@@ -1,7 +1,9 @@
-getEmailAddressDomain<?php
+<?php
 
 class LdapContactsSuggestions implements \RainLoop\Providers\Suggestions\ISuggestions
 {
+	use \MailSo\Log\Inherit;
+
 	private string $sLdapUri = 'ldap://localhost:389';
 
 	private bool $bUseStartTLS = true;
@@ -19,11 +21,6 @@ class LdapContactsSuggestions implements \RainLoop\Providers\Suggestions\ISugges
 	private string $sNameAttributes = 'displayName,cn,givenName,sn';
 
 	private string $sEmailAttributes = 'mailAddress,mail,mailAlternateAddress,mailAlias';
-
-	/**
-	 * @var \MailSo\Log\Logger
-	 */
-	private $oLogger = null;
 
 	private string $sAllowedEmails = '*';
 
@@ -75,7 +72,7 @@ class LdapContactsSuggestions implements \RainLoop\Providers\Suggestions\ISugges
 		$aResult = array();
 		$oCon = @\ldap_connect($this->sLdapUri);
 		if ($oCon) {
-			$this->oLogger->Write('ldap_connect: connected', \LOG_INFO, 'LDAP');
+			$this->logWrite('ldap_connect: connected', \LOG_INFO, 'LDAP');
 
 			@\ldap_set_option($oCon, LDAP_OPT_PROTOCOL_VERSION, 3);
 
@@ -142,7 +139,7 @@ class LdapContactsSuggestions implements \RainLoop\Providers\Suggestions\ISugges
 			$sFilter .= (1 < count($aItems) ? '(|' : '').$sSubFilter.(1 < count($aItems) ? ')' : '');
 			$sFilter .= ')';
 
-			$this->oLogger->Write('ldap_search: start: '.$sBaseDn.' / '.$sFilter, \LOG_INFO, 'LDAP');
+			$this->logWrite('ldap_search: start: '.$sBaseDn.' / '.$sFilter, \LOG_INFO, 'LDAP');
 			$oS = @\ldap_search($oCon, $sBaseDn, $sFilter, $aItems, 0, 30, 30);
 			if ($oS) {
 				$aEntries = @\ldap_get_entries($oCon, $oS);
@@ -245,23 +242,7 @@ class LdapContactsSuggestions implements \RainLoop\Providers\Suggestions\ISugges
 		if ($this->oLogger) {
 			$sError = $oCon ? @\ldap_error($oCon) : '';
 			$iErrno = $oCon ? @\ldap_errno($oCon) : 0;
-
-			$this->oLogger->Write($sCmd.' error: '.$sError.' ('.$iErrno.')',
-				\LOG_WARNING, 'LDAP');
+			$this->logWrite($sCmd.' error: '.$sError.' ('.$iErrno.')', \LOG_WARNING, 'LDAP');
 		}
-	}
-
-	/**
-	 * @param \MailSo\Log\Logger $oLogger
-	 *
-	 * @return \LdapContactsSuggestions
-	 */
-	public function SetLogger($oLogger)
-	{
-		if ($oLogger instanceof \MailSo\Log\Logger) {
-			$this->oLogger = $oLogger;
-		}
-
-		return $this;
 	}
 }
