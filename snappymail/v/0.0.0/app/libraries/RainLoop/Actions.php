@@ -147,7 +147,6 @@ class Actions
 		}
 
 		$this->oPlugins = new Plugins\Manager($this);
-		$this->oPlugins->SetLogger($this->oLogger);
 		$this->oPlugins->RunHook('filter.application-config', array($this->oConfig));
 	}
 

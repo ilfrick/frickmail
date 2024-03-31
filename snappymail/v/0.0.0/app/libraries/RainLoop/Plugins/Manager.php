@@ -6,10 +6,7 @@ class Manager
 {
 	use \MailSo\Log\Inherit;
 
-	/**
-	 * @var \RainLoop\Actions
-	 */
-	private $oActions;
+	private \RainLoop\Actions $oActions;
 
 	private array
 		$aHooks = array(),
@@ -26,6 +23,7 @@ class Manager
 	public function __construct(\RainLoop\Actions $oActions)
 	{
 		$this->oActions = $oActions;
+		$this->SetLogger($oActions->Logger());
 
 		$oConfig = $oActions->Config();
 		$this->bIsEnabled = (bool) $oConfig->Get('plugins', 'enable', false);
