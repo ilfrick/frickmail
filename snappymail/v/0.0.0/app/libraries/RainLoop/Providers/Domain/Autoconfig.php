@@ -28,11 +28,11 @@ abstract class Autoconfig
 	{
 		$emailaddress = \urlencode($emailaddress);
 		foreach ([
-			// 4.1. Mail provider
+			// Mail provider https://www.ietf.org/archive/id/draft-bucksch-autoconfig-02.html#section-4.1
 			"https://autoconfig.{$domain}/.well-known/mail-v1.xml?emailaddress={$emailaddress}",
 			"https://{$domain}/.well-known/autoconfig/mail/config-v1.1.xml",
 			"http://autoconfig.{$domain}/mail/config-v1.1.xml",
-			// 4.2. Central database
+			// Central database https://www.ietf.org/archive/id/draft-bucksch-autoconfig-02.html#section-4.2
 			"https://autoconfig.thunderbird.net/v1.1/{$domain}"
 		] as $url) {
 			$data = \file_get_contents($url);
@@ -87,6 +87,9 @@ abstract class Autoconfig
 		return $list ?: [];
 	}
 
+	/**
+	 * https://www.ietf.org/archive/id/draft-bucksch-autoconfig-02.html#section-4.3
+	 */
 	private static function mx(string $domain, string $emailaddress) : ?array
 	{
 		$suffixes = static::publicsuffixes();
@@ -161,6 +164,7 @@ abstract class Autoconfig
 
 	/**
 	 * This is Microsoft
+	 * https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/pox-autodiscover-web-service-reference-for-exchange
 	 */
 	private static function autodiscover(string $domain) : ?array
 	{
