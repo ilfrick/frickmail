@@ -33,7 +33,7 @@
 		"SUBJECT": "Тэма",
 		"TEST": "Тэст",
 		"TO": "Да каго",
-		"SERVER_MESSAGE": "Паведамленне сервера",
+		"SERVER_MESSAGE": "Паведамленне серверу",
 		"YES": "Так",
 		"NO": "Не",
 		"INACTIVE": "Неактыўна",
@@ -113,15 +113,15 @@
 		"NO_SORT": "Паштовы сервер не падтрымлівае сартаванне",
 		"SORT_DATE_ASC": "Дата па ўзрастанні",
 		"SORT_DATE_DESC": "Дата па спаданні",
-		"SORT_SIZE_ASC": "Размер па ўзрастанні",
-		"SORT_SIZE_DESC": "Размер па спаданні",
+		"SORT_SIZE_ASC": "Памер па ўзрастанні",
+		"SORT_SIZE_DESC": "Памер па спаданні",
 		"SORT_SUBJECT_ASC": "Тэма А-Я",
 		"SORT_SUBJECT_DESC": "Тэма Я-А",
 		"SORT_FROM_ASC": "Ад А-Я",
 		"SORT_FROM_DESC": "Ад Я-А"
 	},
 	"MESSAGE": {
-		"BUTTON_EDIT": "Редагаваць",
+		"BUTTON_EDIT": "Рэдагаваць",
 		"BUTTON_UNSUBSCRIBE": "Адпісацца",
 		"BUTTON_REPLY": "Адказаць на Ліст",
 		"BUTTON_REPLY_ALL": "Адказаць Усім",
@@ -132,7 +132,7 @@
 		"BUTTON_NOTIFY_READ_RECEIPT": "Апавясціць адпраўніка аб чытанні гэтага паведамлення",
 		"BUTTON_IN_NEW_WINDOW": "У асобным вакне",
 		"BUTTON_THREAD_LIST": "Спіс",
-		"BUTTON_THREAD_PREV": "Папярэдня",
+		"BUTTON_THREAD_PREV": "Папярэднія",
 		"BUTTON_THREAD_NEXT": "Наступнае",
 		"BUTTON_THREAD_MORE": "Больш паведамленняў",
 		"MENU_HEADERS": "Праглядзець загалоўкі",
@@ -149,9 +149,9 @@
 		"LABEL_TO_SHORT": "Да каго",
 		"PRINT_LABEL_ATTACHMENTS": "Файлы",
 		"MESSAGE_VIEW_DESC": "Выберыце паведамленні да прагляду.",
-		"MESSAGE_VIEW_MOVE_DESC": "Выберыце імя каталога в левой панэлі, каб перамясціць паведамленне.",
+		"MESSAGE_VIEW_MOVE_DESC": "Выберыце імя каталогу ў левай панэлі, каб перамясціць паведамленне.",
 		"LINK_DOWNLOAD_AS_ZIP": "Захаваць як zip",
-		"SPAM_SCORE": "Ацэнка спама",
+		"SPAM_SCORE": "Ацэнка спаму",
 		"HAS_VIRUS_WARNING": "УВАГА: Выяўлены вірус!",
 		"TAGS": "Меткі",
 		"NEW_TAG": "Новая метка",
@@ -169,7 +169,7 @@
 	},
 	"READ_RECEIPT": {
 		"SUBJECT": "Апавяшчэнне аб чытанні ліста - %SUBJECT%",
-		"BODY": "Гэта апавяшчэнне аб чытанні для паведамлення, якое вы одправілі на адрас %READ-RECEIPT%.\n\nЗаўвага: Гэтае апявяшчэнне азначае толкі тое, што паведамленне было адлюстравана на прыладзе атрымальніка.\nЯно не гарантуе таго, што атрымальнік прачытаў ці зразумеў сэнс паведамлення.\n"
+		"BODY": "Гэта апавяшчэнне аб чытанні для паведамлення, якое вы адправілі на адрас %READ-RECEIPT%.\n\nЗаўвага: Гэтае апявяшчэнне азначае толькі тое, што паведамленне было адлюстравана на прыладзе атрымальніка.\nЯно не гарантуе таго, што атрымальнік прачытаў ці зразумеў сэнс паведамлення.\n"
 	},
 	"SUGGESTIONS": {
 		"SEARCHING_DESC": "Пошук..."
@@ -177,7 +177,7 @@
 	"CONTACTS": {
 		"TAB_CONTACT": "Кантакт",
 		"TAB_LOCATIONS": "Месцазнаходжанне",
-		"TAB_BUSINESS": "Організацыя",
+		"TAB_BUSINESS": "Арганізацыя",
 		"LABEL_ORGANIZATION": "Кампанія",
 		"LABEL_DEPARTMENT": "Аддзел",
 		"LABEL_TITLE": "Назва",
@@ -193,10 +193,10 @@
 		"BUTTON_EXPORT_VCARD": "Экспарт (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Экспарт (csv)",
 		"ERROR_IMPORT_FILE": "Памылка імпарту (няправільны фармат файла)",
-		"EMPTY_LIST": "Нема кантактаў",
+		"EMPTY_LIST": "Няма кантактаў",
 		"EMPTY_SEARCH": "Контакты ня знойдзены",
 		"CLEAR_SEARCH": "Ачысціць пошук",
-		"CONTACT_VIEW_DESC": "Абярыце кантакт для просмотра.",
+		"CONTACT_VIEW_DESC": "Абярыце кантакт для прагляду.",
 		"LABEL_BIRTHDAY": "Дзень нараджэння",
 		"PLACEHOLDER_ENTER_DISPLAY_NAME": "Увядзіце поўнае імя",
 		"PLACEHOLDER_ENTER_LAST_NAME": "Увядзіце імя",
@@ -209,14 +209,14 @@
 		"ADD_MENU_PHONE": "Тэлефон",
 		"ADD_MENU_URL": "Сайт",
 		"ADD_MENU_ADDRESS": "Адрас",
-		"ADD_MENU_BIRTHDAY": "Дзень нараджння",
+		"ADD_MENU_BIRTHDAY": "Дзень нараджэння",
 		"ADD_MENU_TAGS": "Меткі",
 		"BUTTON_SHARE_ALL": "Усім",
 		"BUTTON_SYNC": "Сінхранізацыя (CardDAV)",
 		"SEND_TO_ALL_CONTACT_EMAILS": "Адправіць на ўсе кантактныя адрасы электроннай пошты"
 	},
 	"COMPOSE": {
-		"LINK_SHOW_INPUTS": "Паказаць усі палі",
+		"LINK_SHOW_INPUTS": "Паказаць усе палі",
 		"BUTTON_SEND": "Адпаравіць",
 		"BUTTON_MINIMIZE": "Згарнуць",
 		"SAVED_TIME": "Захавана ў %TIME%",
@@ -380,10 +380,10 @@
 		"ERROR_FILE_IS_TOO_BIG": "Файл занадта вялікі",
 		"ERROR_FILE_PARTIALLY_UPLOADED": "Файл не запампаваўся поўнасцю",
 		"ERROR_NO_FILE_UPLOADED": "Файл не быў запампаваны",
-		"ERROR_MISSING_TEMP_FOLDER": "Памылка часовага файла",
-		"ERROR_ON_SAVING_FILE": "Памылка пры захаванні файла",
-		"ERROR_FILE_TYPE": "Няправільны тып файла",
-		"ERROR_UNKNOWN": "Невядомая памылка пры запампоўцы файла на сервер"
+		"ERROR_MISSING_TEMP_FOLDER": "Памылка часовага файлу",
+		"ERROR_ON_SAVING_FILE": "Памылка пры захаванні файлу",
+		"ERROR_FILE_TYPE": "Няправільны тып файлу",
+		"ERROR_UNKNOWN": "Невядомая памылка пры запампоўцы файлу на сервер"
 	},
 	"EDITOR": {
 		"PLAIN": "HTML <-> TEXT",
@@ -427,7 +427,7 @@
 		"SIMPLE": "Просты",
 		"ADVANCED": "Пашыраны",
 		"BUTTON_ADD_SCRIPT": "Дадаць Скрыпт",
-		"SUBNAME_MOVE_TO": "Перамясціць в \"%FOLDER%\"",
+		"SUBNAME_MOVE_TO": "Перамясціць у \"%FOLDER%\"",
 		"SUBNAME_FORWARD_TO": "Переслаць на \"%EMAIL%\"",
 		"SUBNAME_REJECT": "Не прымаць",
 		"SUBNAME_VACATION_MESSAGE": "Паведамленне аўтаадказчыка",
@@ -442,7 +442,7 @@
 		"LANGUAGE": "Мова",
 		"HOUR_FORMAT": "Фармат часу",
 		"IDENTITY": "Профіль",
-		"LAYOUT": "",
+		"LAYOUT": "Размяшчэньне",
 		"LAYOUT_NO_SPLIT": "Адна панэль",
 		"LAYOUT_VERTICAL_SPLIT": "Вертыкальныя панэлі",
 		"LAYOUT_HORIZONTAL_SPLIT": "Гарызантальныя панэлі",
@@ -455,7 +455,7 @@
 		"HIDE_DELETED_MESSAGES": "Схаваць паведамленні, азначаныя для выдалення",
 		"USE_CHECKBOXES_IN_LIST": "Паказваць сцяжкі ў спісах",
 		"USE_THREADS": "Згортваць лісты ў перапісках",
-		"THREAD_ALGORITHM": "Threads algorithm",
+    "THREADS ALGORITHM": "Алгарытм нітак",
 		"REPLY_SAME_FOLDER": "Змяшчаць адказы ў той жа каталог, дзе знаходзіцца арыгінал",
 		"PREFER_HTML": "Аддаваць перавагу HTML замест звычайнага тэксту",
 		"PREFER_HTML_INFO": "Паведамленні часамі прыходзяць у абодвух фарматах. Гэты параметр вызначае, ці вы хочаце каб адлюстроўвалася HTML-частка ці звычайны тэкст.",
@@ -541,7 +541,7 @@
 		"IMPORT_FROM_SERVER": "Імпартаваць з сервера",
 		"TITLE_PRIVATE": "Прыватны",
 		"TITLE_PUBLIC": "Публічны",
-		"GET_MAILVELOPE": "Атрымаць дадатак для браўзэра Mailvelope."
+		"GET_MAILVELOPE": "Атрымаць дадатак для браўзэру Mailvelope."
 	},
 	"SHORTCUTS_HELP": {
 		"LEGEND_SHORTCUTS_HELP": "Спалучэнні клавішаў",

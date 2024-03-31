@@ -179,7 +179,7 @@
 		"CantInstallPackage": "Памылка ўсталёўкі ўбудовы",
 		"CantDeletePackage": "Памылка выдалення ўбудовы",
 		"InvalidPluginPackage": "Памылка пакета ўбудовы",
-		"UnsupportedPluginPackage": "Для працы пакета патрэбна поўная падтрымка сервера",
+		"UnsupportedPluginPackage": "Для працы пакету патрэбна поўная падтрымка сервера",
 		"UnknownError": "Невядомая памылка"
 	}
 }
