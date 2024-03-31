@@ -4,7 +4,7 @@
 		"LABEL_REGISTRATION": "S'enregistrer"
 	},
 	"TAB_LOGIN": {
-		"LABEL_FORGOT_PASSWORD_LINK_URL": "Forgot password url",
-		"LABEL_REGISTRATION_LINK_URL": "Register url"
+		"LABEL_FORGOT_PASSWORD_LINK_URL": "URL du mot de passe oublié",
+		"LABEL_REGISTRATION_LINK_URL": "URL d'enregistrement"
 	}
 }
