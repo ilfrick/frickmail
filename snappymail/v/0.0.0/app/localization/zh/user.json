@@ -139,7 +139,7 @@
 		"MENU_VIEW_ORIGINAL": "显示原始内容",
 		"HTML_VIEW": "显示 HTML 消息",
 		"PLAIN_VIEW": "显示纯文本消息",
-		"SWAP_COLORS": "Swap default (background)color",
+		"SWAP_COLORS": "切换默认 (背景)颜色",
 		"MENU_DOWNLOAD_ORIGINAL": "下载为 .eml 文件",
 		"MENU_FILTER_SIMILAR": "筛选类似邮件",
 		"MENU_PRINT": "打印邮件",
@@ -155,8 +155,8 @@
 		"HAS_VIRUS_WARNING": "警告：检测到病毒",
 		"TAGS": "标签",
 		"NEW_TAG": "新标签",
-		"ENABLE_TRACKING_LINKS": "Enable tracking links",
-		"TRACKING_ENABLED": "Links are now tracked when clicked!"
+		"ENABLE_TRACKING_LINKS": "启用追踪链接",
+		"TRACKING_ENABLED": "链接点击后将会被追踪!"
 	},
 	"MESSAGE_TAGS": {
 		"$important": "重要",
@@ -213,7 +213,7 @@
 		"ADD_MENU_TAGS": "标签",
 		"BUTTON_SHARE_ALL": "所有人",
 		"BUTTON_SYNC": "同步 (CardDAV)",
-		"SEND_TO_ALL_CONTACT_EMAILS": "Send to all contact emails"
+		"SEND_TO_ALL_CONTACT_EMAILS": "发送到所有联系人邮箱"
 	},
 	"COMPOSE": {
 		"LINK_SHOW_INPUTS": "显示所有信息",
@@ -282,13 +282,13 @@
 		"VERIFY": "Verify",
 		"GOOD_SIGNATURE": "来自 %USER% 的可用签名",
 		"ERROR": "%TYPE% 错误： %ERROR%",
-		"CREATE_SELF_SIGNED": "Create self-signed",
-		"VALID_UNTIL": "Valid until",
-		"PRIVATE_KEY": "Private key",
-		"CHANGE_PASS": "Change passphrase",
-		"CURRENT_PASS": "Current passphrase",
-		"NEW_PASS": "New passphrase",
-		"ASK_CRYPTKEY_PASS": "Your login passphrase has changed. Please fill in your old login password to decrypt data"
+		"CREATE_SELF_SIGNED": "创建自签名的",
+		"VALID_UNTIL": "有效期至",
+		"PRIVATE_KEY": "私钥",
+		"CHANGE_PASS": "修改密码",
+		"CURRENT_PASS": "当前密码",
+		"NEW_PASS": "新密码",
+		"ASK_CRYPTKEY_PASS": "您的密码已更改。请输入您的旧登录密码解密数据"
 	},
 	"OPENPGP": {
 		"POPUP_IMPORT_TITLE": "导入 OpenPGP 密钥",
@@ -297,23 +297,23 @@
 		"POPUP_VIEW_BUTTON": "选择",
 		"POPUP_GENERATE_TITLE": "生成 OpenPGP 密钥",
 		"POPUP_GENERATE_BUTTON": "生成",
-		"LABEL_KEY_TYPE": "Type",
+		"LABEL_KEY_TYPE": "类型",
 		"SIGNED_MESSAGE": "由 OpenPGP 签名",
 		"ENCRYPTED_MESSAGE": "由 OpenPGP 加密",
 		"STORE_IN_GNUPG": "以 GnuPG 存储在服务器",
-		"STORE_PUBLIC_KEY_IN_GNUPG": "Store public key on server in GnuPG",
-		"STORE_PRIVATE_KEY_IN_GNUPG": "Store private key on server in GnuPG",
+		"STORE_PUBLIC_KEY_IN_GNUPG": "将公钥存储在 GnuPG 的服务器上",
+		"STORE_PRIVATE_KEY_IN_GNUPG": "将私钥存储在 GnuPG 的服务器上",
 		"BACKUP_ON_SERVER": "加密存储在服务器",
-		"BACKUP_PUBLIC_KEY_ON_SERVER": "Backup public key on server",
-		"BACKUP_PRIVATE_KEY_ON_SERVER": "Backup private key on server"
+		"BACKUP_PUBLIC_KEY_ON_SERVER": "在服务器上备份公钥",
+		"BACKUP_PRIVATE_KEY_ON_SERVER": "在服务器上备份私钥"
 	},
 	"SMIME": {
-		"POPUP_IMPORT_TITLE": "Import S\/MIME certificate",
-		"CERTIFICATE": "Certificate",
-		"CERTIFICATES": "S\/MIME Certificates",
+		"POPUP_IMPORT_TITLE": "导入 S\/MIME 证书",
+		"CERTIFICATE": "证书",
+		"CERTIFICATES": "S\/MIME 证书",
 		"SIGNED_MESSAGE": "由 S\/MIME 签名",
 		"ENCRYPTED_MESSAGE": "由 S\/MIME 加密",
-		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
+		"PRIVATE_KEY_OF": "%EMAIL% 的 S\/MIME 私钥"
 	},
 	"POPUPS_FILTER": {
 		"TITLE_CREATE_FILTER": "创建筛选条件？",
@@ -340,7 +340,7 @@
 		"SELECT_TYPE_NOT_EQUAL_TO": "不等于",
 		"SELECT_TYPE_OVER": "超过",
 		"SELECT_TYPE_UNDER": "不超过",
-		"SELECT_TYPE_TEXT": "Text",
+		"SELECT_TYPE_TEXT": "文本",
 		"SELECT_TYPE_RAW": "源文件",
 		"SELECT_MATCH_ANY": "满足下列任何条件",
 		"SELECT_MATCH_ALL": "满足下列所有条件",
@@ -412,7 +412,7 @@
 		"IMAGEUPLOAD": "选择图片",
 		"UNDO": "撤销",
 		"REDO": "重做",
-		"REMOVESTYLE": "Remove style"
+		"REMOVESTYLE": "移除样式"
 	},
 	"SETTINGS_LABELS": {
 		"GENERAL": "常规",
@@ -455,7 +455,7 @@
 		"HIDE_DELETED_MESSAGES": "隐藏标记为删除的消息",
 		"USE_CHECKBOXES_IN_LIST": "列表中显示多选框",
 		"USE_THREADS": "使用对话",
-		"THREAD_ALGORITHM": "Threads algorithm",
+		"THREAD_ALGORITHM": "会话算法",
 		"REPLY_SAME_FOLDER": "将回复的邮件置于被回复的邮件所在的文件夹",
 		"PREFER_HTML": "相比纯文本优先使用 HTML",
 		"PREFER_HTML_INFO": "消息有时以两种格式传送。该选项控制您希望显示 HTML 部分还是纯文本部分。",
@@ -481,7 +481,7 @@
 		"IMAGES_OPTION_WHITELIST": "白名单或询问",
 		"IMAGES_OPTION_ALWAYS": "总是显示",
 		"IMAGES_WHITELIST": "图片白名单",
-		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab"
+		"MESSAGE_POPUP_WINDOW": "弹出页面使用新窗口代替新选项卡"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "自动添加到您的地址簿",
@@ -538,7 +538,7 @@
 	"SETTINGS_OPENPGP": {
 		"BUTTON_IMPORT_KEY": "导入 密钥",
 		"BUTTON_GENERATE_KEY_PAIR": "生成 密钥",
-		"IMPORT_FROM_SERVER": "Import from server",
+		"IMPORT_FROM_SERVER": "从服务器导入",
 		"TITLE_PRIVATE": "私有",
 		"TITLE_PUBLIC": "公开",
 		"GET_MAILVELOPE": "获取 Mailvelope 浏览器扩展。"
@@ -590,7 +590,7 @@
 		"DomainAlreadyExists": "域已经存在",
 		"DomainNotAllowed": "不允许此域名",
 		"AccountNotAllowed": "不允许此账户",
-		"CryptKeyError": "Your login passphrase has changed",
+		"CryptKeyError": "您的登录密码已更改",
 		"ContactsSyncError": "联系人同步错误",
 		"CantGetMessageList": "无法获取邮件列表",
 		"CantGetMessage": "无法获取邮件",

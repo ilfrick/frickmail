@@ -68,7 +68,7 @@
 		"LABEL_STORAGE_DSN": "Dsn",
 		"LABEL_STORAGE_USER": "用户",
 		"LABEL_STORAGE_PASSWORD": "密码",
-		"SQLITE_GLOBAL": "Use a global DB instead of per account",
+		"SQLITE_GLOBAL": "使用全局数据库替代各账号的数据库",
 		"ALERT_NOTICE": "提示!",
 		"SUGGESTIONS_LIMIT": "建议数量上限",
 		"HTML_ALERT_DO_NOT_USE_THIS_DATABASE": "如果有大量的活跃用户，请不要选择此数据库类型。",
@@ -84,7 +84,7 @@
 	"TAB_SECURITY": {
 		"LEGEND_SECURITY": "安全",
 		"LABEL_USE_IMAGE_PROXY": "对外部图片使用本地代理",
-		"LABEL_AUTO_VERIFY": "Verify signatures automatically",
+		"LABEL_AUTO_VERIFY": "自动验证签名",
 		"LABEL_SHOW_PHP_INFO": "显示 PHP 信息",
 		"LEGEND_ADMIN_PANEL_ACCESS_CREDENTIALS": "管理员面板访问凭据",
 		"LABEL_CURRENT_PASSWORD": "当前密码",
@@ -110,7 +110,7 @@
 		"HTML_NEW_VERSION": "有新的<b>%VERSION%<\/b> 版本可用.",
 		"LABEL_UPDATING": "更新中",
 		"LABEL_CHECKING": "检查更新",
-		"BUTTON_RELEASES": "Releases"
+		"BUTTON_RELEASES": "发行版"
 	},
 	"POPUPS_DOMAIN_ALIAS": {
 		"TITLE_ADD_DOMAIN_ALIAS": "添加别名",
@@ -135,7 +135,7 @@
 		"SECURE_OPTION_NONE": "无",
 		"LABEL_ALLOW_SIEVE_SCRIPTS": "可使用筛选脚本",
 		"LABEL_USE_SHORT_LOGIN": "使用短用户名登录",
-		"LABEL_LOWERCASE_LOGIN": "Lowercase login (case-insensitive)",
+		"LABEL_LOWERCASE_LOGIN": "小写登录 (大小写敏感)",
 		"LABEL_USE_AUTH": "使用认证",
 		"LABEL_SET_SENDER": "使用登录名作为发件人",
 		"LABEL_AUTH_PLAIN_LINE": "强制单一 AUTH PLAIN 命令登录",
