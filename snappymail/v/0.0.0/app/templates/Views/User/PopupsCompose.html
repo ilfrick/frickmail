@@ -61,13 +61,13 @@
 					</a>
 				</li>
 				<li data-bind="toggle: doSign, visible: canSign">
-					<a>
+					<a data-bind="attr:{title: signOptionsText}">
 						<i class="fontastic" data-bind="text: doSign() ? '☑' : '☐'"></i>
 						<span data-icon="✍" data-i18n="CRYPTO/SIGN"></span>
 					</a>
 				</li>
 				<li data-bind="toggle: doEncrypt, visible: canEncrypt">
-					<a>
+					<a data-bind="attr:{title: encryptOptionsText}">
 						<i class="fontastic" data-bind="text: doEncrypt() || 'mailvelope' == viewArea() ? '☑' : '☐'"></i>
 						<span data-icon="🔒" data-i18n="CRYPTO/ENCRYPT"></span>
 					</a>

@@ -336,6 +336,9 @@ export class ComposePopupView extends AbstractViewPopup {
 			canMailvelope: () => this.encryptOptions.includes('Mailvelope'),
 			canSign: () => this.signOptions().length,
 
+			encryptOptionsText: () => this.encryptOptions().join(', '),
+			signOptionsText: () => this.signOptions().map(o => o[0]).join(', '),
+
 			identitiesOptions: () =>
 				IdentityUserStore.map(item => ({
 					item: item,
@@ -1396,13 +1399,6 @@ export class ComposePopupView extends AbstractViewPopup {
 			OpenPGPUserStore.hasPublicKeyForEmails(recipients)
 			&& options.push('OpenPGP');
 
-			if (await MailvelopeUserStore.hasPublicKeyForEmails(recipients)) {
-				options.push('Mailvelope');
-			} else {
-				'mailvelope' === this.viewArea() && this.bodyArea();
-//				this.dropMailvelope();
-			}
-
 			const count = recipients.length,
 				identity = this.currentIdentity(),
 				from = (identity.smimeKey() && identity.smimeCertificate()) ? identity.email() : null;
@@ -1412,6 +1408,13 @@ export class ComposePopupView extends AbstractViewPopup {
 					|| SMimeUserStore.find(certificate => email == certificate.emailAddress && certificate.smimeencrypt)
 				).length
 				&& options.push('S/MIME');
+
+			if (await MailvelopeUserStore.hasPublicKeyForEmails(recipients)) {
+				options.push('Mailvelope');
+			} else {
+				'mailvelope' === this.viewArea() && this.bodyArea();
+//				this.dropMailvelope();
+			}
 		}
 
 		console.dir({encryptOptions:options});
