@@ -195,10 +195,6 @@ class Actions
 					// RainLoop\Providers\Settings\ISettings
 					$mResult = new Providers\Settings\DefaultSettings($this->LocalStorageProvider());
 					break;
-				case 'login':
-					// Providers\Login\LoginInterface
-					$mResult = new Providers\Login\DefaultLogin();
-					break;
 				case 'domain':
 					// Providers\Domain\DomainInterface
 					$mResult = new Providers\Domain\DefaultDomain(APP_PRIVATE_DATA . 'domains', $this->Cacher());
