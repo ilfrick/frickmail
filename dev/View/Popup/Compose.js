@@ -481,8 +481,7 @@ export class ComposePopupView extends AbstractViewPopup {
 			if (SettingsUserStore.replySameFolder()) {
 				if (
 					3 === arrayLength(this.aDraftInfo) &&
-					null != this.aDraftInfo[2] &&
-					this.aDraftInfo[2].length
+					this.aDraftInfo[2]?.length
 				) {
 					sSentFolder = this.aDraftInfo[2];
 				}
