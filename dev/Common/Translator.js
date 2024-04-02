@@ -45,8 +45,7 @@ export const
 			}
 		}
 		if (Intl.RelativeTimeFormat) {
-			let rtf = new Intl.RelativeTimeFormat(doc.documentElement.lang);
-			return rtf.format(seconds, unit);
+			return (new Intl.RelativeTimeFormat(doc.documentElement.lang)).format(seconds, unit);
 		}
 		// Safari < 14
 		abs = Math.abs(seconds);

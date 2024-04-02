@@ -165,8 +165,8 @@ export const GnuPGUserStore = new class {
 		return fingerprints;
 	}
 
-	getPrivateKeyFor(query, sign) {
-		return findGnuPGKey(this.privateKeys, query, sign);
+	getPrivateKeyFor(query/*, sign*/) {
+		return findGnuPGKey(this.privateKeys, query/*, sign*/);
 	}
 
 	async decrypt(message) {

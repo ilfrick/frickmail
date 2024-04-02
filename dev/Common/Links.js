@@ -38,11 +38,10 @@ export const
 
 	/**
 	 * @param {string} download
-	 * @param {string=} customSpecSuffix
 	 * @returns {string}
 	 */
-	attachmentDownload = (download, customSpecSuffix) =>
-		serverRequestRaw('Download', download, customSpecSuffix),
+	attachmentDownload = (download) =>
+		serverRequestRaw('Download', download),
 
 	proxy = url =>
 		BASE + '?/ProxyExternal/'
