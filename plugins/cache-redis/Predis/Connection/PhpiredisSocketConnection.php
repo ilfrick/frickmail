@@ -3,7 +3,8 @@
 /*
  * This file is part of the Predis package.
  *
- * (c) Daniele Alessandri <suppakilla@gmail.com>
+ * (c) 2009-2020 Daniele Alessandri
+ * (c) 2021-2023 Till Krüss
  *
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
@@ -11,9 +12,12 @@
 
 namespace Predis\Connection;
 
+use Closure;
+use InvalidArgumentException;
 use Predis\Command\CommandInterface;
 use Predis\NotSupportedException;
 use Predis\Response\Error as ErrorResponse;
+use Predis\Response\ErrorInterface as ErrorResponseInterface;
 use Predis\Response\Status as StatusResponse;
 
 /**
@@ -36,12 +40,11 @@ use Predis\Response\Status as StatusResponse;
  *  - host: hostname or IP address of the server.
  *  - port: TCP port of the server.
  *  - path: path of a UNIX domain socket when scheme is 'unix'.
- *  - timeout: timeout to perform the connection.
+ *  - timeout: timeout to perform the connection (default is 5 seconds).
  *  - read_write_timeout: timeout of read / write operations.
  *
- * @link http://github.com/nrk/phpiredis
- *
- * @author Daniele Alessandri <suppakilla@gmail.com>
+ * @see http://github.com/nrk/phpiredis
+ * @deprecated 2.1.2
  */
 class PhpiredisSocketConnection extends AbstractConnection
 {
@@ -65,9 +68,9 @@ class PhpiredisSocketConnection extends AbstractConnection
      */
     public function __destruct()
     {
-        phpiredis_reader_destroy($this->reader);
-
         parent::__destruct();
+
+        phpiredis_reader_destroy($this->reader);
     }
 
     /**
@@ -93,7 +96,15 @@ class PhpiredisSocketConnection extends AbstractConnection
      */
     protected function assertParameters(ParametersInterface $parameters)
     {
-        parent::assertParameters($parameters);
+        switch ($parameters->scheme) {
+            case 'tcp':
+            case 'redis':
+            case 'unix':
+                break;
+
+            default:
+                throw new InvalidArgumentException("Invalid scheme: '$parameters->scheme'.");
+        }
 
         if (isset($parameters->persistent)) {
             throw new NotSupportedException(
@@ -132,25 +143,37 @@ class PhpiredisSocketConnection extends AbstractConnection
     /**
      * Returns the handler used by the protocol reader for inline responses.
      *
-     * @return \Closure
+     * @return Closure
      */
-    private function getStatusHandler()
+    protected function getStatusHandler()
     {
-        return function ($payload) {
-            return StatusResponse::get($payload);
-        };
+        static $statusHandler;
+
+        if (!$statusHandler) {
+            $statusHandler = function ($payload) {
+                return StatusResponse::get($payload);
+            };
+        }
+
+        return $statusHandler;
     }
 
     /**
      * Returns the handler used by the protocol reader for error responses.
      *
-     * @return \Closure
+     * @return Closure
      */
     protected function getErrorHandler()
     {
-        return function ($payload) {
-            return new ErrorResponse($payload);
-        };
+        static $errorHandler;
+
+        if (!$errorHandler) {
+            $errorHandler = function ($errorMessage) {
+                return new ErrorResponse($errorMessage);
+            };
+        }
+
+        return $errorHandler;
     }
 
     /**
@@ -206,9 +229,7 @@ class PhpiredisSocketConnection extends AbstractConnection
             $protocol = SOL_TCP;
         }
 
-        $socket = @socket_create($domain, SOCK_STREAM, $protocol);
-
-        if (!is_resource($socket)) {
+        if (false === $socket = @socket_create($domain, SOCK_STREAM, $protocol)) {
             $this->emitSocketError();
         }
 
@@ -241,10 +262,10 @@ class PhpiredisSocketConnection extends AbstractConnection
             $timeoutSec = floor($rwtimeout);
             $timeoutUsec = ($rwtimeout - $timeoutSec) * 1000000;
 
-            $timeout = array(
+            $timeout = [
                 'sec' => $timeoutSec,
                 'usec' => $timeoutUsec,
-            );
+            ];
 
             if (!socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, $timeout)) {
                 $this->emitSocketError();
@@ -263,7 +284,7 @@ class PhpiredisSocketConnection extends AbstractConnection
      * @param string              $address    IP address (DNS-resolved from hostname)
      * @param ParametersInterface $parameters Parameters used to initialize the connection.
      *
-     * @return string
+     * @return void
      */
     private function connectWithTimeout($socket, $address, ParametersInterface $parameters)
     {
@@ -280,9 +301,9 @@ class PhpiredisSocketConnection extends AbstractConnection
         socket_set_block($socket);
 
         $null = null;
-        $selectable = array($socket);
+        $selectable = [$socket];
 
-        $timeout = (float) $parameters->timeout;
+        $timeout = (isset($parameters->timeout) ? (float) $parameters->timeout : 5.0);
         $timeoutSecs = floor($timeout);
         $timeoutUSecs = ($timeout - $timeoutSecs) * 1000000;
 
@@ -308,7 +329,11 @@ class PhpiredisSocketConnection extends AbstractConnection
     {
         if (parent::connect() && $this->initCommands) {
             foreach ($this->initCommands as $command) {
-                $this->executeCommand($command);
+                $response = $this->executeCommand($command);
+
+                if ($response instanceof ErrorResponseInterface) {
+                    $this->onConnectionError("`{$command->getId()}` failed: {$response->getMessage()}", 0);
+                }
             }
         }
     }
@@ -319,7 +344,9 @@ class PhpiredisSocketConnection extends AbstractConnection
     public function disconnect()
     {
         if ($this->isConnected()) {
+            phpiredis_reader_reset($this->reader);
             socket_close($this->getResource());
+
             parent::disconnect();
         }
     }

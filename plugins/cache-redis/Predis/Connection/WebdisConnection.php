@@ -3,7 +3,8 @@
 /*
  * This file is part of the Predis package.
  *
- * (c) Daniele Alessandri <suppakilla@gmail.com>
+ * (c) 2009-2020 Daniele Alessandri
+ * (c) 2021-2023 Till Krüss
  *
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
@@ -11,6 +12,8 @@
 
 namespace Predis\Connection;
 
+use Closure;
+use InvalidArgumentException;
 use Predis\Command\CommandInterface;
 use Predis\NotSupportedException;
 use Predis\Protocol\ProtocolException;
@@ -33,15 +36,14 @@ use Predis\Response\Status as StatusResponse;
  *  - scheme: must be 'http'.
  *  - host: hostname or IP address of the server.
  *  - port: TCP port of the server.
- *  - timeout: timeout to perform the connection.
+ *  - timeout: timeout to perform the connection (default is 5 seconds).
  *  - user: username for authentication.
  *  - pass: password for authentication.
  *
- * @link http://webd.is
- * @link http://github.com/nicolasff/webdis
- * @link http://github.com/seppo0010/phpiredis
- *
- * @author Daniele Alessandri <suppakilla@gmail.com>
+ * @see http://webd.is
+ * @see http://github.com/nicolasff/webdis
+ * @see http://github.com/seppo0010/phpiredis
+ * @deprecated 2.1.2
  */
 class WebdisConnection implements NodeConnectionInterface
 {
@@ -52,14 +54,14 @@ class WebdisConnection implements NodeConnectionInterface
     /**
      * @param ParametersInterface $parameters Initialization parameters for the connection.
      *
-     * @throws \InvalidArgumentException
+     * @throws InvalidArgumentException
      */
     public function __construct(ParametersInterface $parameters)
     {
         $this->assertExtensions();
 
         if ($parameters->scheme !== 'http') {
-            throw new \InvalidArgumentException("Invalid scheme: '{$parameters->scheme}'.");
+            throw new InvalidArgumentException("Invalid scheme: '{$parameters->scheme}'.");
         }
 
         $this->parameters = $parameters;
@@ -117,19 +119,20 @@ class WebdisConnection implements NodeConnectionInterface
     private function createCurl()
     {
         $parameters = $this->getParameters();
+        $timeout = (isset($parameters->timeout) ? (float) $parameters->timeout : 5.0) * 1000;
 
-        if (filter_var($host = $parameters->host, FILTER_VALIDATE_IP)) {
+        if (filter_var($host = $parameters->host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
             $host = "[$host]";
         }
 
-        $options = array(
+        $options = [
             CURLOPT_FAILONERROR => true,
-            CURLOPT_CONNECTTIMEOUT_MS => $parameters->timeout * 1000,
+            CURLOPT_CONNECTTIMEOUT_MS => $timeout,
             CURLOPT_URL => "$parameters->scheme://$host:$parameters->port",
             CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
             CURLOPT_POST => true,
-            CURLOPT_WRITEFUNCTION => array($this, 'feedReader'),
-        );
+            CURLOPT_WRITEFUNCTION => [$this, 'feedReader'],
+        ];
 
         if (isset($parameters->user, $parameters->pass)) {
             $options[CURLOPT_USERPWD] = "{$parameters->user}:{$parameters->pass}";
@@ -158,25 +161,37 @@ class WebdisConnection implements NodeConnectionInterface
     /**
      * Returns the handler used by the protocol reader for inline responses.
      *
-     * @return \Closure
+     * @return Closure
      */
     protected function getStatusHandler()
     {
-        return function ($payload) {
-            return StatusResponse::get($payload);
-        };
+        static $statusHandler;
+
+        if (!$statusHandler) {
+            $statusHandler = function ($payload) {
+                return StatusResponse::get($payload);
+            };
+        }
+
+        return $statusHandler;
     }
 
     /**
      * Returns the handler used by the protocol reader for error responses.
      *
-     * @return \Closure
+     * @return Closure
      */
     protected function getErrorHandler()
     {
-        return function ($payload) {
-            return new ErrorResponse($payload);
-        };
+        static $errorHandler;
+
+        if (!$errorHandler) {
+            $errorHandler = function ($errorMessage) {
+                return new ErrorResponse($errorMessage);
+            };
+        }
+
+        return $errorHandler;
     }
 
     /**
@@ -223,9 +238,8 @@ class WebdisConnection implements NodeConnectionInterface
      *
      * @param CommandInterface $command Command instance.
      *
-     * @throws NotSupportedException
-     *
      * @return string
+     * @throws NotSupportedException
      */
     protected function getCommandId(CommandInterface $command)
     {
@@ -239,7 +253,6 @@ class WebdisConnection implements NodeConnectionInterface
             case 'DISCARD':
             case 'MONITOR':
                 throw new NotSupportedException("Command '$commandID' is not allowed by Webdis.");
-
             default:
                 return $commandID;
         }
@@ -279,10 +292,10 @@ class WebdisConnection implements NodeConnectionInterface
         curl_setopt($resource, CURLOPT_POSTFIELDS, $serializedCommand);
 
         if (curl_exec($resource) === false) {
-            $error = curl_error($resource);
+            $error = trim(curl_error($resource));
             $errno = curl_errno($resource);
 
-            throw new ConnectionException($this, trim($error), $errno);
+            throw new ConnectionException($this, "$error{$this->getParameters()}]", $errno);
         }
 
         if (phpiredis_reader_get_state($this->reader) !== PHPIREDIS_READER_STATE_COMPLETE) {
@@ -337,7 +350,7 @@ class WebdisConnection implements NodeConnectionInterface
      */
     public function __sleep()
     {
-        return array('parameters');
+        return ['parameters'];
     }
 
     /**

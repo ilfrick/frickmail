@@ -3,7 +3,8 @@
 /*
  * This file is part of the Predis package.
  *
- * (c) Daniele Alessandri <suppakilla@gmail.com>
+ * (c) 2009-2020 Daniele Alessandri
+ * (c) 2021-2023 Till Krüss
  *
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
@@ -16,23 +17,19 @@ use Predis\NotSupportedException;
 
 /**
  * Defines a strategy for master/slave replication.
- *
- * @author Daniele Alessandri <suppakilla@gmail.com>
  */
 class ReplicationStrategy
 {
     protected $disallowed;
     protected $readonly;
     protected $readonlySHA1;
+    protected $loadBalancing = true;
 
-    /**
-     *
-     */
     public function __construct()
     {
         $this->disallowed = $this->getDisallowedOperations();
         $this->readonly = $this->getReadOnlyOperations();
-        $this->readonlySHA1 = array();
+        $this->readonlySHA1 = [];
     }
 
     /**
@@ -41,12 +38,15 @@ class ReplicationStrategy
      *
      * @param CommandInterface $command Command instance.
      *
-     * @throws NotSupportedException
-     *
      * @return bool
+     * @throws NotSupportedException
      */
     public function isReadOperation(CommandInterface $command)
     {
+        if (!$this->loadBalancing) {
+            return false;
+        }
+
         if (isset($this->disallowed[$id = $command->getId()])) {
             throw new NotSupportedException(
                 "The command '$id' is not allowed in replication mode."
@@ -62,7 +62,8 @@ class ReplicationStrategy
         }
 
         if (($eval = $id === 'EVAL') || $id === 'EVALSHA') {
-            $sha1 = $eval ? sha1($command->getArgument(0)) : $command->getArgument(0);
+            $argument = $command->getArgument(0);
+            $sha1 = $eval ? sha1(strval($argument)) : $argument;
 
             if (isset($this->readonlySHA1[$sha1])) {
                 if (true === $readonly = $this->readonlySHA1[$sha1]) {
@@ -90,18 +91,54 @@ class ReplicationStrategy
     }
 
     /**
-     * Checks if a SORT command is a readable operation by parsing the arguments
-     * array of the specified commad instance.
+     * Checks if BITFIELD performs a read-only operation by looking for certain
+     * SET and INCRYBY modifiers in the arguments array of the command.
      *
      * @param CommandInterface $command Command instance.
      *
      * @return bool
      */
-    protected function isSortReadOnly(CommandInterface $command)
+    protected function isBitfieldReadOnly(CommandInterface $command)
     {
         $arguments = $command->getArguments();
+        $argc = count($arguments);
 
-        return ($c = count($arguments)) === 1 ? true : $arguments[$c - 2] !== 'STORE';
+        if ($argc >= 2) {
+            for ($i = 1; $i < $argc; ++$i) {
+                $argument = strtoupper($arguments[$i]);
+                if ($argument === 'SET' || $argument === 'INCRBY') {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Checks if a GEORADIUS command is a readable operation by parsing the
+     * arguments array of the specified command instance.
+     *
+     * @param CommandInterface $command Command instance.
+     *
+     * @return bool
+     */
+    protected function isGeoradiusReadOnly(CommandInterface $command)
+    {
+        $arguments = $command->getArguments();
+        $argc = count($arguments);
+        $startIndex = $command->getId() === 'GEORADIUS' ? 5 : 4;
+
+        if ($argc > $startIndex) {
+            for ($i = $startIndex; $i < $argc; ++$i) {
+                $argument = strtoupper($arguments[$i]);
+                if ($argument === 'STORE' || $argument === 'STOREDIST') {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -153,7 +190,7 @@ class ReplicationStrategy
      */
     protected function getDisallowedOperations()
     {
-        return array(
+        return [
             'SHUTDOWN' => true,
             'INFO' => true,
             'DBSIZE' => true,
@@ -165,7 +202,7 @@ class ReplicationStrategy
             'BGSAVE' => true,
             'BGREWRITEAOF' => true,
             'SLOWLOG' => true,
-        );
+        ];
     }
 
     /**
@@ -175,7 +212,7 @@ class ReplicationStrategy
      */
     protected function getReadOnlyOperations()
     {
-        return array(
+        return [
             'EXISTS' => true,
             'TYPE' => true,
             'KEYS' => true,
@@ -231,7 +268,25 @@ class ReplicationStrategy
             'BITPOS' => true,
             'TIME' => true,
             'PFCOUNT' => true,
-            'SORT' => array($this, 'isSortReadOnly'),
-        );
+            'BITFIELD' => [$this, 'isBitfieldReadOnly'],
+            'GEOHASH' => true,
+            'GEOPOS' => true,
+            'GEODIST' => true,
+            'GEORADIUS' => [$this, 'isGeoradiusReadOnly'],
+            'GEORADIUSBYMEMBER' => [$this, 'isGeoradiusReadOnly'],
+        ];
+    }
+
+    /**
+     * Disables reads to slaves when using
+     * a replication topology.
+     *
+     * @return self
+     */
+    public function disableLoadBalancing(): self
+    {
+        $this->loadBalancing = false;
+
+        return $this;
     }
 }
