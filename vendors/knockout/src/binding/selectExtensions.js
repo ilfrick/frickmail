@@ -39,7 +39,7 @@ ko.selectExtensions = {
                 break;
             case 'SELECT':
                 // A blank string or null value will select the caption
-                var selection = -1, noValue = ("" === value || null == value),
+                var selection = -1, noValue = ("" === (value ?? "")),
                     i = element.options.length, optionValue;
                 while (i--) {
                     optionValue = ko.selectExtensions.readValue(element.options[i]);
@@ -54,7 +54,7 @@ ko.selectExtensions = {
                 }
                 break;
             default:
-                element.value = (value == null) ? "" : value;
+                element.value = value ?? "";
                 break;
         }
     }

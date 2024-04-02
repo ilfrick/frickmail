@@ -18,11 +18,7 @@ ko.bindingHandlers['textInput'] = {
         };
 
         var updateView = () => {
-            var modelValue = ko.utils.unwrapObservable(valueAccessor());
-
-            if (modelValue == null) {
-                modelValue = '';
-            }
+            var modelValue = ko.utils.unwrapObservable(valueAccessor()) ?? '';
 
             if (elementValueBeforeEvent !== undefined && modelValue === elementValueBeforeEvent) {
                 setTimeout(updateView, 4);

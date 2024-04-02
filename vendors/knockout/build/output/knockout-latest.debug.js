@@ -530,7 +530,7 @@ ko.observable = initialValue => {
     observable[observableLatestValue] = initialValue;
 
     Object.defineProperty(observable, length, {
-        get: () => null == observable[observableLatestValue] ? undefined : observable[observableLatestValue][length]
+        get: () => observable[observableLatestValue]?.[length]
     });
 
     // Inherit from 'subscribable'
@@ -1294,7 +1294,7 @@ ko.selectExtensions = {
                 break;
             case 'SELECT':
                 // A blank string or null value will select the caption
-                var selection = -1, noValue = ("" === value || null == value),
+                var selection = -1, noValue = ("" === (value ?? "")),
                     i = element.options.length, optionValue;
                 while (i--) {
                     optionValue = ko.selectExtensions.readValue(element.options[i]);
@@ -1309,7 +1309,7 @@ ko.selectExtensions = {
                 }
                 break;
             default:
-                element.value = (value == null) ? "" : value;
+                element.value = value ?? "";
                 break;
         }
     }
@@ -2660,7 +2660,6 @@ ko.bindingHandlers['options'] = {
             previousScrollTop = (!selectWasPreviouslyEmpty && multiple) ? element.scrollTop : null,
             unwrappedArray = ko.utils.unwrapObservable(valueAccessor()),
             arrayToDomNodeChildrenOptions = {},
-            captionValue,
             filteredArray,
             previousSelectedValues = [],
 
@@ -2701,7 +2700,7 @@ ko.bindingHandlers['options'] = {
                 unwrappedArray = [unwrappedArray];
 
             // Filter out any entries marked as destroyed
-            filteredArray = unwrappedArray.filter(item => item || item == null);
+            filteredArray = unwrappedArray.filter(item => item ?? 1);
         } else {
             // If a falsy value is provided (e.g. null), we'll simply empty the select element
         }
@@ -2847,11 +2846,7 @@ ko.bindingHandlers['textInput'] = {
         };
 
         var updateView = () => {
-            var modelValue = ko.utils.unwrapObservable(valueAccessor());
-
-            if (modelValue == null) {
-                modelValue = '';
-            }
+            var modelValue = ko.utils.unwrapObservable(valueAccessor()) ?? '';
 
             if (elementValueBeforeEvent !== undefined && modelValue === elementValueBeforeEvent) {
                 setTimeout(updateView, 4);

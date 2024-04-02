@@ -131,7 +131,7 @@ export class AbstractFetchRemote
 
 		fetchJSON(sAction, getURL(sGetAdd),
 			sGetAdd ? null : (params || {}),
-			undefined === iTimeout ? 30000 : pInt(iTimeout),
+			pInt(iTimeout ?? 30000),
 			async data => {
 				let iError = 0;
 				if (data) {
