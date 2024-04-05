@@ -72,8 +72,6 @@ define('APP_PLUGINS_PATH', APP_PRIVATE_DATA.'plugins/');
 
 ini_set('default_charset', 'UTF-8');
 ini_set('internal_encoding', 'UTF-8');
-mb_internal_encoding('UTF-8');
-mb_language('uni');
 
 if (!defined('SNAPPYMAIL_LIBRARIES_PATH')) {
 	define('SNAPPYMAIL_LIBRARIES_PATH', rtrim(realpath(__DIR__), '\\/').'/app/libraries/');
@@ -101,6 +99,9 @@ if (APP_VERSION !== (is_file(APP_DATA_FOLDER_PATH.'INSTALLED') ? file_get_conten
 {
 	include __DIR__ . '/setup.php';
 }
+
+mb_internal_encoding('UTF-8');
+mb_language('uni');
 
 $sSalt = is_file(APP_DATA_FOLDER_PATH.'SALT.php') ? trim(file_get_contents(APP_DATA_FOLDER_PATH.'SALT.php')) : '';
 if (!$sSalt) {
