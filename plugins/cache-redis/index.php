@@ -6,8 +6,8 @@ class CacheRedisPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	const
 		NAME = 'Cache Redis',
-		VERSION = '2.36.1',
-		RELEASE = '2024-03-31',
+		VERSION = '2.36.2',
+		RELEASE = '2024-04-08',
 		REQUIRED = '2.36.0',
 		CATEGORY = 'Cache',
 		DESCRIPTION = 'Cache handler using Redis';
