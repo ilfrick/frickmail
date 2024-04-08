@@ -583,7 +583,7 @@ class Actions
 						'MaxBlockquotesLevel' => 0,
 						'simpleAttachmentsList' => false,
 						'listGrouped' => $oConfig->Get('defaults', 'mail_list_grouped', false),
-						'MessagesPerPage' => \max(5, (int) $oConfig->Get('webmail', 'messages_per_page', 25)),
+						'MessagesPerPage' => \max(10, \intval($oConfig->Get('webmail', 'messages_per_page', 25)) ?: 25),
 						'messageNewWindow' => false,
 						'messageReadAuto' => true, // (bool) $oConfig->Get('webmail', 'message_read_auto', true),
 						'MessageReadDelay' => (int) $oConfig->Get('webmail', 'message_read_delay', 5),
@@ -678,7 +678,7 @@ class Actions
 					$aResult['simpleAttachmentsList'] = (bool)$oSettings->GetConf('simpleAttachmentsList', $aResult['simpleAttachmentsList']);
 					$aResult['listGrouped'] = (bool)$oSettings->GetConf('listGrouped', $aResult['listGrouped']);
 					$aResult['ContactsAutosave'] = (bool)$oSettings->GetConf('ContactsAutosave', $aResult['ContactsAutosave']);
-					$aResult['MessagesPerPage'] = \max(5, (int)$oSettings->GetConf('MessagesPerPage', $aResult['MessagesPerPage']));
+					$aResult['MessagesPerPage'] = \max(10, \intval($oSettings->GetConf('MessagesPerPage', $aResult['MessagesPerPage']) ?: $aResult['MessagesPerPage']));
 					$aResult['messageNewWindow'] = (int)$oSettings->GetConf('messageNewWindow', $aResult['messageNewWindow']);
 					$aResult['messageReadAuto'] = (int)$oSettings->GetConf('messageReadAuto', $aResult['messageReadAuto']);
 					$aResult['MessageReadDelay'] = (int)$oSettings->GetConf('MessageReadDelay', $aResult['MessageReadDelay']);

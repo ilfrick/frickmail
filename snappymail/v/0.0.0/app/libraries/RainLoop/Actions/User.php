@@ -157,7 +157,7 @@ trait User
 		}
 
 		$this->setSettingsFromParams($oSettings, 'MessagesPerPage', 'int', function ($iValue) {
-			return \min(50, \max(10, $iValue));
+			return \min(100, \max(10, $iValue));
 		});
 
 		$this->setSettingsFromParams($oSettings, 'Layout', 'int', function ($iValue) {
