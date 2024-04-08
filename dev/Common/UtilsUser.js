@@ -121,7 +121,7 @@ computedPaginatorHelper = (koCurrentPage, koPageCount) => {
 			next = 0,
 			limit = 2;
 
-		if (1 < pageCount || (0 < pageCount && pageCount < currentPage)) {
+		if (1 < pageCount) {
 			if (pageCount < currentPage) {
 				fAdd(pageCount);
 				prev = pageCount;
