@@ -166,7 +166,7 @@ trait Attachments
 			$iUid = (int) $aValues['uid'];
 			$sMimeIndex = (string) $aValues['mimeIndex'] ?: '';
 			$oFileProvider = $this->FilesProvider();
-			$mResult = $this->MailClient()->MessageMimeStream(
+			$this->MailClient()->MessageMimeStream(
 				function ($rResource, $sContentType, $sFileName, $sMimeIndex = '')
 				use ($oAccount, $oFileProvider, &$aValues) {
 					unset($sContentType, $sFileName, $sMimeIndex);
