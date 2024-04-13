@@ -36,10 +36,11 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$this->addTemplate('templates/PopupsNextcloudFiles.html');
 			$this->addTemplate('templates/PopupsNextcloudCalendars.html');
 /*
-			// DISABLED https://github.com/the-djmaze/snappymail/issues/1420#issuecomment-1933045917
-			$this->addHook('imap.before-login', 'oidcLogin');
-			$this->addHook('smtp.before-login', 'oidcLogin');
-			$this->addHook('sieve.before-login', 'oidcLogin');
+			$this->addHook('login.credentials.step-2', 'loginCredentials');
+			$this->addHook('login.credentials', 'loginCredentials');
+			$this->addHook('imap.before-login', 'beforeLogin');
+			$this->addHook('smtp.before-login', 'beforeLogin');
+			$this->addHook('sieve.before-login', 'beforeLogin');
 */
 		} else {
 			\SnappyMail\Log::debug('Nextcloud', 'NOT integrated');
@@ -68,6 +69,19 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public static function IsLoggedIn()
 	{
 		return static::IsIntegrated() && \OC::$server->getUserSession()->isLoggedIn();
+	}
+
+	public function loginCredentials(string &$sEmail, string &$sLogin, ?string &$sPassword = null) : void
+	{
+		$ocUser = \OC::$server->getUserSession()->getUser();
+//		$sEmail = $ocUser->getEMailAddress() ?: $oc->user->getPrimaryEMailAddress();
+//		$sLogin = $ocUser->getUID();
+	}
+
+	public function beforeLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
+	{
+//		$oSettings->username = \OC::$server->getUserSession()->getUser()->getUID();
+//		$this->oidcLogin($oAccount, $oClient, $oSettings);
 	}
 
 	// https://apps.nextcloud.com/apps/oidc_login
