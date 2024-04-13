@@ -14,16 +14,19 @@ class MainAccount extends Account
 
 	public function resealCryptKey(SensitiveString $oOldPass) : bool
 	{
-		$sKey = $this->CryptKey();
+		$oStorage = \RainLoop\Api::Actions()->StorageProvider();
+		$sKey = $oStorage->Get($this, StorageType::ROOT, '.cryptkey');
 		if ($sKey) {
-			$sKey = \SnappyMail\Crypt::EncryptToJSON(\bin2hex($sKey), $this->IncPassword());
+			$sKey = \SnappyMail\Crypt::DecryptFromJSON($sKey, $oOldPass);
+			if (!$sKey) {
+				throw new ClientException(Notifications::CryptKeyError);
+			}
+			$sKey = \SnappyMail\Crypt::EncryptToJSON($sKey, $this->IncPassword());
 			if ($sKey) {
-				\RainLoop\Api::Actions()->StorageProvider()->Put($this, StorageType::ROOT, '.cryptkey', $sKey);
-				$sKey = \SnappyMail\Crypt::DecryptFromJSON($sKey, $this->IncPassword());
-				if ($sKey) {
-					$this->sCryptKey = new SensitiveString(\hex2bin($sKey));
+				$this->sCryptKey = null;
+				if (\RainLoop\Api::Actions()->StorageProvider()->Put($this, StorageType::ROOT, '.cryptkey', $sKey)) {
+					return true;
 				}
-				return true;
 			}
 		}
 		return false;
@@ -44,11 +47,10 @@ class MainAccount extends Account
 				$oStorage->Put($this, StorageType::ROOT, '.cryptkey', $sKey);
 			}
 			$sKey = \SnappyMail\Crypt::DecryptFromJSON($sKey, $this->IncPassword());
-			if ($sKey) {
-				$this->sCryptKey = new SensitiveString(\hex2bin($sKey));
-			} else {
+			if (!$sKey) {
 				throw new ClientException(Notifications::CryptKeyError);
 			}
+			$this->sCryptKey = new SensitiveString(\hex2bin($sKey));
 		}
 		return $this->sCryptKey;
 	}
