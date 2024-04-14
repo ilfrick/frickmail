@@ -118,7 +118,10 @@ class BodyStructure implements \JsonSerializable
 
 	public function isText() : bool
 	{
-		return 'text/html' === $this->sContentType || 'text/plain' === $this->sContentType;
+		return 'text/html' === $this->sContentType
+			|| 'text/plain' === $this->sContentType
+			// Also the useless AMP content
+			|| 'text/x-amp-html' === $this->sContentType;
 	}
 
 	// https://datatracker.ietf.org/doc/html/rfc3156#section-4
