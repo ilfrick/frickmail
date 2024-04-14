@@ -13,7 +13,7 @@ abstract class Account implements \JsonSerializable
 
 	private string $sEmail = '';
 
-	private string $sLogin = '';
+	private string $sImapUser = '';
 
 	private ?SensitiveString $oPassword = null;
 
@@ -35,8 +35,12 @@ abstract class Account implements \JsonSerializable
 
 	public function IncLogin() : string
 	{
-//		return $this->oDomain->ImapSettings()->fixUsername($this->sLogin);
-		return $this->sLogin;
+		return $this->ImapUser();
+	}
+	public function ImapUser() : string
+	{
+//		return $this->oDomain->ImapSettings()->fixUsername($this->sImapUser);
+		return $this->sImapUser;
 	}
 
 	public function IncPassword() : string
@@ -45,6 +49,10 @@ abstract class Account implements \JsonSerializable
 	}
 
 	public function OutLogin() : string
+	{
+		return $this->SmtpUser();
+	}
+	public function SmtpUser() : string
 	{
 //		return $this->oDomain->SmtpSettings()->fixUsername($this->sSmtpUser ?: $this->sEmail);
 		return $this->sSmtpUser ?: $this->sEmail;
@@ -59,7 +67,7 @@ abstract class Account implements \JsonSerializable
 	{
 		return \sha1(\implode(APP_SALT, [
 			$this->sEmail,
-			$this->sLogin,
+			$this->sImapUser,
 //			\json_encode($this->Domain()),
 //			$this->oPassword
 		]));
@@ -80,7 +88,7 @@ abstract class Account implements \JsonSerializable
 	{
 		$result = [
 			'email' => $this->sEmail,
-			'login' => $this->sLogin,
+			'login' => $this->sImapUser,
 			'pass'  => $this->IncPassword(),
 			'name' => $this->sName
 		];
@@ -106,7 +114,7 @@ abstract class Account implements \JsonSerializable
 					$oAccount = new static;
 
 					$oAccount->sEmail = \SnappyMail\IDN::emailToAscii($sEmail);
-					$oAccount->sLogin = \SnappyMail\IDN::emailToAscii($sLogin);
+					$oAccount->sImapUser = \SnappyMail\IDN::emailToAscii($sLogin);
 					$oAccount->SetPassword($oPassword);
 					$oAccount->oDomain = $oDomain;
 
@@ -177,7 +185,7 @@ abstract class Account implements \JsonSerializable
 	{
 		$oSettings = $this->Domain()->ImapSettings();
 		$oSettings->timeout = \max($oSettings->timeout, (int) $oConfig->Get('imap', 'timeout', $oSettings->timeout));
-		$oSettings->username = $this->IncLogin();
+		$oSettings->username = $this->ImapUser();
 
 		$oSettings->expunge_all_on_delete |= !!$oConfig->Get('imap', 'use_expunge_all_on_delete', false);
 		$oSettings->fast_simple_search = !(!$oSettings->fast_simple_search || !$oConfig->Get('imap', 'message_list_fast_simple_search', true));
@@ -201,7 +209,7 @@ abstract class Account implements \JsonSerializable
 	public function SmtpConnectAndLogin(\RainLoop\Plugins\Manager $oPlugins, \MailSo\Smtp\SmtpClient $oSmtpClient) : bool
 	{
 		$oSettings = $this->Domain()->SmtpSettings();
-		$oSettings->username = $this->OutLogin();
+		$oSettings->username = $this->SmtpUser();
 		$oSettings->Ehlo = \MailSo\Smtp\SmtpClient::EhloHelper();
 
 		$oSmtpClient->Settings = $oSettings;
@@ -225,7 +233,7 @@ abstract class Account implements \JsonSerializable
 	public function SieveConnectAndLogin(\RainLoop\Plugins\Manager $oPlugins, \MailSo\Sieve\SieveClient $oSieveClient, \RainLoop\Config\Application $oConfig)
 	{
 		$oSettings = $this->Domain()->SieveSettings();
-		$oSettings->username = $this->IncLogin();
+		$oSettings->username = $this->ImapUser();
 
 		$oSieveClient->Settings = $oSettings;
 

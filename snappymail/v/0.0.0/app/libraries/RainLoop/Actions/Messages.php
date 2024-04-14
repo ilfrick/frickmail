@@ -553,7 +553,7 @@ trait Messages
 		}
 
 		if ($oMessage) {
-			$ETag = $oMessage->ETag($this->getAccountFromToken()->IncLogin());
+			$ETag = $oMessage->ETag($this->getAccountFromToken()->ImapUser());
 			$this->verifyCacheByKey($ETag);
 			$this->Plugins()->RunHook('filter.result-message', array($oMessage));
 			$this->cacheByKey($ETag);
