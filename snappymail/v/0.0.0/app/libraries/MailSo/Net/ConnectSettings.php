@@ -98,13 +98,7 @@ class ConnectSettings implements \JsonSerializable
 		// Strip certain characters
 		if ($this->stripLogin) {
 			$value = \explode('@', $value);
-			if (isset($value[1])) {
-				$domain = \array_pop($value);
-			}
-			$value = \str_replace(\str_split($this->stripLogin), '', $value);
-			if (isset($value[1])) {
-				$value[] = $domain;
-			}
+			$value[0] = \str_replace(\str_split($this->stripLogin), '', $value[0]);
 			$value = \implode('@', $value);
 		}
 		return $value;
