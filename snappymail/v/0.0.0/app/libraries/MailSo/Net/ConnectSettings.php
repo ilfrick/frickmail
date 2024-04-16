@@ -79,7 +79,7 @@ class ConnectSettings implements \JsonSerializable
 			$this->passphrase = \is_string($value) ? new SensitiveString($value) : $value;
 		}
 		if ('username' === $name || 'login' === $name) {
-			$this->username = $this->fixUsername($value);
+			$this->username = $value;
 		}
 	}
 

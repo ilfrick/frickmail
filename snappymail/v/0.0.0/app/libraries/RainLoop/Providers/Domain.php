@@ -79,4 +79,16 @@ class Domain extends AbstractProvider
 	{
 		return $this->oDriver instanceof Domain\DomainInterface;
 	}
+
+	public function getByEmailAddress(string $sEmail) : \RainLoop\Model\Domain
+	{
+		$oDomain = $this->Load(\MailSo\Base\Utils::getEmailAddressDomain($sEmail), true);
+		if (!$oDomain) {
+			throw new ClientException(Notifications::DomainNotAllowed);
+		}
+		if (!$oDomain->ValidateWhiteList($sEmail)) {
+			throw new ClientException(Notifications::AccountNotAllowed);
+		}
+		return $oDomain;
+	}
 }

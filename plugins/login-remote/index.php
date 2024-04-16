@@ -56,11 +56,11 @@ class LoginRemotePlugin extends \RainLoop\Plugins\AbstractPlugin
 		return true;
 	}
 
-	public function FilterLoginCredentials(&$sEmail, &$sLogin, &$sPassword)
+	public function FilterLoginCredentials(&$sEmail, &$sImapUser, &$sPassword, &$sSmtpUser)
 	{
 		// cPanel https://github.com/the-djmaze/snappymail/issues/697
 //		 && !empty($_ENV['CPANEL'])
-		if (static::$login/* && $sLogin == $_ENV['REMOTE_USER']*/) {
+		if (static::$login/* && $sImapUser == $_ENV['REMOTE_USER']*/) {
 			if (empty($_ENV['REMOTE_TEMP_USER'])) {
 				$iPos = \strpos($sPassword, '[::cpses::]');
 				if ($iPos) {
@@ -68,7 +68,8 @@ class LoginRemotePlugin extends \RainLoop\Plugins\AbstractPlugin
 				}
 			}
 			if (!empty($_ENV['REMOTE_TEMP_USER'])) {
-				$sLogin = $_ENV['REMOTE_USER'] . '/' . $_ENV['REMOTE_TEMP_USER'];
+				$sImapUser = $_ENV['REMOTE_USER'] . '/' . $_ENV['REMOTE_TEMP_USER'];
+				$sSmtpUser = $_ENV['REMOTE_USER'] . '/' . $_ENV['REMOTE_TEMP_USER'];
 			}
 		}
 	}

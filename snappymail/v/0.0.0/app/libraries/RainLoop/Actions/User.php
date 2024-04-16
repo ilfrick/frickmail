@@ -35,11 +35,11 @@ trait User
 	 */
 	public function DoLogin() : array
 	{
-		$sEmail = \MailSo\Base\Utils::Trim($this->GetActionParam('Email', ''));
-		$oPassword = new \SnappyMail\SensitiveString($this->GetActionParam('Password', ''));
-
 		try {
-			$oAccount = $this->LoginProcess($sEmail, $oPassword);
+			$oAccount = $this->LoginProcess(
+				\MailSo\Base\Utils::Trim($this->GetActionParam('Email', '')),
+				new \SnappyMail\SensitiveString($this->GetActionParam('Password', ''))
+			);
 		} catch (\Throwable $oException) {
 			$this->loginErrorDelay();
 			throw $oException;

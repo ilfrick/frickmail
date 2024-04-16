@@ -104,27 +104,25 @@ class Domain implements \JsonSerializable
 		$this->aliasName = \strtolower(\idn_to_ascii($sAliasName));
 	}
 
-	public function ValidateWhiteList(string $sEmail, string $sLogin) : bool
+	public function ValidateWhiteList(string $sEmail) : bool
 	{
 		$sW = \trim($this->whiteList);
-		if ($sW) {
-			$sEmail = $this->IMAP->fixUsername($sEmail, false);
-			$sLogin = $this->IMAP->fixUsername($sLogin);
-			$sUserPart = \MailSo\Base\Utils::getEmailAddressLocalPart($sLogin ?: $sEmail);
-			$sUserDomain = \MailSo\Base\Utils::getEmailAddressDomain($sEmail);
-			$sItem = \strtok($sW, " ;,\n");
-			while (false !== $sItem) {
-				$sItem = $this->IMAP->fixUsername(\trim($sItem), false);
-				if ($sLogin === $sItem || $sEmail === $sItem
-				  || $sUserPart === $sItem || "@{$sUserDomain}" === $sItem
-				) {
-					return true;
-				}
-				$sItem = \strtok(" ;,\n");
-			}
-			return false;
+		if (!$sW) {
+			return true;
 		}
-		return true;
+		$sEmail = \SnappyMail\IDN::emailToAscii(\mb_strtolower($sEmail));
+		$iPos = \strrpos($sEmail, '@');
+		$sUserPart = \substr($sEmail, 0, $iPos);
+		$sUserDomain = \substr($sEmail, $iPos);
+		$sItem = \strtok($sW, " ;,\n");
+		while (false !== $sItem) {
+			$sItem = \SnappyMail\IDN::emailToAscii(\mb_strtolower(\trim($sItem)));
+			if ($sItem === $sEmail || $sItem === $sUserPart || $sItem === $sUserDomain) {
+				return true;
+			}
+			$sItem = \strtok(" ;,\n");
+		}
+		return false;
 	}
 
 	public function ImapSettings() : \MailSo\Imap\Settings

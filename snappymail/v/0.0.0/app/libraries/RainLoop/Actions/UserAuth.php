@@ -11,6 +11,7 @@ use RainLoop\Model\AdditionalAccount;
 use RainLoop\Providers\Storage\Enumerations\StorageType;
 use RainLoop\Exceptions\ClientException;
 use SnappyMail\Cookies;
+use SnappyMail\SensitiveString;
 
 trait UserAuth
 {
@@ -24,7 +25,7 @@ trait UserAuth
 	{
 		return $this->DefaultResponse(
 			$this->getMainAccountFromToken()->resealCryptKey(
-				new \SnappyMail\SensitiveString($this->GetActionParam('passphrase', ''))
+				new SensitiveString($this->GetActionParam('passphrase', ''))
 			)
 		);
 	}
@@ -32,7 +33,7 @@ trait UserAuth
 	/**
 	 * @throws \RainLoop\Exceptions\ClientException
 	 */
-	public function resolveLoginCredentials(string &$sEmail, \SnappyMail\SensitiveString $oPassword, string &$sLogin): void
+	protected function resolveLoginCredentials(string $sEmail, SensitiveString $oPassword): array
 	{
 		$sEmail = \SnappyMail\IDN::emailToAscii(\MailSo\Base\Utils::Trim($sEmail));
 
@@ -40,28 +41,31 @@ trait UserAuth
 
 		$oDomain = null;
 		$oDomainProvider = $this->DomainProvider();
+
+		// When email address is missing the domain, try to add it
 		if (!\str_contains($sEmail, '@')) {
 			$this->logWrite("The email address '{$sEmail}' is incomplete", \LOG_INFO, 'LOGIN');
 			if ($this->Config()->Get('login', 'determine_user_domain', false)) {
-//				$sUserHost = \SnappyMail\IDN::toAscii($this->Http()->GetHost(false, true));
-				$sUserHost = \strtolower(\idn_to_ascii($this->Http()->GetHost(false, true)));
+				$sUserHost = \SnappyMail\IDN::toAscii($this->Http()->GetHost(false, true));
 				$this->logWrite("Determined user domain: {$sUserHost}", \LOG_INFO, 'LOGIN');
 
+				// Determine without wildcard
 				$aDomainParts = \explode('.', $sUserHost);
 				$iLimit = \min(\count($aDomainParts), 14);
 				while (0 < $iLimit--) {
-					$sLine = \implode('.', $aDomainParts);
-					$oDomain = $oDomainProvider->Load($sLine, false);
+					$sDomain = \implode('.', $aDomainParts);
+					$oDomain = $oDomainProvider->Load($sDomain, false);
 					if ($oDomain) {
-						$sEmail .= '@' . $sLine;
-						$this->logWrite("Check '{$sLine}': OK", \LOG_INFO, 'LOGIN');
+						$sEmail .= '@' . $sDomain;
+						$this->logWrite("Check '{$sDomain}': OK", \LOG_INFO, 'LOGIN');
 						break;
 					} else {
-						$this->logWrite("Check '{$sLine}': NO", \LOG_INFO, 'LOGIN');
+						$this->logWrite("Check '{$sDomain}': NO", \LOG_INFO, 'LOGIN');
 					}
 					\array_shift($aDomainParts);
 				}
 
+				// Else determine with wildcard
 				if (!$oDomain) {
 					$oDomain = $oDomainProvider->Load($sUserHost, true);
 					if ($oDomain) {
@@ -77,6 +81,7 @@ trait UserAuth
 				}
 			}
 
+			// Else try default domain
 			if (!$oDomain) {
 				$sDefDomain = \trim($this->Config()->Get('login', 'default_domain', ''));
 				if (\strlen($sDefDomain)) {
@@ -97,43 +102,57 @@ trait UserAuth
 		$this->Plugins()->RunHook('login.credentials.step-2', array(&$sEmail, &$sPassword));
 		$this->logMask($sPassword);
 
-		$sLogin = $sEmail;
+		$sImapUser = $sEmail;
+		$sSmtpUser = $sEmail;
 		if (\str_contains($sEmail, '@')
-		 && ($oDomain || ($oDomain = $oDomainProvider->Load(\MailSo\Base\Utils::getEmailAddressDomain($sEmail))))
+		 && ($oDomain || ($oDomain = $oDomainProvider->Load(\MailSo\Base\Utils::getEmailAddressDomain($sEmail), true)))
 		) {
 			$sEmail = $oDomain->ImapSettings()->fixUsername($sEmail, false);
-			$sLogin = $oDomain->ImapSettings()->fixUsername($sLogin);
+			$sImapUser = $oDomain->ImapSettings()->fixUsername($sImapUser);
+			$sSmtpUser = $oDomain->SmtpSettings()->fixUsername($sSmtpUser);
 		}
 
-		$this->Plugins()->RunHook('login.credentials', array(&$sEmail, &$sLogin, &$sPassword));
+		$this->Plugins()->RunHook('login.credentials', array(&$sEmail, &$sImapUser, &$sPassword, &$sSmtpUser));
 
 		$oPassword->setValue($sPassword);
+
+		return [
+			'email' => $sEmail,
+			'domain' => $oDomain,
+			'imapUser' => $sImapUser,
+			'smtpUser' => $sSmtpUser,
+			'pass' => $oPassword
+		];
 	}
 
 	/**
 	 * @throws \RainLoop\Exceptions\ClientException
 	 */
-	public function LoginProcess(string &$sEmail, \SnappyMail\SensitiveString $oPassword, bool $bMainAccount = true): Account
+	public function LoginProcess(string $sEmail, SensitiveString $oPassword, bool $bMainAccount = true): Account
 	{
-		$sInputEmail = $sEmail;
+		$sCredentials = $this->resolveLoginCredentials($sEmail, $oPassword);
 
-		$sLogin = '';
-		$this->resolveLoginCredentials($sEmail, $oPassword, $sLogin);
-
-		if (!\str_contains($sEmail, '@') || !\strlen($oPassword)) {
+		if (!\str_contains($sCredentials['email'], '@') || !\strlen($oPassword)) {
 			throw new ClientException(Notifications::InvalidInputArgument);
 		}
 
 		$oAccount = null;
 		try {
-			$oAccount = $bMainAccount
-				? MainAccount::NewInstanceFromCredentials($this, $sEmail, $sLogin, $oPassword, true)
-				: AdditionalAccount::NewInstanceFromCredentials($this, $sEmail, $sLogin, $oPassword, true);
+			$oAccount = $bMainAccount ? new MainAccount : new AdditionalAccount;
+			$oAccount->setCredentials(
+				$sCredentials['domain'],
+				$sCredentials['email'],
+				$sCredentials['imapUser'],
+				$oPassword,
+				$sCredentials['smtpUser']
+//				,new SensitiveString($oPassword)
+			);
+			$this->Plugins()->RunHook('filter.account', array($oAccount));
 			if (!$oAccount) {
-				throw new ClientException(Notifications::AuthError);
+				throw new ClientException(Notifications::AccountFilterError);
 			}
 		} catch (\Throwable $oException) {
-			$this->LoggerAuthHelper($oAccount, $sInputEmail);
+			$this->LoggerAuthHelper($oAccount, $sEmail);
 			throw $oException;
 		}
 

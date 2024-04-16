@@ -552,16 +552,14 @@ class ServiceActions
 				if (\is_array($aData) && !empty($aData['Email']) && isset($aData['Password'], $aData['Time']) &&
 					(0 === $aData['Time'] || \time() - 10 < $aData['Time']))
 				{
-					$sEmail = \trim($aData['Email']);
-					$oPassword = new \SnappyMail\SensitiveString($aData['Password']);
-
 					$aAdditionalOptions = (isset($aData['AdditionalOptions']) && \is_array($aData['AdditionalOptions']))
 						? $aData['AdditionalOptions'] : [];
-
 					try
 					{
-						$oAccount = $this->oActions->LoginProcess($sEmail, $oPassword);
-
+						$oAccount = $this->oActions->LoginProcess(
+							\trim($aData['Email']),
+							new \SnappyMail\SensitiveString($aData['Password'])
+						);
 						if ($aAdditionalOptions) {
 							$bSaveSettings = false;
 

@@ -132,8 +132,9 @@ $Plugin->addHook('hook.name', 'functionName');
 ### login.credentials
 	params:
 		string &$sEmail
-		string &$sLogin
+		string &$sImapUser
 		string &$sPassword
+		string &$sSmtpUser
 
 ### login.success
 	params:
