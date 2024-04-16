@@ -80,8 +80,7 @@ class ZIP
 		\header('Pragma: no-cache');
 		\header('Content-Transfer-Encoding: binary');
 		$name .= '.zip';
-		$name = \preg_match('#^[\x01-\x7F]*$#D', $name) ? $name : '=?UTF-8?B?'.\base64_encode($name).'?=';
-		\header("Content-Disposition: attachment; filename={$name}");
+		\MailSo\Base\Http::setContentDisposition('attachment', ['filename' => $name]);
 		\header("Content-Type: application/zip; name={$name}");
 	}
 

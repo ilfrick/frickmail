@@ -219,7 +219,7 @@ class ActionsAdmin extends Actions
 			$this->IsAdminLoggined();
 			$file = \SnappyMail\Upgrade::backup();
 			\header('Content-Type: application/gzip');
-			\header('Content-Disposition: attachment; filename="' . \basename($file) . '"');
+			\MailSo\Base\Http::setContentDisposition('attachment', ['filename' => \basename($file)]);
 			\header('Content-Transfer-Encoding: binary');
 			\header('Content-Length: ' . \filesize($file));
 			$fp = \fopen($file, 'rb');
