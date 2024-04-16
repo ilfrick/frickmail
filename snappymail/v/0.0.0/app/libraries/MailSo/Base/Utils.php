@@ -369,7 +369,7 @@ abstract class Utils
 
 	public static function AttributeRfc2231Encode(string $sAttrName, string $sValue, string $sCharset = 'utf-8', string $sLang = '', int $iLen = 1000) : string
 	{
-		$sValue = \strtoupper($sCharset).'\''.$sLang.'\''.
+		$sValue = \strtoupper($sCharset)."'{$sLang}'".
 			\preg_replace_callback('/[\x00-\x20*\'%()<>@,;:\\\\"\/[\]?=\x80-\xFF]/', function ($match) {
 				return \rawurlencode($match[0]);
 			}, $sValue);
