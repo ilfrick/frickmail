@@ -87,13 +87,9 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public function beforeLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
 	{
 		$oSettings->username = \OC::$server->getUserSession()->getUser()->getUID();
-		$this->oidcLogin($oAccount, $oClient, $oSettings);
-	}
-
-	// https://apps.nextcloud.com/apps/oidc_login
-	// DISABLED https://github.com/the-djmaze/snappymail/issues/1420#issuecomment-1933045917
-	public function oidcLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
-	{
+/*
+		// https://apps.nextcloud.com/apps/oidc_login
+		// DISABLED https://github.com/the-djmaze/snappymail/issues/1420#issuecomment-1933045917
 		if (\OC::$server->getConfig()->getAppValue('snappymail', 'snappymail-autologin-oidc', false)
 		 && \OC::$server->getSession()->get('is_oidc')
 //		 && $oClient->supportsAuthType('OAUTHBEARER') // v2.28
@@ -104,6 +100,7 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 				\array_unshift($oSettings->SASLMechanisms, 'OAUTHBEARER');
 			}
 		}
+*/
 	}
 
 	/*
