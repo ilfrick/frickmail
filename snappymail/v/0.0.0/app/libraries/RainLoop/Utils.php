@@ -134,11 +134,7 @@ class Utils
 	{
 		static $open_basedir;
 		if (null === $open_basedir) {
-			$open_basedir = \ini_get('open_basedir');
-			if ($open_basedir) {
-				\SnappyMail\Log::warning('OpenBasedir', "open_basedir restriction in effect. Allowed path(s): {$open_basedir}");
-			}
-			$open_basedir = \array_filter(\explode(PATH_SEPARATOR, $open_basedir));
+			$open_basedir = \array_filter(\explode(PATH_SEPARATOR, \ini_get('open_basedir')));
 		}
 		if ($open_basedir) {
 			foreach ($open_basedir as $dir) {
