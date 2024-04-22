@@ -51,7 +51,9 @@ class HaveibeenpwnedPlugin extends \RainLoop\Plugins\AbstractPlugin
 		}
 
 		$pass = \sha1($oAccount->ImapPass());
-		$response = $HTTP->doRequest('GET', 'https://api.pwnedpasswords.com/range/' . \substr($pass, 0, 5));
+		$prefix = \substr($pass, 0, 5);
+		$suffix = \substr($pass, 5);
+		$response = $HTTP->doRequest('GET', "https://api.pwnedpasswords.com/range/{$prefix}");
 		$passwords = [];
 		foreach (\preg_split('/\\R/', $response->body) as $entry) {
 			if ($entry) {
@@ -61,8 +63,7 @@ class HaveibeenpwnedPlugin extends \RainLoop\Plugins\AbstractPlugin
 		}
 
 		return $this->jsonResponse(__FUNCTION__, array(
-			'pwned' => isset($passwords[$pass]) ? $passwords[$pass] : 0,
-//			'passwords' => $passwords,
+			'pwned' => isset($passwords[$suffix]) ? $passwords[$suffix] : 0,
 			'breached' => $breached ? [
 				'request_uri' => $breached->request_uri,
 				'final_uri' => $breached->final_uri,
