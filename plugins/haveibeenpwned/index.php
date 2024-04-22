@@ -3,14 +3,8 @@
  * https://haveibeenpwned.com/API/v3
  */
 
-use RainLoop\Model\Account;
-use MailSo\Imap\ImapClient;
-use MailSo\Imap\Settings as ImapSettings;
-use MailSo\Sieve\SieveClient;
-use MailSo\Sieve\Settings as SieveSettings;
-use MailSo\Smtp\SmtpClient;
-use MailSo\Smtp\Settings as SmtpSettings;
-use MailSo\Mime\Message as MimeMessage;
+use SnappyMail\Hibp;
+use SnappyMail\SensitiveString;
 
 class HaveibeenpwnedPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
@@ -22,7 +16,7 @@ class HaveibeenpwnedPlugin extends \RainLoop\Plugins\AbstractPlugin
 		URL      = 'https://snappymail.eu/',
 		VERSION  = '0.1',
 		RELEASE  = '2024-04-22',
-		REQUIRED = '2.14.0',
+		REQUIRED = '2.36.1',
 		CATEGORY = 'General',
 		LICENSE  = 'MIT',
 		DESCRIPTION = 'Check if your passphrase or email address is in a data breach';
@@ -40,37 +34,14 @@ class HaveibeenpwnedPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$oAccount = $this->Manager()->Actions()->getAccountFromToken();
 //		$oAccount = \RainLoop\Api::Actions()->getAccountFromToken();
 
-		$HTTP = \SnappyMail\HTTP\Request::factory();
-
-		$breached = null;
 		$api_key = \trim($this->Config()->Get('plugin', 'hibp-api-key', ''));
-		if ($api_key) {
-			$breached = $HTTP->doRequest('GET', "https://haveibeenpwned.com/api/v3/breachedaccount/{$oAccount->Email()}", null, [
-				'hibp-api-key' => $api_key
-			]);
-		}
+		$breaches = $api_key ? Hibp::account($api_key, $oAccount->Email()) : null;
 
-		$pass = \sha1($oAccount->ImapPass());
-		$prefix = \substr($pass, 0, 5);
-		$suffix = \substr($pass, 5);
-		$response = $HTTP->doRequest('GET', "https://api.pwnedpasswords.com/range/{$prefix}");
-		$passwords = [];
-		foreach (\preg_split('/\\R/', $response->body) as $entry) {
-			if ($entry) {
-				$entry = \explode(':', $entry);
-				$passwords[$entry[0]] = (int) $entry[1];
-			}
-		}
+		$pwned = Hibp::password(new SensitiveString($oAccount->ImapPass()));
 
 		return $this->jsonResponse(__FUNCTION__, array(
-			'pwned' => isset($passwords[$suffix]) ? $passwords[$suffix] : 0,
-			'breached' => $breached ? [
-				'request_uri' => $breached->request_uri,
-				'final_uri' => $breached->final_uri,
-				'status' => $breached->status,
-				'headers' => $breached->headers,
-				'body' => $breached->body
-			] : []
+			'pwned' => $pwned,
+			'breaches' => $breaches
 		));
 	}
 
