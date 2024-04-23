@@ -136,6 +136,7 @@
 				squire = new win.Squire2(wysiwyg, SquireDefaultConfig);
 
 			this.container = container;
+			container.classList.add('CompactComposer');
 
 			plain.className = 'squire-plain';
 			wysiwyg.className = 'squire-wysiwyg';
