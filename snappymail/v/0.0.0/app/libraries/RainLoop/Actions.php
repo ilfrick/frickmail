@@ -772,7 +772,7 @@ class Actions
 
 	protected function loginErrorDelay(): void
 	{
-		$iDelay = (int) $this->oConfig->Get('labs', 'login_fault_delay', 0);
+		$iDelay = (int) $this->oConfig->Get('login', 'fault_delay', 0);
 		if (0 < $iDelay) {
 			$seconds = $iDelay - (\microtime(true) - $_SERVER['REQUEST_TIME_FLOAT']);
 			if (0 < $seconds) {

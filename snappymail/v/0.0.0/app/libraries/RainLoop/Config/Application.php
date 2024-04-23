@@ -128,6 +128,10 @@ class Application extends \RainLoop\Config\AbstractConfig
 				$sSectionKey = 'imap';
 				$sParamKey = 'fetch_new_messages';
 			}
+			if ('login_fault_delay' === $sParamKey) {
+				$sSectionKey = 'login';
+				$sParamKey = 'fault_delay';
+			}
 		}
 		parent::Set($sSectionKey, $sParamKey, $mParamValue);
 	}
@@ -289,7 +293,9 @@ once they closed the browser window.
 Values:
   "DefaultOff" - can be used, disabled by default;
   "DefaultOn"  - can be used, enabled by default;
-  "Unused"     - cannot be used')
+  "Unused"     - cannot be used'),
+
+				'fault_delay' => array(5, 'When login fails, wait N seconds before responding'),
 			),
 
 			'plugins' => array(
@@ -416,7 +422,6 @@ Enables caching in the system'),
 
 			'labs' => array(
 				'allow_message_append' => array(false, 'Allow drag & drop .eml files from system into messages list'),
-				'login_fault_delay' => array(5, 'When login fails, wait N seconds before responding'),
 				'log_ajax_response_write_limit' => array(300),
 				'smtp_show_server_errors' => array(false),
 				'mail_func_clear_headers' => array(true, 'PHP mail() remove To and Subject headers'),
