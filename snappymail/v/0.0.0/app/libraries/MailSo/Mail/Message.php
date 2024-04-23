@@ -507,7 +507,6 @@ class Message implements \JsonSerializable
 			'spamResult' => $this->sSpamResult,
 			'isSpam' => $this->bIsSpam,
 			'dateTimestamp' => $this->iHeaderTimeStampInUTC ?: $this->iInternalTimeStampInUTC,
-			'internalTimestamp' => $this->iInternalTimeStampInUTC,
 
 			// \MailSo\Mime\EmailCollection
 			'from' => $this->oFrom,

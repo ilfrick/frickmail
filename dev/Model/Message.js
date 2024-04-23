@@ -81,7 +81,6 @@ export class MessageModel extends AbstractModel {
 //			autocrypt: ko.observableArray(),
 			hasVirus: null, // or boolean when scanned
 			priority: 3, // Normal
-			internalTimestamp: 0,
 			senderEmailsString: '',
 			senderClearEmailsString: '',
 			isSpam: false,
