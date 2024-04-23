@@ -255,10 +255,14 @@ AskPopupView.password = function(sAskDesc, btnText, ask) {
 	return new Promise(resolve => {
 		this.showModal([
 			sAskDesc,
-			view => resolve({password:view.passphrase(), remember:view.remember()}),
+			view => resolve({
+				password:view.passphrase(),
+				username:/*ask & 2 ? */view.username(),
+				remember:/*ask & 4 ? */view.remember()
+			}),
 			() => resolve(null),
 			true,
-			ask || 5,
+			ask || 1,
 			btnText
 		]);
 	});

@@ -46,8 +46,8 @@ export class IdentityPopupView extends AbstractViewPopup {
 	}
 
 	createSelfSigned() {
-		AskPopupView.password('', 'CRYPTO/CREATE_SELF_SIGNED').then(pass => {
-			if (pass) {
+		AskPopupView.password('', 'CRYPTO/CREATE_SELF_SIGNED').then(result => {
+			if (result) {
 				const identity = this.identity();
 				Remote.request('SMimeCreateCertificate', (iError, oData) => {
 					if (oData.Result.x509) {
@@ -60,7 +60,7 @@ export class IdentityPopupView extends AbstractViewPopup {
 					name: identity.name(),
 					email: identity.email(),
 					privateKey: identity.smimeKey(),
-					passphrase: pass.password
+					passphrase: result.password
 				});
 			}
 		});
@@ -70,13 +70,13 @@ export class IdentityPopupView extends AbstractViewPopup {
 		const identity = this.identity();
 		let old = null
 		if (identity.smimeKeyEncrypted()) {
-			old = await AskPopupView.password(i18n('CRYPTO/CURRENT_PASS'), 'CRYPTO/DECRYPT', 1);
+			old = await AskPopupView.password(i18n('CRYPTO/CURRENT_PASS'), 'CRYPTO/DECRYPT');
 			if (!old) {
 				return;
 			}
 		}
-		AskPopupView.password(i18n('CRYPTO/NEW_PASS'), 'GLOBAL/SAVE', 1).then(pass => {
-			if (pass) {
+		AskPopupView.password(i18n('CRYPTO/NEW_PASS'), 'GLOBAL/SAVE').then(result => {
+			if (result) {
 				Remote.request('SMimeExportPrivateKey', (iError, oData) => {
 					if (oData.Result) {
 						identity.smimeKey(oData.Result);
@@ -86,7 +86,7 @@ export class IdentityPopupView extends AbstractViewPopup {
 				}, {
 					privateKey: identity.smimeKey(),
 					oldPassphrase: old?.password,
-					newPassphrase: pass.password
+					newPassphrase: result.password
 				});
 			}
 		});

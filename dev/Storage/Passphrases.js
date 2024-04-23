@@ -5,7 +5,7 @@ export const Passphrases = new WeakMap();
 Passphrases.ask = async (key, sAskDesc, btnText) =>
 	Passphrases.has(key)
 		? {password:Passphrases.handle(key)/*, remember:false*/}
-		: await AskPopupView.password(sAskDesc, btnText);
+		: await AskPopupView.password(sAskDesc, btnText, 5);
 
 const timeouts = {};
 // get/set accessor to control deletion after 15 minutes of inactivity
