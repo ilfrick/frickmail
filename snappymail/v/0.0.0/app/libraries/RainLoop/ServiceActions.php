@@ -183,7 +183,7 @@ class ServiceActions
 				$this->oActions->logException($oException, \LOG_ERR);
 			}
 
-			$iLimit = (int) $this->Config()->Get('labs', 'log_ajax_response_write_limit', 0);
+			$iLimit = (int) $this->Config()->Get('logs', 'json_response_write_limit', 0);
 			$this->oActions->logWrite(0 < $iLimit && $iLimit < \strlen($sResult)
 					? \substr($sResult, 0, $iLimit).'...' : $sResult, \LOG_INFO, 'JSON');
 		}

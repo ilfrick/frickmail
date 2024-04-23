@@ -132,6 +132,10 @@ class Application extends \RainLoop\Config\AbstractConfig
 				$sSectionKey = 'login';
 				$sParamKey = 'fault_delay';
 			}
+			if ('log_ajax_response_write_limit' === $sParamKey) {
+				$sSectionKey = 'logs';
+				$sParamKey = 'json_response_write_limit';
+			}
 		}
 		parent::Set($sSectionKey, $sParamKey, $mParamValue);
 	}
@@ -379,7 +383,9 @@ Examples:
 				'auth_logging' => array(false, 'Enable auth logging in a separate file (for fail2ban)'),
 				'auth_logging_filename' => array('fail2ban/auth-{date:Y-m-d}.txt'),
 				'auth_logging_format' => array('[{date:Y-m-d H:i:s}] Auth failed: ip={request:ip} user={imap:login} host={imap:host} port={imap:port}'),
-				'auth_syslog' => array(false, 'Enable auth logging to syslog for fail2ban')
+				'auth_syslog' => array(false, 'Enable auth logging to syslog for fail2ban'),
+
+				'json_response_write_limit' => array(300),
 			),
 
 			'debug' => array(
@@ -422,7 +428,6 @@ Enables caching in the system'),
 
 			'labs' => array(
 				'allow_message_append' => array(false, 'Allow drag & drop .eml files from system into messages list'),
-				'log_ajax_response_write_limit' => array(300),
 				'smtp_show_server_errors' => array(false),
 				'mail_func_clear_headers' => array(true, 'PHP mail() remove To and Subject headers'),
 				'mail_func_additional_parameters' => array(false, 'PHP mail() set -f emailaddress'),
