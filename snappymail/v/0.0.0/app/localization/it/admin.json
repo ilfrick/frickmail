@@ -6,7 +6,7 @@
 		"TEST": "Test",
 		"UPDATE": "Aggiorna",
 		"USERNAME": "Nome utente",
-		"PASSWORD": "Password",
+		"PASSWORD": "Passphrase",
 		"CANCEL": "Annulla",
 		"SEARCH": "Cerca"
 	},
@@ -44,7 +44,7 @@
 		"LABEL_ALLOW_IDENTITIES": "Permetti identità multiple",
 		"ALERT_DATA_ACCESS": "La cartella Data è accessibile. Per favore configura il tuo server web per nascondere la cartella data da accessi esterni. Maggiori informazioni qui:",
 		"ALERT_WARNING": "Attenzione!",
-		"HTML_ALERT_WEAK_PASSWORD": "L'account admin sta utilizzando la password predefinita.\n<br>\nPer ragioni di sicurezza per favore\n<strong><a href=\"#\/security\">cambia<\/a><\/strong>\nla password ora."
+		"HTML_ALERT_WEAK_PASSWORD": "L'account admin sta utilizzando la passphrase predefinita.\n<br>\nPer ragioni di sicurezza per favore\n<strong><a href=\"#\/security\">cambia<\/a><\/strong>\nla passphrase ora."
 	},
 	"TAB_LOGIN": {
 		"LEGEND_LOGIN_SCREEN": "Login Screen",
@@ -67,7 +67,7 @@
 		"LABEL_STORAGE_TYPE": "Type",
 		"LABEL_STORAGE_DSN": "Dsn",
 		"LABEL_STORAGE_USER": "Utente",
-		"LABEL_STORAGE_PASSWORD": "Password",
+		"LABEL_STORAGE_PASSWORD": "Passphrase",
 		"SQLITE_GLOBAL": "Use a global DB instead of per account",
 		"ALERT_NOTICE": "Avviso!",
 		"SUGGESTIONS_LIMIT": "Limite suggerimenti",
@@ -87,8 +87,8 @@
 		"LABEL_AUTO_VERIFY": "Verify signatures automatically",
 		"LABEL_SHOW_PHP_INFO": "Mostra informazioni PHP",
 		"LEGEND_ADMIN_PANEL_ACCESS_CREDENTIALS": "Credenziali di Accesso Pannello Admin",
-		"LABEL_CURRENT_PASSWORD": "Password Corrente",
-		"LABEL_NEW_PASSWORD": "Nuova password",
+		"LABEL_CURRENT_PASSWORD": "Passphrase Corrente",
+		"LABEL_NEW_PASSWORD": "Nuova passphrase",
 		"LABEL_REPEAT_PASSWORD": "Ripeti",
 		"LABEL_REQUIRE_VERIFICATION": "Richiesta verifica del certificato SSL utilizzato",
 		"CRYPTO": "Crypto",

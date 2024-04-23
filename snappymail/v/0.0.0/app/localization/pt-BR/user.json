@@ -288,7 +288,7 @@
 		"CHANGE_PASS": "Change passphrase",
 		"CURRENT_PASS": "Current passphrase",
 		"NEW_PASS": "New passphrase",
-		"ASK_CRYPTKEY_PASS": "Your login passphrase has changed. Please fill in your old login password to decrypt data"
+		"ASK_CRYPTKEY_PASS": "Your login passphrase has changed. Please fill in your old login passphrase to decrypt data"
 	},
 	"OPENPGP": {
 		"POPUP_IMPORT_TITLE": "Importar chave OpenPGP",

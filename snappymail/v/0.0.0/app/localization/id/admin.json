@@ -44,7 +44,7 @@
 		"LABEL_ALLOW_IDENTITIES": "Izinkan identitas jamak",
 		"ALERT_DATA_ACCESS": "Data foldel SnappyMail bisa diakses. Silahkan atur web server anda untuk menyembunyikan folder data dari akses eksternal. Baca selengkapnya di sini:",
 		"ALERT_WARNING": "Peringatan!",
-		"HTML_ALERT_WEAK_PASSWORD": "Anda menggunakan password admin bawaan.\n<br>\nAtas alasan keamanan, mohon\n<strong><a href=\"#\/security\">mengganti<\/a><\/strong>\npassword dengan frasa yang lainnya segera.\n"
+		"HTML_ALERT_WEAK_PASSWORD": "Anda menggunakan passphrase admin bawaan.\n<br>\nAtas alasan keamanan, mohon\n<strong><a href=\"#\/security\">mengganti<\/a><\/strong>\npassphrase dengan frasa yang lainnya segera.\n"
 	},
 	"TAB_LOGIN": {
 		"LEGEND_LOGIN_SCREEN": "Laman login",
@@ -67,7 +67,7 @@
 		"LABEL_STORAGE_TYPE": "Tipe",
 		"LABEL_STORAGE_DSN": "Dsn",
 		"LABEL_STORAGE_USER": "User",
-		"LABEL_STORAGE_PASSWORD": "Password",
+		"LABEL_STORAGE_PASSWORD": "Passphrase",
 		"SQLITE_GLOBAL": "Use a global DB instead of per account",
 		"ALERT_NOTICE": "Perhatian!",
 		"SUGGESTIONS_LIMIT": "Suggestions limit",
@@ -87,8 +87,8 @@
 		"LABEL_AUTO_VERIFY": "Verify signatures automatically",
 		"LABEL_SHOW_PHP_INFO": "Tampilkan informasi PHP",
 		"LEGEND_ADMIN_PANEL_ACCESS_CREDENTIALS": "Hak Akses Panel Admin",
-		"LABEL_CURRENT_PASSWORD": "Password saat ini",
-		"LABEL_NEW_PASSWORD": "Password baru",
+		"LABEL_CURRENT_PASSWORD": "Passphrase saat ini",
+		"LABEL_NEW_PASSWORD": "Passphrase baru",
 		"LABEL_REPEAT_PASSWORD": "Ulangi",
 		"LABEL_REQUIRE_VERIFICATION": "Diperlukan verifikasi sertifikat SSL dengan",
 		"CRYPTO": "Crypto",
