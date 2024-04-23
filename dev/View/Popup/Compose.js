@@ -489,70 +489,91 @@ export class ComposePopupView extends AbstractViewPopup {
 
 			if (!sSentFolder) {
 				showScreenPopup(FolderSystemPopupView, [FolderType.Sent]);
-			} else try {
-				this.sendError(false);
-				this.sending(true);
-
-				sSentFolder = UNUSED_OPTION_VALUE === sSentFolder ? '' : sSentFolder;
-
-				this.getMessageRequestParams(sSentFolder).then(params => {
-					Remote.request('SendMessage',
-						(iError, data) => {
-							this.sending(false);
-							if (iError) {
-								if (Notifications.CantSaveMessage === iError) {
-									this.sendSuccessButSaveError(true);
-									let msg = i18n('COMPOSE/SAVED_ERROR_ON_SEND');
-									if (data?.ErrorMessageAdditional) {
-										msg = msg + "\n" + data?.ErrorMessageAdditional;
-									}
-									this.savedErrorDesc(msg);
-								} else {
-									params.signPassphrase && Passphrases.delete(identity);
-									this.sendError(true);
-									this.sendErrorDesc(
-										getNotification(iError, data?.ErrorMessage, Notifications.CantSendMessage)
-										+ "\n" + data?.ErrorMessageAdditional
-									);
-								}
-							} else {
-								if (arrayLength(this.aDraftInfo) > 0) {
-									const flag = {
-										'reply': '\\answered',
-										'forward': '$forwarded'
-									}[this.aDraftInfo[0]];
-									if (flag) {
-										const aFlags = oLastMessage.flags();
-										if (aFlags.indexOf(flag) === -1) {
-											aFlags.push(flag);
-											oLastMessage.flags(aFlags);
-										}
-									}
-								}
-								this.close();
-							}
-							setFolderETag(this.draftsFolder(), '');
-							setFolderETag(sSentFolder, '');
-							if (3 === arrayLength(this.aDraftInfo)) {
-								const folder = this.aDraftInfo[2];
-								setFolderETag(folder, '');
-							}
-							reloadDraftFolder();
-						},
-						params,
-						30000
-					);
-				}).catch(e => {
+			} else {
+				const sendError = e => {
 					console.error(e);
 					this.sendError(true);
 					this.sendErrorDesc(e);
 					this.sending(false);
-				});
-			} catch (e) {
-				console.error(e);
-				this.sendError(true);
-				this.sendErrorDesc(e);
-				this.sending(false);
+				};
+				const sendFailed = (iError, data) => {
+					this.sendError(true);
+					this.sendErrorDesc(
+						getNotification(iError, data?.ErrorMessage, Notifications.CantSendMessage)
+						+ "\n" + data?.ErrorMessageAdditional
+					);
+				};
+				try {
+					this.sendError(false);
+					this.sending(true);
+
+					sSentFolder = UNUSED_OPTION_VALUE === sSentFolder ? '' : sSentFolder;
+
+					const sendMessage = params => {
+						Remote.request('SendMessage',
+							(iError, data) => {
+								this.sending(false);
+								if (iError) {
+/*
+									if (Notifications.AuthError === iError && !params.auth) {
+										AskPopupView.password('SMTP login', 'retry', 3).then(result => {
+											if (result) {
+												this.sending(true);
+												params.auth = result;
+												sendMessage(params);
+											} else {
+												sendFailed(iError, data);
+											}
+										});
+									} else
+*/
+									if (Notifications.CantSaveMessage === iError) {
+										this.sendSuccessButSaveError(true);
+										let msg = i18n('COMPOSE/SAVED_ERROR_ON_SEND');
+										if (data?.ErrorMessageAdditional) {
+											msg = msg + "\n" + data?.ErrorMessageAdditional;
+										}
+										this.savedErrorDesc(msg);
+									} else {
+										params.signPassphrase && Passphrases.delete(identity);
+										this.sendError(true);
+										sendFailed(iError, data);
+									}
+								} else {
+									if (arrayLength(this.aDraftInfo) > 0) {
+										const flag = {
+											'reply': '\\answered',
+											'forward': '$forwarded'
+										}[this.aDraftInfo[0]];
+										if (flag) {
+											const aFlags = oLastMessage.flags();
+											if (aFlags.indexOf(flag) === -1) {
+												aFlags.push(flag);
+												oLastMessage.flags(aFlags);
+											}
+										}
+									}
+									this.close();
+								}
+								setFolderETag(this.draftsFolder(), '');
+								setFolderETag(sSentFolder, '');
+								if (3 === arrayLength(this.aDraftInfo)) {
+									const folder = this.aDraftInfo[2];
+									setFolderETag(folder, '');
+								}
+								reloadDraftFolder();
+							},
+							params,
+							30000
+						);
+					};
+
+					this.getMessageRequestParams(sSentFolder)
+					.then(sendMessage)
+					.catch(sendError);
+				} catch (e) {
+					sendError(e);
+				}
 			}
 		}
 	}

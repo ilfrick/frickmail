@@ -157,7 +157,18 @@ trait Messages
 	public function DoSendMessage() : array
 	{
 		$oAccount = $this->initMailClientConnection();
-
+/*
+		$aAuth = $this->GetActionParam('auth', null);
+		if ($aAuth) {
+			$oAccount->setSmtpUser($aAuth['username']);
+			$oAccount->setSmtpPass(new \SnappyMail\SensitiveString($aAuth['password']));
+//			if ($oAccount instanceof AdditionalAccount && !empty($aAuth['remember'])) {
+//				$oMainAccount = $this->getMainAccountFromToken();
+//				$aAccounts = $this->GetAccounts($oMainAccount);
+//				$this->SetAccounts($oMainAccount, $aAccounts);
+//			}
+		}
+*/
 		$oConfig = $this->Config();
 
 		$sSaveFolder = $this->GetActionParam('saveFolder', '');
@@ -299,6 +310,10 @@ trait Messages
 					$mResult = true;
 				}
 			}
+		}
+		catch (\MailSo\Smtp\Exceptions\LoginBadCredentialsException $oException)
+		{
+			throw new ClientException(Notifications::AuthError, $oException);
 		}
 		catch (ClientException $oException)
 		{
