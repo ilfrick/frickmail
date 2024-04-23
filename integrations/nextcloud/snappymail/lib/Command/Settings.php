@@ -37,13 +37,10 @@ class Settings extends Base
 			)
 			->addArgument(
 				'pass',
-				InputArgument::REQUIRED,
+				InputArgument::OPTIONAL,
 				'The login passphrase'
 			)
 		;
-	}
-
-	protected function checkInput(InputInterface $input) {
 	}
 
 	protected function execute(InputInterface $input, OutputInterface $output): int {
@@ -57,6 +54,15 @@ class Settings extends Base
 		$this->config->setUserValue($uid, 'snappymail', 'snappymail-email', $sEmail);
 
 		$sPass = $input->getArgument('pass');
+		if (empty($sPass)) {
+			// Prompt on command line for value
+			if (\is_callable('readline')) {
+				$sPass = \readline("password: ");
+			} else {
+				echo "password: ";
+				$sPass = \stream_get_line(STDIN, 1024, PHP_EOL);
+			}
+		}
 		$sPass = ($sEmail && $sPass) ? SnappyMailHelper::encodePassword($sPass, \md5($sEmail)) : '';
 		$this->config->setUserValue($uid, 'snappymail', 'passphrase', $sPass);
 		return 0;
