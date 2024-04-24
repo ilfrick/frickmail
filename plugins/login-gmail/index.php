@@ -14,8 +14,8 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 	const
 		NAME     = 'GMail OAuth2',
 		VERSION  = '2.36',
-		RELEASE  = '2024-03-27',
-		REQUIRED = '2.36.0',
+		RELEASE  = '2024-04-23',
+		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'GMail IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
 
@@ -32,13 +32,6 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addHook('imap.before-login', 'clientLogin');
 		$this->addHook('smtp.before-login', 'clientLogin');
 		$this->addHook('sieve.before-login', 'clientLogin');
-
-//		set_include_path(get_include_path() . PATH_SEPARATOR . __DIR__);
-		spl_autoload_register(function($classname){
-			if (str_starts_with($classname, 'OAuth2\\')) {
-				include_once __DIR__ . strtr("\\{$classname}", '\\', DIRECTORY_SEPARATOR) . '.php';
-			}
-		});
 
 		$this->addPartHook('LoginGMail', 'ServiceLoginGMail');
 
