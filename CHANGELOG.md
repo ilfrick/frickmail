@@ -1,9 +1,53 @@
+## 2.36.1 – 2024-04-23
+
+### Added
+- Autoconfig detect through DNS SRV (RFC 6186 & 8314) and disable MX
+- Have I Been Pwned class to check breached passwords and email addresses
+- Handle RFC 5987 in Content-Disposition header
+- Ignore text/x-amp-html
+- Show SMTP error to user
+  [#1521](https://github.com/the-djmaze/snappymail/issues/1521)
+- OAuth2 for login using gmail (and others)
+
+### Changed
+- logMask all AUTHENTICATE requests
+- ErrorTip use white-space: pre
+- Simplify LoginProcess handling
+- ES2020 everywhere (require Safari 13.1)
+- Modified Squire to be more in line with v2.2.8
+- CSS set min-width for .attachmentParent and .flagParent to line them up
+- cPanel use extension login-cpanel instead of login-remote
+- Improved login credentials handling
+- Speedup Knockout a bit
+- Update Belarusian by @spoooyders
+- Update Chinese by @mayswind
+- Update French by @hguilbert
+- Update Polish by @tinola
+- Update Portuguese by @ner00
+
+### Fixed
+- Content encoding and type detection in JavaScript could fail due to case-sensitivity.
+- Extensions set logger failed
+- GnuPG check open_basedir and if shell_exec is disabled
+- Hide pagination when search result has no messages
+- Prevent mbstring error before setup.php
+- Prevent MessagesPerPage Infinity
+  [#1540](https://github.com/the-djmaze/snappymail/issues/1540)
+- Reseal CryptKey failed
+  [#1543](https://github.com/the-djmaze/snappymail/issues/1543)
+
+### Nextcloud
+- Add an occ command to set up the login settings
+  [#1552](https://github.com/the-djmaze/snappymail/issues/1552)
+
+
 ## 2.36.0 – 2024-03-18
 
 ### Added
 - Allow setting the supported THREAD algorithm
 - Icon to system folders
 - Remove remembered password after 15 minutes of inactivity
+  [#1142](https://github.com/the-djmaze/snappymail/issues/1142)
 - Swap background and text color for unreadable text on dark background
   [#1486](https://github.com/the-djmaze/snappymail/issues/1486)
 - Generate TOTP code at ?Admin -> Security

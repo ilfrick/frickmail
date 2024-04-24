@@ -147,7 +147,8 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			\RainLoop\Plugins\Property::NewInstance('client_id')
 				->SetLabel('Client ID')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING)
-				->SetAllowedInJs(),
+				->SetAllowedInJs()
+				->SetDescription('https://github.com/the-djmaze/snappymail/wiki/FAQ#gmail'),
 			\RainLoop\Plugins\Property::NewInstance('client_secret')
 				->SetLabel('Client Secret')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING)

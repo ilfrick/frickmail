@@ -380,7 +380,7 @@ class Manager
 
 	public function GetUserPluginSettings(string $sPluginName) : array
 	{
-		$oAccount = $this->oActions->GetAccount();
+		$oAccount = $this->oActions->getAccountFromToken();
 		if ($oAccount) {
 			$oSettings = $this->oActions->SettingsProvider()->Load($oAccount);
 			if ($oSettings) {
@@ -396,7 +396,7 @@ class Manager
 
 	public function SaveUserPluginSettings(string $sPluginName, array $aSettings) : bool
 	{
-		$oAccount = $this->oActions->GetAccount();
+		$oAccount = $this->oActions->getAccountFromToken();
 		if ($oAccount) {
 			$oSettings = $this->oActions->SettingsProvider()->Load($oAccount);
 			if ($oSettings) {
