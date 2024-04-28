@@ -243,12 +243,12 @@ class Http
 	{
 		$parms = array($type);
 		if (isset($params['filename'])) {
-			if (\preg_match('#^[\x01-\x7F]*$#D', $sFilename)) {
+			if (\preg_match('#^[\x01-\x7F]*$#D', $params['filename'])) {
 				$parms[] = "filename=\"{$params['filename']}\"";
 			} else {
 				// RFC 5987
 //				$parms[] = Utils::EncodeHeaderUtf8AttributeValue('filename', $sFileNameOut);
-				$parms[] = "filename*=utf-8''" . \rawurlencode($sFilename);
+				$parms[] = "filename*=utf-8''" . \rawurlencode($params['filename']);
 			}
 		}
 		if (isset($params['creation-date'])) $parms[] = 'creation-date=' . \date(DATE_RFC822, $params['creation-date']);
