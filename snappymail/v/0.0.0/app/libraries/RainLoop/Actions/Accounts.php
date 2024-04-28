@@ -87,9 +87,9 @@ trait Accounts
 		if ($bNew || \strlen($oPassword)) {
 			$oNewAccount = $this->LoginProcess($sEmail, $oPassword, false);
 			$sEmail = $oNewAccount->Email();
-			$aAccounts[$sEmail] = $oNewAccount->asTokenArray($oMainAccount);
+			$aAccount = $oNewAccount->asTokenArray($oMainAccount);
 		} else {
-			$aAccounts[$sEmail] = \RainLoop\Model\AdditionalAccount::convertArray($aAccounts[$sEmail]);
+			$aAccount = \RainLoop\Model\AdditionalAccount::convertArray($aAccounts[$sEmail]);
 		}
 
 		if ($bNew) {
@@ -99,6 +99,8 @@ trait Accounts
 		} else if (!isset($aAccounts[$sEmail])) {
 			throw new ClientException(Notifications::AccountDoesNotExist);
 		}
+
+		$aAccounts[$sEmail] = $aAccount;
 
 		if ($aAccounts[$sEmail]) {
 			$aAccounts[$sEmail]['name'] = \trim($this->GetActionParam('name', ''));
