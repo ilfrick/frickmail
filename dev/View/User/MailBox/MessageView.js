@@ -240,6 +240,7 @@ export class MailMessageView extends AbstractViewRight {
 		decorateKoCommands(this, {
 			editCommand: self => self.messageVisible(),
 			moveCommand: self => self.messageVisible(),
+			copyCommand: self => self.messageVisible(),
 			goUpCommand: self => !self.messageListOrViewLoading(),
 			goDownCommand: self => !self.messageListOrViewLoading()
 		});
@@ -257,13 +258,21 @@ export class MailMessageView extends AbstractViewRight {
 		currentMessage() && showMessageComposer([ComposeType.Draft, currentMessage()]);
 	}
 
-	moveCommand(vm, event) {
+	moveOrCopy(vm, event, mode) {
 		if (vm && event?.preventDefault) {
 			stopEvent(event);
 		}
 		this.actionsMenu().ddBtn.hide();
 		AppUserStore.focusedState(ScopeFolderList);
-		moveAction(true);
+		moveAction(mode);
+	}
+
+	moveCommand(vm, event) {
+		this.moveOrCopy(vm, event, 1);
+	}
+
+	copyCommand(vm, event) {
+		this.moveOrCopy(vm, event, 2);
 	}
 
 	setUnseen() {
