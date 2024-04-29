@@ -40,11 +40,13 @@ class LdapMailAccountsPlugin extends AbstractPlugin
 	 * Overwrite the MainAccount mail address by looking up the new one in the ldap directory
 	 *
 	 * @param string &$sEmail
-	 * @param string &$sLogin
+	 * @param string &$sImapUser
+	 * @param string &$sPassword
+	 * @param string &$sSmtpUser
 	 */
-	public function overwriteMainAccountEmail(&$sEmail, &$sLogin)
+	public function overwriteMainAccountEmail(&$sEmail, &$sImapUser, &$sPassword, &$sSmtpUser)
 	{
-		$this->Manager()->Actions()->Logger()->Write("Login DATA: login: $sLogin email: $sEmail", \LOG_WARNING, "LDAP MAIL ACCOUNTS PLUGIN");
+		$this->Manager()->Actions()->Logger()->Write("Login DATA: login: $sImapUser email: $sEmail", \LOG_WARNING, "LDAP MAIL ACCOUNTS PLUGIN");
 
 		// Set up config
 		$config = LdapMailAccountsConfig::MakeConfig($this->Config());
@@ -52,10 +54,10 @@ class LdapMailAccountsPlugin extends AbstractPlugin
 		if ($config->bool_overwrite_mail_address_main_account)
 		{
 			$oldapMailAccounts = new LdapMailAccounts($config, $this->Manager()->Actions()->Logger());
-			$oldapMailAccounts->overwriteEmail($sEmail, $sLogin);
+			$oldapMailAccounts->overwriteEmail($sEmail);
 		}
 
-		$this->Manager()->Actions()->Logger()->Write("Login DATA: login: $sLogin email: $sEmail", \LOG_WARNING, "LDAP MAIL ACCOUNTS PLUGIN");
+		$this->Manager()->Actions()->Logger()->Write("Login DATA: login: $sImapUser email: $sEmail", \LOG_WARNING, "LDAP MAIL ACCOUNTS PLUGIN");
 	}
 
 	// Function gets called by RainLoop/Actions/User.php

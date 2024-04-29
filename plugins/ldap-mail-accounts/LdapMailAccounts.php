@@ -3,6 +3,7 @@
 use RainLoop\Enumerations\Capa;
 use MailSo\Log\Logger;
 use RainLoop\Actions;
+use RainLoop\Model\AdditionalAccount;
 use RainLoop\Model\MainAccount;
 
 class LdapMailAccounts
@@ -50,14 +51,13 @@ class LdapMailAccounts
 	/**
 	 * @inheritDoc
 	 *
-	 * AOverwrite the MainAccount mail address by looking up the new one in the ldap directory
+	 * Overwrite the MainAccount mail address by looking up the new one in the ldap directory
 	 *
 	 * The ldap search string has to be configured in the plugin configuration of the extension (in the SnappyMail Admin Panel)
 	 *
 	 * @param string &$sEmail
-	 * @param string &$sLogin
 	 */
-	public function overwriteEmail(&$sEmail, &$sLogin)
+	public function overwriteEmail(&$sEmail)
 	{
 		try {
 			$this->EnsureBound();
@@ -105,10 +105,12 @@ class LdapMailAccounts
 
 		foreach($mailAddressResults as $mailAddressResult)
 		{
+			$this->logger->Write("AAAAAAA: $mailAddressResult->username , $username , $mailAddressResult->mailMainAccount , $sEmail", \LOG_NOTICE, self::LOG_KEY);
 			if($mailAddressResult->username === $username)	{
-				//$sLogin is already set to be the same as $sEmail by function "resolveLoginCredentials" in /RainLoop/Actions/UserAuth.php
+				//$sImapUser and $sSmtpUser are already set to be the same as $sEmail by function "resolveLoginCredentials" in /RainLoop/Actions/UserAuth.php
 				//that called this hook, so we just have to overwrite the mail address
 				$sEmail = $mailAddressResult->mailMainAccount;
+				$this->logger->Write("BBBBBBB: $mailAddressResult->username , $username , $mailAddressResult->mailMainAccount , $sEmail", \LOG_NOTICE, self::LOG_KEY);
 			}
 		}
 	}
@@ -131,10 +133,10 @@ class LdapMailAccounts
 			return false; // exceptions are only thrown from the handle error function that does logging already
 		}
 
-		// Try to get account information. IncLogin() returns the username of the user
+		// Try to get account information. ImapUser() returns the username of the user
 		// and removes the domainname if this was configured inside the domain config.
-		$username = @ldap_escape($oAccount->IncLogin(), "", LDAP_ESCAPE_FILTER);
-
+		$username = @ldap_escape($oAccount->ImapUser(), "", LDAP_ESCAPE_FILTER);
+		
 		$searchString = $this->config->search_string;
 
 		// Replace placeholders inside the ldap search string with actual values
@@ -210,7 +212,19 @@ class LdapMailAccounts
 					//if this fails the user will see the new mail addresses but will be asked for the correct password
 					$sPass = new \SnappyMail\SensitiveString($oAccount->IncPassword());
 					//After creating the accounts here $sUsername is used as username to login to the IMAP server (see Account.php)
-					$oNewAccount = RainLoop\Model\AdditionalAccount::NewInstanceFromCredentials($oActions, $sEmail, $sUsername, $sPass);
+					//$oNewAccount = RainLoop\Model\AdditionalAccount::NewInstanceFromCredentials($oActions, $sEmail, $sUsername, $sPass);
+
+					$oDomain = $oActions->DomainProvider()->Load($sDomain, false);
+
+					$oNewAccount = new AdditionalAccount;			
+					$oNewAccount->setCredentials(
+						$oDomain,
+						$sEmail,
+						$sUsername,
+						$sPass,
+						$sUsername,
+						$sPass
+					);
 
 					$aAccounts[$sEmail] = $oNewAccount->asTokenArray($oAccount);
 				}
