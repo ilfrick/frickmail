@@ -223,7 +223,7 @@ class LdapMailAccounts
 						$sUsername,
 						$sPass
 					);
-
+					
 					$aAccounts[$sEmail] = $oNewAccount->asTokenArray($oAccount);
 				}
 
