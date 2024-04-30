@@ -105,12 +105,10 @@ class LdapMailAccounts
 
 		foreach($mailAddressResults as $mailAddressResult)
 		{
-			$this->logger->Write("AAAAAAA: $mailAddressResult->username , $username , $mailAddressResult->mailMainAccount , $sEmail", \LOG_NOTICE, self::LOG_KEY);
 			if($mailAddressResult->username === $username)	{
 				//$sImapUser and $sSmtpUser are already set to be the same as $sEmail by function "resolveLoginCredentials" in /RainLoop/Actions/UserAuth.php
 				//that called this hook, so we just have to overwrite the mail address
 				$sEmail = $mailAddressResult->mailMainAccount;
-				$this->logger->Write("BBBBBBB: $mailAddressResult->username , $username , $mailAddressResult->mailMainAccount , $sEmail", \LOG_NOTICE, self::LOG_KEY);
 			}
 		}
 	}
