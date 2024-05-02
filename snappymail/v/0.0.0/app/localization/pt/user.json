@@ -286,10 +286,10 @@
 		"CREATE_SELF_SIGNED": "Criar auto-assinado",
 		"VALID_UNTIL": "Válido até",
 		"PRIVATE_KEY": "Chave privada",
-		"CHANGE_PASS": "Change passphrase",
-		"CURRENT_PASS": "Current passphrase",
-		"NEW_PASS": "New passphrase",
-		"ASK_CRYPTKEY_PASS": "Your login passphrase has changed. Please fill in your old login passphrase to decrypt data"
+		"CHANGE_PASS": "Alterar frase secreta",
+		"CURRENT_PASS": "Frase secreta atual",
+		"NEW_PASS": "Nova frase secreta",
+		"ASK_CRYPTKEY_PASS": "A sua frase secreta de autenticação foi alterada. Por favor, preencha a sua frase secreta antiga para desencriptar os dados"
 	},
 	"OPENPGP": {
 		"POPUP_IMPORT_TITLE": "Importar chave OpenPGP",
@@ -616,7 +616,7 @@
 		"DemoAccountError": "Por motivos de segurança, esta conta não tem permissão de executar esta ação!",
 		"AccountAlreadyExists": "Esta conta já existe",
 		"AccountDoesNotExist": "Esta conta não existe",
-		"AccountSwitchFailed": "A mudança para a conta \"%EMAIL%\" falhou",
+		"AccountSwitchFailed": "A alteração para a conta \"%EMAIL%\" falhou",
 		"MailServerError": "Ocorreu um erro ao aceder ao servidor de correio",
 		"InvalidInputArgument": "Parâmetro de entrada inválido",
 		"UnknownError": "Erro desconhecido"
