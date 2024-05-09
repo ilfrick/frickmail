@@ -37,7 +37,7 @@ abstract class DateTimeHelper
 	{
 		$sDateTime = \trim($sDateTime);
 		if (empty($sDateTime)) {
-			\SnappyMail\Log::info("No RFC 2822 date to parse");
+			\SnappyMail\Log::info('', "No RFC 2822 date to parse");
 			return 0;
 		}
 
@@ -45,7 +45,7 @@ abstract class DateTimeHelper
 		$oDateTime = \DateTime::createFromFormat(\DateTime::RFC2822, $sDateTime, static::GetUtcTimeZoneObject());
 		// 398045302 is 1982-08-13 00:08:22 the date RFC 822 was created
 		if (!$oDateTime || 398045302 > $oDateTime->getTimestamp()) {
-			\SnappyMail\Log::notice("Failed to parse RFC 2822 date '{$sDateTime}'");
+			\SnappyMail\Log::notice('', "Failed to parse RFC 2822 date '{$sDateTime}'");
 		}
 		return $oDateTime ? $oDateTime->getTimestamp() : 0;
 	}

@@ -341,11 +341,14 @@ trait UserAuth
 			\SnappyMail\Log::notice(self::AUTH_SIGN_ME_TOKEN_KEY, 'decrypt');
 			$aResult = \SnappyMail\Crypt::DecryptUrlSafe($sSignMeToken, 'signme');
 			if (isset($aResult['e'], $aResult['u']) && \SnappyMail\UUID::isValid($aResult['u'])) {
+				if (!isset($aResult['c'])) {
+					$aTokenData['c'] = \array_key_last($aTokenData);
+					$aTokenData['d'] = \end($aTokenData);
+				}
 				return $aResult;
 			}
 			\SnappyMail\Log::notice(self::AUTH_SIGN_ME_TOKEN_KEY, 'invalid');
-			// Don't clear due to login checkbox
-//			Cookies::clear(self::AUTH_SIGN_ME_TOKEN_KEY);
+			Cookies::clear(self::AUTH_SIGN_ME_TOKEN_KEY);
 		}
 		return null;
 	}
@@ -360,7 +363,8 @@ trait UserAuth
 			\SnappyMail\Crypt::EncryptUrlSafe([
 				'e' => $oAccount->Email(),
 				'u' => $uuid,
-				$data[0] => \base64_encode($data[1])
+				'c' => $data[0],
+				'd' => \base64_encode($data[1])
 			], 'signme'),
 			\time() + 3600 * 24 * 30 // 30 days
 		);
@@ -382,8 +386,8 @@ trait UserAuth
 					throw new \RuntimeException("server token not found for {$aTokenData['e']}/.sign_me/{$aTokenData['u']}");
 				}
 				$aAccountHash = \SnappyMail\Crypt::Decrypt([
-					\array_key_last($aTokenData),
-					\base64_decode(\end($aTokenData)),
+					$aTokenData['c'],
+					\base64_decode($aTokenData['d']),
 					$sAuthToken
 				], 'signme');
 				if (!\is_array($aAccountHash)) {
@@ -401,8 +405,7 @@ trait UserAuth
 			catch (\Throwable $oException)
 			{
 				\SnappyMail\Log::warning(self::AUTH_SIGN_ME_TOKEN_KEY, $oException->getMessage());
-				// Don't clear due to smctoken cookie missing at initialization and login checkbox
-//				$this->ClearSignMeData();
+				$this->ClearSignMeData();
 			}
 		}
 		return null;

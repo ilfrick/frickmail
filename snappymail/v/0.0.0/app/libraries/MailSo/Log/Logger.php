@@ -206,17 +206,15 @@ class Logger extends \SplFixedArray
 		}
 	}
 
-	public function signalHandler($signo)
+	public function signalHandler($signo, /*?array*/$siginfo = null)
 	{
 		if (\SIGTERM == $signo) {
 			exit;
 		}
-		if ($this->bUsed) {
-			foreach (static::$SIGNALS as $SIGNAL) {
-				if (\defined($SIGNAL) && \constant($SIGNAL) == $signo) {
-					$this->Write("Caught {$SIGNAL}");
-					break;
-				}
+		foreach (static::$SIGNALS as $SIGNAL) {
+			if (\defined($SIGNAL) && \constant($SIGNAL) == $signo) {
+				$this->Write("Caught {$SIGNAL} ".($siginfo ? \json_encode($siginfo) : ''), \LOG_CRIT, 'PHP');
+				break;
 			}
 		}
 	}
