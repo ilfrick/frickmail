@@ -18,6 +18,18 @@ use MailSo\Net\Enumerations\ConnectionSecurityType;
 use SnappyMail\IDN;
 
 /**
+	response codes:
+		220 ready
+		221 Closing
+		235 Authentication succeeded
+		250 Requested mail action okay, completed
+		251 User not local; will forward
+		252 Cannot verify the user, but it will try to deliver the message anyway
+		334 Server challenge (the text part contains the Base64-encoded challenge)
+		354 Start mail input
+*/
+
+/**
  * @category MailSo
  * @package Smtp
  */
@@ -183,7 +195,7 @@ class SmtpClient extends \MailSo\Net\NetClient
 					// RFC 5802
 					$sRequest = $SASL->authenticate($sLogin, $sPassword, $sResult);
 					$this->logMask($sRequest);
-					$sResult = $this->sendRequestWithCheck($sRequest, 234);
+					$sResult = $this->sendRequestWithCheck($sRequest, 334);
 					$sRequest = $SASL->challenge($sResult);
 				} else switch ($type) {
 				// RFC 4616
