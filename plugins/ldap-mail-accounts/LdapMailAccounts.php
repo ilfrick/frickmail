@@ -220,10 +220,9 @@ class LdapMailAccounts
 						$sEmail,
 						$sUsername,
 						$sPass,
-						$sUsername,
-						$sPass
+						$sUsername
 					);
-					
+
 					$aAccounts[$sEmail] = $oNewAccount->asTokenArray($oAccount);
 				}
 
