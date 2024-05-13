@@ -155,6 +155,20 @@
 				pasteImageHandler(e, squire);
 			});
 
+			wysiwyg.addEventListener('focus', () => {
+				const range = this.squire.getSelection();
+				if (range.collapsed && range.startContainer === wysiwyg) {
+					// when the caret is directly in the wysiwyg a bunch of stuff
+					// (like lists, blockquotes, etc...) do not work,
+					// so we need to place it inside the nearest element
+					if (wysiwyg.children[range.startOffset] !== undefined) {
+						const newRange = document.createRange();
+						newRange.setStart(wysiwyg.children[range.startOffset], 0);
+						this.squire.setSelection(newRange);
+					}
+				}
+			});
+
 //		squire.addEventListener('focus', () => shortcuts.off());
 //		squire.addEventListener('blur', () => shortcuts.on());
 
@@ -598,7 +612,7 @@
 							type: 'menu_item',
 							label: 'HTML Mode',
 							id: 'menu-item-mode-wysiwyg',
-							cmd: () => this.setMode('wysiwyg'),
+							cmd: () => this.setModeCmd('wysiwyg'),
 							showInPlainMode: true,
 							icon: '<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="m2 2v3h1v-2h2v-1zm13 0v1h2v2h1v-3zm-9 3v10h2v-4h4v4h2v-10h-2v4h-4v-4zm-4 10v3h3v-1h-2v-2zm15 0v2h-2v1h3v-3z"/></svg>'
 						},
@@ -606,7 +620,7 @@
 							type: 'menu_item',
 							label: 'Edit Source',
 							id: 'menu-item-mode-source',
-							cmd: () => this.setMode('source'),
+							cmd: () => this.setModeCmd('source'),
 							showInPlainMode: true,
 							icon: '<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="m12 2.83c-0.478-0.138-0.976 0.141-1.11 0.619l-3.6 12.6c-0.138 0.478 0.141 0.976 0.619 1.11 0.478 0.138 0.976-0.141 1.11-0.619l3.6-12.6c0.138-0.478-0.141-0.976-0.619-1.11zm2.27 4.65 2.51 2.51-2.51 2.51c-0.352 0.352-0.352 0.923 0 1.27 0.352 0.352 0.923 0.352 1.27 0l3.15-3.15c0.352-0.352 0.352-0.923 0-1.27l-3.15-3.15c-0.352-0.352-0.923-0.352-1.27-0.00141-0.35 0.35-0.35 0.921 0.00141 1.27zm-8.63-1.27c-0.352-0.352-0.923-0.352-1.27 0l-3.15 3.15c-0.352 0.352-0.352 0.923 0 1.27l3.15 3.15c0.352 0.352 0.923 0.352 1.27 0 0.352-0.352 0.352-0.923 0-1.27l-2.51-2.51 2.51-2.51c0.352-0.352 0.352-0.923 0-1.27z"/></svg>'
 						},
@@ -614,7 +628,7 @@
 							type: 'menu_item',
 							label: 'Plain Text Mode',
 							id: 'menu-item-mode-plain',
-							cmd: () => this.setMode('plain'),
+							cmd: () => this.setModeCmd('plain'),
 							showInPlainMode: true,
 							icon: '<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="m2 2v3h1v-2h2v-1zm13 0v1h2v2h1v-3zm-9 3v2h3v8h2v-8h3v-2zm-4 10v3h3v-1h-2v-2zm15 0v2h-2v1h3v-3z"/></svg>'
 						}
@@ -871,6 +885,12 @@
 				return validation.test(this.squire.getPath()) || this.squire.hasFormat(format);
 			}
 		*/
+
+		setModeCmd(mode) {
+			this.setMode(mode);
+			setTimeout(() => this.focus(), 1);
+		}
+
 		setMode(mode) {
 			if (this.mode !== mode) {
 				let cl = this.container.classList,
@@ -894,7 +914,6 @@
 				this.mode = mode;
 				cl.add('squire2-mode-' + mode);
 				this.onModeChange?.();
-				setTimeout(() => this.focus(), 1);
 			}
 		}
 
