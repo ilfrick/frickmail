@@ -264,14 +264,15 @@ class Actions
 			}
 
 			if ($oAccount) {
-				$oDomain = $oAccount->Domain();
 				$sLine = \str_replace('{imap:login}', $oAccount->ImapUser(), $sLine);
-				$sLine = \str_replace('{imap:host}', $oDomain->ImapSettings()->host, $sLine);
-				$sLine = \str_replace('{imap:port}', $oDomain->ImapSettings()->port, $sLine);
-
 				$sLine = \str_replace('{smtp:login}', $oAccount->SmtpUser(), $sLine);
-				$sLine = \str_replace('{smtp:host}', $oDomain->SmtpSettings()->host, $sLine);
-				$sLine = \str_replace('{smtp:port}', $oDomain->SmtpSettings()->port, $sLine);
+				$oDomain = $oAccount->Domain();
+				if ($oDomain) {
+					$sLine = \str_replace('{imap:host}', $oDomain->ImapSettings()->host, $sLine);
+					$sLine = \str_replace('{imap:port}', $oDomain->ImapSettings()->port, $sLine);
+					$sLine = \str_replace('{smtp:host}', $oDomain->SmtpSettings()->host, $sLine);
+					$sLine = \str_replace('{smtp:port}', $oDomain->SmtpSettings()->port, $sLine);
+				}
 			}
 
 			$aClear['/\{imap:([^}]*)\}/i'] = 'imap';
