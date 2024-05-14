@@ -192,11 +192,18 @@ class SmtpClient extends \MailSo\Net\NetClient
 			{
 				$sRequest = '';
 				if (\str_starts_with($type, 'SCRAM-')) {
-					// RFC 5802
+					// RFC 5802 send "client-first-message" and receive "server-first-message"
 					$sRequest = $SASL->authenticate($sLogin, $sPassword, $sResult);
 					$this->logMask($sRequest);
 					$sResult = $this->sendRequestWithCheck($sRequest, 334);
+					// RFC 5802 send "client-final-message" and receive "server-final-message"
 					$sRequest = $SASL->challenge($sResult);
+					$this->logMask($sRequest);
+					$sResult = $this->sendRequestWithCheck($sRequest, 334);
+					$SASL->verify($sResult);
+					// Now end the authentication
+					$sRequest = '';
+					$this->sendRequestWithCheck($sRequest, 235);
 				} else switch ($type) {
 				// RFC 4616
 				case 'PLAIN':
