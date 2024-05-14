@@ -5,6 +5,7 @@ use MailSo\Log\Logger;
 use RainLoop\Actions;
 use RainLoop\Model\AdditionalAccount;
 use RainLoop\Model\MainAccount;
+use RainLoop\Providers\Storage\Enumerations\StorageType;
 
 class LdapMailAccounts
 {
@@ -174,6 +175,18 @@ class LdapMailAccounts
 		//Check if SnappyMail is configured to allow additional accounts
 		if (!$oActions->GetCapa(Capa::ADDITIONAL_ACCOUNTS)) {
 			return $oActions->FalseResponse(__FUNCTION__);
+		}
+
+		//SnappyMail saves the passwords of the additional accounts by encrypting them using a cryptkey that is saved in the file .cryptkey
+		//When the password of the main account changes, SnappyMail asks the user for the old password to reencrypt the keys with the new userpassword.
+		//On a password change using ldap (or when the password has been forgotten by the user) this makes us some problems. Therefore overwrite
+		//the .cryptkey file in order to always accept the actual ldap password of the user. This has side effects on pgp keys! 
+		//See https://github.com/the-djmaze/snappymail/issues/1570#issuecomment-2085528061
+		if ($this->config->bool_overwrite_cryptkey) {
+			if (!$oActions->StorageProvider()->Put($oAccount, StorageType::ROOT, '.cryptkey', "")) {
+				$this->logger->Write("Could not overwrite the .cryptkey file!", \LOG_WARNING, self::LOG_KEY);
+				return $oActions->FalseResponse(__FUNCTION__);
+			}
 		}
 
 		$aAccounts = $oActions->GetAccounts($oAccount);
