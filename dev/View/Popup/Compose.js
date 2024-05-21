@@ -914,10 +914,9 @@ export class ComposePopupView extends AbstractViewPopup {
 					oLastMessage.headers().valuesByName('autocrypt').forEach(value => {
 						let autocrypt = new MimeHeaderAutocryptModel(value);
 						if (autocrypt.addr && autocrypt.keydata) {
-							PgpUserStore.hasPublicKeyForEmails([autocrypt.addr]).then(result =>
-								result || PgpUserStore.importKey(autocrypt.pem(), true, true)
-//								result || showScreenPopup(OpenPgpImportPopupView, [autocrypt.pem()])
-							);
+							PgpUserStore.hasPublicKeyForEmails([autocrypt.addr])
+							|| PgpUserStore.importKey(autocrypt.pem(), true, true)
+//							|| showScreenPopup(OpenPgpImportPopupView, [autocrypt.pem()])
 						}
 					});
 				} break;
