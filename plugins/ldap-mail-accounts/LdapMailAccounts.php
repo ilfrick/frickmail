@@ -132,6 +132,15 @@ class LdapMailAccounts
 			return false; // exceptions are only thrown from the handle error function that does logging already
 		}
 
+		//Basing on https://github.com/the-djmaze/snappymail/issues/616
+
+		$oActions = \RainLoop\Api::Actions();
+
+		//Check if SnappyMail is configured to allow additional accounts
+		if (!$oActions->GetCapa(Capa::ADDITIONAL_ACCOUNTS)) {
+			return $oActions->FalseResponse(__FUNCTION__);
+		}
+
 		// Try to get account information. ImapUser() returns the username of the user
 		// and removes the domainname if this was configured inside the domain config.
 		$username = @ldap_escape($oAccount->ImapUser(), "", LDAP_ESCAPE_FILTER);
@@ -160,21 +169,23 @@ class LdapMailAccounts
 		catch (LdapMailAccountsException $e) {
 			return false; // exceptions are only thrown from the handle error function that does logging already
 		}
+
 		if (count($mailAddressResults) < 1) {
 			$this->logger->Write("Could not find user $username", \LOG_NOTICE, self::LOG_KEY);
 			return false;
-		} else if (count($mailAddressResults) == 1) {
-			$this->logger->Write("Found only one match for user $username, no additional mail adresses found", \LOG_NOTICE, self::LOG_KEY);
-			return true;
 		}
 
-		//Basing on https://github.com/the-djmaze/snappymail/issues/616
+		$aAccounts = $oActions->GetAccounts($oAccount);
 
-		$oActions = \RainLoop\Api::Actions();
-
-		//Check if SnappyMail is configured to allow additional accounts
-		if (!$oActions->GetCapa(Capa::ADDITIONAL_ACCOUNTS)) {
-			return $oActions->FalseResponse(__FUNCTION__);
+		//Search for accounts with suffix " (LDAP)" at the end of the name that were created by this plugin and initially remove them from the
+		//account array. This only removes the visibility but does not delete the config done by the user. So if a user looses access to a
+		//mailbox the user will not see the account anymore but the configuration can be restored when the user regains access to it
+		foreach($aAccounts as $key => $aAccount)
+		{
+			if (preg_match("/\s\(LDAP\)$/", $aAccount['name']))
+			{
+				unset($aAccounts[$key]);
+			}
 		}
 
 		//SnappyMail saves the passwords of the additional accounts by encrypting them using a cryptkey that is saved in the file .cryptkey
@@ -189,17 +200,11 @@ class LdapMailAccounts
 			}
 		}
 
-		$aAccounts = $oActions->GetAccounts($oAccount);
-
-		//Search for accounts with suffix " (LDAP)" at the end of the name that were created by this plugin and initially remove them from the
-		//account array. This only removes the visibility but does not delete the config done by the user. So if a user looses access to a
-		//mailbox the user will not see the account anymore but the configuration can be restored when the user regains access to it
-		foreach($aAccounts as $key => $aAccount)
-		{
-			if (preg_match("/\s\(LDAP\)$/", $aAccount['name']))
-			{
-				unset($aAccounts[$key]);
-			}
+		if (count($mailAddressResults) == 1) {
+			$this->logger->Write("Found only one match for user $username, no additional mail adresses found", \LOG_NOTICE, self::LOG_KEY);
+			//Write back the accounts even if no additional account was found. This ensures, that previous additional accounts are always removed
+			$oActions->SetAccounts($oAccount, $aAccounts);
+			return true;
 		}
 
 		foreach($mailAddressResults as $mailAddressResult)
