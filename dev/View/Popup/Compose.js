@@ -1566,6 +1566,10 @@ export class ComposePopupView extends AbstractViewPopup {
 						params.signed = signed.toString();
 						params.boundary = signed.boundary;
 						data = signed;
+/*
+						Object.entries(PgpUserStore.getPublicKeyOfEmails([getEmail(this.from())]) || {})
+						.forEach(([k,v]) => params.publicKey = v);
+*/
 					} catch (e) {
 						sign = false;
 						console.error(e);
@@ -1579,6 +1583,7 @@ export class ComposePopupView extends AbstractViewPopup {
 //						params.signData = data.toString();
 						params.signFingerprint = signOptions[i][1].fingerprint;
 						params.signPassphrase = pass;
+//						params.attachPublicKey = false;
 					} else {
 						sign = false;
 					}
@@ -1589,6 +1594,7 @@ export class ComposePopupView extends AbstractViewPopup {
 					params.sign = 'S/MIME';
 //					params.signCertificate = identity.smimeCertificate();
 //					params.signPrivateKey = identity.smimeKey();
+//					params.attachCertificate = false;
 					if (identity.smimeKeyEncrypted()) {
 						const pass = await Passphrases.ask(identity,
 							i18n('SMIME/PRIVATE_KEY_OF', {EMAIL: identity.email()}),
