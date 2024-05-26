@@ -342,8 +342,8 @@ trait UserAuth
 			$aResult = \SnappyMail\Crypt::DecryptUrlSafe($sSignMeToken, 'signme');
 			if (isset($aResult['e'], $aResult['u']) && \SnappyMail\UUID::isValid($aResult['u'])) {
 				if (!isset($aResult['c'])) {
-					$aTokenData['c'] = \array_key_last($aTokenData);
-					$aTokenData['d'] = \end($aTokenData);
+					$aResult['c'] = \array_key_last($aResult);
+					$aResult['d'] = \end($aResult);
 				}
 				return $aResult;
 			}
