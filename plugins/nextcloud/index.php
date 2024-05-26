@@ -4,11 +4,11 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME = 'Nextcloud',
-		VERSION = '2.35',
-		RELEASE  = '2024-03-29',
+		VERSION = '2.36',
+		RELEASE  = '2024-05-26',
 		CATEGORY = 'Integrations',
 		DESCRIPTION = 'Integrate with Nextcloud v20+',
-		REQUIRED = '2.36.0';
+		REQUIRED = '2.36.2';
 
 	public function Init() : void
 	{
@@ -89,7 +89,6 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$oSettings->username = \OC::$server->getUserSession()->getUser()->getUID();
 
 		// https://apps.nextcloud.com/apps/oidc_login
-		// DISABLED https://github.com/the-djmaze/snappymail/issues/1420#issuecomment-1933045917
 		if (\OC::$server->getConfig()->getAppValue('snappymail', 'snappymail-autologin-oidc', false)
 		 && \OC::$server->getSession()->get('is_oidc')
 //		 && $oClient->supportsAuthType('OAUTHBEARER') // v2.28
