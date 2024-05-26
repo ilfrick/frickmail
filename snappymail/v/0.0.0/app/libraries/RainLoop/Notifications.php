@@ -17,6 +17,7 @@ class Notifications
 	const ConnectionError = 104;
 	const DomainNotAllowed = 109;
 	const AccountNotAllowed = 110;
+	const CryptKeyError = 111;
 
 	const ContactsSyncError = 140;
 
@@ -58,7 +59,6 @@ class Notifications
 	const MailServerError = 901;
 	const ClientViewError = 902;
 	const InvalidInputArgument = 903;
-//	const UnknownNotification = 998;
 	const UnknownError = 999;
 
 	// Admin

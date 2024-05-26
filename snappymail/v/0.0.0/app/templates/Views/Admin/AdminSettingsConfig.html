@@ -1,5 +1,6 @@
 <div class="legend">application.ini</div>
 <form method="POST" data-bind="submit: saveConfig" spellcheck="false" autocomplete="off" autocapitalize="none">
+<input type="search" data-bind="textInput: search" data-i18n="[placeholder]GLOBAL/SEARCH">
 <table class="table table-hover table-bordered">
 	<!-- ko foreach: config -->
 	<tbody>
@@ -11,7 +12,10 @@
 				<!-- ko if: 'checkbox' == type -->
 				<input type="checkbox" data-bind="attr: {name: key, checked: value}">
 				<!-- /ko -->
-				<!-- ko if: 'checkbox' != type -->
+				<!-- ko if: options -->
+				<select data-bind="attr: {name: key}, options: options, value: value"></select>
+				<!-- /ko -->
+				<!-- ko if: 'checkbox' != type && !options -->
 				<input data-bind="attr: {name: key, type: type}, value: value" autocorrect="off">
 				<!-- /ko -->
 				<em data-bind="text: comment, visible: comment"></em>

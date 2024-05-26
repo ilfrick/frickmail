@@ -27,7 +27,7 @@ class ParameterCollection extends \MailSo\Base\Collection
 	public function append($oParameter, bool $bToTop = false) : void
 	{
 		assert($oParameter instanceof Parameter);
-		parent::append($oParameter, $bToTop);
+		parent::offsetSet(\strtolower($oParameter->Name()), $oParameter);
 	}
 
 	public function ParameterValueByName(string $sName) : string
@@ -39,12 +39,7 @@ class ParameterCollection extends \MailSo\Base\Collection
 	public function getParameter(string $sName) : ?Parameter
 	{
 		$sName = \strtolower(\trim($sName));
-		foreach ($this as $oParam) {
-			if ($sName === \strtolower($oParam->Name())) {
-				return $oParam;
-			}
-		}
-		return null;
+		return parent::offsetExists($sName) ? parent::offsetGet($sName) : null;
 	}
 
 	public function setParameter(string $sName, string $sValue) : void
@@ -53,7 +48,7 @@ class ParameterCollection extends \MailSo\Base\Collection
 		if ($oParam) {
 			$oParam->setValue($sValue);
 		} else {
-			parent::append(new Parameter(\trim($sName), $sValue));
+			$this->append(new Parameter(\trim($sName), $sValue));
 		}
 	}
 
@@ -64,7 +59,7 @@ class ParameterCollection extends \MailSo\Base\Collection
 		$aDataToParse = \explode(';', $sRawParams);
 
 		foreach ($aDataToParse as $sParam) {
-			$this->append(Parameter::CreateFromParameterLine($sParam));
+			$this->append(Parameter::FromString($sParam));
 		}
 
 		$this->reParseParameters();

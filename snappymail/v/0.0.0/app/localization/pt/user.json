@@ -18,6 +18,7 @@
 		"LOGOUT": "Sair",
 		"MORE": "Mais",
 		"MOVE_TO": "Mover para",
+		"COPY_TO": "Copiar para",
 		"NAME": "Nome",
 		"NONE": "Nenhum",
 		"TO_SPAM": "Mover mensagem(ns) para o Spam",
@@ -139,6 +140,7 @@
 		"MENU_VIEW_ORIGINAL": "Mostrar original",
 		"HTML_VIEW": "Ver mensagem em HTML",
 		"PLAIN_VIEW": "Ver mensagem em texto simples",
+		"SWAP_COLORS": "Swap default (background)color",
 		"MENU_DOWNLOAD_ORIGINAL": "Transferir como ficheiro .eml",
 		"MENU_FILTER_SIMILAR": "Filtrar mensagens semelhantes a esta",
 		"MENU_PRINT": "Imprimir",
@@ -153,7 +155,9 @@
 		"SPAM_SCORE": "Pontuação de Spam",
 		"HAS_VIRUS_WARNING": "AVISO: vírus detetado",
 		"TAGS": "Etiquetas",
-		"NEW_TAG": "Nova etiqueta"
+		"NEW_TAG": "Nova etiqueta",
+		"ENABLE_TRACKING_LINKS": "Ativar ligações de rastreamento",
+		"TRACKING_ENABLED": "As ligações irão ser rastreadas quando clicadas!"
 	},
 	"MESSAGE_TAGS": {
 		"$important": "Importante",
@@ -210,7 +214,7 @@
 		"ADD_MENU_TAGS": "Etiquetas",
 		"BUTTON_SHARE_ALL": "Todos",
 		"BUTTON_SYNC": "Sincronização (CardDAV)",
-		"SEND_TO_ALL_CONTACT_EMAILS": "Send to all contact emails"
+		"SEND_TO_ALL_CONTACT_EMAILS": "Enviar para todos os contactos"
 	},
 	"COMPOSE": {
 		"LINK_SHOW_INPUTS": "Mostrar todos os campos",
@@ -253,9 +257,10 @@
 	"POPUPS_IDENTITY": {
 		"TITLE_ADD_IDENTITY": "Adicionar identidade?",
 		"TITLE_UPDATE_IDENTITY": "Atualizar identidade?",
+		"LABEL": "Rótulo",
 		"BUTTON_ADD_IDENTITY": "Adicionar",
 		"BUTTON_UPDATE_IDENTITY": "Atualizar",
-		"LABEL_SIGNATURE_ADD": "Add\/Edit signature",
+		"SIGNATURE": "Assinatura",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Nas respostas, inserir esta assinatura acima da mensagem citada"
 	},
 	"POPUPS_CREATE_FOLDER": {
@@ -271,6 +276,21 @@
 		"DANGER_DESC_HTML_2": "Uma vez iniciado, o processo não pode ser interrompido ou cancelado.",
 		"TITLE_CLEARING_PROCESS": "A eliminar a pasta..."
 	},
+	"CRYPTO": {
+		"SIGN": "Assinar",
+		"ENCRYPT": "Encriptar",
+		"DECRYPT": "Desencriptar",
+		"VERIFY": "Validar",
+		"GOOD_SIGNATURE": "Boa assinatura de %USER%",
+		"ERROR": "Erro %TYPE%: %ERROR%",
+		"CREATE_SELF_SIGNED": "Criar auto-assinado",
+		"VALID_UNTIL": "Válido até",
+		"PRIVATE_KEY": "Chave privada",
+		"CHANGE_PASS": "Alterar frase secreta",
+		"CURRENT_PASS": "Frase secreta atual",
+		"NEW_PASS": "Nova frase secreta",
+		"ASK_CRYPTKEY_PASS": "A sua frase secreta de autenticação foi alterada. Por favor, preencha a sua frase secreta antiga para desencriptar os dados"
+	},
 	"OPENPGP": {
 		"POPUP_IMPORT_TITLE": "Importar chave OpenPGP",
 		"POPUP_IMPORT_BUTTON": "Importar",
@@ -279,16 +299,22 @@
 		"POPUP_GENERATE_TITLE": "Gerar chaves OpenPGP",
 		"POPUP_GENERATE_BUTTON": "Gerar",
 		"LABEL_KEY_TYPE": "Tipo",
-		"LABEL_SIGN": "Assinar",
-		"LABEL_ENCRYPT": "Encriptar",
-		"BUTTON_DECRYPT": "Desencriptar",
-		"BUTTON_VERIFY": "Validar",
 		"SIGNED_MESSAGE": "Mensagem assinada com OpenPGP",
 		"ENCRYPTED_MESSAGE": "Mensagem encriptada com OpenPGP",
 		"STORE_IN_GNUPG": "Guardar no servidor em GnuPG",
+		"STORE_PUBLIC_KEY_IN_GNUPG": "Guardar a chave pública no servidor em GnuPG",
+		"STORE_PRIVATE_KEY_IN_GNUPG": "Guardar a chave privada no servidor em GnuPG",
 		"BACKUP_ON_SERVER": "Guardar (encriptado) no servidor",
-		"GOOD_SIGNATURE": "Boa assinatura de %USER%",
-		"ERROR": "Erro OpenPGP: %ERROR%"
+		"BACKUP_PUBLIC_KEY_ON_SERVER": "Fazer cópia de segurança da chave pública no servidor",
+		"BACKUP_PRIVATE_KEY_ON_SERVER": "Fazer cópia de segurança da chave privada no servidor"
+	},
+	"SMIME": {
+		"POPUP_IMPORT_TITLE": "Importar certificado S\/MIME",
+		"CERTIFICATE": "Certificado",
+		"CERTIFICATES": "Certificados S\/MIME",
+		"SIGNED_MESSAGE": "Mensagem assinada com S\/MIME",
+		"ENCRYPTED_MESSAGE": "Mensagem encriptada com S\/MIME",
+		"PRIVATE_KEY_OF": "Chave privada S\/MIME de %EMAIL%"
 	},
 	"POPUPS_FILTER": {
 		"TITLE_CREATE_FILTER": "Criar um filtro?",
@@ -386,7 +412,8 @@
 		"IMAGEURL": "Imagem por URL",
 		"IMAGEUPLOAD": "Escolher imagem",
 		"UNDO": "Desfazer",
-		"REDO": "Refazer"
+		"REDO": "Refazer",
+		"REMOVESTYLE": "Remover estilo"
 	},
 	"SETTINGS_LABELS": {
 		"GENERAL": "Geral",
@@ -413,7 +440,6 @@
 		"AUTOLOGIN_NEVER_OPTION_NAME": "Nunca"
 	},
 	"SETTINGS_GENERAL": {
-		"LEGEND_GENERAL": "Geral",
 		"LANGUAGE": "Idioma",
 		"HOUR_FORMAT": "Formato da hora",
 		"IDENTITY": "Identidade",
@@ -430,6 +456,7 @@
 		"HIDE_DELETED_MESSAGES": "Ocultar mensagens marcadas para eliminação",
 		"USE_CHECKBOXES_IN_LIST": "Apresentar caixas de seleção na lista",
 		"USE_THREADS": "Usar tópicos de conversa",
+		"THREAD_ALGORITHM": "Algoritmo de agrupamento",
 		"REPLY_SAME_FOLDER": "Colocar respostas na pasta das mensagens a que responde",
 		"PREFER_HTML": "Preferir HTML em vez de texto simples",
 		"PREFER_HTML_INFO": "Por vezes as mensagens são recebidas em ambos os formatos. Esta opção determina se prefere apresentar o conteúdo em HTML ou em texto simples.",
@@ -455,7 +482,7 @@
 		"IMAGES_OPTION_WHITELIST": "Lista Branca ou perguntar",
 		"IMAGES_OPTION_ALWAYS": "Mostrar sempre",
 		"IMAGES_WHITELIST": "Lista Branca de imagens",
-		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab"
+		"MESSAGE_POPUP_WINDOW": "Abrir em nova janela em vez de um separador"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Adicionar destinatários automaticamente à sua lista de endereços",
@@ -489,7 +516,7 @@
 		"TO_MANY_FOLDERS_DESC_2": "Apenas apresentámos parte delas, para evitar problemas de desempenho.",
 		"HELP_DELETE_FOLDER": "Eliminar pasta",
 		"HELP_SHOW_HIDE_FOLDER": "Mostrar\/ocultar pasta",
-		"HELP_CHECK_FOR_NEW_MESSAGES": "Procurar\/não procurar novas mensagens",
+		"HELP_CHECK_FOR_NEW_MESSAGES": "Procurar novas mensagens",
 		"HIDE_UNSUBSCRIBED": "Esconder pastas não subscritas",
 		"UNHIDE_KOLAB_FOLDERS": "Tonar pastas Kolab visíveis",
 		"TYPE_CALENDAR": "Calendário",
@@ -512,6 +539,7 @@
 	"SETTINGS_OPENPGP": {
 		"BUTTON_IMPORT_KEY": "Importar chave",
 		"BUTTON_GENERATE_KEY_PAIR": "Gerar chaves",
+		"IMPORT_FROM_SERVER": "Importar de servidor",
 		"TITLE_PRIVATE": "Privada",
 		"TITLE_PUBLIC": "Pública",
 		"GET_MAILVELOPE": "Obter extensão Mailvelope para o navegador."
@@ -554,42 +582,43 @@
 		"LABEL_CLOSE_COMPOSE": "Fechar janela de composição"
 	},
 	"NOTIFICATIONS": {
-		"REQUEST_ERROR": "A solicitação falhou",
-		"REQUEST_ABORTED": "A solicitação foi abortada",
-		"REQUEST_TIMEOUT": "A solicitação expirou",
-		"INVALID_TOKEN": "Token inválido",
-		"AUTH_ERROR": "A autenticação falhou",
-		"CONNECTION_ERROR": "Não foi possível ligar ao servidor",
-		"DOMAIN_ALREADY_EXISTS": "O domínio já existe",
-		"DOMAIN_NOT_ALLOWED": "Este domínio não é permitido",
-		"ACCOUNT_NOT_ALLOWED": "Esta conta não é permitida",
-		"CONTACTS_SYNC_ERROR": "Erro na sincronização de contactos",
-		"CANT_GET_MESSAGE_LIST": "Não é possível obter a lista de mensagens",
-		"CANT_GET_MESSAGE": "Não é possível obter a mensagem",
-		"CANT_DELETE_MESSAGE": "Não é possível eliminar a mensagem",
-		"CANT_COPY_MESSAGE": "Não é possível copiar a mensagem",
-		"CANT_MOVE_MESSAGE": "Não é possível mover a mensagem",
-		"CANT_SAVE_MESSAGE": "Não é possível guardar a mensagem",
-		"CANT_SEND_MESSAGE": "Não é possível enviar a mensagem",
-		"INVALID_RECIPIENTS": "Destinatários inválidos",
-		"CANT_SAVE_FILTERS": "Não é possível guardar os filtros",
-		"CANT_GET_FILTERS": "Não é possível obter os filtros",
-		"CANT_ACTIVATE_FILTERS_SCRIPT": "Não é possível ativar o script de filtração",
-		"CANT_DELETE_FILTERS_SCRIPT": "Não é possível apagar o script de filtração",
-		"FILTERS_ARE_NOT_CORRECT": "Os filtros não estão corretos",
-		"CANT_CREATE_FOLDER": "Não é possível criar a pasta",
-		"CANT_RENAME_FOLDER": "Não é possível renomear a pasta",
-		"CANT_DELETE_FOLDER": "Não é possível eliminar a pasta",
-		"CANT_DELETE_NON_EMPTY_FOLDER": "Não é possível eliminar pastas com conteúdos",
-		"CANT_SUBSCRIBE_FOLDER": "Não é possível subscrever a esta pasta",
-		"CANT_UNSUBSCRIBE_FOLDER": "Não é possível anular a subsrição desta pasta",
-		"DEMO_SEND_MESSAGE_ERROR": "Por motivos de segurança, esta conta de demonstração não tem permissão para enviar mensagens para endereços de e-mail externos!",
-		"DEMO_ACCOUNT_ERROR": "Por motivos de segurança, esta conta não tem permissão de executar esta ação!",
-		"ACCOUNT_ALREADY_EXISTS": "Esta conta já existe",
-		"ACCOUNT_DOES_NOT_EXIST": "Esta conta não existe",
-		"ACCOUNT_SWITCH_FAILED": "A mudança para a conta \"%EMAIL%\" falhou",
-		"MAIL_SERVER_ERROR": "Ocorreu um erro ao aceder ao servidor de correio",
-		"INVALID_INPUT_ARGUMENT": "Parâmetro de entrada inválido",
-		"UNKNOWN_ERROR": "Erro desconhecido"
+		"RequestError": "A solicitação falhou",
+		"RequestAborted": "A solicitação foi abortada",
+		"RequestTimeout": "A solicitação expirou",
+		"InvalidToken": "Token inválido",
+		"AuthError": "A autenticação falhou",
+		"ConnectionError": "Não foi possível ligar ao servidor",
+		"DomainAlreadyExists": "O domínio já existe",
+		"DomainNotAllowed": "Este domínio não é permitido",
+		"AccountNotAllowed": "Esta conta não é permitida",
+		"CryptKeyError": "Your login passphrase has changed",
+		"ContactsSyncError": "Erro na sincronização de contactos",
+		"CantGetMessageList": "Não é possível obter a lista de mensagens",
+		"CantGetMessage": "Não é possível obter a mensagem",
+		"CantDeleteMessage": "Não é possível eliminar a mensagem",
+		"CantCopyMessage": "Não é possível copiar a mensagem",
+		"CantMoveMessage": "Não é possível mover a mensagem",
+		"CantSaveMessage": "Não é possível guardar a mensagem",
+		"CantSendMessage": "Não é possível enviar a mensagem",
+		"InvalidRecipients": "Destinatários inválidos",
+		"CantSaveFilters": "Não é possível guardar os filtros",
+		"CantGetFilters": "Não é possível obter os filtros",
+		"CantActivateFiltersScript": "Não é possível ativar o script de filtração",
+		"CantDeleteFiltersScript": "Não é possível apagar o script de filtração",
+		"FiltersAreNotCorrect": "Os filtros não estão corretos",
+		"CantCreateFolder": "Não é possível criar a pasta",
+		"CantRenameFolder": "Não é possível renomear a pasta",
+		"CantDeleteFolder": "Não é possível eliminar a pasta",
+		"CantDeleteNonEmptyFolder": "Não é possível eliminar pastas com conteúdos",
+		"CantSubscribeFolder": "Não é possível subscrever a esta pasta",
+		"CantUnsubscribeFolder": "Não é possível anular a subsrição desta pasta",
+		"DemoSendMessageError": "Por motivos de segurança, esta conta de demonstração não tem permissão para enviar mensagens para endereços de e-mail externos!",
+		"DemoAccountError": "Por motivos de segurança, esta conta não tem permissão de executar esta ação!",
+		"AccountAlreadyExists": "Esta conta já existe",
+		"AccountDoesNotExist": "Esta conta não existe",
+		"AccountSwitchFailed": "A alteração para a conta \"%EMAIL%\" falhou",
+		"MailServerError": "Ocorreu um erro ao aceder ao servidor de correio",
+		"InvalidInputArgument": "Parâmetro de entrada inválido",
+		"UnknownError": "Erro desconhecido"
 	}
 }

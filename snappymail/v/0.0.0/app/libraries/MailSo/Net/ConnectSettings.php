@@ -35,9 +35,11 @@ class ConnectSettings implements \JsonSerializable
 	public SSLContext $ssl;
 //	public bool $tls_weak = false;
 
-	// Authentication settings use by all child classes
+	// Authentication settings used by all child classes
 	public bool $useAuth = true;
 	public bool $shortLogin = false;
+	public bool $lowerLogin = true;
+	public string $stripLogin = '';
 	public array $SASLMechanisms = [
 		// https://github.com/the-djmaze/snappymail/issues/182
 		'SCRAM-SHA3-512',
@@ -48,10 +50,9 @@ class ConnectSettings implements \JsonSerializable
 		'PLAIN',
 		'LOGIN'
 	];
-	public string $Login = '';
-	private ?SensitiveString $Password = null;
-	public string $ProxyAuthUser = '';
-	public ?SensitiveString $ProxyAuthPassword = null;
+
+	private string $username = '';
+	private ?SensitiveString $passphrase = null;
 
 	public function __construct()
 	{
@@ -60,21 +61,47 @@ class ConnectSettings implements \JsonSerializable
 
 	public function __get(string $name)
 	{
-		if ('Password' === $name) {
-			return $this->Password ? $this->Password->getValue() : '';
+		$name = \strtolower($name);
+		if ('passphrase' === $name || 'password' === $name) {
+			return $this->passphrase ? $this->passphrase->getValue() : '';
+		}
+		if ('username' === $name || 'login' === $name) {
+			return $this->username;
 		}
 	}
 
-	public function __set(string $name, $value)
-	{
-		if ('Password' === $name) {
-			$this->Password = \is_string($value) ? new SensitiveString($value) : $value;
+	public function __set(string $name,
+		#[\SensitiveParameter]
+		$value
+	) {
+		$name = \strtolower($name);
+		if ('passphrase' === $name || 'password' === $name) {
+			$this->passphrase = \is_string($value) ? new SensitiveString($value) : $value;
+		}
+		if ('username' === $name || 'login' === $name) {
+			$this->username = $value;
 		}
 	}
 
-	public static function Host() : string
+	public function fixUsername(string $value, bool $allowShorten = true) : string
 	{
-		return \SnappyMail\IDN::toAscii($this->host);
+		$value = \SnappyMail\IDN::emailToAscii($value);
+//		$value = \SnappyMail\IDN::emailToAscii(\MailSo\Base\Utils::Trim($value));
+		// Strip the domain part
+		if ($this->shortLogin && $allowShorten) {
+			$value = \MailSo\Base\Utils::getEmailAddressLocalPart($value);
+		}
+		// Convert to lowercase
+		if ($this->lowerLogin) {
+			$value = \mb_strtolower($value);
+		}
+		// Strip certain characters
+		if ($this->stripLogin) {
+			$value = \explode('@', $value);
+			$value[0] = \str_replace(\str_split($this->stripLogin), '', $value[0]);
+			$value = \implode('@', $value);
+		}
+		return $value;
 	}
 
 	public static function fromArray(array $aSettings) : self
@@ -87,6 +114,12 @@ class ConnectSettings implements \JsonSerializable
 			$object->timeout = $aSettings['timeout'];
 		}
 		$object->shortLogin = !empty($aSettings['shortLogin']);
+		if (isset($aSettings['lowerLogin'])) {
+			$object->lowerLogin = !empty($aSettings['lowerLogin']);
+		}
+		if (isset($aSettings['stripLogin'])) {
+			$object->stripLogin = $aSettings['stripLogin'];
+		}
 		$object->ssl = SSLContext::fromArray($aSettings['ssl'] ?? []);
 		if (!empty($aSettings['sasl']) && \is_array($aSettings['sasl'])) {
 			$object->SASLMechanisms = $aSettings['sasl'];
@@ -105,6 +138,8 @@ class ConnectSettings implements \JsonSerializable
 			'type' => $this->type,
 			'timeout' => $this->timeout,
 			'shortLogin' => $this->shortLogin,
+			'lowerLogin' => $this->lowerLogin,
+			'stripLogin' => $this->stripLogin,
 			'sasl' => $this->SASLMechanisms,
 			'ssl' => $this->ssl
 //			'tls_weak' => $this->tls_weak

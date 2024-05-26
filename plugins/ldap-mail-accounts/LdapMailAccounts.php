@@ -69,8 +69,8 @@ class LdapMailAccounts
 		// and removes the domainname if this was configured inside the domain config.
 		$username = $sEmail;
 		$oActions = \RainLoop\Api::Actions();
-		$oDomain = $oActions->DomainProvider()->Load(\MailSo\Base\Utils::GetDomainFromEmail($sEmail), true);
-		if ($oDomain->IncShortLogin()){
+		$oDomain = $oActions->DomainProvider()->Load(\MailSo\Base\Utils::getEmailAddressDomain($sEmail), true);
+		if ($oDomain->ImapSettings()->shortLogin){
 			$username = @ldap_escape($this->RemoveEventualDomainPart($sEmail), "", LDAP_ESCAPE_FILTER);
 		}
 
@@ -101,7 +101,7 @@ class LdapMailAccounts
 		if (count($mailAddressResults) < 1) {
 			$this->logger->Write("Could not find user $username in LDAP! Overwriting of main mail address not possible.", \LOG_NOTICE, self::LOG_KEY);
 			return false;
-		}		
+		}
 
 		foreach($mailAddressResults as $mailAddressResult)
 		{
@@ -208,7 +208,7 @@ class LdapMailAccounts
 				{
 					//Try to login the user with the same password as the primary account has
 					//if this fails the user will see the new mail addresses but will be asked for the correct password
-					$sPass = $oAccount->IncPassword();
+					$sPass = new \SnappyMail\SensitiveString($oAccount->IncPassword());
 					//After creating the accounts here $sUsername is used as username to login to the IMAP server (see Account.php)
 					$oNewAccount = RainLoop\Model\AdditionalAccount::NewInstanceFromCredentials($oActions, $sEmail, $sUsername, $sPass);
 
@@ -415,8 +415,8 @@ class LdapMailAccounts
 	 */
 	public static function RemoveEventualDomainPart(string $sInput) : string
 	{
-		// Copy of \MailSo\Base\Utils::GetAccountNameFromEmail to make sure that also after eventual future
-		// updates the input string gets returned when no '@' is found (GetDomainFromEmail already doesn't do this)
+		// Copy of \MailSo\Base\Utils::getEmailAddressLocalPart to make sure that also after eventual future
+		// updates the input string gets returned when no '@' is found (getEmailAddressDomain already doesn't do this)
 		$sResult = '';
 		if (\strlen($sInput))
 		{

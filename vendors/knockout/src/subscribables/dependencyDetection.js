@@ -1,6 +1,6 @@
 (() => {
 
-var outerFrames = [],
+let outerFrames = [],
     currentFrame,
     lastId = 0,
 
@@ -19,13 +19,13 @@ ko.dependencyDetection = {
     registerDependency: subscribable => {
         if (currentFrame) {
             if (!ko.isSubscribable(subscribable))
-                throw new Error("Only subscribable things can act as dependencies");
+                throw Error("Only subscribable things can act as dependencies");
             currentFrame.callback.call(currentFrame.callbackTarget, subscribable,
                 subscribable._id || (subscribable._id = ++lastId));
         }
     },
 
-    ignore: (callback, callbackTarget, callbackArgs) => {
+    ignore(callback, callbackTarget, callbackArgs) {
         try {
             begin();
             return callback.apply(callbackTarget, callbackArgs || []);

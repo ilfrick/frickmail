@@ -97,13 +97,15 @@ abstract class Integrity
 	public static function phpExtensions()
 	{
 		$aRequirements = array(
+			'openssl'  => extension_loaded('openssl'),
 			'mbstring' => extension_loaded('mbstring'),
 			'Zlib'     => extension_loaded('zlib'),
 			// enabled by default:
-			'ctype'    => extension_loaded('ctype'),
 			'json'     => function_exists('json_decode'),
 			'libxml'   => function_exists('libxml_use_internal_errors'),
-			'dom'      => class_exists('DOMDocument')
+			'dom'      => class_exists('DOMDocument'),
+			// https://github.com/the-djmaze/snappymail/issues/1392
+			'fileinfo' => extension_loaded('fileinfo')
 			// https://github.com/the-djmaze/snappymail/issues/392
 		//	'phar'     => class_exists('PharData')
 		);

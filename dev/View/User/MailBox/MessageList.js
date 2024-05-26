@@ -162,11 +162,11 @@ export class MailMessageList extends AbstractViewRight {
 				let list = [], current, sort = FolderUserStore.sortMode() || 'DATE';
 				if (sort.includes('FROM')) {
 					MessagelistUserStore.forEach(msg => {
-						let email = msg.from[0].email;
+						let email = msg.from[0]?.email;
 						if (!current || email != current.id) {
 							current = {
 								id: email,
-								label: msg.from[0].toLine(),
+								label: msg.from[0]?.toLine(),
 								search: 'from=' + email,
 								messages: []
 							};
@@ -243,7 +243,7 @@ export class MailMessageList extends AbstractViewRight {
 
 		this.selector.on('MiddleClick', message => populateMessageBody(message, true));
 
-		this.selector.on('ItemGetUid', message => (message ? message.generateUid() : ''));
+		this.selector.on('ItemGetUid', message => (message ? message.folder + '/' + message.uid : ''));
 
 		this.selector.on('canSelect', () => MessagelistUserStore.canSelect());
 
@@ -331,6 +331,7 @@ export class MailMessageList extends AbstractViewRight {
 			spamCommand: canBeMovedHelper,
 			notSpamCommand: canBeMovedHelper,
 			moveCommand: canBeMovedHelper,
+			copyCommand: canBeMovedHelper
 		});
 	}
 
@@ -415,16 +416,24 @@ export class MailMessageList extends AbstractViewRight {
 		moveMessagesToFolderType(FolderType.Inbox);
 	}
 
-	moveCommand(vm, event) {
+	moveOrCopy(vm, event, mode) {
 		if (canBeMovedHelper()) {
 			if (vm && event?.preventDefault) {
 				stopEvent(event);
 			}
 
-			let b = moveAction();
-			AppUserStore.focusedState(b ? ScopeMessageList : ScopeFolderList);
-			moveAction(!b);
+			let i = moveAction();
+			AppUserStore.focusedState(i ? ScopeMessageList : ScopeFolderList);
+			moveAction(i ? 0 : mode);
 		}
+	}
+
+	moveCommand(vm, event) {
+		this.moveOrCopy(vm, event, 1);
+	}
+
+	copyCommand(vm, event) {
+		this.moveOrCopy(vm, event, 2);
 	}
 
 	composeClick() {

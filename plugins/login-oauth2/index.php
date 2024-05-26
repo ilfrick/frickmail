@@ -4,9 +4,9 @@ class LoginOAuth2Plugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'OAuth2',
-		VERSION  = '1.1',
-		RELEASE  = '2022-11-11',
-		REQUIRED = '2.21.0',
+		VERSION  = '1.3',
+		RELEASE  = '2024-03-27',
+		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
 
@@ -55,7 +55,7 @@ class LoginOAuth2Plugin extends \RainLoop\Plugins\AbstractPlugin
 
 	public function clientLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
 	{
-		$sPassword = $oSettings->Password;
+		$sPassword = $oSettings->passphrase;
 		$iGatLen = \strlen(static::GMAIL_TOKENS_PREFIX);
 		if ($sPassword && static::GMAIL_TOKENS_PREFIX === \substr($sPassword, 0, $iGatLen)) {
 			$aTokens = \json_decode(\substr($sPassword, $iGatLen));
@@ -63,7 +63,7 @@ class LoginOAuth2Plugin extends \RainLoop\Plugins\AbstractPlugin
 			$sRefreshToken = !empty($aTokens[1]) ? $aTokens[1] : '';
 		}
 		if ($sAccessToken && $sRefreshToken) {
-			$oSettings->Password = $this->gmailRefreshToken($sAccessToken, $sRefreshToken);
+			$oSettings->passphrase = $this->gmailRefreshToken($sAccessToken, $sRefreshToken);
 			\array_unshift($oSettings->SASLMechanisms, 'OAUTHBEARER', 'XOAUTH2');
 		}
 	}
@@ -77,8 +77,8 @@ class LoginOAuth2Plugin extends \RainLoop\Plugins\AbstractPlugin
 			 * So we need to securely save a cryptkey.
 			 * Encrypted using the old/new refresh token is an option:
 			 *   1. decrypt cryptkey with the old refresh token
-			 *   2. $oAccount->SetCryptKey('cryptkey')
-			 *   3. encrypt cryptkey with the new refresh token
+			 *   2. encrypt cryptkey with the new refresh token
+			 *   = $oAccount->resealCryptKey(new \SnappyMail\SensitiveString('old refresh token'))
 			 */
 		}
 	}
@@ -91,7 +91,6 @@ class LoginOAuth2Plugin extends \RainLoop\Plugins\AbstractPlugin
 		{
 			$oAccount = $oActions->LoginProcess($sEmail, $sPassword);
 			if ($oAccount instanceof \RainLoop\Model\Account) {
-				$oActions->AuthToken($oAccount);
 				$iErrorCode = 0;
 			} else {
 				$oAccount = null;

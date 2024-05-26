@@ -1322,6 +1322,7 @@ html.rl-left-panel-disabled #rl-app .b-folders .b-toolbar {
 #rl-app .b-folders .b-content {
 	top: 60px;
 	bottom: 162px;
+	color: unset;
 }
 
 #rl-app .b-folders .b-content.show-on-panel-disabled {
@@ -1850,8 +1851,8 @@ html.sm-msgView-bottom #rl-app .messageView {
 	height: 30px;
 }
 
-#rl-app .messageView .openpgp-control.encrypted,
-#rl-app .messageView .openpgp-control.signed {
+#rl-app .messageView .crypto-control.encrypted,
+#rl-app .messageView .crypto-control.signed {
 	border-radius: var(--nc-border-radius);
 }
 
@@ -2546,6 +2547,11 @@ html.rl-mobile #rl-app #V-AdminPane>.b-toolbar {
 #rl-app .messageListItem.hasFlaggedSubMessage .flagParent::after,
 #rl-app .messageListItem.msgflag-\\flagged .flagParent::after {
 	color: var(--msgflag-\\flagged-color);
+}
+
+#rl-app #messageItem .b-text-part.swapColors {
+	background-color: var(--nc-color-primary);
+	color: var(--nc-color-primary-text);
 }
 
 /* #endregion */

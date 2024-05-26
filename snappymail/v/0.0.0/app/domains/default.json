@@ -1,11 +1,11 @@
 {
-    "name": "*",
     "IMAP": {
         "host": "localhost",
         "port": 143,
         "type": 0,
         "timeout": 300,
         "shortLogin": false,
+        "lowerLogin": true,
         "sasl": [
             "SCRAM-SHA3-512",
             "SCRAM-SHA-512",
@@ -23,8 +23,9 @@
             "security_level": 1
         },
         "disabled_capabilities": [
-            "STATUS=SIZE",
-            "PREVIEW"
+            "METADATA",
+            "PREVIEW",
+            "STATUS=SIZE"
         ],
         "use_expunge_all_on_delete": false,
         "fast_simple_search": true,
@@ -39,6 +40,7 @@
         "type": 0,
         "timeout": 60,
         "shortLogin": false,
+        "lowerLogin": true,
         "sasl": [
             "SCRAM-SHA3-512",
             "SCRAM-SHA-512",
@@ -65,6 +67,7 @@
         "type": 0,
         "timeout": 10,
         "shortLogin": false,
+        "lowerLogin": true,
         "sasl": [
             "SCRAM-SHA3-512",
             "SCRAM-SHA-512",

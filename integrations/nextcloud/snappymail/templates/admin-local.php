@@ -38,6 +38,15 @@
 				</div>
 			</p>
 			<br />
+
+			<p>
+				<input id="snappymail-autologin-oidc" name="snappymail-autologin-oidc" type="checkbox" class="checkbox" <?php if ($_['snappymail-autologin-oidc']) echo 'checked="checked"'; ?>>
+				<label for="snappymail-autologin-oidc">
+					<?php echo($l->t('Attempt to automatically login with OIDC when active')); ?>
+				</label>
+			</p>
+			<br />
+
 			<p>
 				<input id="snappymail-no-embed" name="snappymail-no-embed" type="checkbox" class="checkbox" <?php if ($_['snappymail-no-embed']) echo 'checked="checked"'; ?>>
 				<label for="snappymail-no-embed">

@@ -5,7 +5,7 @@
 
 namespace SnappyMail\HTTP;
 
-class CSP
+class CSP implements \Stringable
 {
 	public
 		$report = false,
@@ -27,6 +27,7 @@ class CSP
 		'img-src' => ["'self'", 'data:'],
 		'media-src' => ["'self'", 'data:'],
 		'style-src' => ["'self'", "'unsafe-inline'"],
+		'connect-src' => ["'self'", 'data:', "keys.openpgp.org"]
 	];
 
 	function __construct(string $default = '')

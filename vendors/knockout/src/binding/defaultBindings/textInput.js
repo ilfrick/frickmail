@@ -18,11 +18,7 @@ ko.bindingHandlers['textInput'] = {
         };
 
         var updateView = () => {
-            var modelValue = ko.utils.unwrapObservable(valueAccessor());
-
-            if (modelValue == null) {
-                modelValue = '';
-            }
+            var modelValue = ko.utils.unwrapObservable(valueAccessor()) ?? '';
 
             if (elementValueBeforeEvent !== undefined && modelValue === elementValueBeforeEvent) {
                 setTimeout(updateView, 4);
@@ -45,16 +41,6 @@ ko.bindingHandlers['textInput'] = {
         // Bind to the change event so that we can catch programmatic updates of the value that fire this event.
         onEvent('change', updateModel);
 
-        // To deal with browsers that don't notify any kind of event for some changes (IE, Safari, etc.)
-        onEvent('blur', updateModel);
-
         ko.computed(updateView, { disposeWhenNodeIsRemoved: element });
     }
-};
-//ko.expressionRewriting.twoWayBindings.add('textInput');
-
-// textinput is an alias for textInput
-ko.bindingHandlers['textinput'] = {
-    // preprocess is the only way to set up a full alias
-    'preprocess': (value, name, addBinding) => addBinding('textInput', value)
 };

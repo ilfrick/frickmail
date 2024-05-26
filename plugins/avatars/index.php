@@ -10,8 +10,8 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		NAME     = 'Avatars',
 		AUTHOR   = 'SnappyMail',
 		URL      = 'https://snappymail.eu/',
-		VERSION  = '1.12',
-		RELEASE  = '2023-11-27',
+		VERSION  = '1.17',
+		RELEASE  = '2024-05-26',
 		REQUIRED = '2.25.0',
 		CATEGORY = 'Contacts',
 		LICENSE  = 'MIT',
@@ -32,6 +32,16 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$this->addHook('json.after-message', 'JsonMessage');
 			$this->addHook('json.after-messagelist', 'JsonMessageList');
 		}
+		// https://www.ietf.org/archive/id/draft-brand-indicators-for-message-identification-04.html#bimi-selector
+		if ($this->Config()->Get('plugin', 'bimi', false)) {
+			$this->addHook('imap.message-headers', 'ImapMessageHeaders');
+		}
+	}
+
+	public function ImapMessageHeaders(array &$aHeaders)
+	{
+		// \MailSo\Mime\Enumerations\Header::BIMI_SELECTOR
+		$aHeaders[] = 'BIMI-Selector';
 	}
 
 	public function JsonMessage(array &$aResponse)
@@ -59,20 +69,19 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$mFrom = $mFrom->jsonSerialize();
 		}
 		if (\is_array($mFrom)) {
-			if ('pass' == $mFrom['dkimStatus'] && $this->Config()->Get('plugin', 'service', true)) {
-				// 'data:image/png;base64,[a-zA-Z0-9+/=]'
-				return static::getServiceIcon($mFrom['email']);
-			}
 			if (!$this->Config()->Get('plugin', 'delay', true)
 			 && ($this->Config()->Get('plugin', 'gravatar', false)
 				|| ($this->Config()->Get('plugin', 'bimi', false) && 'pass' == $mFrom['dkimStatus'])
-				|| !$this->Config()->Get('plugin', 'service', true)
 			 )
 			) try {
 				// Base64Url
 				return \SnappyMail\Crypt::EncryptUrlSafe($mFrom['email']);
 			} catch (\Throwable $e) {
 				\SnappyMail\Log::error('Crypt', $e->getMessage());
+			}
+			if ('pass' == $mFrom['dkimStatus'] && $this->Config()->Get('plugin', 'service', true)) {
+				// 'data:image/png;base64,[a-zA-Z0-9+/=]'
+				return static::getServiceIcon($mFrom['email']);
 			}
 		}
 		return null;
@@ -84,8 +93,9 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public function DoAvatar() : array
 	{
 		$bBimi = !empty($this->jsonParam('bimi'));
+		$sBimiSelector = $this->jsonParam('bimiSelector') ?: '';
 		$sEmail = $this->jsonParam('email');
-		$aResult = $this->getAvatar($sEmail, !empty($bBimi));
+		$aResult = $this->getAvatar($sEmail, $bBimi, $sBimiSelector);
 		if ($aResult) {
 			$aResult = [
 				'type' => $aResult[0],
@@ -103,7 +113,9 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public function ServiceAvatar(string $sServiceName, string $sBimi, string $sEmail)
 	{
 		$sEmail = \SnappyMail\Crypt::DecryptUrlSafe($sEmail);
-		if ($sEmail && ($aResult = $this->getAvatar($sEmail, !empty($sBimi)))) {
+		$aBimi = \explode('-', $sBimi, 2);
+		$sBimiSelector = isset($aBimi[1]) ? $aBimi[1] : 'default';
+		if ($sEmail && ($aResult = $this->getAvatar($sEmail, !empty($aBimi[0]), $sBimiSelector))) {
 			\header('Content-Type: '.$aResult[0]);
 			echo $aResult[1];
 		} else {
@@ -190,13 +202,13 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		return null;
 	}
 
-	private function getAvatar(string $sEmail, bool $bBimi) : ?array
+	private function getAvatar(string $sEmail, bool $bBimi, string $sBimiSelector = '') : ?array
 	{
 		if (!\strpos($sEmail, '@')) {
 			return null;
 		}
 
-		$sAsciiEmail = \mb_strtolower(\MailSo\Base\Utils::IdnToAscii($sEmail, true));
+		$sAsciiEmail = \mb_strtolower(\SnappyMail\IDN::emailToAscii($sEmail));
 		$sEmailId = \sha1($sAsciiEmail);
 
 		\MailSo\Base\Http::setETag($sEmailId);
@@ -235,7 +247,7 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$aUrls = [];
 
 			if ($this->Config()->Get('plugin', 'bimi', false)) {
-				$BIMI = $bBimi ? \SnappyMail\DNS::BIMI($sDomain) : null;
+				$BIMI = $bBimi ? \SnappyMail\DNS::BIMI($sDomain, $sBimiSelector) : null;
 				if ($BIMI) {
 					$aUrls[] = $BIMI;
 //					$aResult = ['text/uri-list', $BIMI];
@@ -246,7 +258,7 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			}
 
 			if ($this->Config()->Get('plugin', 'gravatar', false)) {
-				$aUrls[] = 'http://gravatar.com/avatar/'.\md5(\strtolower($sAsciiEmail)).'?s=80&d=404';
+				$aUrls[] = 'https://gravatar.com/avatar/'.\md5(\strtolower($sAsciiEmail)).'?s=80&d=404';
 			}
 
 			foreach ($aUrls as $sUrl) {
@@ -292,13 +304,14 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$sDomain = \preg_replace('/^(.+\\.)?(paypal\\.[a-z][a-z])$/D', 'paypal.com', $sDomain);
 		$sDomain = \preg_replace('/^facebookmail.com$/D', 'facebook.com', $sDomain);
 		$sDomain = \preg_replace('/^dhlparcel.nl$/D', 'dhl.com', $sDomain);
+		$sDomain = \preg_replace('/^amazon.nl$/D', 'amazon.com', $sDomain);
 		$sDomain = \preg_replace('/^.+\\.([^.]+\\.[^.]+)$/D', '$1', $sDomain);
 		return $sDomain;
 	}
 
 	private static function cacheImage(string $sEmail, array $aResult) : void
 	{
-		$sEmailId = \sha1(\mb_strtolower(\MailSo\Base\Utils::IdnToAscii($sEmail, true)));
+		$sEmailId = \sha1(\mb_strtolower(\SnappyMail\IDN::emailToAscii($sEmail)));
 		if (!\is_dir(\APP_PRIVATE_DATA . 'avatars')) {
 			\mkdir(\APP_PRIVATE_DATA . 'avatars', 0700);
 		}
@@ -311,12 +324,12 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private static function getCachedImage(string $sEmail) : ?array
 	{
-		$sEmail = \mb_strtolower(\MailSo\Base\Utils::IdnToAscii($sEmail, true));
+		$sEmail = \mb_strtolower(\SnappyMail\IDN::emailToAscii($sEmail));
 		$aFiles = \glob(\APP_PRIVATE_DATA . "avatars/{$sEmail}.*");
 		if ($aFiles) {
 			\MailSo\Base\Http::setLastModified(\filemtime($aFiles[0]));
 			return [
-				\mime_content_type($aFiles[0]),
+				\SnappyMail\File\MimeType::fromFile($aFiles[0]),
 				\file_get_contents($aFiles[0])
 			];
 		}

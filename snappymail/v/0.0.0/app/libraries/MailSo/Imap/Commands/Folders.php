@@ -82,7 +82,8 @@ trait Folders
 		$this->SendRequestGetResponse('DELETE', [$this->EscapeFolderName($sFolderName)]);
 //		$this->FolderCheck();
 
-		// Will this workaround solve Dovecot issue #124 ?
+		// Will this workaround solve Dovecot issue?
+		// https://github.com/the-djmaze/snappymail/issues/124
 		try {
 			$this->FolderRename($sFolderName, "{$sFolderName}-dummy");
 			$this->FolderRename("{$sFolderName}-dummy", $sFolderName);
@@ -135,8 +136,8 @@ trait Folders
 			FolderStatus::UIDNEXT,
 			FolderStatus::UIDVALIDITY
 		);
-		// RFC 4551
-		if ($this->hasCapability('CONDSTORE')) {
+		// RFC 4551 or RFC 5162
+		if ($this->hasCapability('CONDSTORE') || $this->hasCapability('QRESYNC')) {
 			$aStatusItems[] = FolderStatus::HIGHESTMODSEQ;
 		}
 		// RFC 7889
@@ -183,7 +184,7 @@ trait Folders
 			 */
 /*
 			if ($this->hasCapability('ESEARCH') && !isset($oFolderInfo->UNSEEN)) {
-				$oFolderInfo->UNSEEN = $this->MessageSimpleESearch('UNSEEN', ['COUNT'])['COUNT'];
+				$oFolderInfo->UNSEEN = $this->MessageESearch('UNSEEN', ['COUNT'])['COUNT'];
 			}
 			return $oFolderInfo;
 */
@@ -213,8 +214,7 @@ trait Folders
 //			$oFolderInfo->SIZE = \max($oFolderInfo->SIZE, $oInfo->SIZE);
 //			$oFolderInfo->RECENT = \max(0, $oFolderInfo->RECENT, $oInfo->RECENT);
 			$oFolderInfo->hasStatus = $oInfo->hasStatus;
-			$oFolderInfo->generateETag($this);
-			return $oFolderInfo;
+			$oInfo = $oFolderInfo;
 		}
 
 		$oInfo->generateETag($this);
@@ -434,7 +434,7 @@ trait Folders
 		$oResult->UNSEEN = null;
 /*
 		if ($this->hasCapability('ESEARCH')) {
-			$oResult->UNSEEN = $this->MessageSimpleESearch('UNSEEN', ['COUNT'])['COUNT'];
+			$oResult->UNSEEN = $this->MessageESearch('UNSEEN', ['COUNT'])['COUNT'];
 		}
 */
 		$this->oCurrentFolderInfo = $oResult;
@@ -574,17 +574,19 @@ trait Folders
 				}
 			}
 		}
-
-		if ($this->hasCapability('ACL') || $this->CapabilityValue('RIGHTS')) {
+/*
+		// RFC 4314
+		if ($this->hasCapability('ACL')) {
 			foreach ($oFolderCollection as $oFolder) {
 				if ($oFolder->Selectable()) try {
 					$oFolder->myRights = $this->FolderMyRights($oFolder->FullName);
 				} catch (\Throwable $oException) {
-					// Ignore error
+					// BAD Error in IMAP command MYRIGHTS: ACLs disabled
+					break;
 				}
 			}
 		}
-
+*/
 		if (!$bInbox && !$sParentFolderName && !isset($oFolderCollection['INBOX'])) {
 			$oFolderCollection['INBOX'] = new Folder('INBOX', $sDelimiter);
 		}

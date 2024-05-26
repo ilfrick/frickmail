@@ -29,6 +29,7 @@ export const SettingsUserStore = new class {
 			showNextMessage: 0,
 			allowDraftAutosave: 1,
 			useThreads: 0,
+			threadAlgorithm: '',
 			replySameFolder: 0,
 			hideUnsubscribed: 0,
 			hideDeleted: 1,
@@ -47,6 +48,7 @@ export const SettingsUserStore = new class {
 
 			layout: 1,
 			editorDefaultType: 'Html',
+			editorWysiwyg: 'Squire',
 			msgDefaultAction: 1
 		});
 
@@ -78,9 +80,10 @@ export const SettingsUserStore = new class {
 
 	init() {
 		const self = this;
-		self.editorDefaultType(SettingsGet('EditorDefaultType'));
 
 		[
+			'EditorDefaultType',
+			'editorWysiwyg',
 			'messageNewWindow',
 			'messageReadAuto',
 			'MsgDefaultAction',
@@ -97,7 +100,8 @@ export const SettingsUserStore = new class {
 			'listGrouped',
 			'showNextMessage',
 			'AllowDraftAutosave',
-			'UseThreads',
+			'useThreads',
+			'threadAlgorithm',
 			'ReplySameFolder',
 			'HideUnsubscribed',
 			'HideDeleted',
@@ -109,6 +113,39 @@ export const SettingsUserStore = new class {
 			'pgpSign',
 			'pgpEncrypt',
 			'allowSpellcheck'
+/*
+			'MessagesPerPage',
+			'MessageReadDelay',
+			'SoundNotification',
+			'NotificationSound',
+			'DesktopNotifications',
+			'Layout',
+			'AutoLogout',
+			'ContactsAutosave',
+			'contactsAllowed',
+			'CheckMailInterval',
+			'SentFolder',
+			'DraftsFolder',
+			'JunkFolder',
+			'TrashFolder',
+			'ArchiveFolder',
+			'hourCycle',
+			'Resizer4Width',
+			'Resizer5Width',
+			'Resizer5Height',
+			'fontSansSerif',
+			'fontSerif',
+			'fontMono',
+			'userBackgroundName',
+			'userBackgroundHash',
+			'autoVerifySignatures',
+			'allowLanguagesOnSettings',
+			'attachmentLimit',
+			'Theme',
+			'language',
+			'clientLanguage',
+			'StaticLibsJs',
+*/
 		].forEach(name => {
 			let value = SettingsGet(name);
 			name = name[0].toLowerCase() + name.slice(1);

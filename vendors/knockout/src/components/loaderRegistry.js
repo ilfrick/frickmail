@@ -2,7 +2,7 @@
     var loadingSubscribablesCache = Object.create(null), // Tracks component loads that are currently in flight
         loadedDefinitionsCache = new Map();    // Tracks component loads that have already completed
 
-    ko.components = {
+    ko['components'] = {
         get: (componentName, callback) => {
             if (loadedDefinitionsCache.has(componentName)) {
                 callback(loadedDefinitionsCache.get(componentName));
@@ -10,11 +10,11 @@
                 // Join the loading process that is already underway, or start a new one.
                 var subscribable = loadingSubscribablesCache[componentName];
                 if (subscribable) {
-                    subscribable.subscribe(callback);
+                    subscribable['subscribe'](callback);
                 } else {
                     // It's not started loading yet. Start loading, and when it's done, move it to loadedDefinitionsCache.
                     subscribable = loadingSubscribablesCache[componentName] = new ko.subscribable();
-                    subscribable.subscribe(callback);
+                    subscribable['subscribe'](callback);
 
                     loadComponent(componentName, definition => {
                         loadedDefinitionsCache.set(componentName, definition);
@@ -32,13 +32,13 @@
             }
         },
 
-        register: (componentName, config) => {
+        'register': (componentName, config) => {
             if (!config) {
-                throw new Error('Invalid configuration for ' + componentName);
+                throw Error('Invalid configuration for ' + componentName);
             }
 
             if (defaultConfigRegistry[componentName]) {
-                throw new Error('Component ' + componentName + ' is already registered');
+                throw Error('Component ' + componentName + ' is already registered');
             }
 
             defaultConfigRegistry[componentName] = config;
@@ -57,7 +57,7 @@
 
     var defaultConfigRegistry = Object.create(null),
         createViewModelKey = 'createViewModel',
-        throwError = (componentName, message) => { throw new Error(`Component '${componentName}': ${message}`) },
+        throwError = (componentName, message) => { throw Error(`Component '${componentName}': ${message}`) },
 
         // Takes a config object of the form { template: ..., viewModel: ... }, and asynchronously convert it
         // into the standard component definition format:
@@ -102,7 +102,4 @@
             var found = (result['template'] && result[createViewModelKey]);
             callback(found ? result : null);
         };
-
-    ko.exportSymbol('components', ko.components);
-    ko.exportSymbol('components.register', ko.components.register);
 })();

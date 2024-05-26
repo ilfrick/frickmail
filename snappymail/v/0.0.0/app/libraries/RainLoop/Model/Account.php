@@ -13,19 +13,15 @@ abstract class Account implements \JsonSerializable
 
 	private string $sEmail = '';
 
-	private string $sLogin = '';
+	private string $sImapUser = '';
 
-	private ?SensitiveString $sPassword = null;
+	private ?SensitiveString $oImapPass = null;
 
-	private string $sSmtpLogin = '';
+	private string $sSmtpUser = '';
 
-	private ?SensitiveString $sSmtpPassword = null;
+	private ?SensitiveString $oSmtpPass = null;
 
-	private string $sProxyAuthUser = '';
-
-	private ?SensitiveString $sProxyAuthPassword = null;
-
-	private Domain $oDomain;
+	private ?Domain $oDomain = null;
 
 	public function Email() : string
 	{
@@ -37,25 +33,23 @@ abstract class Account implements \JsonSerializable
 		return $this->sName;
 	}
 
-	public function IncLogin() : string
+	public function ImapUser() : string
 	{
-		return $this->oDomain->IncShortLogin()
-			? \MailSo\Base\Utils::GetAccountNameFromEmail($this->sLogin)
-			: $this->sLogin;
+		return $this->sImapUser;
 	}
 
-	public function IncPassword() : string
+	public function ImapPass() : string
 	{
-		return $this->sPassword ? $this->sPassword->getValue() : '';
+		return $this->oImapPass ? $this->oImapPass->getValue() : '';
 	}
 
-	public function OutLogin() : string
+	public function SmtpUser() : string
 	{
-		$sSmtpLogin = $this->sSmtpLogin ?: $this->sLogin;
-		return $this->oDomain->OutShortLogin() ? \MailSo\Base\Utils::GetAccountNameFromEmail($sSmtpLogin) : $sSmtpLogin;
+		return $this->sSmtpUser ?: $this->oDomain->SmtpSettings()->fixUsername($this->sEmail);
+//		return $this->sSmtpUser ?: $this->sEmail ?: $this->sImapUser;
 	}
 
-	public function Domain() : Domain
+	public function Domain() : ?Domain
 	{
 		return $this->oDomain;
 	}
@@ -64,39 +58,30 @@ abstract class Account implements \JsonSerializable
 	{
 		return \sha1(\implode(APP_SALT, [
 			$this->sEmail,
-			$this->sLogin,
+			$this->sImapUser,
 //			\json_encode($this->Domain()),
-//			$this->sPassword
+//			$this->oImapPass
 		]));
 	}
 
-	public function SetPassword(
-		#[\SensitiveParameter]
-		string $sPassword
-	) : void
+	public function setImapUser(string $sImapUser) : void
 	{
-		$this->sPassword = new SensitiveString($sPassword);
+		$this->sImapUser = $sImapUser;
 	}
 
-	public function SetSmtpPassword(
-		#[\SensitiveParameter]
-		string $sPassword
-	) : void
+	public function setImapPass(SensitiveString $oPassword) : void
 	{
-		$this->sSmtpPassword = new SensitiveString($sPassword);
+		$this->oImapPass = $oPassword;
 	}
 
-	public function SetProxyAuthUser(string $sProxyAuthUser) : void
+	public function setSmtpUser(string $sSmtpUser) : void
 	{
-		$this->sProxyAuthUser = $sProxyAuthUser;
+		$this->sSmtpUser = $sSmtpUser;
 	}
 
-	public function SetProxyAuthPassword(
-		#[\SensitiveParameter]
-		string $sProxyAuthPassword
-	) : void
+	public function setSmtpPass(SensitiveString $oPassword) : void
 	{
-		$this->sProxyAuthPassword = new SensitiveString($sProxyAuthPassword);
+		$this->oSmtpPass = $oPassword;
 	}
 
 	#[\ReturnTypeWillChange]
@@ -104,57 +89,34 @@ abstract class Account implements \JsonSerializable
 	{
 		$result = [
 			'email' => $this->sEmail,
-			'login' => $this->sLogin,
-			'pass'  => $this->IncPassword(),
-			'name' => $this->sName
+			'login' => $this->sImapUser,
+			'pass'  => $this->ImapPass(),
+			'name' => $this->sName,
+			'smtp' => []
 		];
-		if ($this->sSmtpLogin && $this->sSmtpPassword) {
-			$result['smtp'] = [
-				'user' => $this->sSmtpLogin,
-				'pass' => $this->sSmtpPassword->getValue()
-			];
+		if ($this->sSmtpUser) {
+			$result['smtp']['user'] = $this->sSmtpUser;
 		}
-		if ($this->sProxyAuthUser && $this->sProxyAuthPassword) {
-			$result['proxy'] = [
-				'user' => $this->sProxyAuthUser,
-				'pass' => $this->sProxyAuthPassword->getValue()
-			];
+		if ($this->oSmtpPass) {
+			$result['smtp']['pass'] = $this->oSmtpPass->getValue();
 		}
 		return $result;
 	}
 
-	public static function NewInstanceFromCredentials(\RainLoop\Actions $oActions,
-		string $sEmail, string $sLogin,
-		#[\SensitiveParameter]
-		string $sPassword,
-		bool $bThrowException = false): ?self
-	{
-		$oAccount = null;
-		if ($sEmail && $sLogin && $sPassword) {
-			$oDomain = $oActions->DomainProvider()->Load(\MailSo\Base\Utils::GetDomainFromEmail($sEmail), true);
-			if ($oDomain) {
-				if ($oDomain->ValidateWhiteList($sEmail, $sLogin)) {
-					$oAccount = new static;
-
-					$oAccount->sEmail = \MailSo\Base\Utils::IdnToAscii($sEmail, true);
-					$oAccount->sLogin = \MailSo\Base\Utils::IdnToAscii($sLogin);
-					$oAccount->SetPassword($sPassword);
-					$oAccount->oDomain = $oDomain;
-
-					$oActions->Plugins()->RunHook('filter.account', array($oAccount));
-
-					if ($bThrowException && !$oAccount) {
-						throw new ClientException(Notifications::AccountFilterError);
-					}
-				} else if ($bThrowException) {
-					throw new ClientException(Notifications::AccountNotAllowed);
-				}
-			} else if ($bThrowException) {
-				throw new ClientException(Notifications::DomainNotAllowed);
-			}
-		}
-
-		return $oAccount;
+	public function setCredentials(
+		Domain $oDomain,
+		string $sEmail,
+		string $sImapUser,
+		SensitiveString $oImapPass,
+		string $sSmtpUser = '',
+		?SensitiveString $oSmtpPass = null
+	) {
+		$this->sEmail = $sEmail;
+		$this->oDomain = $oDomain;
+		$this->sImapUser = $sImapUser;
+		$this->oImapPass = $oImapPass;
+		$this->sSmtpUser = $sSmtpUser;
+		$this->oSmtpPass = $oSmtpPass;
 	}
 
 	/**
@@ -168,18 +130,11 @@ abstract class Account implements \JsonSerializable
 		if (empty($aAccount[0]) || 'account' != $aAccount[0] || 7 > \count($aAccount)) {
 			return [];
 		}
-		$aResult = [
+		return [
 			'email' => $aAccount[1] ?: '',
 			'login' => $aAccount[2] ?: '',
 			'pass'  => $aAccount[3] ?: ''
 		];
-		if ($aAccount[5] && $aAccount[6]) {
-			$aResult['proxy'] = [
-				'user' => $aAccount[5],
-				'pass' => $aAccount[6]
-			];
-		}
-		return $aResult;
 	}
 
 	public static function NewInstanceFromTokenArray(
@@ -189,30 +144,37 @@ abstract class Account implements \JsonSerializable
 	{
 		$oAccount = null;
 		$aAccountHash = static::convertArray($aAccountHash);
-		if (!empty($aAccountHash['email']) && 3 <= \count($aAccountHash)) {
-			$oAccount = static::NewInstanceFromCredentials(
-				$oActions,
-				$aAccountHash['email'],
-				$aAccountHash['login'],
-				$aAccountHash['pass'],
-				$bThrowExceptionOnFalse
-			);
+		if (!empty($aAccountHash['email']) && !empty($aAccountHash['login']) && !empty($aAccountHash['pass'])) {
+			try {
+				$oDomain = $oActions->DomainProvider()->getByEmailAddress($aAccountHash['email']);
+				if ($oDomain) {
+//					$aAccountHash['email'] = $oDomain->ImapSettings()->fixUsername($aAccountHash['email'], false);
+//					$aAccountHash['login'] = $oDomain->ImapSettings()->fixUsername($aAccountHash['login']);
+					$oAccount = new static;
+					$oAccount->sEmail = \SnappyMail\IDN::emailToAscii($aAccountHash['email']);
+					$oAccount->sImapUser = \SnappyMail\IDN::emailToAscii($aAccountHash['login']);
+					$oAccount->setImapPass(new SensitiveString($aAccountHash['pass']));
+					$oAccount->oDomain = $oDomain;
+					$oActions->Plugins()->RunHook('filter.account', array($oAccount));
+					if ($bThrowExceptionOnFalse && !$oAccount) {
+						throw new ClientException(Notifications::AccountFilterError);
+					}
+				}
+			} catch (\Throwable $e) {
+				if ($bThrowExceptionOnFalse) {
+					throw $e;
+				}
+			}
 			if ($oAccount) {
 				if (isset($aAccountHash['name'])) {
 					$oAccount->sName = $aAccountHash['name'];
 				}
-				$oActions->logMask($oAccount->IncPassword());
 				// init smtp user/password
-				if (isset($aAccountHash['smtp'])) {
-					$oAccount->sSmtpLogin = $aAccountHash['smtp']['user'];
-					$oAccount->SetSmtpPassword($aAccountHash['smtp']['pass']);
-					$oActions->logMask($oAccount->sSmtpPassword);
+				if (isset($aAccountHash['smtp']['user'])) {
+					$oAccount->sSmtpUser = $aAccountHash['smtp']['user'];
 				}
-				// init proxy user/password
-				if (isset($aAccountHash['proxy'])) {
-					$oAccount->sProxyAuthUser = $aAccountHash['proxy']['user'];
-					$oAccount->SetProxyAuthPassword($aAccountHash['proxy']['pass']);
-					$oActions->logMask($oAccount->sProxyAuthPassword);
+				if (isset($aAccountHash['smtp']['pass'])) {
+					$oAccount->setSmtpPass(new SensitiveString($aAccountHash['smtp']['pass']));
 				}
 			}
 		}
@@ -223,7 +185,7 @@ abstract class Account implements \JsonSerializable
 	{
 		$oSettings = $this->Domain()->ImapSettings();
 		$oSettings->timeout = \max($oSettings->timeout, (int) $oConfig->Get('imap', 'timeout', $oSettings->timeout));
-		$oSettings->Login = $this->IncLogin();
+		$oSettings->username = $this->ImapUser();
 
 		$oSettings->expunge_all_on_delete |= !!$oConfig->Get('imap', 'use_expunge_all_on_delete', false);
 		$oSettings->fast_simple_search = !(!$oSettings->fast_simple_search || !$oConfig->Get('imap', 'message_list_fast_simple_search', true));
@@ -240,14 +202,14 @@ abstract class Account implements \JsonSerializable
 		$oImapClient->Connect($oSettings);
 		$oPlugins->RunHook('imap.after-connect', array($this, $oImapClient, $oSettings));
 
-		$oSettings->Password = $this->sPassword;
+		$oSettings->passphrase = $this->oImapPass;
 		return $this->netClientLogin($oImapClient, $oPlugins);
 	}
 
 	public function SmtpConnectAndLogin(\RainLoop\Plugins\Manager $oPlugins, \MailSo\Smtp\SmtpClient $oSmtpClient) : bool
 	{
 		$oSettings = $this->Domain()->SmtpSettings();
-		$oSettings->Login = $this->OutLogin();
+		$oSettings->username = $this->SmtpUser();
 		$oSettings->Ehlo = \MailSo\Smtp\SmtpClient::EhloHelper();
 
 		$oSmtpClient->Settings = $oSettings;
@@ -260,18 +222,18 @@ abstract class Account implements \JsonSerializable
 		$oSmtpClient->Connect($oSettings);
 		$oPlugins->RunHook('smtp.after-connect', array($this, $oSmtpClient, $oSettings));
 /*
-		if ($this->oDomain->OutAskCredentials() && !($this->sSmtpPassword && $this->sSmtpLogin)) {
+		if ($this->oDomain->OutAskCredentials() && !($this->oSmtpPass && $this->sSmtpUser)) {
 			throw new RequireCredentialsException
 		}
 */
-		$oSettings->Password = $this->sSmtpPassword ?: $this->sPassword;
+		$oSettings->passphrase = $this->oSmtpPass ?: $this->oImapPass;
 		return $this->netClientLogin($oSmtpClient, $oPlugins);
 	}
 
 	public function SieveConnectAndLogin(\RainLoop\Plugins\Manager $oPlugins, \MailSo\Sieve\SieveClient $oSieveClient, \RainLoop\Config\Application $oConfig)
 	{
 		$oSettings = $this->Domain()->SieveSettings();
-		$oSettings->Login = $this->IncLogin();
+		$oSettings->username = $this->ImapUser();
 
 		$oSieveClient->Settings = $oSettings;
 
@@ -279,7 +241,7 @@ abstract class Account implements \JsonSerializable
 		$oSieveClient->Connect($oSettings);
 		$oPlugins->RunHook('sieve.after-connect', array($this, $oSieveClient, $oSettings));
 
-		$oSettings->Password = $this->sPassword;
+		$oSettings->passphrase = $this->oImapPass;
 		return $this->netClientLogin($oSieveClient, $oPlugins);
 	}
 
@@ -295,8 +257,6 @@ abstract class Account implements \JsonSerializable
 		)
 */
 		$oSettings = $oClient->Settings;
-		$oSettings->ProxyAuthUser = $this->sProxyAuthUser;
-		$oSettings->ProxyAuthPassword = $this->sProxyAuthPassword;
 
 		$client_name = \strtolower($oClient->getLogName());
 
@@ -306,4 +266,31 @@ abstract class Account implements \JsonSerializable
 		return $bResult;
 	}
 
+/*
+	// Stores settings in AdditionalAccount else MainAccount
+	public function settingsLocal() : \RainLoop\Settings
+	{
+		return \RainLoop\Api::Actions()->SettingsProvider(true)->Load($this);
+	}
+*/
+
+	/**
+	 * @deprecated
+	 */
+	public function IncLogin() : string
+	{
+		return $this->ImapUser();
+	}
+	public function IncPassword() : string
+	{
+		return $this->ImapPass();
+	}
+	public function OutLogin() : string
+	{
+		return $this->SmtpUser();
+	}
+	public function SetPassword(SensitiveString $oPassword) : void
+	{
+		$this->oImapPass = $oPassword;
+	}
 }

@@ -15,7 +15,7 @@ namespace MailSo\Mime;
  * @category MailSo
  * @package Mime
  */
-class Header
+class Header implements \JsonSerializable
 {
 	private string $sName;
 
@@ -23,7 +23,7 @@ class Header
 
 	private string $sFullValue;
 
-	private string $sEncodedValueForReparse;
+	private string $sEncodedValue;
 
 	private ?ParameterCollection $oParameters = null;
 
@@ -39,10 +39,10 @@ class Header
 	{
 		$this->sName = \trim($sName);
 		$this->sFullValue = \trim($sValue);
-		$this->sEncodedValueForReparse = '';
+		$this->sEncodedValue = '';
 
-		if (\strlen($sEncodedValueForReparse) && $this->IsReparsed()) {
-			$this->sEncodedValueForReparse = \trim($sEncodedValueForReparse);
+		if (\strlen($sEncodedValueForReparse) && ($this->IsEmail() || $this->IsSubject() || $this->IsParameterized())) {
+			$this->sEncodedValue = \trim($sEncodedValueForReparse);
 		}
 
 		if (\strlen($this->sFullValue) && $this->IsParameterized()) {
@@ -86,11 +86,6 @@ class Header
 		return $this->sName;
 	}
 
-	public function NameWithDelimitrom() : string
-	{
-		return $this->Name().': ';
-	}
-
 	public function Value() : string
 	{
 		return $this->sValue;
@@ -101,13 +96,18 @@ class Header
 		return $this->sFullValue;
 	}
 
+	public function EncodedValue() : string
+	{
+		return $this->sEncodedValue ?: $this->sFullValue;
+	}
+
 	public function SetParentCharset(string $sParentCharset) : Header
 	{
-		if ($this->sParentCharset !== $sParentCharset && $this->IsReparsed() && \strlen($this->sEncodedValueForReparse)) {
+		if ($this->sParentCharset !== $sParentCharset && \strlen($this->sEncodedValue)) {
 			$this->initInputData(
 				$this->sName,
-				\trim(\MailSo\Base\Utils::DecodeHeaderValue($this->sEncodedValueForReparse, $sParentCharset)),
-				$this->sEncodedValueForReparse
+				\trim(\MailSo\Base\Utils::DecodeHeaderValue($this->sEncodedValue, $sParentCharset)),
+				$this->sEncodedValue
 			);
 		}
 
@@ -132,19 +132,17 @@ class Header
 
 		if ($this->IsSubject()) {
 			if (!\MailSo\Base\Utils::IsAscii($sResult) && \function_exists('iconv_mime_encode')) {
-				$aPreferences = array(
+				return \iconv_mime_encode($this->Name(), $sResult, array(
 //					'scheme' => \MailSo\Base\Enumerations\Encoding::QUOTED_PRINTABLE_SHORT,
 					'scheme' => \MailSo\Base\Enumerations\Encoding::BASE64_SHORT,
 					'input-charset' => \MailSo\Base\Enumerations\Charset::UTF_8,
 					'output-charset' => \MailSo\Base\Enumerations\Charset::UTF_8,
 					'line-length' => 74,
 					'line-break-chars' => "\r\n"
-				);
-
-				return \iconv_mime_encode($this->Name(), $sResult, $aPreferences);
+				));
 			}
 		}
-		else if ($this->IsParameterized() && 0 < $this->oParameters->count())
+		else if ($this->IsParameterized() && $this->oParameters->count())
 		{
 			$sResult = $this->sValue.'; '.$this->oParameters->ToString(true);
 		}
@@ -157,24 +155,25 @@ class Header
 		}
 
 		// https://www.rfc-editor.org/rfc/rfc2822#section-2.1.1, avoid folding immediately after the header name
-                return $this->NameWithDelimitrom() . \wordwrap($sResult, 78 - \strlen($this->NameWithDelimitrom()) - 1, "\r\n ");
-
+		$sName = $this->sName . ': ';
+		return $sName . \wordwrap($sResult, 78 - \strlen($sName) - 1, "\r\n ");
 	}
 
-	public function IsSubject() : bool
+	private function IsSubject() : bool
 	{
 		return \strtolower(Enumerations\Header::SUBJECT) === \strtolower($this->Name());
 	}
 
-	public function IsParameterized() : bool
+	private function IsParameterized() : bool
 	{
 		return \in_array(\strtolower($this->sName), array(
 			\strtolower(Enumerations\Header::CONTENT_TYPE),
 			\strtolower(Enumerations\Header::CONTENT_DISPOSITION)
+//			,\strtolower(Enumerations\Header::AUTOCRYPT)
 		));
 	}
 
-	public function IsEmail() : bool
+	private function IsEmail() : bool
 	{
 		return \in_array(\strtolower($this->sName), array(
 			\strtolower(Enumerations\Header::FROM_),
@@ -182,7 +181,7 @@ class Header
 			\strtolower(Enumerations\Header::CC),
 			\strtolower(Enumerations\Header::BCC),
 			\strtolower(Enumerations\Header::REPLY_TO),
-			\strtolower(Enumerations\Header::RETURN_PATH),
+//			\strtolower(Enumerations\Header::RETURN_PATH),
 			\strtolower(Enumerations\Header::SENDER)
 		));
 	}
@@ -190,17 +189,26 @@ class Header
 	public function ValueWithCharsetAutoDetect() : string
 	{
 		if (!\MailSo\Base\Utils::IsAscii($this->Value())
-		 && \strlen($this->sEncodedValueForReparse)
-		 && !\MailSo\Base\Utils::IsAscii($this->sEncodedValueForReparse)
-		 && ($mEncoding = \mb_detect_encoding($this->sEncodedValueForReparse, 'auto', true))
+		 && \strlen($this->sEncodedValue)
+		 && !\MailSo\Base\Utils::IsAscii($this->sEncodedValue)
+		 && ($mEncoding = \mb_detect_encoding($this->sEncodedValue, 'auto', true))
 		) {
 			$this->SetParentCharset($mEncoding);
 		}
 		return $this->Value();
 	}
 
-	public function IsReparsed() : bool
+	#[\ReturnTypeWillChange]
+	public function jsonSerialize()
 	{
-		return $this->IsEmail() || $this->IsSubject() || $this->IsParameterized();
+		$aResult = array(
+			'@Object' => 'Object/MimeHeader',
+			'name' => $this->sName,
+			'value' => $this->sValue // $this->EncodedValue()
+		);
+		if ($this->oParameters->count()) {
+			$aResult['parameters'] = $this->oParameters;
+		}
+		return $aResult;
 	}
 }

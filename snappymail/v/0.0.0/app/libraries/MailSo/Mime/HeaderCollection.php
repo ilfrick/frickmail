@@ -17,16 +17,13 @@ namespace MailSo\Mime;
  */
 class HeaderCollection extends \MailSo\Base\Collection
 {
-
-	protected string $sRawHeaders = '';
-
 	protected string $sParentCharset = '';
 
-	function __construct(string $sRawHeaders = '', bool $bStoreRawHeaders = true, string $sParentCharset = '')
+	function __construct(string $sRawHeaders = '', string $sParentCharset = '')
 	{
 		parent::__construct();
 		if (\strlen($sRawHeaders)) {
-			$this->Parse($sRawHeaders, $bStoreRawHeaders, $sParentCharset);
+			$this->Parse($sRawHeaders, $sParentCharset);
 		}
 	}
 
@@ -53,13 +50,13 @@ class HeaderCollection extends \MailSo\Base\Collection
 		return $oHeader ? ($bCharsetAutoDetect ? $oHeader->ValueWithCharsetAutoDetect() : $oHeader->Value()) : '';
 	}
 
-	public function ValuesByName(string $sHeaderName, bool $bCharsetAutoDetect = false) : array
+	public function ValuesByName(string $sHeaderName) : array
 	{
 		$aResult = array();
 		$sHeaderNameLower = \strtolower($sHeaderName);
 		foreach ($this as $oHeader) {
 			if ($sHeaderNameLower === \strtolower($oHeader->Name())) {
-				$aResult[] = $bCharsetAutoDetect ? $oHeader->ValueWithCharsetAutoDetect() : $oHeader->Value();
+				$aResult[] = $oHeader->Value();
 			}
 		}
 		return $aResult;
@@ -74,22 +71,18 @@ class HeaderCollection extends \MailSo\Base\Collection
 		return $this;
 	}
 
-	public function GetAsEmailCollection(string $sHeaderName, bool $bCharsetAutoDetect = false) : ?EmailCollection
+	public function GetAsEmailCollection(string $sHeaderName) : ?EmailCollection
 	{
-		return new EmailCollection(
-			$this->ValueByName($sHeaderName, $bCharsetAutoDetect)
-		);
-	}
-
-	public function ParametersByName(string $sHeaderName) : ?ParameterCollection
-	{
-		$oHeader = $this->GetByName($sHeaderName);
-		return $oHeader ? $oHeader->Parameters() : null;
+		if ($oHeader = $this->GetByName($sHeaderName)) {
+			return new EmailCollection($oHeader->EncodedValue());
+		}
+		return new EmailCollection();
 	}
 
 	public function ParameterValue(string $sHeaderName, string $sParamName) : string
 	{
-		$oParameters = $this->ParametersByName($sHeaderName);
+		$oHeader = $this->GetByName($sHeaderName);
+		$oParameters = $oHeader ? $oHeader->Parameters() : null;
 		return (null !== $oParameters) ? $oParameters->ParameterValueByName($sParamName) : '';
 	}
 
@@ -115,19 +108,9 @@ class HeaderCollection extends \MailSo\Base\Collection
 		return $this;
 	}
 
-	public function Clear() : void
-	{
-		parent::Clear();
-		$this->sRawHeaders = '';
-	}
-
-	public function Parse(string $sRawHeaders, bool $bStoreRawHeaders = false, string $sParentCharset = '') : self
+	public function Parse(string $sRawHeaders, string $sParentCharset = '') : self
 	{
 		$this->Clear();
-
-		if ($bStoreRawHeaders) {
-			$this->sRawHeaders = $sRawHeaders;
-		}
 
 		if (\strlen($this->sParentCharset)) {
 			$this->sParentCharset = $sParentCharset;
@@ -210,6 +193,7 @@ class HeaderCollection extends \MailSo\Base\Collection
 		if (\count($aHeaders)) {
 			$aHeaders = \implode(';', $aHeaders);
 			$aHeaders = \preg_replace('/[\\r\\n\\t\\s]+/', ' ', $aHeaders);
+			$aHeaders = \str_replace('-bit key;', '-bit key,', $aHeaders);
 			$aHeaders = \explode(';', $aHeaders);
 			foreach ($aHeaders as $sLine) {
 				$aStatus = array();
@@ -243,5 +227,14 @@ class HeaderCollection extends \MailSo\Base\Collection
 	public function __toString() : string
 	{
 		return \implode("\r\n", $this->getArrayCopy());
+	}
+
+	#[\ReturnTypeWillChange]
+	public function jsonSerialize()
+	{
+		return array(
+			'@Object' => 'Collection/MimeHeaderCollection',
+			'@Collection' => $this->getArrayCopy()
+		);
 	}
 }

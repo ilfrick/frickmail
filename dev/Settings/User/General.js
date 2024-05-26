@@ -5,6 +5,7 @@ import { SaveSettingStatus } from 'Common/Enums';
 import { LayoutSideView, LayoutBottomView } from 'Common/EnumsUser';
 import { setRefreshFoldersInterval } from 'Common/Folders';
 import { Settings, SettingsGet } from 'Common/Globals';
+import { WYSIWYGS } from 'Common/HtmlEditor';
 import { isArray } from 'Common/Utils';
 import { addSubscribablesTo, addComputablesTo } from 'External/ko';
 import { i18n, translateTrigger, translatorReload, convertLangName } from 'Common/Translator';
@@ -14,6 +15,7 @@ import { showScreenPopup } from 'Knoin/Knoin';
 
 import { AppUserStore } from 'Stores/User/App';
 import { LanguageStore } from 'Stores/Language';
+import { FolderUserStore } from 'Stores/User/Folder';
 import { SettingsUserStore } from 'Stores/User/Settings';
 import { IdentityUserStore } from 'Stores/User/Identity';
 import { NotificationUserStore } from 'Stores/User/Notification';
@@ -40,11 +42,18 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 		this.isDesktopNotificationAllowed = NotificationUserStore.allowed;
 
 		this.threadsAllowed = AppUserStore.threadsAllowed;
+		// 'THREAD=REFS', 'THREAD=REFERENCES', 'THREAD=ORDEREDSUBJECT'
+		this.threadAlgorithms = ko.observableArray();
+		FolderUserStore.capabilities.forEach(capa =>
+			capa.startsWith('THREAD=') && this.threadAlgorithms.push(capa.slice(7))
+		);
+		this.threadAlgorithms.sort((a, b) => a.length - b.length);
+		this.threadAlgorithm = SettingsUserStore.threadAlgorithm;
 
-		['useThreads',
+		['useThreads', 'threadAlgorithm',
 		 // These use addSetting()
 		 'layout', 'messageReadDelay', 'messagesPerPage', 'checkMailInterval',
-		 'editorDefaultType', 'msgDefaultAction', 'maxBlockquotesLevel',
+		 'editorDefaultType', 'editorWysiwyg', 'msgDefaultAction', 'maxBlockquotesLevel',
 		 // These are in addSettings()
 		 'requestReadReceipt', 'requestDsn', 'requireTLS', 'pgpSign', 'pgpEncrypt',
 		 'viewHTML', 'viewImages', 'viewImagesWhitelist', 'removeColors', 'allowStyles', 'allowDraftAutosave',
@@ -58,6 +67,8 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 		this.languageTrigger = ko.observable(SaveSettingStatus.Idle);
 
 		this.identities = IdentityUserStore;
+
+		this.wysiwygs = WYSIWYGS;
 
 		addComputablesTo(this, {
 			languageFullName: () => convertLangName(this.language()),
@@ -80,6 +91,8 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 				];
 			},
 
+			hasWysiwygs: () => 1 < WYSIWYGS().length,
+
 			msgDefaultActions: () => {
 				translateTrigger();
 				return [
@@ -99,6 +112,7 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 		});
 
 		this.addSetting('EditorDefaultType');
+		this.addSetting('editorWysiwyg');
 		this.addSetting('MsgDefaultAction');
 		this.addSetting('MessageReadDelay');
 		this.addSetting('MessagesPerPage');
@@ -138,6 +152,11 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 			useThreads: value => {
 				MessagelistUserStore([]);
 				Remote.saveSetting('UseThreads', value);
+			},
+
+			threadAlgorithm: value => {
+				MessagelistUserStore([]);
+				Remote.saveSetting('threadAlgorithm', value);
 			},
 
 			checkMailInterval: () => {

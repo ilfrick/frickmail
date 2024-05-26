@@ -165,17 +165,6 @@ abstract class Utils
 			|| !\preg_match('/[^\x09\x10\x13\x0A\x0D\x20-\x7E]/', $sValue);
 	}
 
-	public static function StrMailDomainToLower(string $sValue) : string
-	{
-		$aParts = \explode('@', $sValue);
-		$iLast = \count($aParts) - 1;
-		if ($iLast) {
-			$aParts[$iLast] = \mb_strtolower($aParts[$iLast]);
-		}
-
-		return \implode('@', $aParts);
-	}
-
 	public static function StripSpaces(string $sValue) : string
 	{
 		return static::Trim(
@@ -196,10 +185,10 @@ abstract class Utils
 		return \round($iSize, $iRound).$aSizes[$iIndex];
 	}
 
-	public static function DecodeEncodingValue(string $sEncodedValue, string $sEncodeingType) : string
+	public static function DecodeEncodingValue(string $sEncodedValue, string $sEncodingType) : string
 	{
 		$sResult = $sEncodedValue;
-		switch (\strtolower($sEncodeingType))
+		switch (\strtolower($sEncodingType))
 		{
 			case 'q':
 			case 'quoted_printable':
@@ -219,7 +208,7 @@ abstract class Utils
 		return \preg_replace('/ ([\r]?[\n])/m', ' ', $sInputValue);
 	}
 
-	public static function DecodeHeaderValue(string $sEncodedValue, string $sIncomingCharset = '', string $sForcedIncomingCharset = '') : string
+	public static function DecodeHeaderValue(string $sEncodedValue, string $sIncomingCharset = '') : string
 	{
 		$sValue = $sEncodedValue;
 		if (\strlen($sIncomingCharset)) {
@@ -276,8 +265,7 @@ abstract class Utils
 			}
 
 			if (\strlen($aTempArr[0])) {
-				$sCharset = \strlen($sForcedIncomingCharset) ? $sForcedIncomingCharset : $aTempArr[0];
-				$sCharset = static::NormalizeCharset($sCharset, true);
+				$sCharset = static::NormalizeCharset($aTempArr[0], true);
 
 				if ('' === $sMainCharset) {
 					$sMainCharset = $sCharset;
@@ -356,7 +344,10 @@ abstract class Utils
 		return $sResultHeaders;
 	}
 
-	public static function EncodeUnencodedValue(string $sEncodeType, string $sValue) : string
+	/**
+	 * https://datatracker.ietf.org/doc/html/rfc2047
+	 */
+	public static function EncodeHeaderValue(string $sValue, string $sEncodeType = 'B') : string
 	{
 		$sValue = \trim($sValue);
 		if (\strlen($sValue) && !static::IsAscii($sValue)) {
@@ -378,7 +369,7 @@ abstract class Utils
 
 	public static function AttributeRfc2231Encode(string $sAttrName, string $sValue, string $sCharset = 'utf-8', string $sLang = '', int $iLen = 1000) : string
 	{
-		$sValue = \strtoupper($sCharset).'\''.$sLang.'\''.
+		$sValue = \strtoupper($sCharset)."'{$sLang}'".
 			\preg_replace_callback('/[\x00-\x20*\'%()<>@,;:\\\\"\/[\]?=\x80-\xFF]/', function ($match) {
 				return \rawurlencode($match[0]);
 			}, $sValue);
@@ -418,28 +409,30 @@ abstract class Utils
 		return \trim($sValue);
 	}
 
+	/**
+	 * @deprecated use getEmailAddressLocalPart
+	 */
 	public static function GetAccountNameFromEmail(string $sEmail) : string
 	{
-		$sResult = '';
-		if (\strlen($sEmail)) {
-			$iPos = \strrpos($sEmail, '@');
-			$sResult = (false === $iPos) ? $sEmail : \substr($sEmail, 0, $iPos);
-		}
-
-		return $sResult;
+		return static::getEmailAddressLocalPart($sEmail);
+	}
+	public static function getEmailAddressLocalPart(string $sEmail) : string
+	{
+		$iPos = \strrpos($sEmail, '@');
+		return (false === $iPos) ? $sEmail : \substr($sEmail, 0, $iPos);
 	}
 
+	/**
+	 * @deprecated use getEmailAddressDomain
+	 */
 	public static function GetDomainFromEmail(string $sEmail) : string
 	{
-		$sResult = '';
-		if (\strlen($sEmail)) {
-			$iPos = \strrpos($sEmail, '@');
-			if (false !== $iPos && 0 < $iPos) {
-				$sResult = \substr($sEmail, $iPos + 1);
-			}
-		}
-
-		return $sResult;
+		return static::getEmailAddressDomain($sEmail);
+	}
+	public static function getEmailAddressDomain(string $sEmail) : string
+	{
+		$iPos = \strrpos($sEmail, '@');
+		return (false === $iPos) ? '' : \substr($sEmail, $iPos + 1);
 	}
 
 	public static function GetClearDomainName(string $sDomain) : string
@@ -691,56 +684,42 @@ abstract class Utils
 		return \sha1($sAdditionalSalt . \random_bytes(16));
 	}
 
-	public static function ValidateDomain(string $sDomain, bool $bSimple = false) : bool
-	{
-		$aMatch = array();
-		if ($bSimple) {
-			return \preg_match('/.+(\.[a-zA-Z]+)$/', $sDomain, $aMatch) && !empty($aMatch[1]);
-		}
-
-		return \preg_match('/.+(\.[a-zA-Z]+)$/', $sDomain, $aMatch) && !empty($aMatch[1]) && \in_array($aMatch[1], \explode(' ',
-			'.academy .actor .agency .audio .bar .beer .bike .blue .boutique .cab .camera .camp .capital .cards .careers .cash .catering .center .cheap .city .cleaning .clinic .clothing .club .coffee .community .company .computer .construction .consulting .contractors .cool .credit .dance .dating .democrat .dental .diamonds .digital .direct .directory .discount .domains .education .email .energy .equipment .estate .events .expert .exposed .fail .farm .fish .fitness .florist .fund .futbol .gallery .gift .glass .graphics .guru .help .holdings .holiday .host .hosting .house .institute .international .kitchen .land .life .lighting .limo .link .management .market .marketing .media .menu .moda .partners .parts .photo .photography .photos .pics .pink .press .productions .pub .red .rentals .repair .report .rest .sexy .shoes .social .solar .solutions .space .support .systems .tattoo .tax .technology .tips .today .tools .town .toys .trade .training .university .uno .vacations .vision .vodka .voyage .watch .webcam .wiki .work .works .wtf .zone .aero .asia .biz .cat .com .coop .edu .gov .info .int .jobs .mil .mobi .museum .name .net .org .pro .tel .travel .xxx .xyz '.
-			'.ac .ad .ae .af .ag .ai .al .am .an .ao .aq .ar .as .at .au .aw .ax .az .ba .bb .bd .be .bf .bg .bh .bi .bj .bm .bn .bo .br .bs .bt .bv .bw .by .bz .ca .cc .cd .cf .cg .ch .ci .ck .cl .cm .cn .co .cr .cs .cu .cv .cx .cy .cz .dd .de .dj .dk .dm .do .dz .ec .ee .eg .er .es .et .eu .fi .fj .fk .fm .fo .fr .ga .gb .gd .ge .gf .gg .gh .gi .gl .gm .gn .gp .gq .gr .gs .gt .gu .gw .gy .hk .hm .hn .hr .ht .hu .id .ie .il .im .in .io .iq .ir .is .it .je .jm .jo .jp .ke .kg .kh .ki .km .kn .kp .kr .kw .ky .kz .la .lb .lc .li .lk .lr .ls .lt .lu .lv .ly .ma .mc .md .me .mg .mh .mk .ml .mm .mn .mo .mp .mq .mr .ms .mt .mu .mv .mw .mx .my .mz .na .nc .ne .nf .ng .ni .nl .no .np .nr .nu .nz .om .pa .pe .pf .pg .ph .pk .pl .pm .pn .pr .ps .pt .pw .py .qa .re .ro .rs .ru . .rw .sa .sb .sc .sd .se .sg .sh .si .sj .sk .sl .sm .sn .so .sr .st .su .sv .sy .sz .tc .td .tf .tg .th .tj .tk .tl .tm .tn .to .tp .tr .tt .tv .tw .tz .ua .ug .uk .us .uy .uz .va .vc .ve .vg .vi .vn .vu .wf .ws .ye .yt .za .zm .zw'
-		));
-	}
-
 	public static function ValidateIP(string $sIp) : bool
 	{
 		return !empty($sIp) && $sIp === \filter_var($sIp, FILTER_VALIDATE_IP);
 	}
 
-	public static function IdnToUtf8(string $sStr, bool $bLowerIfAscii = false) : string
+	/**
+	 * @deprecated
+	 */
+	public static function IdnToUtf8(string $sStr) : string
 	{
-		if (\strlen($sStr) && \preg_match('/(^|\.|@)xn--/i', $sStr)) {
-			try
-			{
-				$sStr = \SnappyMail\IDN::anyToUtf8($sStr);
-			}
-			catch (\Throwable $oException) {}
+		$trace = \debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1];
+		\SnappyMail\Log::warning('MailSo', "Deprecated function IdnToUtf8 called at {$trace['file']}#{$trace['line']}");
+		if (\preg_match('/(^|\.|@)xn--/i', $sStr)) {
+			$sStr = \str_contains($sStr, '@')
+			? \SnappyMail\IDN::emailToUtf8($string)
+			: \idn_to_utf8($string);
 		}
-
-		return $bLowerIfAscii ? static::StrMailDomainToLower($sStr) : $sStr;
+		return $sStr;
 	}
 
-	public static function IdnToAscii(string $sStr, bool $bLowerIfAscii = false) : string
+	/**
+	 * @deprecated
+	 */
+	public static function IdnToAscii(string $sStr, bool $bLowerCase = false) : string
 	{
-		$sStr = $bLowerIfAscii ? static::StrMailDomainToLower($sStr) : $sStr;
-
-		$sUser = '';
-		$sDomain = $sStr;
-		if (false !== \strpos($sStr, '@')) {
-			$sUser = static::GetAccountNameFromEmail($sStr);
-			$sDomain = static::GetDomainFromEmail($sStr);
+		$trace = \debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2)[1];
+		\SnappyMail\Log::warning('MailSo', "Deprecated function IdnToAscii called at {$trace['file']}#{$trace['line']}");
+		$aParts = \explode('@', $sStr);
+		$sDomain = \array_pop($aParts);
+		if (\preg_match('/[^\x20-\x7E]/', $sDomain)) {
+			$sDomain = \idn_to_ascii($string);
 		}
-
-		if (\strlen($sDomain) && \preg_match('/[^\x20-\x7E]/', $sDomain)) {
-			try
-			{
-				$sDomain = \SnappyMail\IDN::anyToAscii($sDomain);
-			}
-			catch (\Throwable $oException) {}
+		if ($bLowerCase) {
+			$sDomain = \strtolower($sDomain);
 		}
-
-		return ('' === $sUser ? '' : $sUser.'@').$sDomain;
+		$aParts[] = $sDomain;
+		return \implode('@', $aParts);
 	}
 }

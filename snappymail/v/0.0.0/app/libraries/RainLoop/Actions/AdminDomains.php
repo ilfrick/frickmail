@@ -10,8 +10,13 @@ trait AdminDomains
 	public function DoAdminDomainLoad() : array
 	{
 		$this->IsAdminLoggined();
-
-		return $this->DefaultResponse($this->DomainProvider()->Load($this->GetActionParam('name', ''), false, false));
+		$mResult = false;
+		$oDomain = $this->DomainProvider()->Load($this->GetActionParam('name', ''), false, false);
+		if ($oDomain) {
+			$mResult = $oDomain->jsonSerialize();
+			$mResult['name'] = $oDomain->Name();
+		}
+		return $this->DefaultResponse($mResult);
 	}
 
 	public function DoAdminDomainList() : array
@@ -24,8 +29,7 @@ trait AdminDomains
 	public function DoAdminDomainDelete() : array
 	{
 		$this->IsAdminLoggined();
-
-		return $this->DefaultResponse($this->DomainProvider()->Delete((string) $this->GetActionParam('name', '')));
+		return $this->DefaultResponse($this->DomainProvider()->Delete($this->GetActionParam('name', '')));
 	}
 
 	public function DoAdminDomainDisable() : array
@@ -59,18 +63,27 @@ trait AdminDomains
 
 	public function DoAdminDomainMatch() : array
 	{
-		$sEmail = $this->GetActionParam('username');
-		$sPassword = '********';
-		$sLogin = '';
-		$this->resolveLoginCredentials($sEmail, $sPassword, $sLogin);
-		$oDomain = \str_contains($sEmail, '@')
-			? $this->DomainProvider()->Load(\MailSo\Base\Utils::GetDomainFromEmail($sEmail), true)
-			: null;
+		$sCredentials = $this->resolveLoginCredentials(
+			$this->GetActionParam('username'),
+			new \SnappyMail\SensitiveString('********')
+		);
+		return $this->DefaultResponse(array(
+			'email' => $sCredentials['email'],
+			'login' => $sCredentials['imapUser'],
+			'domain' => $sCredentials['domain'],
+			'whitelist' => $sCredentials['domain'] ? $sCredentials['domain']->ValidateWhiteList($sEmail) : null
+		));
+	}
+
+	public function DoAdminDomainAutoconfig() : array
+	{
+		$this->IsAdminLoggined();
+//		$sDomain = \SnappyMail\IDN::toAscii($this->GetActionParam('domain'));
+		$sDomain = \strtolower(\idn_to_ascii($this->GetActionParam('domain')));
+		$sEmail = "test@{$sDomain}";
 		return $this->DefaultResponse(array(
 			'email' => $sEmail,
-			'login' => $sLogin,
-			'domain' => $oDomain,
-			'whitelist' => $oDomain ? $oDomain->ValidateWhiteList($sEmail, $sLogin) : null
+			'config' => \RainLoop\Providers\Domain\Autoconfig::discover($sEmail)
 		));
 	}
 
@@ -100,8 +113,8 @@ trait AdminDomains
 					'connectCapa' => \array_values(\array_diff($oImapClient->Capabilities(), ['STARTTLS']))
 				];
 				if (!empty($aAuth['user'])) {
-					$oSettings->Login = $aAuth['user'];
-					$oSettings->Password = $aAuth['pass'];
+					$oSettings->username = $aAuth['user'];
+					$oSettings->passphrase = $aAuth['pass'];
 					$oImapClient->Login($oSettings);
 					$mImapResult['authCapa'] = \array_values(\array_unique(\array_map(function($n){
 							return \str_starts_with($n, 'THREAD=') ? 'THREAD' : $n;
@@ -126,7 +139,7 @@ trait AdminDomains
 				$sImapErrorDesc = $oException->getMessage();
 			}
 
-			if ($oDomain->OutUsePhpMail()) {
+			if ($oDomain->SmtpSettings()->usePhpMail) {
 				$mSmtpResult = \MailSo\Base\Utils::FunctionCallable('mail');
 				if (!$mSmtpResult) {
 					$sSmtpErrorDesc = 'PHP: mail() function is undefined';
@@ -145,8 +158,8 @@ trait AdminDomains
 					];
 
 					if (!empty($aAuth['user'])) {
-						$oSettings->Login = $aAuth['user'];
-						$oSettings->Password = $aAuth['pass'];
+						$oSettings->username = $aAuth['user'];
+						$oSettings->passphrase = $aAuth['pass'];
 						$oSmtpClient->Login($oSettings);
 						$mSmtpResult['authCapa'] = $oSmtpClient->Capability();
 					}
@@ -168,7 +181,7 @@ trait AdminDomains
 				}
 			}
 
-			if ($oDomain->UseSieve()) {
+			if ($oDomain->SieveSettings()->enabled) {
 				try
 				{
 					$oSieveClient = new \MailSo\Sieve\SieveClient();
@@ -181,8 +194,8 @@ trait AdminDomains
 					];
 
 					if (!empty($aAuth['user'])) {
-						$oSettings->Login = $aAuth['user'];
-						$oSettings->Password = $aAuth['pass'];
+						$oSettings->username = $aAuth['user'];
+						$oSettings->passphrase = $aAuth['pass'];
 						$oSieveClient->Login($oSettings);
 						$mSieveResult['authCapa'] = $oSieveClient->Capability();
 					}

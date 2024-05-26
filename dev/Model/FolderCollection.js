@@ -3,9 +3,8 @@ import { AbstractCollectionModel } from 'Model/AbstractCollection';
 import { UNUSED_OPTION_VALUE } from 'Common/Consts';
 import { isArray, getKeyByValue, forEachObjectEntry, b64EncodeJSONSafe } from 'Common/Utils';
 import { ClientSideKeyNameExpandedFolders, FolderType, FolderMetadataKeys } from 'Common/EnumsUser';
-import { clearCache, getFolderFromCacheList, setFolder, setFolderInboxName, removeFolderFromCacheList } from 'Common/Cache';
+import { clearCache, getFolderFromCacheList, setFolder, setFolderInboxName } from 'Common/Cache';
 import { Settings, SettingsGet, fireEvent } from 'Common/Globals';
-import { Notifications } from 'Common/Enums';
 
 import * as Local from 'Storage/Client';
 
@@ -15,17 +14,22 @@ import { MessagelistUserStore } from 'Stores/User/Messagelist';
 import { SettingsUserStore } from 'Stores/User/Settings';
 
 import { sortFolders } from 'Common/Folders';
-import { i18n, translateTrigger, getNotification } from 'Common/Translator';
+import { i18n, translateTrigger } from 'Common/Translator';
 
 import { AbstractModel } from 'Knoin/AbstractModel';
 
 import { /*koComputable,*/ addObservablesTo } from 'External/ko';
 
-//import { mailBox } from 'Common/Links';
+import { mailBox } from 'Common/Links';
 
 import Remote from 'Remote/User/Fetch';
 
 import { FileInfo } from 'Common/File';
+
+import { FolderPopupView } from 'View/Popup/Folder';
+import { showScreenPopup } from 'Knoin/Knoin';
+
+import { isAllowedKeyword } from 'Stores/User/Folder';
 
 const
 //	isPosNumeric = value => null != value && /^[0-9]*$/.test(value.toString()),
@@ -113,6 +117,8 @@ export class FolderCollectionModel extends AbstractCollectionModel
 		this.namespace;
 		this.optimized
 		this.capabilities
+		this.allow; // allow adding
+//		this.exist;
 	}
 */
 
@@ -254,6 +260,10 @@ export class FolderCollectionModel extends AbstractCollectionModel
 		return result;
 	}
 
+	visible() {
+		return this.filter(folder => folder.visible());
+	}
+
 	storeIt() {
 		FolderUserStore.displaySpecSetting(Settings.app('folderSpecLimit') < this.CountRec);
 
@@ -296,6 +306,7 @@ export class FolderModel extends AbstractModel {
 		super();
 
 		this.fullName = '';
+		this.parentName = '';
 		this.delimiter = '';
 		this.deep = 0;
 		this.expires = 0;
@@ -316,12 +327,10 @@ export class FolderModel extends AbstractModel {
 
 			focused: false,
 			selected: false,
-			editing: false,
 			isSubscribed: true,
 			checkable: false, // Check for new messages
 			askDelete: false,
 
-			nameForEdit: '',
 			errorMsg: '',
 
 			totalEmails: 0,
@@ -341,7 +350,6 @@ export class FolderModel extends AbstractModel {
 		this.addSubscribables({
 			kolabType: sValue => this.metadata[FolderMetadataKeys.KolabFolderType] = sValue,
 			permanentFlags: aValue => this.tagsAllowed(aValue.includes('\\*')),
-			editing: value => value && this.nameForEdit(this.name()),
 			unreadEmails: unread => FolderType.Inbox === this.type() && fireEvent('mailbox.inbox-unread-count', unread)
 		});
 
@@ -363,20 +371,19 @@ export class FolderModel extends AbstractModel {
 			.extend({ notify: 'always' });
 */
 /*
-		https://www.rfc-editor.org/rfc/rfc8621.html#section-2
-		"myRights": {
-			"mayAddItems": true,
-			"mayRename": false,
-			"maySubmit": true,
-			"mayDelete": false,
-			"maySetKeywords": true,
-			"mayRemoveItems": true,
-			"mayCreateChild": true,
-			"maySetSeen": true,
-			"mayReadItems": true
-		},
+		// https://www.rfc-editor.org/rfc/rfc8621.html#section-2
+		this.myRights = {
+			'mayAddItems': true,
+			'mayCreateChild': true,
+			'mayDelete': true,
+			'mayReadItems': true,
+			'mayRemoveItems': true,
+			'mayRename': true,
+			'maySetKeywords': true,
+			'maySetSeen': true,
+			'maySubmit': true
+		};
 */
-
 		this.addComputables({
 
 			isInbox: () => FolderType.Inbox === this.type(),
@@ -387,6 +394,7 @@ export class FolderModel extends AbstractModel {
 //			isSubscribed: () => this.attributes().includes('\\subscribed'),
 
 			hasVisibleSubfolders: () => !!this.subFolders().find(folder => folder.visible()),
+			visibleSubfolders: () => this.subFolders().visible(),
 
 			hasSubscriptions: () => this.isSubscribed() | !!this.subFolders().find(
 					oFolder => {
@@ -394,8 +402,6 @@ export class FolderModel extends AbstractModel {
 						return !oFolder.isSystemFolder() && subscribed;
 					}
 				),
-
-			canBeEdited: () => !this.type() && this.exists/* && this.selectable()*/,
 
 			isSystemFolder: () => this.type()
 				| (FolderUserStore.allowKolab() && !!this.kolabType() & !SettingsUserStore.unhideKolabFolders()),
@@ -406,6 +412,8 @@ export class FolderModel extends AbstractModel {
 
 			canBeSubscribed: () => this.selectable()
 				&& !(this.isSystemFolder() | !SettingsUserStore.hideUnsubscribed()),
+
+			optionalTags: () => this.permanentFlags.filter(isAllowedKeyword),
 
 			/**
 			 * Folder is visible when:
@@ -463,60 +471,30 @@ export class FolderModel extends AbstractModel {
 
 			detailedName: () => this.name() + ' ' + this.nameInfo(),
 
-			hasSubscribedUnreadMessagesSubfolders: () =>
-				!!this.subFolders().find(
-					folder => folder.unreadCount() | folder.hasSubscribedUnreadMessagesSubfolders()
-				)
-/*
-				!!this.subFolders().filter(
-					folder => folder.unreadCount() | folder.hasSubscribedUnreadMessagesSubfolders()
-				).length
-*/
-//			,href: () => this.canBeSelected() && mailBox(this.fullNameHash)
+			icon: () => {
+				switch (this.type())
+				{
+					case 1: return '📥'; // FolderType.Inbox
+					case 2: return '📧'; // FolderType.Sent icon-paper-plane
+					case 3: return '🗎'; // FolderType.Drafts
+					case 4: return '⚠'; // FolderType.Junk
+					case 5: return '🗑'; // FolderType.Trash
+					case 6: return '🗄'; // FolderType.Archive
+				}
+				return null;
+			},
+
+			hasUnreadInSub: () =>
+				this.subFolders().some(
+					folder => folder.unreadEmails() | folder.hasUnreadInSub()
+				),
+
+			href: () => this.canBeSelected() && mailBox(this.fullNameHash)
 		});
 	}
 
 	edit() {
-		this.canBeEdited() && this.editing(true);
-	}
-
-	unedit() {
-		this.editing(false);
-	}
-
-	rename() {
-		const folder = this,
-			nameToEdit = folder.nameForEdit().trim();
-		if (nameToEdit && folder.name() !== nameToEdit) {
-			Remote.abort('Folders').post('FolderRename', FolderUserStore.foldersRenaming, {
-					folder: folder.fullName,
-					newFolderName: nameToEdit,
-					subscribe: folder.isSubscribed() ? 1 : 0
-				})
-				.then(data => {
-					folder.name(nameToEdit/*data.name*/);
-					if (folder.subFolders.length) {
-						Remote.setTrigger(FolderUserStore.foldersLoading, true);
-//						clearTimeout(Remote.foldersTimeout);
-//						Remote.foldersTimeout = setTimeout(loadFolders, 500);
-						setTimeout(loadFolders, 500);
-						// TODO: rename all subfolders with folder.delimiter to prevent reload?
-					} else {
-						removeFolderFromCacheList(folder.fullName);
-						folder.fullName = data.Result.fullName;
-						setFolder(folder);
-						const parent = getFolderFromCacheList(folder.parentName);
-						sortFolders(parent ? parent.subFolders : FolderUserStore.folderList);
-					}
-				})
-				.catch(error => {
-					FolderUserStore.error(
-						getNotification(error.code, '', Notifications.CantRenameFolder)
-						+ '.\n' + error.message);
-				});
-		}
-
-		folder.editing(false);
+		showScreenPopup(FolderPopupView, [this]);
 	}
 
 	/**

@@ -1,5 +1,7 @@
 <?php
 
+use SnappyMail\SensitiveString;
+
 class ChangePasswordDriverLDAP
 {
 	const
@@ -55,19 +57,19 @@ class ChangePasswordDriverLDAP
 		);
 	}
 
-	public function ChangePassword(\RainLoop\Model\Account $oAccount, string $sPrevPassword, string $sNewPassword) : bool
+	public function ChangePassword(\RainLoop\Model\Account $oAccount, SensitiveString $oPrevPassword, SensitiveString $oNewPassword) : bool
 	{
-		$sDomain = \MailSo\Base\Utils::GetDomainFromEmail($oAccount->Email());
+		$sDomain = \MailSo\Base\Utils::getEmailAddressDomain($oAccount->Email());
 		$sUserDn = \strtr($this->sUserDnFormat, array(
 			'{domain}' => $sDomain,
 			'{domain:dc}' => 'dc='.\strtr($sDomain, array('.' => ',dc=')),
 			'{email}' => $oAccount->Email(),
-			'{email:user}' => \MailSo\Base\Utils::GetAccountNameFromEmail($oAccount->Email()),
+			'{email:user}' => \MailSo\Base\Utils::getEmailAddressLocalPart($oAccount->Email()),
 			'{email:domain}' => $sDomain,
 			'{login}' => $oAccount->IncLogin(),
 			'{imap:login}' => $oAccount->IncLogin(),
-			'{imap:host}' => $oAccount->Domain()->IncHost(),
-			'{imap:port}' => $oAccount->Domain()->IncPort(),
+			'{imap:host}' => $oAccount->Domain()->ImapSettings()->host,
+			'{imap:port}' => $oAccount->Domain()->ImapSettings()->port,
 			'{gecos}' => \function_exists('posix_getpwnam') ? \posix_getpwnam($oAccount->IncLogin()) : ''
 		));
 
@@ -89,25 +91,25 @@ class ChangePasswordDriverLDAP
 			throw new \Exception('ldap_start_tls error '.\ldap_errno($oCon).': '.\ldap_error($oCon));
 		}
 
-		if (!\ldap_bind($oCon, $sUserDn, $sPrevPassword)) {
+		if (!\ldap_bind($oCon, $sUserDn, $oPrevPassword)) {
 			throw new \Exception('ldap_bind error '.\ldap_errno($oCon).': '.\ldap_error($oCon));
 		}
 
 		$sSshaSalt = '';
 		$sPrefix = '{'.\strtoupper($this->sPasswordEncType).'}';
-		$sEncodedNewPassword = $sNewPassword;
+		$sEncodedNewPassword = $oNewPassword;
 		switch ($sPrefix)
 		{
 			case '{SSHA}':
 				$sSshaSalt = $this->getSalt(4);
 			case '{SHA}':
-				$sEncodedNewPassword = $sPrefix.\base64_encode(\hash('sha1', $sNewPassword.$sSshaSalt, true).$sSshaSalt);
+				$sEncodedNewPassword = $sPrefix.\base64_encode(\hash('sha1', $oNewPassword.$sSshaSalt, true).$sSshaSalt);
 				break;
 			case '{MD5}':
-				$sEncodedNewPassword = $sPrefix.\base64_encode(\md5($sNewPassword, true));
+				$sEncodedNewPassword = $sPrefix.\base64_encode(\md5($oNewPassword, true));
 				break;
 			case '{CRYPT}':
-				$sEncodedNewPassword = $sPrefix.\crypt($sNewPassword, $this->getSalt(2));
+				$sEncodedNewPassword = $sPrefix.\crypt($oNewPassword, $this->getSalt(2));
 				break;
 		}
 

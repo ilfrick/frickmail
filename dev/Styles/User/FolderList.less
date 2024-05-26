@@ -17,6 +17,15 @@
 	width: 100%;
 }
 
+/* https://github.com/the-djmaze/snappymail/issues/1427 */
+#V-MailFolderList .e-checkbox {
+	margin: 0 4px;
+	width: calc(100% - 8px);
+}
+#V-MailFolderList .unreadOnly li a:not(.unread-sub):not([data-unread]) {
+    display:none;
+}
+
 .b-folders {
 	display: flex;
 	flex-direction: column;
@@ -56,6 +65,7 @@
 		overflow: hidden;
 		overflow-y: auto;
 		min-width: 100px;
+		color: var(--folders-color, #333);
 	}
 
 	hr {
@@ -68,22 +78,18 @@
 		white-space: nowrap;
 
 		a {
-			display: block;
-			position: relative;
-			z-index: 1;
-			line-height: 34px;
 			background-color: transparent;
-			vertical-align: middle;
-			color: var(--folders-disabled-color, #666);
 			border-left: 3px solid transparent;
-
+			color: var(--folders-color, #333);
+			display: block;
+			line-height: 34px;
 			padding: 0 2em 0 @folderItemPadding;
-
+			position: relative;
 			text-decoration: none;
+			vertical-align: middle;
+			z-index: 1;
 
 			&.selectable {
-
-				color: var(--folders-color, #333);
 				cursor: pointer;
 
 				&:hover {
@@ -106,6 +112,7 @@
 				}
 			}
 			&:not(.selectable) {
+				color: var(--folders-disabled-color, #666);
 				cursor: default;
 				font-style: italic;
 			}
@@ -185,27 +192,6 @@
 	li li li li li a {
 		text-indent: 4em;
 	}
-
-/**/
-	&.single-root-inbox .b-folders-user > li > a {
-		display: none !important;
-	}
-
-	&.single-root-inbox {
-		li li a {
-			text-indent: 0;
-		}
-		li li li a {
-			text-indent: 1em;
-		}
-		li li li li a {
-			text-indent: 2em;
-		}
-		li li li li li a {
-			text-indent: 3em;
-		}
-	}
-/**/
 }
 
 #rl-left .buttonCompose {

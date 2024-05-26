@@ -6,10 +6,7 @@ class Manager
 {
 	use \MailSo\Log\Inherit;
 
-	/**
-	 * @var \RainLoop\Actions
-	 */
-	private $oActions;
+	private \RainLoop\Actions $oActions;
 
 	private array
 		$aHooks = array(),
@@ -26,6 +23,7 @@ class Manager
 	public function __construct(\RainLoop\Actions $oActions)
 	{
 		$this->oActions = $oActions;
+		$this->SetLogger($oActions->Logger());
 
 		$oConfig = $oActions->Config();
 		$this->bIsEnabled = (bool) $oConfig->Get('plugins', 'enable', false);
@@ -382,7 +380,7 @@ class Manager
 
 	public function GetUserPluginSettings(string $sPluginName) : array
 	{
-		$oAccount = $this->oActions->GetAccount();
+		$oAccount = $this->oActions->getAccountFromToken();
 		if ($oAccount) {
 			$oSettings = $this->oActions->SettingsProvider()->Load($oAccount);
 			if ($oSettings) {
@@ -398,7 +396,7 @@ class Manager
 
 	public function SaveUserPluginSettings(string $sPluginName, array $aSettings) : bool
 	{
-		$oAccount = $this->oActions->GetAccount();
+		$oAccount = $this->oActions->getAccountFromToken();
 		if ($oAccount) {
 			$oSettings = $this->oActions->SettingsProvider()->Load($oAccount);
 			if ($oSettings) {
@@ -419,7 +417,7 @@ class Manager
 				$aData[$sPluginName] = $aPluginSettings;
 				$oSettings->SetConf('Plugins',$aData);
 
-				return $this->oActions->SettingsProvider()->Save($oAccount, $oSettings);
+				return $oSettings->save();
 			}
 		}
 

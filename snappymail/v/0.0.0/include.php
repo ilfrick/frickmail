@@ -4,8 +4,16 @@ if (defined('APP_VERSION_ROOT_PATH')) {
 }
 
 // PHP 8
-if (\PHP_VERSION_ID < 80000) {
-	require __DIR__ . '/php8.php';
+if (PHP_VERSION_ID < 80000) {
+	require __DIR__ . '/app/libraries/polyfill/php8.php';
+}
+
+if (!extension_loaded('ctype')) {
+	require __DIR__ . '/app/libraries/polyfill/ctype.php';
+}
+
+if (!extension_loaded('intl')) {
+	require __DIR__ . '/app/libraries/polyfill/intl.php';
 }
 
 if (!defined('APP_VERSION')) {
@@ -64,8 +72,6 @@ define('APP_PLUGINS_PATH', APP_PRIVATE_DATA.'plugins/');
 
 ini_set('default_charset', 'UTF-8');
 ini_set('internal_encoding', 'UTF-8');
-mb_internal_encoding('UTF-8');
-mb_language('uni');
 
 if (!defined('SNAPPYMAIL_LIBRARIES_PATH')) {
 	define('SNAPPYMAIL_LIBRARIES_PATH', rtrim(realpath(__DIR__), '\\/').'/app/libraries/');
@@ -93,6 +99,9 @@ if (APP_VERSION !== (is_file(APP_DATA_FOLDER_PATH.'INSTALLED') ? file_get_conten
 {
 	include __DIR__ . '/setup.php';
 }
+
+mb_internal_encoding('UTF-8');
+mb_language('uni');
 
 $sSalt = is_file(APP_DATA_FOLDER_PATH.'SALT.php') ? trim(file_get_contents(APP_DATA_FOLDER_PATH.'SALT.php')) : '';
 if (!$sSalt) {

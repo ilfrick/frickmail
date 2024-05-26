@@ -17,18 +17,26 @@ namespace MailSo\Imap\Responses;
  */
 class ACL implements \JsonSerializable
 {
-	private array $rights;
+	private string
+		$identifier,
+		$rights;
 
-	function __construct(array $rights)
+	function __construct(string $identifier, string $rights)
 	{
+		$this->identifier = $identifier;
 		$this->rights = $rights;
+	}
+
+	public function identifier() : string
+	{
+		return $this->identifier;
 	}
 
 	/** PHP 8.1
 	public function hasRight(string|\MailSo\Imap\Enumerations\FolderACL $right)
 	{
 		if ($right instanceof \BackedEnum) {
-			return \in_array($right->value, $this->rights);
+			return \str_contains($this->rights, $right->value);
 		}
 	*/
 	public function hasRight(string $right) : bool
@@ -37,13 +45,25 @@ class ACL implements \JsonSerializable
 		if (\defined($const)) {
 			$right = \constant($const);
 		}
-		return \in_array($right, $this->rights);
+		return \str_contains($this->rights, $right);
 	}
 
 	#[\ReturnTypeWillChange]
 	public function jsonSerialize()
 	{
-		return $this->rights;
+		return [
+			'identifier' => $this->identifier,
+			'rights' => $this->rights,
+			'mayReadItems'   => ($this->hasRight('l') && $this->hasRight('r')),
+			'mayAddItems'    => $this->hasRight('i'),
+			'mayRemoveItems' => ($this->hasRight('t') && $this->hasRight('e')),
+			'maySetSeen'     => $this->hasRight('s'),
+			'maySetKeywords' => $this->hasRight('w'),
+			'mayCreateChild' => $this->hasRight('k'),
+			'mayRename'      => $this->hasRight('x'),
+			'mayDelete'      => $this->hasRight('x'),
+			'maySubmit'      => $this->hasRight('p')
+		];
 	}
 
 }

@@ -80,6 +80,9 @@
 								<a href="#" tabindex="-1" data-bind="command: moveCommand" data-icon="📁" data-i18n="GLOBAL/MOVE_TO"></a>
 							</li>
 							<li role="presentation">
+								<a href="#" tabindex="-1" data-bind="command: copyCommand" data-icon="&#xE068;" data-i18n="GLOBAL/COPY_TO"></a>
+							</li>
+							<li role="presentation">
 								<a href="#" tabindex="-1" data-bind="command: deleteCommand" data-icon="🗑" data-i18n="GLOBAL/DELETE"></a>
 							</li>
 							<li role="presentation">
@@ -108,6 +111,9 @@
 							<li role="presentation" data-bind="visible: isHtml()">
 								<a href="#" tabindex="-1" data-bind="click: viewPlain" data-icon="👁" data-i18n="MESSAGE/PLAIN_VIEW"></a>
 							</li>
+							<li role="presentation">
+								<a href="#" tabindex="-1" data-bind="click: swapColors" data-icon="🎨" data-i18n="MESSAGE/SWAP_COLORS"></a>
+							</li>
 							<li class="dividerbar" role="presentation">
 								<a target="_blank" href="#" tabindex="-1" data-bind="attr: { href: viewRaw() }">
 									<i class="icon-file-code"></i>
@@ -132,13 +138,13 @@
 			</div>
 			<div class="informationShort">
 				<span class="from" data-bind="html: viewFromShort, attr:{ title: message().from }"></span>
-				<i data-bind="visible: viewDkimIcon, css: dkimIconClass, attr:{ title: dkimTitle }"></i>
+				<i class="fontastic" data-bind="text: dkimIcon, css: dkimIconClass, attr:{ title: dkimTitle }"></i>
 			</div>
 		</div>
 		<div id="messageItem">
 			<div class="messageItemHeader" data-bind="if: message, i18nUpdate: message">
 				<div data-bind="hidden: showFullInfo">
-					<time class="date" data-moment-format="FULL" data-bind="visible: 0 < message().dateTimestamp(), moment: message().dateTimestamp()"></time>
+					<time class="date" data-time-format="FULL" data-bind="visible: 0 < message().dateTimestamp(), time: message().dateTimestamp()"></time>
 					<div class="informationShortWrp">
 						<div class="informationShort" data-bind="visible: message().to.length">
 							<span data-i18n="GLOBAL/TO"></span>:
@@ -149,18 +155,16 @@
 							<span data-bind="text: message().cc"></span>
 						</div>
 					</div>
-					<div class="informationShort" data-bind="visible: message().spamResult()">
+					<div class="informationShort" data-bind="visible: message().spamResult">
 						<span data-i18n="MESSAGE/SPAM_SCORE"></span>:
-						<meter min="0" max="100" optimum="0" low="33" high="66" data-bind="value: message().spamScore(), attr:{ title: message().spamStatus() }"></meter>
+						<meter min="0" max="100" optimum="0" low="33" high="66" data-bind="value: message().spamScore, attr:{ title: message().spamStatus() }"></meter>
 					</div>
 				</div>
 				<div class="informationFull" data-bind="visible: showFullInfo, with: message">
 					<table>
 						<tr data-bind="visible: from.length">
 							<td data-i18n="GLOBAL/FROM"></td>
-							<td><span data-bind="text: from"></span>
-								<i data-bind="visible: $parent.viewDkimIcon, css: $parent.dkimIconClass, attr:{ title: $parent.dkimTitle }"></i>
-							</td>
+							<td data-bind="text: from"></td>
 						</tr>
 						<tr data-bind="visible: to.length">
 							<td data-i18n="GLOBAL/TO"></td>
@@ -181,9 +185,9 @@
 						<tr data-bind="visible: dateTimestamp">
 							<td data-i18n="MESSAGE/LABEL_DATE"></td>
 							<td>
-								<time data-moment-format="FULL" data-bind="moment: dateTimestamp"></time>
+								<time data-time-format="FULL" data-bind="time: dateTimestamp"></time>
 								&nbsp;
-								(<time data-moment-format="FROMNOW" data-bind="moment: dateTimestamp"></time>)
+								(<time data-time-format="FROMNOW" data-bind="time: dateTimestamp"></time>)
 							</td>
 						</tr>
 						<tr data-bind="visible: spamResult">
@@ -196,7 +200,7 @@
 						</tr>
 					</table>
 				</div>
-				<div class="hasVirus" data-bind="visible: message().hasVirus()" data-i18n="MESSAGE/HAS_VIRUS_WARNING"></div>
+				<div class="hasVirus" data-bind="visible: message().hasVirus" data-i18n="MESSAGE/HAS_VIRUS_WARNING"></div>
 				<!-- ko if: tagsAllowed -->
 				<div class="messageTags">
 					<span data-i18n="MESSAGE/TAGS"></span>:
@@ -287,16 +291,37 @@
 							</div>
 						</div>
 
+						<div class="btn-toolbar" data-bind="visible: message().hasTracking()">
+							<div class="btn" data-bind="visible: !nowTracking(), click: showTracking" data-icon="🔗" data-i18n="MESSAGE/ENABLE_TRACKING_LINKS"></div>
+							<div class="alert" data-bind="visible: nowTracking" data-i18n="MESSAGE/TRACKING_ENABLED" style="margin:0"></div>
+						</div>
+
 						<div data-bind="visible: message().pgpEncrypted()">
-							<div class="openpgp-control encrypted" data-bind="css: {success: message().pgpDecrypted()}">
+							<div class="crypto-control encrypted" data-bind="css: {success: message().pgpDecrypted()}">
 								<span data-icon="🔒" data-i18n="OPENPGP/ENCRYPTED_MESSAGE"></span>
-								<button class="btn" data-bind="visible: pgpSupported, click: pgpDecrypt" data-i18n="OPENPGP/BUTTON_DECRYPT"></button>
+								<button class="btn" data-bind="visible: pgpSupported, click: pgpDecrypt" data-i18n="CRYPTO/DECRYPT"></button>
+								<div class="alert-error" data-icon="⚠" data-bind="visible: message().pgpEncrypted()?.error, text: message().pgpEncrypted()?.error"></div>
 							</div>
 						</div>
 						<div data-bind="visible: message().pgpSigned()">
-							<div class="openpgp-control signed" data-bind="css: {success: message().pgpVerified() && message().pgpVerified().success, error: message().pgpVerified() && !message().pgpVerified().success}">
+							<div class="crypto-control signed" data-bind="css: {success: true === message().pgpSigned()?.success, error: false === message().pgpSigned()?.success}">
 								<span data-icon="✍" data-i18n="OPENPGP/SIGNED_MESSAGE"></span>
-								<button class="btn" data-bind="visible: pgpSupported, click: pgpVerify" data-i18n="OPENPGP/BUTTON_VERIFY"></button>
+								<button class="btn" data-bind="visible: pgpSupported, click: pgpVerify" data-i18n="CRYPTO/VERIFY"></button>
+								<div data-icon="⚠" data-bind="visible: message().pgpSigned()?.error, text: message().pgpSigned()?.error"></div>
+							</div>
+						</div>
+
+						<div data-bind="visible: message().smimeEncrypted()">
+							<div class="crypto-control encrypted" data-bind="css: {success: message().smimeDecrypted()}">
+								<span data-icon="🔒" data-i18n="SMIME/ENCRYPTED_MESSAGE"></span>
+								<button class="btn" data-bind="click: smimeDecrypt" data-i18n="CRYPTO/DECRYPT"></button>
+								<div class="alert-error" data-icon="⚠" data-bind="visible: message().smimeEncrypted()?.error, text: message().smimeEncrypted()?.error"></div>
+							</div>
+						</div>
+						<div data-bind="visible: message().smimeSigned()">
+							<div class="crypto-control signed" data-bind="css: {success: true === message().smimeSigned()?.success, error: false === message().smimeSigned()?.success}">
+								<span data-icon="✍" data-i18n="SMIME/SIGNED_MESSAGE"></span>
+								<button class="btn" data-bind="click: smimeVerify" data-i18n="CRYPTO/VERIFY"></button>
 							</div>
 						</div>
 					</div>

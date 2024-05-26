@@ -2,11 +2,13 @@
 
 namespace RainLoop\Model;
 
-use MailSo\Base\Utils;
+use SnappyMail\SensitiveString;
 
 class Identity implements \JsonSerializable
 {
 	private string $sId;
+
+	private string $sLabel = '';
 
 	private string $sEmail;
 
@@ -18,12 +20,35 @@ class Identity implements \JsonSerializable
 
 	private string $sSignature = '';
 
+	private string $sSentFolder = '';
+
 	private bool $bSignatureInsertBefore = false;
+
+	private bool $pgpEncrypt = false;
+	private bool $pgpSign = false;
+
+	private ?SensitiveString $smimeKey = null;
+	private string $smimeCertificate = '';
 
 	function __construct(string $sId = '', string $sEmail = '')
 	{
 		$this->sId = $sId;
 		$this->sEmail = $sEmail;
+	}
+
+	function __get(string $name)
+	{
+		if (!\property_exists($this, $name)) {
+			$name = \substr($name, 1);
+		}
+		if (\property_exists($this, $name)) {
+			return $this->$name;
+		}
+	}
+
+	function toMime() : \MailSo\Mime\Email
+	{
+		return new \MailSo\Mime\Email($this->sEmail, $this->sName);
 	}
 
 	public function Id(bool $bFillOnEmpty = false): string
@@ -48,16 +73,6 @@ class Identity implements \JsonSerializable
 		return $this->sName;
 	}
 
-	public function ReplyTo(): string
-	{
-		return $this->sReplyTo;
-	}
-
-	public function Bcc(): string
-	{
-		return $this->sBcc;
-	}
-
 	public function SetId(string $sId): Identity
 	{
 		$this->sId = $sId;
@@ -70,10 +85,9 @@ class Identity implements \JsonSerializable
 		return $this;
 	}
 
-	public function SetReplyTo(string $sReplyTo): Identity
+	public function ReplyTo(): string
 	{
-		$this->sReplyTo = $sReplyTo;
-		return $this;
+		return $this->sReplyTo;
 	}
 
 	public function SetBcc(string $sBcc): Identity
@@ -82,29 +96,22 @@ class Identity implements \JsonSerializable
 		return $this;
 	}
 
-	public function SetSignature(string $sSignature): Identity
-	{
-		$this->sSignature = $sSignature;
-		return $this;
-	}
-
-	public function SetSignatureInsertBefore(bool $bSignatureInsertBefore): Identity
-	{
-		$this->bSignatureInsertBefore = $bSignatureInsertBefore;
-		return $this;
-	}
-
 	public function FromJSON(array $aData, bool $bJson = false): bool
 	{
 		if (!empty($aData['Email'])) {
 			$this->sId = !empty($aData['Id']) ? $aData['Id'] : '';
-			$this->sEmail = $bJson ? Utils::IdnToAscii($aData['Email'], true) : $aData['Email'];
+			$this->sLabel = isset($aData['Label']) ? $aData['Label'] : '';
+			$this->sEmail = $bJson ? \SnappyMail\IDN::emailToAscii($aData['Email']) : $aData['Email'];
 			$this->sName = isset($aData['Name']) ? $aData['Name'] : '';
 			$this->sReplyTo = !empty($aData['ReplyTo']) ? $aData['ReplyTo'] : '';
 			$this->sBcc = !empty($aData['Bcc']) ? $aData['Bcc'] : '';
 			$this->sSignature = !empty($aData['Signature']) ? $aData['Signature'] : '';
 			$this->bSignatureInsertBefore = !empty($aData['SignatureInsertBefore']);
-
+			$this->sSentFolder = isset($aData['sentFolder']) ? $aData['sentFolder'] : '';
+			$this->pgpEncrypt = !empty($aData['pgpEncrypt']);
+			$this->pgpSign = !empty($aData['pgpSign']);
+			$this->smimeKey = new SensitiveString(isset($aData['smimeKey']) ? $aData['smimeKey'] : '');
+			$this->smimeCertificate = isset($aData['smimeCertificate']) ? $aData['smimeCertificate'] : '';
 			return true;
 		}
 
@@ -116,12 +123,18 @@ class Identity implements \JsonSerializable
 	{
 		return array(
 			'Id' => $this->sId,
+			'Label' => $this->sLabel,
 			'Email' => $this->sEmail,
 			'Name' => $this->sName,
 			'ReplyTo' => $this->sReplyTo,
 			'Bcc' => $this->sBcc,
 			'Signature' => $this->sSignature,
-			'SignatureInsertBefore' => $this->bSignatureInsertBefore
+			'SignatureInsertBefore' => $this->bSignatureInsertBefore,
+			'sentFolder' => $this->sSentFolder,
+			'pgpEncrypt' => $this->pgpEncrypt,
+			'pgpSign' => $this->pgpSign,
+			'smimeKey' => (string) $this->smimeKey,
+			'smimeCertificate' => $this->smimeCertificate
 		);
 	}
 
@@ -131,12 +144,18 @@ class Identity implements \JsonSerializable
 		return array(
 			'@Object' => 'Object/Identity',
 			'id' => $this->sId,
-			'email' => Utils::IdnToUtf8($this->sEmail),
+			'label' => $this->sLabel,
+			'email' => \SnappyMail\IDN::emailToUtf8($this->sEmail),
 			'name' => $this->sName,
 			'replyTo' => $this->sReplyTo,
 			'bcc' => $this->sBcc,
 			'signature' => $this->sSignature,
-			'signatureInsertBefore' => $this->bSignatureInsertBefore
+			'signatureInsertBefore' => $this->bSignatureInsertBefore,
+			'sentFolder' => $this->sSentFolder,
+			'pgpEncrypt' => $this->pgpEncrypt,
+			'pgpSign' => $this->pgpSign,
+			'smimeKey' => (string) $this->smimeKey,
+			'smimeCertificate' => $this->smimeCertificate
 		);
 	}
 

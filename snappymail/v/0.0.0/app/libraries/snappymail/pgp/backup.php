@@ -25,7 +25,7 @@ class Backup
 				$key = \SnappyMail\Crypt::Encrypt($key, $hash);
 				$key[1] = \base64_encode($key[1]);
 				$key[2] = \base64_encode($key[2]);
-				$key[] = \hash_hmac('sha1', $key[2], $hash);
+				$key[3] = \hash_hmac('sha1', $key[2], $hash);
 				return !!\file_put_contents("{$dir}{$keyId}.key", \json_encode($key));
 			}
 			if (\str_contains($key, 'PGP PUBLIC KEY')) {
@@ -44,13 +44,11 @@ class Backup
 		$oActions = \RainLoop\Api::Actions();
 		$oAccount = $oActions->getMainAccountFromToken();
 		if ($oAccount) {
-			$keyId = $keyId ? "0x{$keyId}" : \sha1($key);
 			$dir = $oActions->StorageProvider()->GenerateFilePath(
 				$oAccount,
 				\RainLoop\Providers\Storage\Enumerations\StorageType::PGP,
 				true
 			);
-			$hash = $oAccount->CryptKey();
 			foreach (\glob("{$dir}*") as $file) {
 				if (\is_file($file)) {
 					if ('_public.asc' === \substr($file, -11)) {
@@ -62,6 +60,7 @@ class Backup
 						$key = \json_decode(\file_get_contents($file));
 						if (\is_array($key)) {
 							$mac = \array_pop($key);
+							$hash = $oAccount->CryptKey();
 							if (!empty($key[2]) && \hash_hmac('sha1', $key[2], $hash) === $mac) {
 								$key[1] = \base64_decode($key[1]);
 								$key[2] = \base64_decode($key[2]);

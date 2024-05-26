@@ -49,7 +49,7 @@ This fork of RainLoop has the following changes:
 * Admin uses password_hash/password_verify
 * Auth failed attempts written to syslog
 * Added Fail2ban instructions
-* ES2018
+* ES2020
 * PHP 7.4+ required
 * PHP mbstring extension required
 * PHP replaced pclZip with PharData and ZipArchive
@@ -140,28 +140,28 @@ RainLoop 1.17 vs SnappyMail
 
 |js/*           	|RainLoop 	|Snappy   	|
 |---------------	|--------:	|--------:	|
-|admin.js        	|2.170.153	|   80.370	|
-|app.js          	|4.207.787	|  408.429	|
-|boot.js         	|  868.735	|    4.142	|
-|libs.js         	|  658.812	|  193.230	|
-|sieve.js         	|        0	|   85.085	|
+|admin.js        	|2.170.153	|   83.494	|
+|app.js          	|4.207.787	|  437.079	|
+|boot.js         	|  868.735	|    4.147	|
+|libs.js         	|  658.812	|  193.716	|
+|sieve.js         	|        0	|   84.598	|
 |polyfills.js    	|  334.608	|        0	|
 |serviceworker.js	|        0	|      285	|
-|TOTAL           	|8.240.095	|  771.541	|
+|TOTAL           	|8.240.095	|  803.319	|
 
 |js/min/*       	|RainLoop 	|Snappy   	|RL gzip	|SM gzip	|RL brotli	|SM brotli	|
 |---------------	|--------:	|--------:	|------:	|------:	|--------:	|--------:	|
-|admin.min.js    	|  256.831	|   39.285	| 73.606	| 13.183	| 60.877  	| 11.806	|
-|app.min.js      	|  515.367	|  186.270	|139.456	| 63.111	|110.485  	| 54.218	|
-|boot.min.js     	|   84.659	|    2.084	| 26.998	|  1.202	| 23.643  	|  1.003	|
-|libs.min.js     	|  584.772	|   93.401	|180.901	| 34.765	|155.182  	| 31.194	|
-|sieve.min.js     	|        0	|   41.316	|      0	| 10.364	|      0  	|  9.352	|
+|admin.min.js    	|  256.831	|   40.856	| 73.606	| 13.776	| 60.877  	| 12.345	|
+|app.min.js      	|  515.367	|  197.782	|139.456	| 67.143	|110.485  	| 57.251	|
+|boot.min.js     	|   84.659	|    2.087	| 26.998	|  1.204	| 23.643  	|  1.002	|
+|libs.min.js     	|  584.772	|   92.365	|180.901	| 34.487	|155.182  	| 30.830	|
+|sieve.min.js     	|        0	|   41.093	|      0	| 10.325	|      0  	|  9.327	|
 |polyfills.min.js	|   32.837	|        0	| 11.406	|      0	| 10.175  	|      0	|
-|TOTAL user      	|1.217.635	|  281.755	|358.761	| 99.078	|299.485  	| 86.415	|
-|TOTAL user+sieve	|1.217.635	|  323.071	|358.761	|109.442	|299.485  	| 95.767	|
-|TOTAL admin     	|  959.099	|  134.770	|292.911	| 49.150	|249.877  	| 44.003	|
+|TOTAL user      	|1.217.635	|  292.234	|358.761	|102.834	|299.485  	| 89.083	|
+|TOTAL user+sieve	|1.217.635	|  333.327	|358.761	|113.159	|299.485  	| 98.410	|
+|TOTAL admin     	|  959.099	|  135.308	|292.911	| 49.467	|249.877  	| 44.177	|
 
-For a user it is around 69% smaller and faster than traditional RainLoop.
+For a user it is around 68% smaller and faster than traditional RainLoop.
 
 ### CSS changes
 
@@ -188,12 +188,12 @@ For a user it is around 69% smaller and faster than traditional RainLoop.
 
 |css/*       	|RainLoop	|Snappy   	|RL gzip	|SM gzip	|SM brotli	|
 |------------	|-------:	|------:	|------:	|------:	|--------:	|
-|app.css     	| 340.331	| 84.484	| 46.946	| 17.627	| 15.110	|
-|app.min.css 	| 274.947	| 67.910	| 39.647	| 15.541	| 13.547	|
+|app.css     	| 340.331	| 84.629	| 46.946	| 17.652	| 15.127	|
+|app.min.css 	| 274.947	| 67.995	| 39.647	| 15.562	| 13.568	|
 |boot.css    	|       	|  1.326	|       	|    664	|    545	|
 |boot.min.css	|       	|  1.071	|       	|    590	|    474	|
-|admin.css    	|       	| 30.641	|       	|  7.028	|  6.111	|
-|admin.min.css	|       	| 24.742	|       	|  6.352	|  5.599	|
+|admin.css    	|       	| 30.528	|       	|  7.001	|  6.088	|
+|admin.min.css	|       	| 24.652	|       	|  6.325	|  5.574	|
 
 ### PGP
 RainLoop uses the old OpenPGP.js v2
@@ -207,7 +207,7 @@ See https://github.com/the-djmaze/openpgpjs for development
 
 |OpenPGP        	|RainLoop 	|Snappy   	|RL gzip	|SM gzip	|RL brotli	|SM brotli	|
 |---------------	|--------:	|--------:	|------:	|-------:	|--------:	|--------:	|
-|openpgp.min.js 	|  330.742	|  541.176	|102.388	| 168.266	| 84.241  	|  138.278	|
+|openpgp.min.js 	|  330.742	|  546.309	|102.388	| 169.249	| 84.241  	|  138.751	|
 |openpgp.worker 	|    1.499	|         	|    824	|        	|    695 	|        	|
 
 
@@ -224,5 +224,3 @@ Still TODO:
 |ckeditor	|       ?	| 520.035	|      ?	|  155.916	|
 
 CKEditor including the 7 asset requests (css,language,plugins,icons) is 633.46 KB / 180.47 KB (gzip).
-
-To use the old CKEditor, you must install the plugin.

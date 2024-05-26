@@ -1,7 +1,7 @@
 import 'External/ko';
 import ko from 'ko';
 import { RFC822 } from 'Common/File';
-import { HtmlEditor } from 'Common/Html';
+import { HtmlEditor } from 'Common/HtmlEditor';
 import { timeToNode } from 'Common/Translator';
 import { doc, elementById, addEventsListeners, dropdowns, leftPanelDisabled } from 'Common/Globals';
 import { EmailAddressesComponent } from 'Component/EmailAddresses';
@@ -91,7 +91,7 @@ Object.assign(ko.bindingHandlers, {
 				};
 
 			if (ko.isObservable(fValue)) {
-				editor = new HtmlEditor(element, fUpdateKoValue, fOnReady, fUpdateKoValue);
+				editor = new HtmlEditor(element, fOnReady, fUpdateKoValue, fUpdateKoValue);
 
 				fValue.__fetchEditorValue = fUpdateKoValue;
 
@@ -103,7 +103,7 @@ Object.assign(ko.bindingHandlers, {
 		}
 	},
 
-	moment: {
+	time: {
 		init: ttn,
 		update: ttn
 	},

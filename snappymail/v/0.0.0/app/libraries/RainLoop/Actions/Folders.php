@@ -2,7 +2,6 @@
 
 namespace RainLoop\Actions;
 
-use RainLoop\Enumerations\Capa;
 use RainLoop\Exceptions\ClientException;
 use RainLoop\Notifications;
 use MailSo\Imap\Enumerations\FolderType;
@@ -57,15 +56,40 @@ trait Folders
 
 		$oFolderCollection = $this->MailClient()->Folders('', '*', $HideUnsubscribed);
 
-		if ($oFolderCollection) {
-			$aQuota = null;
-			if ($this->GetCapa(Capa::QUOTA)) {
-				try {
-//					$aQuota = $this->ImapClient()->Quota();
-					$aQuota = $this->ImapClient()->QuotaRoot();
-				} catch (\Throwable $oException) {
-					// ignore
+		$oNamespaces = $this->ImapClient()->GetNamespaces();
+		if ($oNamespaces) {
+			if (isset($oNamespaces->aOtherUsers[0])) try {
+				$oCollection = $this->MailClient()->Folders($oNamespaces->aOtherUsers[0]['prefix'], '*', $HideUnsubscribed);
+				if ($oCollection) {
+					foreach ($oCollection as $oFolder) {
+						$oFolderCollection[$oFolder->FullName] = $oFolder;
+					}
 				}
+			} catch (\Throwable $e) {
+				// https://github.com/the-djmaze/snappymail/issues/1438
+				// $oAccount->Domain()->ImapSettings()->disabled_capabilities[] = 'NAMESPACE';
+				// $this->DomainProvider()->Save($oAccount->Domain());
+			}
+			if (isset($oNamespaces->aShared[0])) try {
+				$oCollection = $this->MailClient()->Folders($oNamespaces->aShared[0]['prefix'], '*', $HideUnsubscribed);
+				if ($oCollection) {
+					foreach ($oCollection as $oFolder) {
+						$oFolderCollection[$oFolder->FullName] = $oFolder;
+					}
+				}
+			} catch (\Throwable $e) {
+				// https://github.com/the-djmaze/snappymail/issues/1438
+				// $oAccount->Domain()->ImapSettings()->disabled_capabilities[] = 'NAMESPACE';
+				// $this->DomainProvider()->Save($oAccount->Domain());
+			}
+		}
+
+		if ($oFolderCollection) {
+			try {
+//				$aQuota = $this->ImapClient()->Quota();
+				$aQuota = $this->ImapClient()->QuotaRoot();
+			} catch (\Throwable $oException) {
+				// ignore
 			}
 
 			$aCapabilities = \array_values(\array_filter($this->ImapClient()->Capability() ?: [], function ($item) {
@@ -77,7 +101,8 @@ trait Folders
 				array(
 					'quotaUsage' => $aQuota ? $aQuota[0] * 1024 : null,
 					'quotaLimit' => $aQuota ? $aQuota[1] * 1024 : null,
-					'namespace' => $this->ImapClient()->GetPersonalNamespace(),
+					'namespace' => $oNamespaces ? $oNamespaces->GetPersonalPrefix() : '',
+					'namespaces' => $oNamespaces,
 					'capabilities' => $aCapabilities
 				)
 			);
@@ -120,6 +145,42 @@ trait Folders
 		return $this->TrueResponse();
 	}
 
+	public function DoFolderSettings() : array
+	{
+		$this->initMailClientConnection();
+
+		$sFolderFullName = $this->GetActionParam('folder', '');
+
+		// DoFolderSubscribe
+		try
+		{
+			$bSubscribe = !empty($this->GetActionParam('subscribe', 0));
+			$this->ImapClient()->{$bSubscribe ? 'FolderSubscribe' : 'FolderUnsubscribe'}($sFolderFullName);
+		}
+		catch (\Throwable $oException)
+		{
+		}
+
+		// DoFolderCheckable
+		$this->SetFolderCheckable($sFolderFullName, !empty($this->GetActionParam('checkable')));
+
+		// DoFolderSetMetadata
+		try
+		{
+			$aKolab = $this->GetActionParam('kolab');
+			if ($aKolab['type']) {
+				$this->ImapClient()->FolderSetMetadata($sFolderFullName, [
+					$aKolab['type'] => $aKolab['value'] ?: null
+				]);
+			}
+		}
+		catch (\Throwable $oException)
+		{
+		}
+
+		return $this->TrueResponse();
+	}
+
 	public function DoFolderSubscribe() : array
 	{
 		$this->initMailClientConnection();
@@ -142,51 +203,35 @@ trait Folders
 		return $this->TrueResponse();
 	}
 
-	public function DoFolderCheckable() : array
+	protected function SetFolderCheckable(string $sFolderFullName, bool $bCheckable) : bool
 	{
 		$oAccount = $this->getAccountFromToken();
-
-		$sFolderFullName = $this->GetActionParam('folder', '');
-
 		$oSettingsLocal = $this->SettingsProvider(true)->Load($oAccount);
 
-		$aCheckableFolder = \json_decode($oSettingsLocal->GetConf('CheckableFolder', '[]'));
-		if (!\is_array($aCheckableFolder)) {
-			$aCheckableFolder = array();
+		$aCheckableFolders = \json_decode($oSettingsLocal->GetConf('CheckableFolder', '[]'));
+		if (!\is_array($aCheckableFolders)) {
+			$aCheckableFolders = array();
 		}
 
-		if (!empty($this->GetActionParam('checkable', '0'))) {
-			$aCheckableFolder[] = $sFolderFullName;
-		} else if (($key = \array_search($sFolderFullName, $aCheckableFolder)) !== false) {
-			\array_splice($aCheckableFolder, $key, 1);
+		if ($bCheckable) {
+			$aCheckableFolders[] = $sFolderFullName;
+		} else if (($key = \array_search($sFolderFullName, $aCheckableFolders)) !== false) {
+			\array_splice($aCheckableFolders, $key, 1);
 		}
 
-		$oSettingsLocal->SetConf('CheckableFolder', \json_encode(\array_unique($aCheckableFolder)));
+		$oSettingsLocal->SetConf('CheckableFolder', \json_encode(\array_unique($aCheckableFolders)));
 
-		return $this->DefaultResponse($this->SettingsProvider(true)->Save($oAccount, $oSettingsLocal));
+		return $oSettingsLocal->save();
 	}
 
-	/**
-	 * @throws \MailSo\RuntimeException
-	 */
-	public function DoFolderMove() : array
+	public function DoFolderCheckable() : array
 	{
-		$this->initMailClientConnection();
-
-		try
-		{
-			$this->MailClient()->FolderMove(
+		return $this->DefaultResponse(
+			$this->SetFolderCheckable(
 				$this->GetActionParam('folder', ''),
-				$this->GetActionParam('newFolder', ''),
-				!empty($this->GetActionParam('subscribe', 1))
-			);
-		}
-		catch (\Throwable $oException)
-		{
-			throw new ClientException(Notifications::CantRenameFolder, $oException);
-		}
-
-		return $this->TrueResponse();
+				!empty($this->GetActionParam('checkable'))
+			)
+		);
 	}
 
 	/**
@@ -196,25 +241,68 @@ trait Folders
 	{
 		$this->initMailClientConnection();
 
-		$sName = $this->GetActionParam('newFolderName', '');
 		try
 		{
-			$sFullName = $this->MailClient()->FolderRename(
-				$this->GetActionParam('folder', ''),
-				$sName,
-				!empty($this->GetActionParam('subscribe', 1))
-			);
+			$sOldName = $this->GetActionParam('oldName', '');
+			$sNewName = $this->GetActionParam('newName', '');
+			$sDelimiter = $this->ImapClient()->FolderHierarchyDelimiter($sOldName);
+
+			$this->MailClient()->FolderRename($sOldName, $sNewName);
+
+			// DoFolderSubscribe
+			try
+			{
+				$bSubscribe = !empty($this->GetActionParam('subscribe', 0));
+				$this->ImapClient()->{$bSubscribe ? 'FolderSubscribe' : 'FolderUnsubscribe'}($sNewName);
+			}
+			catch (\Throwable $oException)
+			{
+			}
+
+			// DoFolderCheckable
+			$oAccount = $this->getAccountFromToken();
+			$oSettingsLocal = $this->SettingsProvider(true)->Load($oAccount);
+			$aCheckableFolders = \json_decode($oSettingsLocal->GetConf('CheckableFolder', '[]'));
+			$aRemoveFolders = [];
+			if (\is_array($aCheckableFolders)) {
+				foreach ($aCheckableFolders as $sFolder) {
+					if (\str_starts_with($sFolder . $sDelimiter, $sOldName . $sDelimiter)) {
+						$aRemoveFolders[] = $sFolder;
+						if ($sFolder !== $sOldName) {
+							$aCheckableFolders[] = $sNewName . $sDelimiter . \substr($sFolder, \strlen($sOldName) + 1);
+						}
+					}
+				}
+				$aCheckableFolders = \array_diff($aCheckableFolders, $aRemoveFolders);
+			} else {
+				$aCheckableFolders = [];
+			}
+			if ($this->GetActionParam('checkable')) {
+				$aCheckableFolders[] = $sNewName;
+			}
+			$oSettingsLocal->SetConf('CheckableFolder', \json_encode(\array_unique($aCheckableFolders)));
+			$oSettingsLocal->save();
+
+			// DoFolderSetMetadata
+			try
+			{
+				$aKolab = $this->GetActionParam('kolab');
+				if ($aKolab['type']) {
+					$this->ImapClient()->FolderSetMetadata($sNewName, [
+						$aKolab['type'] => $aKolab['value'] ?: null
+					]);
+				}
+			}
+			catch (\Throwable $oException)
+			{
+			}
 		}
 		catch (\Throwable $oException)
 		{
 			throw new ClientException(Notifications::CantRenameFolder, $oException);
 		}
 
-//		FolderInformation(string $sFolderName, int $iPrevUidNext = 0, array $aUids = array())
-		return $this->DefaultResponse(array(
-			'name' => $sName,
-			'fullName' => $sFullName,
-		));
+		return $this->TrueResponse();
 	}
 
 	/**
@@ -319,6 +407,41 @@ trait Folders
 		$oSettingsLocal->SetConf('TrashFolder', $this->GetActionParam('trash', ''));
 		$oSettingsLocal->SetConf('ArchiveFolder', $this->GetActionParam('archive', ''));
 
-		return $this->DefaultResponse($this->SettingsProvider(true)->Save($oAccount, $oSettingsLocal));
+		return $this->DefaultResponse($oSettingsLocal->save());
 	}
+
+	public function DoFolderACL() : array
+	{
+		$this->initMailClientConnection();
+		return $this->DefaultResponse(
+			$this->ImapClient()->FolderGetACL(
+				$this->GetActionParam('folder', '')
+			)
+		);
+	}
+
+	public function DoFolderDeleteACL() : array
+	{
+		$this->initMailClientConnection();
+		$this->ImapClient()->FolderDeleteACL(
+			$this->GetActionParam('folder', ''),
+			$this->GetActionParam('identifier', '')
+		);
+		return $this->TrueResponse();
+	}
+
+	public function DoFolderSetACL() : array
+	{
+//		$oImapClient->FolderSetACL('INBOX', 'demo@snappymail.eu', 'lrwstipekxacd');
+//		$oImapClient->FolderSetACL($sFolderFullName, 'demo@snappymail.eu', 'lrwstipekxacd');
+//		$oImapClient->FolderSetACL($sFolderFullName, 'foobar@snappymail.eu', 'lr');
+		$this->initMailClientConnection();
+		$this->ImapClient()->FolderSetACL(
+			$this->GetActionParam('folder', ''),
+			$this->GetActionParam('identifier', ''),
+			$this->GetActionParam('rights', '')
+		);
+		return $this->TrueResponse();
+	}
+
 }

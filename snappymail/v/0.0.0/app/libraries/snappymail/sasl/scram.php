@@ -89,7 +89,12 @@ class Scram extends \SnappyMail\SASL
 		return $this->encode("{$cfmb},p={$proof}");
 	}
 
-	public function verify(string $data) : bool
+	public function hasChallenge() : bool
+	{
+		return true;
+	}
+
+	public function verify(string $data) : void
 	{
 		$v = static::parseMessage($this->decode($data));
 		if (empty($v['v'])) {
@@ -98,7 +103,6 @@ class Scram extends \SnappyMail\SASL
 		if (\base64_encode($this->server_key) !== $v['v']) {
 			throw new \Exception('Server signature invalid');
 		}
-		return true;
 	}
 
 	protected static function parseMessage(string $msg) : array

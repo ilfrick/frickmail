@@ -133,11 +133,11 @@ class SquireUI
 				dir: {
 					dir_ltr: {
 						html: '⁋',
-						cmd: () => squire.bidi('ltr')
+						cmd: () => squire.setTextDirection('ltr')
 					},
 					dir_rtl: {
 						html: '¶',
-						cmd: () => squire.bidi('rtl')
+						cmd: () => squire.setTextDirection('rtl')
 					}
 				},
 				colors: {
@@ -237,7 +237,7 @@ class SquireUI
 						cmd: () => {
 							let node = squire.getSelectionClosest('IMG'),
 								src = prompt("Image", node?.src || "https://");
-							src?.length ? squire.insertImage(src) : (node && squire.detach(node));
+							src?.length ? squire.insertImage(src) : node?.remove();
 						},
 						matches: 'IMG'
 					},
@@ -269,6 +269,13 @@ class SquireUI
 							this.setMode('source' == this.mode ? 'wysiwyg' : 'source');
 							btn.classList.toggle('active', 'source' == this.mode);
 						}
+					}
+				},
+
+				clear: {
+					removeStyle: {
+						html: '⎚',
+						cmd: () => squire.setStyle()
 					}
 				}
 			},
@@ -318,11 +325,6 @@ class SquireUI
 		wysiwyg.className = 'squire-wysiwyg';
 		wysiwyg.dir = 'auto';
 		this.mode = ''; // 'plain' | 'wysiwyg'
-		this.__plain = {
-			getRawData: () => this.plain.value,
-			setRawData: plain => this.plain.value = plain
-		};
-
 		this.container = container;
 		this.squire = squire;
 		this.plain = plain;
@@ -403,9 +405,9 @@ class SquireUI
 
 		let changes = actions.changes;
 		changes.undo.input.disabled = changes.redo.input.disabled = true;
-		squire.addEventListener('undoStateChange', state => {
-			changes.undo.input.disabled = !state.canUndo;
-			changes.redo.input.disabled = !state.canRedo;
+		squire.addEventListener('undoStateChange', e => {
+			changes.undo.input.disabled = !e.detail.canUndo;
+			changes.redo.input.disabled = !e.detail.canRedo;
 		});
 
 		actions.font.fontSize.input.selectedIndex = actions.font.fontSize.defaultValueIndex;
@@ -478,21 +480,21 @@ class SquireUI
 		squire.addEventListener('pathChange', e => {
 
 			const squireRoot = squire.getRoot();
+			let elm = e.detail.element;
 
 			forEachObjectValue(actions, entries => {
 				forEachObjectValue(entries, cfg => {
-//					cfg.matches && cfg.input.classList.toggle('active', e.element && e.element.matches(cfg.matches));
-					cfg.matches && cfg.input.classList.toggle('active', e.element && e.element.closestWithin(cfg.matches, squireRoot));
+//					cfg.matches && cfg.input.classList.toggle('active', elm && elm.matches(cfg.matches));
+					cfg.matches && cfg.input.classList.toggle('active', elm && elm.closestWithin(cfg.matches, squireRoot));
 				});
 			});
 
-			if (e.element) {
+			if (elm) {
 				// try to find font-family and/or font-size and set "select" elements' values
 
 				let sizeSelectedIndex = actions.font.fontSize.defaultValueIndex;
 				let familySelectedIndex = defaultFontFamilyIndex;
 
-				let elm = e.element;
 				let familyFound = false;
 				let sizeFound = false;
 				do {
@@ -524,21 +526,12 @@ class SquireUI
 		});
 /*
 		squire.addEventListener('cursor', e => {
-			console.dir({cursor:e.range});
+			console.dir({cursor:e.detail.range});
 		});
 		squire.addEventListener('select', e => {
-			console.dir({select:e.range});
+			console.dir({select:e.detail.range});
 		});
 */
-
-		// CKEditor gimmicks used by HtmlEditor
-		this.plugins = {
-			plain: true
-		};
-		this.focusManager = {
-			hasFocus: () => squire._isFocused,
-			blur: () => squire.blur()
-		};
 	}
 
 	doAction(name) {
@@ -576,7 +569,6 @@ class SquireUI
 		this.modeSelect.selectedIndex = 'plain' == this.mode ? 1 : 0;
 	}
 
-	// CKeditor gimmicks used by HtmlEditor
 	on(type, fn) {
 		if ('mode' == type) {
 			this.onModeChange = fn;
@@ -641,6 +633,18 @@ class SquireUI
 		range.setStart(node, 0);
 		range.setEnd(node, 0);
 		squire.setSelection( range );
+	}
+
+	getPlainData() {
+		return this.plain.value;
+	}
+
+	setPlainData(text) {
+		this.plain.value = text;
+	}
+
+	blur() {
+		this.squire.blur();
 	}
 
 	focus() {

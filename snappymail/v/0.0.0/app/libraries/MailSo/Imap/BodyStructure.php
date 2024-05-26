@@ -11,7 +11,7 @@
 
 namespace MailSo\Imap;
 
-use MailSo\Mime\ParameterCollection;
+use MailSo\Mime\Enumerations\ContentType;
 
 /**
  * @category MailSo
@@ -19,38 +19,40 @@ use MailSo\Mime\ParameterCollection;
  */
 class BodyStructure implements \JsonSerializable
 {
-	private string $sContentType;
-
 	private array $aContentTypeParams;
 
-	private string $sCharset;
+	private string
+		$sCharset = '',
+		$sContentID = '',
+		$sContentTransferEncoding = '',
+		$sContentType = '',
+		$sDescription = '',
+		$sDisposition = '',
+		$sFileName = '',
+		$sLanguage = '',
+		$sLocation = '',
+		$sPartID = '';
 
-	private string $sContentID;
-
-	private string $sDescription;
-
-	private string $sMailEncodingName;
-
-	private string $sDisposition;
-
-	private string $sFileName;
-
-	private string $sLanguage = '';
-
-	private string $sLocation = '';
-
-	private int $iSize;
-
-	private string $sPartID;
+	private int $iSize = 0;
 
 	/**
 	 * \MailSo\Imap\BodyStructure[]
 	 */
 	private array $aSubParts;
 
-	public function MailEncodingName() : string
+	public function Charset() : string
 	{
-		return $this->sMailEncodingName;
+		return $this->sCharset;
+	}
+
+	public function ContentTransferEncoding() : string
+	{
+		return $this->sContentTransferEncoding;
+	}
+
+	public function ContentType() : string
+	{
+		return $this->sContentType;
 	}
 
 	public function PartID() : string
@@ -88,15 +90,10 @@ class BodyStructure implements \JsonSerializable
 		return ($this->isInline() ? 'inline' : 'part' ) . $sIdx;
 	}
 
-	public function ContentType() : string
-	{
-		return $this->sContentType;
-	}
-
 	public function EstimatedSize() : int
 	{
 		$fCoefficient = 1;
-		switch ($this->sMailEncodingName)
+		switch ($this->sContentTransferEncoding)
 		{
 			case 'base64':
 				$fCoefficient = 0.75;
@@ -107,11 +104,6 @@ class BodyStructure implements \JsonSerializable
 		}
 
 		return (int) ($this->iSize * $fCoefficient);
-	}
-
-	public function Charset() : string
-	{
-		return $this->sCharset;
 	}
 
 	public function SubParts() : array
@@ -126,12 +118,15 @@ class BodyStructure implements \JsonSerializable
 
 	public function isText() : bool
 	{
-		return 'text/html' === $this->sContentType || 'text/plain' === $this->sContentType;
+		return 'text/html' === $this->sContentType
+			|| 'text/plain' === $this->sContentType
+			// Also the useless AMP content
+			|| 'text/x-amp-html' === $this->sContentType;
 	}
 
-	public function IsPgpEncrypted() : bool
+	// https://datatracker.ietf.org/doc/html/rfc3156#section-4
+	public function isPgpEncrypted() : bool
 	{
-		// https://datatracker.ietf.org/doc/html/rfc3156#section-4
 		return 'multipart/encrypted' === $this->sContentType
 		 && !empty($this->aContentTypeParams['protocol'])
 		 && 'application/pgp-encrypted' === \strtolower(\trim($this->aContentTypeParams['protocol']))
@@ -142,20 +137,39 @@ class BodyStructure implements \JsonSerializable
 //		 && 'Version: 1' === $this->aSubParts[0]->Body()
 	}
 
-	public function IsPgpSigned() : bool
+	// https://datatracker.ietf.org/doc/html/rfc3156#section-5
+	public function isPgpSigned() : bool
 	{
-		// https://datatracker.ietf.org/doc/html/rfc3156#section-5
 		return 'multipart/signed' === $this->sContentType
 		 && !empty($this->aContentTypeParams['protocol'])
 		 && 'application/pgp-signature' === \strtolower(\trim($this->aContentTypeParams['protocol']))
 		 // The multipart/signed body MUST consist of exactly two parts.
 		 && 2 === \count($this->aSubParts)
-		 && $this->aSubParts[1]->IsPgpSignature();
+		 && 'application/pgp-signature' === $this->aSubParts[1]->ContentType();
 	}
 
-	public function IsPgpSignature() : bool
+	// https://datatracker.ietf.org/doc/html/rfc2633#section-3.3
+	public function isSMimeEncrypted() : bool
 	{
-		return \in_array($this->sContentType, ['application/pgp-signature', 'application/pkcs7-signature']);
+		$type = \strtolower(\trim($this->aContentTypeParams['smime-type'] ?? ''));
+		return ContentType::isPkcs7Mime($this->sContentType)
+		 && !empty($this->aContentTypeParams['smime-type'])
+		 && ('enveloped-data' === $type || 'authenveloped-data' === $type);
+	}
+
+	// https://www.rfc-editor.org/rfc/rfc8551.html#section-3.5
+	public function isSMimeSigned() : bool
+	{
+		return ('multipart/signed' === $this->sContentType
+			&& !empty($this->aContentTypeParams['protocol'])
+			&& ContentType::isPkcs7Signature(\strtolower(\trim($this->aContentTypeParams['protocol'])))
+			// The multipart/signed body MUST consist of exactly two parts.
+			&& 2 === \count($this->aSubParts)
+			&& ContentType::isPkcs7Signature($this->aSubParts[1]->ContentType())
+		) || (ContentType::isPkcs7Mime($this->sContentType)
+			&& !empty($this->aContentTypeParams['smime-type'])
+			&& 'signed-data' === \strtolower(\trim($this->aContentTypeParams['smime-type']))
+		);
 	}
 
 	public function IsAttachment() : bool
@@ -173,7 +187,7 @@ class BodyStructure implements \JsonSerializable
 	{
 		return !empty($this->aContentTypeParams['format'])
 			&& 'flowed' === \strtolower(\trim($this->aContentTypeParams['format']))
-			&& !\in_array($this->sMailEncodingName, array('base64', 'quoted-printable'));
+			&& !\in_array($this->sContentTransferEncoding, array('base64', 'quoted-printable'));
 	}
 
 	public function GetHtmlAndPlainParts() : array
@@ -190,13 +204,26 @@ class BodyStructure implements \JsonSerializable
 		/**
 		 * No text found, is it encrypted?
 		 * If so, just return that.
+		 * Only when \RainLoop\Api::Config()->Get('security', 'openpgp', true)
 		 */
 		if (!$aParts) {
 			$gEncryptedParts = $this->SearchByContentType('multipart/encrypted');
 			foreach ($gEncryptedParts as $oPart) {
-				if ($oPart->IsPgpEncrypted() && $oPart->SubParts()[1]->isInline()) {
+				if ($oPart->isPgpEncrypted()) {
 					return array($oPart->SubParts()[1]);
 				}
+			}
+		}
+
+		/**
+		 * Still no text found?
+		 * Look in attachments as it could be an X-Mms-Message
+		 * https://github.com/the-djmaze/snappymail/issues/1294
+		 */
+		if (!$aParts) {
+			$gParts = $this->SearchByCallback(fn($oItem) => $oItem->isText());
+			foreach ($gParts as $oPart) {
+				$aParts[] = $oPart;
 			}
 		}
 
@@ -232,7 +259,7 @@ class BodyStructure implements \JsonSerializable
 	{
 		return $this->SearchByCallback(function ($oItem, $oParent) {
 //			return $oItem->IsAttachment();
-			return $oItem->IsAttachment() && (!$oParent || !$oParent->IsPgpEncrypted());
+			return $oItem->IsAttachment() && (!$oParent || !$oParent->isPgpEncrypted());
 		});
 	}
 
@@ -241,6 +268,13 @@ class BodyStructure implements \JsonSerializable
 		$sContentType = \strtolower($sContentType);
 		return $this->SearchByCallback(function ($oItem) use ($sContentType) {
 			return $sContentType === $oItem->sContentType;
+		});
+	}
+
+	public function SearchByContentTypes(array $aContentTypes) : iterable
+	{
+		return $this->SearchByCallback(function ($oItem) use ($aContentTypes) {
+			return \in_array($oItem->sContentType, $aContentTypes);
 		});
 	}
 
@@ -328,7 +362,7 @@ class BodyStructure implements \JsonSerializable
 		$sCharset = ''; // \MailSo\Base\Enumerations\Charset::UTF_8 ?
 		$sContentID = '';
 		$sDescription = '';
-		$sMailEncodingName = '';
+		$sContentTransferEncoding = '';
 		$iSize = 0;
 		$iExtraItemPos = 0;  // list index of items which have no well-established position (such as 0, 1, 5, etc).
 
@@ -424,10 +458,10 @@ class BodyStructure implements \JsonSerializable
 				if (!\is_string($aBodyStructure[5])) {
 					return null;
 				}
-				$sMailEncodingName = $aBodyStructure[5];
+				$sContentTransferEncoding = $aBodyStructure[5];
 			}
 
-			$iSize = \is_numeric($aBodyStructure[6]) ? (int) $aBodyStructure[6] : -1;
+			$iSize = \is_numeric($aBodyStructure[6]) ? (int) $aBodyStructure[6] : 0;
 
 			if (!\strlen($sPartID) || '.' === $sPartID[\strlen($sPartID) - 1]) {
 				// This is the only sub-part of the message (otherwise, it would be
@@ -480,7 +514,7 @@ class BodyStructure implements \JsonSerializable
 		$oStructure->sCharset = $sCharset;
 		$oStructure->sContentID = \trim($sContentID);
 		$oStructure->sDescription = $sDescription;
-		$oStructure->sMailEncodingName = \strtolower($sMailEncodingName);
+		$oStructure->sContentTransferEncoding = \strtolower($sContentTransferEncoding);
 		$oStructure->sDisposition = \strtolower($sDisposition);
 		$oStructure->sFileName = \MailSo\Base\Utils::Utf8Clear($sFileName);
 		$oStructure->iSize = $iSize;

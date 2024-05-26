@@ -1,14 +1,15 @@
 <?php
 
-use \RainLoop\Exceptions\ClientException;
+use RainLoop\Exceptions\ClientException;
+use SnappyMail\SensitiveString;
 
 class ChangePasswordPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Change Password',
-		VERSION  = '2.19',
-		RELEASE  = '2023-04-11',
-		REQUIRED = '2.23.0',
+		VERSION  = '2.38',
+		RELEASE  = '2024-04-22',
+		REQUIRED = '2.36.1',
 		CATEGORY = 'Security',
 		DESCRIPTION = 'Extension to allow users to change their passwords';
 
@@ -17,7 +18,8 @@ class ChangePasswordPlugin extends \RainLoop\Plugins\AbstractPlugin
 		CouldNotSaveNewPassword = 130,
 		CurrentPasswordIncorrect = 131,
 		NewPasswordShort = 132,
-		NewPasswordWeak = 133;
+		NewPasswordWeak = 133,
+		NewPasswordHibp = 134;
 
 	public function Init() : void
 	{
@@ -102,18 +104,23 @@ class ChangePasswordPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public function configMapping() : array
 	{
 		$result = [
-			\RainLoop\Plugins\Property::NewInstance("pass_min_length")
+			\RainLoop\Plugins\Property::NewInstance('pass_min_length')
 				->SetLabel('Password minimum length')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::INT)
 				->SetDescription('Minimum length of the password')
 				->SetDefaultValue(10)
 				->SetAllowedInJs(true),
-			\RainLoop\Plugins\Property::NewInstance("pass_min_strength")
+			\RainLoop\Plugins\Property::NewInstance('pass_min_strength')
 				->SetLabel('Password minimum strength')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::INT)
 				->SetDescription('Minimum strength of the password in %')
 				->SetDefaultValue(70)
 				->SetAllowedInJs(true),
+			\RainLoop\Plugins\Property::NewInstance('check_hibp')
+				->SetLabel('Check Have I Been Pwned')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
+				->SetDescription('Check if new passphrase is in a data breach')
+				->SetDefaultValue(false),
 		];
 		foreach ($this->getSupportedDrivers(true) as $name => $class) {
 			$group = new \RainLoop\Plugins\PropertyCollection($name);
@@ -149,14 +156,18 @@ class ChangePasswordPlugin extends \RainLoop\Plugins\AbstractPlugin
 		if ($sPrevPassword !== $oAccount->IncPassword()) {
 			throw new ClientException(static::CurrentPasswordIncorrect, null, $oActions->StaticI18N('NOTIFICATIONS/CURRENT_PASSWORD_INCORRECT'));
 		}
+		$oPrevPassword = new \SnappyMail\SensitiveString($sPrevPassword);
 
 		$sNewPassword = $this->jsonParam('NewPassword');
 		if ($this->Config()->Get('plugin', 'pass_min_length', 10) > \strlen($sNewPassword)) {
 			throw new ClientException(static::NewPasswordShort, null, $oActions->StaticI18N('NOTIFICATIONS/NEW_PASSWORD_SHORT'));
 		}
-
 		if ($this->Config()->Get('plugin', 'pass_min_strength', 70) > static::PasswordStrength($sNewPassword)) {
 			throw new ClientException(static::NewPasswordWeak, null, $oActions->StaticI18N('NOTIFICATIONS/NEW_PASSWORD_WEAK'));
+		}
+		$oNewPassword = new \SnappyMail\SensitiveString($sNewPassword);
+		if ($this->Config()->Get('plugin', 'check_hibp', false) && \SnappyMail\Hibp::password($oNewPassword)) {
+			throw new ClientException(static::NewPasswordHibp, null, $oActions->StaticI18N('NOTIFICATIONS/NEW_PASSWORD_HIBP'));
 		}
 
 		$bResult = false;
@@ -171,7 +182,7 @@ class ChangePasswordPlugin extends \RainLoop\Plugins\AbstractPlugin
 						$oConfig,
 						$oLogger
 					);
-					if (!$oDriver->ChangePassword($oAccount, $sPrevPassword, $sNewPassword)) {
+					if (!$oDriver->ChangePassword($oAccount, $oPrevPassword, $oNewPassword)) {
 						throw new ClientException(static::CouldNotSaveNewPassword);
 					}
 					$bResult = true;
@@ -196,15 +207,16 @@ class ChangePasswordPlugin extends \RainLoop\Plugins\AbstractPlugin
 			throw new ClientException(static::CouldNotSaveNewPassword);
 		}
 
-		$oAccount->SetPassword($sNewPassword);
+		$oAccount->SetPassword($oNewPassword);
 		if ($oAccount instanceof \RainLoop\Model\MainAccount) {
 			$oActions->SetAuthToken($oAccount);
+			$oAccount->resealCryptKey($oPrevPassword);
 		}
 
 		return $this->jsonResponse(__FUNCTION__, $oActions->AppData(false));
 	}
 
-	public static function encrypt(string $algo, string $password)
+	public static function encrypt(string $algo, SensitiveString $password)
 	{
 		switch (\strtolower($algo))
 		{
@@ -233,7 +245,7 @@ class ChangePasswordPlugin extends \RainLoop\Plugins\AbstractPlugin
 	private static function PasswordStrength(string $sPassword) : int
 	{
 		$i = \strlen($sPassword);
-		$max = min(100, $i * 8);
+		$max = \min(100, $i * 8);
 		$s = 0;
 		while (--$i) {
 			$s += ($sPassword[$i] != $sPassword[$i-1] ? 1 : -0.5);

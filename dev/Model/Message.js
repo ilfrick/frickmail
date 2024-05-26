@@ -8,12 +8,14 @@ import { forEachObjectEntry, b64EncodeJSONSafe } from 'Common/Utils';
 import { serverRequestRaw, proxy } from 'Common/Links';
 import { addObservablesTo, addComputablesTo } from 'External/ko';
 
-import { FolderUserStore, isAllowedKeyword } from 'Stores/User/Folder';
+import { FolderUserStore } from 'Stores/User/Folder';
 import { SettingsUserStore } from 'Stores/User/Settings';
 
 import { FileInfo, RFC822 } from 'Common/File';
 import { AttachmentCollectionModel } from 'Model/AttachmentCollection';
 import { EmailCollectionModel } from 'Model/EmailCollection';
+import { MimeHeaderCollectionModel } from 'Model/MimeHeaderCollection';
+//import { MimeHeaderAutocryptModel } from 'Model/MimeHeaderAutocrypt';
 import { AbstractModel } from 'Knoin/AbstractModel';
 
 import PreviewHTML from 'Html/PreviewMessage.html';
@@ -21,6 +23,8 @@ import PreviewHTML from 'Html/PreviewMessage.html';
 import { LanguageStore } from 'Stores/Language';
 
 import Remote from 'Remote/User/Fetch';
+
+import { MimeToMessage } from 'Mime/Utils';
 
 const
 	msgHtml = msg => cleanHtml(msg.html(), msg.attachments(), '#rl-msg-' + msg.hash),
@@ -55,42 +59,50 @@ export class MessageModel extends AbstractModel {
 	constructor() {
 		super();
 
-		this.folder = '';
-		this.uid = 0;
-		this.hash = '';
-		this.from = new EmailCollectionModel;
-		this.to = new EmailCollectionModel;
-		this.cc = new EmailCollectionModel;
-		this.bcc = new EmailCollectionModel;
-		this.sender = new EmailCollectionModel;
-		this.replyTo = new EmailCollectionModel;
-		this.deliveredTo = new EmailCollectionModel;
-		this.body = null;
-		this.draftInfo = [];
-		this.dkim = [];
-		this.spf = [];
-		this.dmarc = [];
-		this.messageId = '';
-		this.inReplyTo = '';
-		this.references = '';
-		this.autocrypt = {};
+		Object.assign(this, {
+			folder: '',
+			uid: 0,
+			hash: '',
+			from: new EmailCollectionModel,
+			to: new EmailCollectionModel,
+			cc: new EmailCollectionModel,
+			bcc: new EmailCollectionModel,
+			sender: new EmailCollectionModel,
+			replyTo: new EmailCollectionModel,
+			deliveredTo: new EmailCollectionModel,
+			body: null,
+			draftInfo: [],
+			dkim: [],
+			spf: [],
+			dmarc: [],
+			messageId: '',
+			inReplyTo: '',
+			references: '',
+//			autocrypt: ko.observableArray(),
+			hasVirus: null, // or boolean when scanned
+			priority: 3, // Normal
+			senderEmailsString: '',
+			senderClearEmailsString: '',
+			isSpam: false,
+			spamScore: 0,
+			spamResult: '',
+			size: 0,
+			readReceipt: '',
+			preview: null,
+
+			attachments: ko.observableArray(new AttachmentCollectionModel),
+			threads: ko.observableArray(),
+			threadUnseen: ko.observableArray(),
+			unsubsribeLinks: ko.observableArray(),
+			flags: ko.observableArray(),
+			headers: ko.observableArray(new MimeHeaderCollectionModel)
+		});
 
 		addObservablesTo(this, {
 			subject: '',
 			plain: '',
 			html: '',
-			preview: null,
-			size: 0,
-			spamScore: 0,
-			spamResult: '',
-			isSpam: false,
-			hasVirus: null, // or boolean when scanned
 			dateTimestamp: 0,
-			internalTimestamp: 0,
-			priority: 3, // Normal
-
-			senderEmailsString: '',
-			senderClearEmailsString: '',
 
 			deleted: false,
 
@@ -102,26 +114,29 @@ export class MessageModel extends AbstractModel {
 			isHtml: false,
 			hasImages: false,
 			hasExternals: false,
-
-			pgpSigned: null,
-			pgpVerified: null,
+			hasTracking: false,
 
 			encrypted: false,
+
+			pgpSigned: null,
 			pgpEncrypted: null,
 			pgpDecrypted: false,
 
-			readReceipt: '',
+			smimeSigned: null,
+			smimeEncrypted: null,
+			smimeDecrypted: false,
 
 			// rfc8621
 			id: '',
 //			threadId: ''
-		});
 
-		this.attachments = ko.observableArray(new AttachmentCollectionModel);
-		this.threads = ko.observableArray();
-		this.threadUnseen = ko.observableArray();
-		this.unsubsribeLinks = ko.observableArray();
-		this.flags = ko.observableArray();
+			/**
+			 * Basic support for Linked Data (Structured Email)
+			 * https://json-ld.org/
+			 * https://structured.email/
+			 **/
+			linkedData: []
+		});
 
 		addComputablesTo(this, {
 			attachmentIconClass: () =>
@@ -141,17 +156,15 @@ export class MessageModel extends AbstractModel {
 
 			tagOptions: () => {
 				const tagOptions = [];
-				FolderUserStore.currentFolder().permanentFlags.forEach(value => {
-					if (isAllowedKeyword(value)) {
-						let lower = value.toLowerCase();
-						tagOptions.push({
-							css: 'msgflag-' + lower,
-							value: value,
-							checked: this.flags().includes(lower),
-							label: i18n('MESSAGE_TAGS/'+lower, 0, value),
-							toggle: (/*obj*/) => toggleTag(this, value)
-						});
-					}
+				FolderUserStore.currentFolder().optionalTags().forEach(value => {
+					let lower = value.toLowerCase();
+					tagOptions.push({
+						css: 'msgflag-' + lower,
+						value: value,
+						checked: this.flags().includes(lower),
+						label: i18n('MESSAGE_TAGS/'+lower, 0, value),
+						toggle: (/*obj*/) => toggleTag(this, value)
+					});
 				});
 				return tagOptions
 			},
@@ -180,6 +193,10 @@ export class MessageModel extends AbstractModel {
 				return options;
 			}
 		});
+
+		this.smimeSigned.subscribe(value =>
+			value?.body && MimeToMessage(value.body, this)
+		);
 	}
 
 	get requestHash() {
@@ -197,23 +214,23 @@ export class MessageModel extends AbstractModel {
 	}
 
 	spamStatus() {
-		let spam = this.spamResult();
-		return spam ? i18n(this.isSpam() ? 'GLOBAL/SPAM' : 'GLOBAL/NOT_SPAM') + ': ' + spam : '';
+		let spam = this.spamResult;
+		return spam ? i18n(this.isSpam ? 'GLOBAL/SPAM' : 'GLOBAL/NOT_SPAM') + ': ' + spam : '';
 	}
 
 	/**
 	 * @returns {string}
 	 */
 	friendlySize() {
-		return FileInfo.friendlySize(this.size());
+		return FileInfo.friendlySize(this.size);
 	}
 
 	computeSenderEmail() {
 		const list = this[
 			[FolderUserStore.sentFolder(), FolderUserStore.draftsFolder()].includes(this.folder) ? 'to' : 'from'
 		];
-		this.senderEmailsString(list.toString(true));
-		this.senderClearEmailsString(list.map(email => email?.email).filter(email => email).join(', '));
+		this.senderEmailsString = list.toString(true);
+		this.senderClearEmailsString = list.map(email => email?.email).filter(email => email).join(', ');
 	}
 
 	/**
@@ -224,8 +241,63 @@ export class MessageModel extends AbstractModel {
 		if (super.revivePropertiesFromJson(json)) {
 //			this.foundCIDs = isArray(json.FoundCIDs) ? json.FoundCIDs : [];
 //			this.attachments(AttachmentCollectionModel.reviveFromJson(json.attachments, this.foundCIDs));
+//			this.headers(MimeHeaderCollectionModel.reviveFromJson(json.headers));
 
 			this.computeSenderEmail();
+
+			let value, headers = this.headers();
+/*			// These could be by Envelope or MIME
+			this.messageId = headers.valueByName('Message-Id');
+			this.subject(headers.valueByName('Subject'));
+			this.sender = EmailCollectionModel.fromString(headers.valueByName('Sender'));
+			this.from = EmailCollectionModel.fromArray(headers.valueByName('From'));
+			this.replyTo = EmailCollectionModel.fromArray(headers.valueByName('Reply-To'));
+			this.to = EmailCollectionModel.fromArray(headers.valueByName('To'));
+			this.cc = EmailCollectionModel.fromArray(headers.valueByName('Cc'));
+			this.bcc = EmailCollectionModel.fromArray(headers.valueByName('Bcc'));
+			this.inReplyTo = headers.valueByName('In-Reply-To');
+
+			this.deliveredTo = EmailCollectionModel.fromString(headers.valueByName('Delivered-To'));
+*/
+			// Priority
+			value = headers.valueByName('X-MSMail-Priority')
+				|| headers.valueByName('Importance')
+				|| headers.valueByName('X-Priority');
+			if (value) {
+				if (/[h12]/.test(value[0])) {
+					this.priority = 1;
+				} else if (/[l45]/.test(value[0])) {
+					this.priority = 5;
+				}
+			}
+
+			// Unsubscribe links
+			if (value = headers.valueByName('List-Unsubscribe')) {
+				this.unsubsribeLinks(value.split(',').map(
+					link => link.replace(/^[ <>]+|[ <>]+$/g, '')
+				));
+			}
+
+			if (headers.valueByName('X-Virus')) {
+				this.hasVirus = true;
+			}
+			if (value = headers.valueByName('X-Virus-Status')) {
+				if (value.includes('infected')) {
+					this.hasVirus = true;
+				} else if (value.includes('clean')) {
+					this.hasVirus = false;
+				}
+			}
+/*
+			if (value = headers.valueByName('X-Virus-Scanned')) {
+				this.virusScanned(value);
+			}
+
+			// https://autocrypt.org/level1.html#the-autocrypt-header
+			headers.valuesByName('Autocrypt').forEach(value => {
+				this.autocrypt.push(new MimeHeaderAutocryptModel(value));
+			});
+*/
 			return true;
 		}
 	}
@@ -241,7 +313,7 @@ export class MessageModel extends AbstractModel {
 			checked: this.checked(),
 			unseen: this.isUnseen(),
 			focused: this.focused(),
-			priorityHigh: this.priority() === 1,
+			priorityHigh: this.priority === 1,
 			withAttachments: !!this.attachments().length,
 			// hasChildrenMessage: 1 < this.threadsLen()
 		}, (key, value) => value && classes.push(key));
@@ -307,8 +379,10 @@ export class MessageModel extends AbstractModel {
 				let result = msgHtml(this);
 				this.hasExternals(result.hasExternals);
 				this.hasImages(!!result.hasExternals);
+				this.hasTracking(!!result.tracking);
+				this.linkedData(result.linkedData);
 				body.innerHTML = result.html;
-				if (!this.isSpam() && FolderUserStore.spamFolder() != this.folder) {
+				if (!this.isSpam && FolderUserStore.spamFolder() != this.folder) {
 					if ('always' === SettingsUserStore.viewImages()) {
 						this.showExternalImages();
 					}
@@ -341,6 +415,11 @@ export class MessageModel extends AbstractModel {
 
 	viewPlain() {
 		return this.viewBody(false);
+	}
+
+	swapColors() {
+		const cl = this.body?.classList;
+		cl && cl.toggle('swapColors');
 	}
 
 	/**
@@ -379,13 +458,6 @@ export class MessageModel extends AbstractModel {
 
 	printMessage() {
 		this.popupMessage(true);
-	}
-
-	/**
-	 * @returns {string}
-	 */
-	generateUid() {
-		return this.folder + '/' + this.uid;
 	}
 
 	/**
@@ -438,7 +510,7 @@ export class MessageModel extends AbstractModel {
 					hasImages = true;
 				},
 				attr = 'data-x-src',
-				src, useProxy = !!SettingsGet('useLocalProxyForExternalImages');
+				src, useProxy = !!SettingsGet('proxyExternalImages');
 			body.querySelectorAll('img[' + attr + ']').forEach(node => {
 				src = node.getAttribute(attr);
 				if (isValid(src)) {

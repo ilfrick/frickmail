@@ -198,7 +198,7 @@
 		}
 	}
 
-	.openpgp-control {
+	.crypto-control {
 		padding: 0.5em;
 
 		span {
@@ -330,6 +330,11 @@
 		height: 100%;
 		padding: 10px;
 		position: relative;
+
+		&.swapColors {
+			background-color: var(--main-color, currentcolor);
+			color: var(--main-bg-color);
+		}
 
 		* {
 			box-sizing: unset;

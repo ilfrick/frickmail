@@ -39,11 +39,15 @@
 		avatars = new Map,
 		ncAvatars = new Map,
 		templateId = 'MailMessageView',
-		getAvatarUid = msg => {
-			let from = msg.from[0],
-				bimi = 'pass' == from.dkimStatus ? 1 : 0;
-			return `${bimi}/${from.email.toLowerCase()}`;
+		getBimiSelector = msg => {
+			// Get 's' value out of 'v=BIMI1; s=foo;'
+			let bimiSelector = msg.headers().valueByName('BIMI-Selector');
+			bimiSelector = bimiSelector ? bimiSelector.match(/;.*s=([^\s;]+)/)[1] : '';
+			return bimiSelector || '';
 		},
+		getBimiId = msg => ('pass' == msg.from[0].dkimStatus ? 1 : 0) + '-' + getBimiSelector(msg),
+		getAvatarUrl = msg => `?Avatar/${getBimiId(msg)}/${msg.avatar}`,
+		getAvatarUid = msg => `${getBimiId(msg)}/${msg.from[0].email.toLowerCase()}`,
 		getAvatar = msg => ncAvatars.get(msg.from[0].email.toLowerCase()) || avatars.get(getAvatarUid(msg)),
 		hash = async txt => {
 			if (/^[0-9a-f]{15,}$/i.test(txt)) {
@@ -97,6 +101,7 @@
 							runQueue();
 						}, 'Avatar', {
 							bimi: 'pass' == from.dkimStatus ? 1 : 0,
+							bimiSelector: getBimiSelector(item[0]),
 							email: from.email
 						});
 						break;
@@ -174,7 +179,7 @@
 							fn(msg.avatar);
 						} else {
 							element.onerror = () => setIdenticon(from, fn);
-							fn(`?Avatar/${'pass' == from.dkimStatus ? 1 : 0}/${msg.avatar}`);
+							fn(getAvatarUrl(msg));
 						}
 					} else {
 						addQueue(msg, fn);
@@ -214,8 +219,7 @@
 					if (url) {
 						fn(url);
 					} else if (msg.avatar) {
-						fn(msg.avatar.startsWith('data:') ? msg.avatar
-							: `?Avatar/${'pass' == msg.from[0].dkimStatus ? 1 : 0}/${msg.avatar}`);
+						fn(msg.avatar.startsWith('data:') ? msg.avatar : getAvatarUrl(msg));
 					} else {
 //						let from = msg.from[0];
 //						view.viewUserPic(`?Avatar/${'pass' == from.dkimStatus ? 1 : 0}/${encodeURIComponent(from.email)}`);

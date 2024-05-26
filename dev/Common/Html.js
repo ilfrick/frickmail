@@ -1,5 +1,5 @@
 import { createElement } from 'Common/Globals';
-import { forEachObjectEntry, pInt } from 'Common/Utils';
+import { forEachObjectEntry, isArray, pInt } from 'Common/Utils';
 import { SettingsUserStore } from 'Stores/User/Settings';
 
 const
@@ -207,7 +207,9 @@ export const
 			bqLevel = parseInt(SettingsUserStore.maxBlockquotesLevel()),
 
 			result = {
-				hasExternals: false
+				hasExternals: false,
+				tracking: false,
+				linkedData: []
 			},
 
 			findAttachmentByCid = cId => oAttachments.findByCid(cId),
@@ -269,12 +271,15 @@ export const
 			// Not supported by <template> element
 //			.replace(/<!doctype[^>]*>/gi, '')
 //			.replace(/<\?xml[^>]*\?>/gi, '')
+			.replace(/<(\/?)head(\s[^>]*)?>/gi, '')
 			.replace(/<(\/?)body(\s[^>]*)?>/gi, '<$1div class="mail-body"$2>')
 //			.replace(/<\/?(html|head)[^>]*>/gi, '')
 			// Fix Reddit https://github.com/the-djmaze/snappymail/issues/540
 			.replace(/<span class="preview-text"[\s\S]+?<\/span>/, '')
 			// https://github.com/the-djmaze/snappymail/issues/900
 			.replace(/\u2028/g,' ')
+			// https://github.com/the-djmaze/snappymail/issues/1415
+			.replace(/<br>\s*<\/p>/gi,'</p>')
 			.trim();
 		html = '';
 
@@ -283,6 +288,21 @@ export const
 		while (nodeIterator.nextNode()) {
 			nodeIterator.referenceNode.remove();
 		}
+
+		/**
+		 * Basic support for Linked Data (Structured Email)
+		 * https://json-ld.org/
+		 * https://structured.email/
+		 **/
+		tmpl.content.querySelectorAll('script[type="application/ld+json"]').forEach(oElement => {
+			// Could be array of objects or single object
+			try {
+				const data = JSON.parse(oElement.textContent);
+				(isArray(data) ? data : [data]).forEach(entry => result.linkedData.push(entry));
+			} catch (e) {
+				console.error(e, oElement.textContent);
+			}
+		});
 
 		tmpl.content.querySelectorAll(
 			disallowedTags
@@ -381,10 +401,14 @@ export const
 			if ('A' === name) {
 				value = oElement.href;
 				if (!/^([a-z]+):/i.test(value)) {
-					setAttribute('data-x-broken-href', value);
+					setAttribute('data-x-href-broken', value);
 					delAttribute('href');
 				} else {
 					oElement.href = stripTracking(value);
+					if (oElement.href != value) {
+						result.tracking = true;
+						setAttribute('data-x-href-tracking', value);
+					}
 					setAttribute('target', '_blank');
 //					setAttribute('rel', 'external nofollow noopener noreferrer');
 				}
@@ -406,9 +430,8 @@ export const
 			*/
 
 			let skipStyle = false;
-			if (hasAttribute('src')) {
-				value = stripTracking(delAttribute('src'));
-
+			value = delAttribute('src');
+			if (value) {
 				if ('IMG' === name) {
 					oElement.loading = 'lazy';
 					let attachment;
@@ -445,12 +468,18 @@ export const
 						oStyle.display = 'none';
 //						setAttribute('style', 'display:none');
 						setAttribute('data-x-src-hidden', value);
+//						result.tracking = true;
 					}
 					else if (httpre.test(value))
 					{
-						setAttribute('data-x-src', value);
+						let src = stripTracking(value);
+						if (src != value) {
+							result.tracking = true;
+							setAttribute('data-x-src-tracking', value);
+						}
+						setAttribute('data-x-src', src);
 						result.hasExternals = true;
-						oElement.alt || (oElement.alt = value.replace(/^.+\/([^/?]+).*$/, '$1').slice(-20));
+						oElement.alt || (oElement.alt = src.replace(/^.+\/([^/?]+).*$/, '$1').slice(-20));
 					}
 					else if (value.startsWith('data:image/'))
 					{
@@ -721,184 +750,7 @@ export const
 			.replace(/\n/g, '<br>');
 		blockquoteSwitcher();
 		return tmpl.innerHTML.trim();
-	},
-
-	WYSIWYGS = ko.observableArray();
-
-WYSIWYGS.push(['Squire', (owner, container, onReady)=>{
-	let squire = new SquireUI(container);
-	setTimeout(()=>onReady(squire), 1);
-/*
-	squire.on('blur', () => owner.blurTrigger());
-	squire.on('focus', () => clearTimeout(owner.blurTimer));
-	squire.on('mode', () => {
-		owner.blurTrigger();
-		owner.onModeChange?.(!owner.isPlain());
-	});
-*/
-}]);
-
-rl.registerWYSIWYG = (name, construct) => WYSIWYGS.push([name, construct]);
-
-export class HtmlEditor {
-	/**
-	 * @param {Object} element
-	 * @param {Function=} onBlur
-	 * @param {Function=} onReady
-	 * @param {Function=} onModeChange
-	 */
-	constructor(element, onBlur = null, onReady = null, onModeChange = null) {
-		this.blurTimer = 0;
-
-		this.onBlur = onBlur;
-		this.onModeChange = onModeChange;
-
-		if (element) {
-			onReady = onReady ? [onReady] : [];
-			this.onReady = fn => onReady.push(fn);
-			// TODO: make 'which' user configurable
-//			const which = 'CKEditor4',
-//				wysiwyg = WYSIWYGS.find(item => which == item[0]) || WYSIWYGS.find(item => 'Squire' == item[0]);
-			const wysiwyg = WYSIWYGS.find(item => 'Squire' == item[0]);
-			wysiwyg[1](this, element, editor => {
-				this.editor = editor;
-				editor.on('blur', () => this.blurTrigger());
-				editor.on('focus', () => clearTimeout(this.blurTimer));
-				editor.on('mode', () => {
-					this.blurTrigger();
-					this.onModeChange?.(!this.isPlain());
-				});
-				this.onReady = fn => fn();
-				onReady.forEach(fn => fn());
-			});
-		}
-	}
-
-	blurTrigger() {
-		if (this.onBlur) {
-			clearTimeout(this.blurTimer);
-			this.blurTimer = setTimeout(() => this.onBlur?.(), 200);
-		}
-	}
-
-	/**
-	 * @returns {boolean}
-	 */
-	isHtml() {
-		return this.editor ? !this.isPlain() : false;
-	}
-
-	/**
-	 * @returns {boolean}
-	 */
-	isPlain() {
-		return this.editor ? 'plain' === this.editor.mode : false;
-	}
-
-	/**
-	 * @returns {void}
-	 */
-	clearCachedSignature() {
-		this.onReady(() => this.editor.execCommand('insertSignature', {
-			clearCache: true
-		}));
-	}
-
-	/**
-	 * @param {string} signature
-	 * @param {bool} html
-	 * @param {bool} insertBefore
-	 * @returns {void}
-	 */
-	setSignature(signature, html, insertBefore = false) {
-		this.onReady(() => this.editor.execCommand('insertSignature', {
-			isHtml: html,
-			insertBefore: insertBefore,
-			signature: signature
-		}));
-	}
-
-	/**
-	 * @param {boolean=} wrapIsHtml = false
-	 * @returns {string}
-	 */
-	getData() {
-		let result = '';
-		if (this.editor) {
-			try {
-				if (this.isPlain() && this.editor.plugins.plain && this.editor.__plain) {
-					result = this.editor.__plain.getRawData();
-				} else {
-					result = this.editor.getData();
-				}
-			} catch (e) {} // eslint-disable-line no-empty
-		}
-		return result;
-	}
-
-	/**
-	 * @returns {string}
-	 */
-	getDataWithHtmlMark() {
-		return (this.isHtml() ? ':HTML:' : '') + this.getData();
-	}
-
-	modeWysiwyg() {
-		this.onReady(() => this.editor.setMode('wysiwyg'));
-	}
-	modePlain() {
-		this.onReady(() => this.editor.setMode('plain'));
-	}
-
-	setHtmlOrPlain(text) {
-		text.startsWith(':HTML:')
-			? this.setHtml(text.slice(6))
-			: this.setPlain(text);
-	}
-
-	setData(mode, data) {
-		this.onReady(() => {
-			const editor = this.editor;
-			this.clearCachedSignature();
-			try {
-				editor.setMode(mode);
-				if (this.isPlain() && editor.plugins.plain && editor.__plain) {
-					editor.__plain.setRawData(data);
-				} else {
-					editor.setData(data);
-				}
-			} catch (e) { console.error(e); }
-		});
-	}
-
-	setHtml(html) {
-		this.setData('wysiwyg', html/*.replace(/<p[^>]*><\/p>/gi, '')*/);
-	}
-
-	setPlain(txt) {
-		this.setData('plain', txt);
-	}
-
-	focus() {
-		this.onReady(() => this.editor.focus());
-	}
-
-	hasFocus() {
-		try {
-			return !!this.editor?.focusManager.hasFocus;
-		} catch (e) {
-			return false;
-		}
-	}
-
-	blur() {
-		this.onReady(() => this.editor.focusManager.blur(true));
-	}
-
-	clear() {
-		this.onReady(() => this.isPlain() ? this.setPlain('') : this.setHtml(''));
-	}
-}
+	};
 
 rl.Utils = {
 	htmlToPlain: htmlToPlain,

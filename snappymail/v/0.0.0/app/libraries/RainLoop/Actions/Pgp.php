@@ -3,17 +3,51 @@
 namespace RainLoop\Actions;
 
 use SnappyMail\PGP\Backup;
+use SnappyMail\PGP\Keyservers;
+use SnappyMail\PGP\GnuPG;
+use MailSo\Imap\Enumerations\FetchType;
+use MailSo\Mime\Enumerations\Header as MimeEnumHeader;
 
 trait Pgp
 {
-	/**
-	 * Also see trait Messages::DoMessagePgpVerify
-	 */
+	public function DoGetPGPKeys() : array
+	{
+		$result = [];
+
+		$keys = Backup::getKeys();
+		foreach ($keys['public'] as $key) {
+			$result[] = $key['value'];
+		}
+		foreach ($keys['private'] as $key) {
+			$result[] = $key['value'];
+		}
+
+		$GPG = $this->GnuPG();
+		if ($GPG) {
+			$keys = $GPG->allKeysInfo('');
+			foreach ($keys['public'] as $key) {
+				$key = $GPG->export($key['subkeys'][0]['fingerprint'] ?: $key['subkeys'][0]['keyid']);
+				if ($key) {
+					$result[] = $key;
+				}
+			}
+		}
+
+		return $this->DefaultResponse(\array_values(\array_unique($result)));
+	}
+
+	public function DoPgpSearchKey() : array
+	{
+		$result = Keyservers::get(
+			$this->GetActionParam('query', '')
+		);
+		return $this->DefaultResponse($result ?: false);
+	}
 
 	/**
 	 * @throws \MailSo\RuntimeException
 	 */
-	public function GnuPG() : ?\SnappyMail\PGP\GnuPG
+	public function GnuPG() : ?\SnappyMail\PGP\PGPInterface
 	{
 		$oAccount = $this->getMainAccountFromToken();
 		if (!$oAccount) {
@@ -41,13 +75,13 @@ trait Pgp
 			// First try a symbolic link
 			$tmpdir = \sys_get_temp_dir() . '/snappymail';
 //			if (\RainLoop\Utils::inOpenBasedir($tmpdir) &&
-			is_dir($tmpdir) || \mkdir($tmpdir, 0700);
+			\is_dir($tmpdir) || \mkdir($tmpdir, 0700);
 			if (\is_dir($tmpdir) && \is_writable($tmpdir)) {
 				$link = $tmpdir . '/' . \md5($homedir);
 				if (\is_link($link) || \symlink($homedir, $link)) {
 					$homedir = $link;
 				} else {
-					\error_log("symlink('{$homedir}', '{$link}') failed");
+					$this->logWrite("symlink('{$homedir}', '{$link}') failed", \LOG_WARNING, 'GnuPG');
 				}
 			}
 			// Else try ~/.gnupg/ + hash(email address)
@@ -63,13 +97,9 @@ trait Pgp
 					$homedir = $tmpdir;
 				}
 			}
-
-			if (104 <= \strlen($homedir . '/S.gpg-agent.extra')) {
-				throw new \Exception("socket name for '{$homedir}/S.gpg-agent.extra' is too long");
-			}
 		}
 
-		return \SnappyMail\PGP\GnuPG::getInstance($homedir);
+		return GnuPG::getInstance($homedir);
 	}
 
 	public function DoGnupgDecrypt() : array
@@ -79,15 +109,14 @@ trait Pgp
 			return $this->FalseResponse();
 		}
 
-		$GPG->addDecryptKey(
-			$this->GetActionParam('keyId', ''),
-			$this->GetActionParam('passphrase', '')
-		);
+		$oPassphrase = new \SnappyMail\SensitiveString($this->GetActionParam('passphrase', ''));
+
+		$GPG->addDecryptKey($this->GetActionParam('keyId', ''), $oPassphrase);
 
 		$sData = $this->GetActionParam('data', '');
 		$oPart = null;
 		$result = [
-			'data' => '',
+			'data' => null,
 			'signatures' => []
 		];
 		if ($sData) {
@@ -97,11 +126,13 @@ trait Pgp
 			$this->initMailClientConnection();
 			$this->MailClient()->MessageMimeStream(
 				function ($rResource) use ($GPG, &$result, &$oPart) {
-					if (\is_resource($rResource)) {
+					if (\is_resource($rResource)) try {
 						$result['data'] = $GPG->decryptStream($rResource);
 //						$oPart = \MailSo\Mime\Part::FromString($result);
 //						$GPG->decryptStream($rResource, $rStreamHandle);
 //						$oPart = \MailSo\Mime\Part::FromStream($rStreamHandle);
+					} catch (\Throwable $e) {
+						$result = $e;
 					}
 				},
 				$this->GetActionParam('folder', ''),
@@ -110,9 +141,13 @@ trait Pgp
 			);
 		}
 
-		if ($oPart && $oPart->IsPgpSigned()) {
+		if ($oPart && $oPart->isPgpSigned()) {
 //			$GPG->verifyStream($oPart->SubParts[0]->Body, \stream_get_contents($oPart->SubParts[1]->Body));
 //			$result['signatures'] = $oPart->SubParts[0];
+		}
+
+		if ($result instanceof \Throwable) {
+			throw $result;
 		}
 
 		return $this->DefaultResponse($result);
@@ -121,15 +156,18 @@ trait Pgp
 	public function DoGnupgGetKeys() : array
 	{
 		$GPG = $this->GnuPG();
-		return $this->DefaultResponse($GPG ? $GPG->keyInfo('') : false);
+		return $this->DefaultResponse($GPG ? $GPG->allKeysInfo('') : false);
 	}
 
 	public function DoGnupgExportKey() : array
 	{
+		$oPassphrase = $this->GetActionParam('isPrivate', '')
+			? new \SnappyMail\SensitiveString($this->GetActionParam('passphrase', ''))
+			: null;
 		$GPG = $this->GnuPG();
 		return $this->DefaultResponse($GPG ? $GPG->export(
 			$this->GetActionParam('keyId', ''),
-			$this->GetActionParam('passphrase', '')
+			$oPassphrase
 		) : false);
 	}
 
@@ -140,9 +178,10 @@ trait Pgp
 		if ($GPG) {
 			$sName = $this->GetActionParam('name', '');
 			$sEmail = $this->GetActionParam('email', '');
+			$oPassphrase = new \SnappyMail\SensitiveString($this->GetActionParam('passphrase', ''));
 			$fingerprint = $GPG->generateKey(
 				$sName ? "{$sName} <{$sEmail}>" : $sEmail,
-				$this->GetActionParam('passphrase', '')
+				$oPassphrase
 			);
 		}
 		return $this->DefaultResponse($fingerprint);
@@ -156,7 +195,7 @@ trait Pgp
 		return $this->DefaultResponse($GPG ? $GPG->deleteKey($sKeyId, $bPrivate) : false);
 	}
 
-	public function DoGnupgImportKey() : array
+	public function DoPgpImportKey() : array
 	{
 		$sKey = $this->GetActionParam('key', '');
 		$sKeyId = $this->GetActionParam('keyId', '');
@@ -169,22 +208,28 @@ trait Pgp
 						$sEmail = $aMatch[0];
 					}
 					if ($sEmail) {
-						$aKeys = \SnappyMail\PGP\Keyservers::index($sEmail);
+						$aKeys = Keyservers::index($sEmail);
 						if ($aKeys) {
 							$sKeyId = $aKeys[0]['keyid'];
 						}
 					}
 				}
 				if ($sKeyId) {
-					$sKey = \SnappyMail\PGP\Keyservers::get($sKeyId);
+					$sKey = Keyservers::get($sKeyId);
 				}
 			} catch (\Throwable $e) {
 				// ignore
 			}
 		}
 
-		$GPG = $sKey ? $this->GnuPG() : null;
-		return $this->DefaultResponse($GPG ? $GPG->import($sKey) : false);
+		$result = [];
+		if ($sKey) {
+			$sKey = \trim($sKey);
+			$result['backup'] = $this->GetActionParam('backup', '') && Backup::PGPKey($sKey);
+			$result['gnuPG'] = $this->GetActionParam('gnuPG', '') && ($GPG = $this->GnuPG()) && $GPG->import($sKey);
+		}
+
+		return $this->DefaultResponse($result);
 	}
 
 	/**
@@ -193,7 +238,7 @@ trait Pgp
 	 */
 	public function DoGetStoredPGPKeys() : array
 	{
-		return $this->DefaultResponse(\SnappyMail\PGP\Backup::getKeys());
+		return $this->DefaultResponse(Backup::getKeys());
 	}
 
 	/**
@@ -242,5 +287,119 @@ trait Pgp
 		$key = $this->GetActionParam('key', '');
 		$keyId = $this->GetActionParam('keyId', '');
 		return $this->DefaultResponse(($key && $keyId && Backup::PGPKey($key, $keyId)));
+	}
+
+	/**
+	 * https://datatracker.ietf.org/doc/html/rfc3156#section-5
+	 */
+	public function DoPgpVerifyMessage() : array
+	{
+		$sBodyPart = $this->GetActionParam('bodyPart', '');
+		if ($sBodyPart) {
+			$result = [
+				'text' => \preg_replace('/\\r?\\n/su', "\r\n", $sBodyPart),
+				'signature' => $this->GetActionParam('sigPart', '')
+			];
+		} else {
+			$sFolderName = $this->GetActionParam('folder', '');
+			$iUid = (int) $this->GetActionParam('uid', 0);
+			$sPartId = $this->GetActionParam('partId', '');
+			$sSigPartId = $this->GetActionParam('sigPartId', '');
+//			$sMicAlg = $this->GetActionParam('micAlg', '');
+
+			$this->initMailClientConnection();
+			$oImapClient = $this->ImapClient();
+			$oImapClient->FolderExamine($sFolderName);
+
+			$aParts = [
+				FetchType::BODY_PEEK.'['.$sPartId.']',
+				// An empty section specification refers to the entire message, including the header.
+				// But Dovecot does not return it with BODY.PEEK[1], so we also use BODY.PEEK[1.MIME].
+				FetchType::BODY_PEEK.'['.$sPartId.'.MIME]'
+			];
+			if ($sSigPartId) {
+				$aParts[] = FetchType::BODY_PEEK.'['.$sSigPartId.']';
+			}
+
+			$oFetchResponse = $oImapClient->Fetch($aParts, $iUid, true)[0];
+
+			$sBodyMime = $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sPartId.'.MIME]');
+			if ($sSigPartId) {
+				$result = [
+					'text' => \preg_replace('/\\r?\\n/su', "\r\n",
+						$sBodyMime . $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sPartId.']')
+					),
+					'signature' => \preg_replace('/[^\x00-\x7F]/', '',
+						$oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sSigPartId.']')
+					)
+				];
+			} else {
+				// clearsigned text
+				$result = [
+					'text' => $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sPartId.']'),
+					'signature' => ''
+				];
+				$decode = (new \MailSo\Mime\HeaderCollection($sBodyMime))->ValueByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING);
+				if ('base64' === $decode) {
+					$result['text'] = \base64_decode($result['text']);
+				} else if ('quoted-printable' === $decode) {
+					$result['text'] = \quoted_printable_decode($result['text']);
+				}
+			}
+		}
+
+		// Try by default as OpenPGP.js sets useGnuPG to 0
+		if ($this->GetActionParam('tryGnuPG', 1)) {
+			$GPG = $this->GnuPG();
+			if ($GPG) {
+				$info = $this->GnuPG()->verify($result['text'], $result['signature']);
+//				$info = $this->GnuPG()->verifyStream($fp, $result['signature']);
+				if (empty($info[0])) {
+					$result = false;
+				} else {
+					$info = $info[0];
+
+					/**
+					* https://code.woboq.org/qt5/include/gpg-error.h.html
+					* status:
+						0 = GPG_ERR_NO_ERROR
+						1 = GPG_ERR_GENERAL
+						9 = GPG_ERR_NO_PUBKEY
+						117440513 = General error
+						117440520 = Bad signature
+					*/
+
+					$summary = \defined('GNUPG_SIGSUM_VALID') ? [
+						GNUPG_SIGSUM_VALID => 'The signature is fully valid.',
+						GNUPG_SIGSUM_GREEN => 'The signature is good but one might want to display some extra information. Check the other bits.',
+						GNUPG_SIGSUM_RED => 'The signature is bad. It might be useful to check other bits and display more information, i.e. a revoked certificate might not render a signature invalid when the message was received prior to the cause for the revocation.',
+						GNUPG_SIGSUM_KEY_REVOKED => 'The key or at least one certificate has been revoked.',
+						GNUPG_SIGSUM_KEY_EXPIRED => 'The key or one of the certificates has expired. It is probably a good idea to display the date of the expiration.',
+						GNUPG_SIGSUM_SIG_EXPIRED => 'The signature has expired.',
+						GNUPG_SIGSUM_KEY_MISSING => 'Can’t verify due to a missing key or certificate.',
+						GNUPG_SIGSUM_CRL_MISSING => 'The CRL (or an equivalent mechanism) is not available.',
+						GNUPG_SIGSUM_CRL_TOO_OLD => 'Available CRL is too old.',
+						GNUPG_SIGSUM_BAD_POLICY => 'A policy requirement was not met.',
+						GNUPG_SIGSUM_SYS_ERROR => 'A system error occurred.',
+//						GNUPG_SIGSUM_TOFU_CONFLICT = 'A TOFU conflict was detected.',
+					] : [];
+
+					// Verified, so no need to return $result['text'] and $result['signature']
+					$result = [
+						'fingerprint' => $info['fingerprint'],
+						'validity' => $info['validity'],
+						'status' => $info['status'],
+						'summary' => $info['summary'],
+						'message' => \implode("\n", \array_filter($summary, function($k) use ($info) {
+							return $info['summary'] & $k;
+						}, ARRAY_FILTER_USE_KEY))
+					];
+				}
+			} else {
+				$result = false;
+			}
+		}
+
+		return $this->DefaultResponse($result);
 	}
 }

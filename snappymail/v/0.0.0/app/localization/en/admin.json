@@ -6,12 +6,12 @@
 		"TEST": "Test",
 		"UPDATE": "Update",
 		"USERNAME": "Username",
-		"PASSWORD": "Password",
-		"CANCEL": "Cancel"
+		"PASSWORD": "Passphrase",
+		"CANCEL": "Cancel",
+		"SEARCH": "Search"
 	},
 	"LOGIN": {
 		"LABEL_LOGIN": "Login",
-		"LABEL_PASSWORD": "Password",
 		"LABEL_TOTP": "TOTP code",
 		"BUTTON_LOGIN": "Log into the admin panel"
 	},
@@ -44,7 +44,7 @@
 		"LABEL_ALLOW_IDENTITIES": "Allow multiple identities",
 		"ALERT_DATA_ACCESS": "Data folder is accessible. Please configure your web server to hide the data folder from external access. Read more here:",
 		"ALERT_WARNING": "Warning!",
-		"HTML_ALERT_WEAK_PASSWORD": "You are using the default admin password.\n<br>\nFor security reasons please\n<strong><a href=\"#\/security\">change<\/a><\/strong>\npassword to something else now.\n"
+		"HTML_ALERT_WEAK_PASSWORD": "You are using the default admin passphrase.\n<br>\nFor security reasons please\n<strong><a href=\"#\/security\">change<\/a><\/strong>\npassphrase to something else now.\n"
 	},
 	"TAB_LOGIN": {
 		"LEGEND_LOGIN_SCREEN": "Login Screen",
@@ -67,7 +67,8 @@
 		"LABEL_STORAGE_TYPE": "Type",
 		"LABEL_STORAGE_DSN": "Data Source Name (DSN)",
 		"LABEL_STORAGE_USER": "User",
-		"LABEL_STORAGE_PASSWORD": "Password",
+		"LABEL_STORAGE_PASSWORD": "Passphrase",
+		"SQLITE_GLOBAL": "Use a global DB instead of per account",
 		"ALERT_NOTICE": "Notice!",
 		"SUGGESTIONS_LIMIT": "Suggestions limit",
 		"HTML_ALERT_DO_NOT_USE_THIS_DATABASE": "Don't use this database type with a large number of active users.",
@@ -78,18 +79,19 @@
 		"BUTTON_ADD_DOMAIN": "Add Domain",
 		"BUTTON_ADD_ALIAS": "Add Alias",
 		"DELETE_ARE_YOU_SURE": "Are you sure?",
-		"HTML_DOMAINS_HELPER": "List of domains webmail is allowed to access.\n<br>\nClick on the name to configure the domain.\n"
+		"HTML_DOMAINS_HELPER": "List of domains that are allowed.\n<br>\nClick on the name to configure the domain.\n"
 	},
 	"TAB_SECURITY": {
 		"LEGEND_SECURITY": "Security",
 		"LABEL_USE_IMAGE_PROXY": "Use local proxy for external images",
-		"LABEL_ALLOW_OPEN_PGP": "Allow OpenPGP",
+		"LABEL_AUTO_VERIFY": "Verify signatures automatically",
 		"LABEL_SHOW_PHP_INFO": "Show PHP information",
 		"LEGEND_ADMIN_PANEL_ACCESS_CREDENTIALS": "Admin Panel Access Credentials",
-		"LABEL_CURRENT_PASSWORD": "Current password",
-		"LABEL_NEW_PASSWORD": "New password",
-		"LABEL_REPEAT_PASSWORD": "Repeat",
+		"LABEL_CURRENT_PASSWORD": "Current passphrase",
+		"LABEL_NEW_PASSWORD": "New passphrase",
+		"LABEL_REPEAT_PASSWORD": "Repeat passphrase",
 		"LABEL_REQUIRE_VERIFICATION": "Require verification of SSL certificate",
+		"CRYPTO": "Crypto",
 		"LABEL_ALLOW_SELF_SIGNED": "Allow self signed certificates"
 	},
 	"TAB_PACKAGES": {
@@ -105,7 +107,7 @@
 		"LABEL_ALL_RIGHTS_RESERVED": "All Rights Reserved.",
 		"HINT_READ_CHANGE_LOG": "Please read the change log before updating.",
 		"HINT_IS_UP_TO_DATE": "SnappyMail is up to date.",
-		"HTML_NEW_VERSION": "New <b>%VERSION%</b> version is available.",
+		"HTML_NEW_VERSION": "New <b>%VERSION%<\/b> version is available.",
 		"LABEL_UPDATING": "Updating",
 		"LABEL_CHECKING": "Checking for updates",
 		"BUTTON_RELEASES": "Releases"
@@ -123,7 +125,7 @@
 		"NAME_HELPER": "wildcard supported",
 		"LABEL_SERVER": "Server",
 		"LABEL_PORT": "Port",
-		"LABEL_SECURE": "Secure",
+		"LABEL_SECURE": "Security",
 		"TIMEOUT": "Timeout",
 		"DISABLE_CAPABILITIES": "Disable capabilities",
 		"LIMITS": "Limits",
@@ -133,6 +135,7 @@
 		"SECURE_OPTION_NONE": "None",
 		"LABEL_ALLOW_SIEVE_SCRIPTS": "Allow sieve scripts",
 		"LABEL_USE_SHORT_LOGIN": "Use short login",
+		"LABEL_LOWERCASE_LOGIN": "Lowercase login (case-insensitive)",
 		"LABEL_USE_AUTH": "Use authentication",
 		"LABEL_SET_SENDER": "Use login as sender",
 		"LABEL_AUTH_PLAIN_LINE": "Force single command AUTH PLAIN login",
@@ -142,7 +145,7 @@
 		"BUTTON_BACK_TO_IMAP": "Back to IMAP settings",
 		"BUTTON_BACK": "Back",
 		"BUTTON_UPDATE": "Update",
-		"NEW_DOMAIN_DESC": "This domain configuration will allow you to work <br>with <i>%NAME%<\/i> email addresses.",
+		"NEW_DOMAIN_DESC": "This domain configuration will allow you to work with <strong>%NAME%<\/strong> email addresses.",
 		"WHITE_LIST_ALERT": "List of domain users webmail is allowed to access.\nUse a space as delimiter.\n"
 	},
 	"POPUPS_PLUGIN": {
@@ -166,17 +169,17 @@
 		"UNKNOWN_ERROR": "Unknown error"
 	},
 	"NOTIFICATIONS": {
-		"REQUEST_ERROR": "Request failed",
-		"REQUEST_ABORTED": "Request is aborted",
-		"REQUEST_TIMEOUT": "Request timed out",
-		"INVALID_TOKEN": "Invalid token",
-		"AUTH_ERROR": "Authentication failed",
-		"DOMAIN_ALREADY_EXISTS": "Domain already exists",
-		"CANT_SAVE_PLUGIN_SETTINGS": "Can't save settings",
-		"CANT_INSTALL_PACKAGE": "Failed to install extension",
-		"CANT_DELETE_PACKAGE": "Failed to remove extension",
-		"INVALID_PLUGIN_PACKAGE": "Invalid extension package",
-		"UNSUPPORTED_PLUGIN_PACKAGE": "Unsupported extension package",
-		"UNKNOWN_ERROR": "Unknown error"
+		"RequestError": "Request failed",
+		"RequestAborted": "Request is aborted",
+		"RequestTimeout": "Request timed out",
+		"InvalidToken": "Invalid token",
+		"AuthError": "Authentication failed",
+		"DomainAlreadyExists": "Domain already exists",
+		"CantSavePluginSettings": "Can't save settings",
+		"CantInstallPackage": "Failed to install extension",
+		"CantDeletePackage": "Failed to remove extension",
+		"InvalidPluginPackage": "Invalid extension package",
+		"UnsupportedPluginPackage": "Unsupported extension package",
+		"UnknownError": "Unknown error"
 	}
 }

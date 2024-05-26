@@ -1,6 +1,7 @@
 import { AbstractCollectionModel } from 'Model/AbstractCollection';
-import { EmailModel, addressparser } from 'Model/Email';
+import { EmailModel } from 'Model/Email';
 import { forEachObjectValue } from 'Common/Utils';
+import { addressparser } from 'Mime/Address';
 
 'use strict';
 
@@ -50,5 +51,25 @@ export class EmailCollectionModel extends AbstractCollectionModel
 			forEachObjectValue(items, item => this.push(item));
 		}
 	}
+
+	/**
+	 * @param {array} [{name: "Name", email: "address@domain"}]
+	 */
+/*
+	static fromArray(addresses) {
+		let list = new this();
+		list.fromArray(addresses);
+		return list;
+	}
+	fromArray(addresses) {
+		addresses.forEach(item => {
+			item = new EmailModel(item.email, item.name);
+			// Make them unique
+			if (item.email && item.name || !this.find(address => address.email == item.email)) {
+				this.push(item);
+			}
+		});
+	}
+*/
 
 }

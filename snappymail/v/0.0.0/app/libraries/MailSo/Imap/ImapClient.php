@@ -52,7 +52,7 @@ class ImapClient extends \MailSo\Net\NetClient
 	public function Hash() : string
 	{
 		return \md5('ImapClientHash/'.
-			$this->Settings->Login . '@' .
+			$this->Settings->username . '@' .
 			$this->Settings->host . ':' .
 			$this->Settings->port
 		);
@@ -110,26 +110,14 @@ class ImapClient extends \MailSo\Net\NetClient
 			return $this;
 		}
 
-		if (!empty($oSettings->ProxyAuthUser) && $oSettings->ProxyAuthPassword) {
-			$sLogin = $oSettings->ProxyAuthUser;
-			$sPassword = $oSettings->ProxyAuthPassword->getValue();
-			$sProxyAuthUser = $oSettings->Login;
-		} else {
-			$sLogin = $oSettings->Login;
-			$sPassword = $oSettings->Password;
-			$sProxyAuthUser = '';
-		}
-
-		$sLogin = \MailSo\Base\Utils::IdnToAscii(\MailSo\Base\Utils::Trim($sLogin));
+		$sLogin = $oSettings->username;
+		$sPassword = $oSettings->passphrase;
 
 		if (!\strlen($sLogin) || !\strlen($sPassword)) {
 			$this->writeLogException(new \UnexpectedValueException, \LOG_ERR);
 		}
 
 		$type = '';
-		if ($this->Encrypted()) {
-			\array_unshift($oSettings->SASLMechanisms, 'PLAIN', 'LOGIN');
-		}
 		foreach ($oSettings->SASLMechanisms as $sasl_type) {
 			if ($this->hasCapability("AUTH={$sasl_type}") && \SnappyMail\SASL::isSupported($sasl_type)) {
 				$type = $sasl_type;
@@ -156,49 +144,45 @@ class ImapClient extends \MailSo\Net\NetClient
 
 		try
 		{
-			if (\str_starts_with($type, 'SCRAM-'))
+			if ('CRAM-MD5' === $type)
 			{
-				$sAuth = $SASL->authenticate($sLogin, $sPassword);
-				if ($this->hasCapability('SASL-IR')) {
-					$this->sendRaw($this->SendRequestGetResponse('AUTHENTICATE', array($type, $sAuth)));
-				} else {
-					$this->SendRequestGetResponse('AUTHENTICATE', array($type));
-					$this->sendRaw($sAuth);
-				}
-				$sChallenge = $SASL->challenge($this->getResponseValue($this->getResponse(), Enumerations\ResponseType::CONTINUATION));
-				$this->logMask($sChallenge);
-				$this->sendRaw($sChallenge);
-				$oResponse = $this->getResponse();
-				$SASL->verify($this->getResponseValue($oResponse));
-			}
-			else if ('CRAM-MD5' === $type)
-			{
-				$sChallenge = $this->getResponseValue($this->SendRequestGetResponse('AUTHENTICATE', array($type)), Enumerations\ResponseType::CONTINUATION);
-				$this->logWrite('challenge: '.\base64_decode($sChallenge));
+				$oResponse = $this->SendRequestGetResponse('AUTHENTICATE', array($type));
+				$sChallenge = $this->getResponseValue($oResponse, Enumerations\ResponseType::CONTINUATION);
 				$sAuth = $SASL->authenticate($sLogin, $sPassword, $sChallenge);
 				$this->logMask($sAuth);
 				$this->sendRaw($sAuth);
 				$oResponse = $this->getResponse();
 			}
-			else if ('PLAIN' === $type || 'OAUTHBEARER' === $type /*|| 'PLAIN-CLIENTTOKEN' === $type*/)
+			else if ('PLAIN' === $type || 'OAUTHBEARER' === $type || \str_starts_with($type, 'SCRAM-') /*|| 'PLAIN-CLIENTTOKEN' === $type*/)
 			{
 				$sAuth = $SASL->authenticate($sLogin, $sPassword);
 				$this->logMask($sAuth);
 				if ($this->hasCapability('SASL-IR')) {
-					$oResponse = $this->SendRequestGetResponse('AUTHENTICATE', array($type, $sAuth));
+					$this->SendRequest('AUTHENTICATE', array($type, $sAuth));
 				} else {
 					$this->SendRequestGetResponse('AUTHENTICATE', array($type));
 					$this->sendRaw($sAuth);
+				}
+				$oResponse = $this->getResponse();
+//				if ($oResponse->getLast()->ResponseType === Enumerations\ResponseType::CONTINUATION)
+				if ($SASL->hasChallenge()) {
+					$sChallenge = $SASL->challenge($this->getResponseValue($oResponse, Enumerations\ResponseType::CONTINUATION));
+					$this->logMask($sChallenge);
+					$this->sendRaw($sChallenge);
+					$oResponse = $this->getResponse();
+					$SASL->verify($this->getResponseValue($oResponse, Enumerations\ResponseType::CONTINUATION));
+					$this->sendRaw('');
 					$oResponse = $this->getResponse();
 				}
 			}
 			else if ('XOAUTH2' === $type || 'OAUTHBEARER' === $type)
 			{
 				$sAuth = $SASL->authenticate($sLogin, $sPassword);
+				$this->logMask($sAuth);
 				$oResponse = $this->SendRequestGetResponse('AUTHENTICATE', array($type, $sAuth));
 				$oR = $oResponse->getLast();
 				if ($oR && Enumerations\ResponseType::CONTINUATION === $oR->ResponseType) {
-					if (!empty($oR->ResponseList[1]) && preg_match('/^[a-zA-Z0-9=+\/]+$/', $oR->ResponseList[1])) {
+					if (!empty($oR->ResponseList[1]) && \preg_match('/^[a-zA-Z0-9=+\/]+$/', $oR->ResponseList[1])) {
 						$this->logWrite(\base64_decode($oR->ResponseList[1]), \LOG_WARNING);
 					}
 					$this->sendRaw('');
@@ -207,8 +191,11 @@ class ImapClient extends \MailSo\Net\NetClient
 			}
 			else if ($this->hasCapability('LOGINDISABLED'))
 			{
-				$sB64 = $this->getResponseValue($this->SendRequestGetResponse('AUTHENTICATE', array($type)), Enumerations\ResponseType::CONTINUATION);
-				$this->sendRaw($SASL->authenticate($sLogin, $sPassword, $sB64), true);
+				$oResponse = $this->SendRequestGetResponse('AUTHENTICATE', array($type));
+				$sB64 = $this->getResponseValue($oResponse, Enumerations\ResponseType::CONTINUATION);
+				$sAuth = $SASL->authenticate($sLogin, $sPassword, $sB64);
+				$this->logMask($sAuth);
+				$this->sendRaw($sAuth, true);
 				$this->getResponse();
 				$sPass = $SASL->challenge(''/*UGFzc3dvcmQ6*/);
 				$this->logMask($sPass);
@@ -228,9 +215,6 @@ class ImapClient extends \MailSo\Net\NetClient
 
 			$this->setCapabilities($oResponse);
 
-			if (\strlen($sProxyAuthUser)) {
-				$this->SendRequestGetResponse('PROXYAUTH', array($this->EscapeString($sProxyAuthUser)));
-			}
 /*
 			// TODO: RFC 9051
 			if ($this->hasCapability('IMAP4rev2')) {
@@ -369,7 +353,7 @@ class ImapClient extends \MailSo\Net\NetClient
 	 * @throws \MailSo\Net\Exceptions\*
 	 * @throws \MailSo\Imap\Exceptions\*
 	 */
-	public function GetNamespace() : ?NamespaceResult
+	public function GetNamespaces() : ?NamespaceResult
 	{
 		if (!$this->hasCapability('NAMESPACE')) {
 			return null;
@@ -388,12 +372,6 @@ class ImapClient extends \MailSo\Net\NetClient
 		} catch (\Throwable $e) {
 			$this->writeLogException($e, \LOG_ERR);
 		}
-	}
-
-	public function GetPersonalNamespace() : string
-	{
-		$oNamespace = $this->GetNamespace();
-		return $oNamespace ? $oNamespace->GetPersonalNamespace() : '';
 	}
 
 	/**
@@ -521,6 +499,14 @@ class ImapClient extends \MailSo\Net\NetClient
 					$oResponse = $this->partialParseResponse();
 					$oResult->append($oResponse);
 
+					if ($oResponse->IsStatusResponse
+					 && Enumerations\ResponseType::UNTAGGED === $oResponse->ResponseType
+					 && Enumerations\ResponseStatus::PREAUTH === $oResponse->StatusOrIndex
+//					 && (Enumerations\ResponseStatus::PREAUTH === $oResponse->StatusOrIndex || Enumerations\ResponseStatus::BYE === $oResponse->StatusOrIndex)
+					) {
+						break;
+					}
+
 					// RFC 5530
 					if ($sEndTag === $oResponse->Tag && \is_array($oResponse->OptionalResponse) && 'CLIENTBUG' === $oResponse->OptionalResponse[0]) {
 						// The server has detected a client bug.
@@ -548,14 +534,14 @@ class ImapClient extends \MailSo\Net\NetClient
 		return $oResult;
 	}
 
-//	public function yieldUntaggedResponses(string $sEndTag = null) : \Generator
-	public function yieldUntaggedResponses(string $sEndTag = null) : iterable
+//	public function yieldUntaggedResponses() : \Generator
+	public function yieldUntaggedResponses() : iterable
 	{
 		try {
 			$oResult = new ResponseCollection;
 
 			if (\is_resource($this->ConnectionResource())) {
-				$sEndTag = $sEndTag ?: $this->getCurrentTag();
+				$sEndTag = $this->getCurrentTag();
 
 				while (true) {
 					$oResponse = $this->partialParseResponse();

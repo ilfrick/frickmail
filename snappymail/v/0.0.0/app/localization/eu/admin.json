@@ -7,11 +7,11 @@
 		"UPDATE": "Eguneratu",
 		"USERNAME": "Erabiltzailea",
 		"PASSWORD": "Pasahitza",
-		"CANCEL": "Ezeztatu"
+		"CANCEL": "Ezeztatu",
+		"SEARCH": "Bilatu"
 	},
 	"LOGIN": {
 		"LABEL_LOGIN": "Login",
-		"LABEL_PASSWORD": "Pasahitza",
 		"LABEL_TOTP": "TOTP kodea",
 		"BUTTON_LOGIN": "Administradore panelean saioa hasi"
 	},
@@ -68,6 +68,7 @@
 		"LABEL_STORAGE_DSN": "Dsn",
 		"LABEL_STORAGE_USER": "Erabiltzailea",
 		"LABEL_STORAGE_PASSWORD": "Pasahitza",
+		"SQLITE_GLOBAL": "Use a global DB instead of per account",
 		"ALERT_NOTICE": "Adi!",
 		"SUGGESTIONS_LIMIT": "Suggestions limit",
 		"HTML_ALERT_DO_NOT_USE_THIS_DATABASE": "Ez erabili datubase hau erabiltzaile aktibo koputu handiarekin.",
@@ -83,13 +84,14 @@
 	"TAB_SECURITY": {
 		"LEGEND_SECURITY": "Segurtasuna",
 		"LABEL_USE_IMAGE_PROXY": "Erabili proxy lokala kanpoko irudientzat",
-		"LABEL_ALLOW_OPEN_PGP": "Baimendu OpenPGP",
+		"LABEL_AUTO_VERIFY": "Verify signatures automatically",
 		"LABEL_SHOW_PHP_INFO": "Erakutsi PHP informazioa",
 		"LEGEND_ADMIN_PANEL_ACCESS_CREDENTIALS": "Admin Panelerako Sarbide Kredentzialak",
 		"LABEL_CURRENT_PASSWORD": "Uneko pasahitza",
 		"LABEL_NEW_PASSWORD": "Pasahitz berria",
 		"LABEL_REPEAT_PASSWORD": "Errepikatu",
 		"LABEL_REQUIRE_VERIFICATION": "SSL ziurtagiriaren baliozkotzea eskatu",
+		"CRYPTO": "Crypto",
 		"LABEL_ALLOW_SELF_SIGNED": "Onartu norberak sinatutako ziurtagiriak"
 	},
 	"TAB_PACKAGES": {
@@ -133,6 +135,7 @@
 		"SECURE_OPTION_NONE": "Bat ere ez",
 		"LABEL_ALLOW_SIEVE_SCRIPTS": "Onartu sieve scriptak",
 		"LABEL_USE_SHORT_LOGIN": "Erabili login motza",
+		"LABEL_LOWERCASE_LOGIN": "Lowercase login (case-insensitive)",
 		"LABEL_USE_AUTH": "Erabili autentikazioa",
 		"LABEL_SET_SENDER": "Erabili logina bidaltzaile bezala",
 		"LABEL_AUTH_PLAIN_LINE": "Force single command AUTH PLAIN login",
@@ -142,7 +145,7 @@
 		"BUTTON_BACK_TO_IMAP": "Itzuli IMAP ezarpenetara",
 		"BUTTON_BACK": "Atzera",
 		"BUTTON_UPDATE": "Eguneratu",
-		"NEW_DOMAIN_DESC": "Domeinu honen konfigurazioak <br><i>%NAME%<\/i> email kontuarekin lan egitea ahalbideratuko dizu.",
+		"NEW_DOMAIN_DESC": "Domeinu honen konfigurazioak <strong>%NAME%<\/strong> email kontuarekin lan egitea ahalbideratuko dizu.",
 		"WHITE_LIST_ALERT": "Webmailak sartzeko baimena duen domeinuko erabiltzaileen zerrenda.\nErabili hutsunea banatzaile bezala.\n"
 	},
 	"POPUPS_PLUGIN": {
@@ -166,17 +169,17 @@
 		"UNKNOWN_ERROR": "Errore ezezaguna"
 	},
 	"NOTIFICATIONS": {
-		"REQUEST_ERROR": "Eskaerak huts egin du",
-		"REQUEST_ABORTED": "Eskaera bertan behera utzi da",
-		"REQUEST_TIMEOUT": "Eskaeraren denbora-muga gainditu da",
-		"INVALID_TOKEN": "Ez-baliozko tokena",
-		"AUTH_ERROR": "Autentikazioak huts egin du",
-		"DOMAIN_ALREADY_EXISTS": "Domeinua jadanik existitzen da",
-		"CANT_SAVE_PLUGIN_SETTINGS": "Ezin dira ezarpenak gorde",
-		"CANT_INSTALL_PACKAGE": "Akatsa gehigarria instalatzean",
-		"CANT_DELETE_PACKAGE": "Akatsa gehigarria kentzean",
-		"INVALID_PLUGIN_PACKAGE": "Ez-baliozko gehigarri paketea",
-		"UNSUPPORTED_PLUGIN_PACKAGE": "Gehigarri paketea ez da onartzen",
-		"UNKNOWN_ERROR": "Errore ezezaguna"
+		"RequestError": "Eskaerak huts egin du",
+		"RequestAborted": "Eskaera bertan behera utzi da",
+		"RequestTimeout": "Eskaeraren denbora-muga gainditu da",
+		"InvalidToken": "Ez-baliozko tokena",
+		"AuthError": "Autentikazioak huts egin du",
+		"DomainAlreadyExists": "Domeinua jadanik existitzen da",
+		"CantSavePluginSettings": "Ezin dira ezarpenak gorde",
+		"CantInstallPackage": "Akatsa gehigarria instalatzean",
+		"CantDeletePackage": "Akatsa gehigarria kentzean",
+		"InvalidPluginPackage": "Ez-baliozko gehigarri paketea",
+		"UnsupportedPluginPackage": "Gehigarri paketea ez da onartzen",
+		"UnknownError": "Errore ezezaguna"
 	}
 }

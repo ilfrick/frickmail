@@ -2,6 +2,8 @@
 
 namespace RainLoop\Actions;
 
+use RainLoop\Enumerations\Capa;
+
 trait Themes
 {
 	public function GetTheme(bool $bAdmin): string
@@ -11,7 +13,7 @@ trait Themes
 			$sTheme = $this->Config()->Get('webmail', 'theme', 'Default');
 			if (!$bAdmin
 			 && ($oAccount = $this->getAccountFromToken(false))
-			 && $this->GetCapa(\RainLoop\Enumerations\Capa::THEMES)
+			 && $this->GetCapa(Capa::THEMES)
 			 && ($oSettingsLocal = $this->SettingsProvider(true)->Load($oAccount))) {
 				$sTheme = (string) $oSettingsLocal->GetConf('Theme', $sTheme);
 			}
@@ -54,14 +56,18 @@ trait Themes
 		}
 
 		$sDir = APP_INDEX_ROOT_PATH . 'themes'; // custom user themes
-		if (\is_dir($sDir) && ($rDirH = \opendir($sDir))) {
-			while (($sFile = \readdir($rDirH)) !== false) {
-				if ('.' !== $sFile[0] && \is_dir($sDir . '/' . $sFile)
-				 && (\file_exists("{$sDir}/{$sFile}/styles.css") || \file_exists("{$sDir}/{$sFile}/styles.less"))) {
-					$aCache[] = $sFile . '@custom';
+		if (\is_dir($sDir)) {
+			if ($rDirH = \opendir($sDir)) {
+				while (($sFile = \readdir($rDirH)) !== false) {
+					if ('.' !== $sFile[0] && \is_dir($sDir . '/' . $sFile)
+					 && (\file_exists("{$sDir}/{$sFile}/styles.css") || \file_exists("{$sDir}/{$sFile}/styles.less"))) {
+						$aCache[] = $sFile . '@custom';
+					}
 				}
+				\closedir($rDirH);
+			} else {
+				$this->logWrite("{$sDir} not readable", \LOG_DEBUG, 'Themes');
 			}
-			\closedir($rDirH);
 		}
 
 		if (\class_exists('OC', false)) {
@@ -146,7 +152,7 @@ trait Themes
 	{
 		$oAccount = $this->getAccountFromToken();
 
-		if (!$this->GetCapa(\RainLoop\Enumerations\Capa::USER_BACKGROUND)) {
+		if (!$this->GetCapa(Capa::USER_BACKGROUND)) {
 			return $this->FalseResponse();
 		}
 
@@ -187,7 +193,7 @@ trait Themes
 
 									$oSettings->SetConf('UserBackgroundName', $sName);
 									$oSettings->SetConf('UserBackgroundHash', $sHash);
-									$this->SettingsProvider()->Save($oAccount, $oSettings);
+									$oSettings->save();
 								}
 							}
 						}

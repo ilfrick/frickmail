@@ -7,11 +7,11 @@
 		"UPDATE": "Atualizar",
 		"USERNAME": "Nome de usuário",
 		"PASSWORD": "Senha",
-		"CANCEL": "Cancelar"
+		"CANCEL": "Cancelar",
+		"SEARCH": "Nenhum contato encontrado"
 	},
 	"LOGIN": {
 		"LABEL_LOGIN": "Usuário",
-		"LABEL_PASSWORD": "Senha",
 		"LABEL_TOTP": "TOTP code",
 		"BUTTON_LOGIN": "Entrar no painel administrativo"
 	},
@@ -68,6 +68,7 @@
 		"LABEL_STORAGE_DSN": "Dsn",
 		"LABEL_STORAGE_USER": "Usuário",
 		"LABEL_STORAGE_PASSWORD": "Senha",
+		"SQLITE_GLOBAL": "Use a global DB instead of per account",
 		"ALERT_NOTICE": "Aviso!",
 		"SUGGESTIONS_LIMIT": "Suggestions limit",
 		"HTML_ALERT_DO_NOT_USE_THIS_DATABASE": "Não use este tipo de banco de dados com um grande número de usuários ativos.",
@@ -83,13 +84,14 @@
 	"TAB_SECURITY": {
 		"LEGEND_SECURITY": "Segurança",
 		"LABEL_USE_IMAGE_PROXY": "Usar proxy local para imagens externas",
-		"LABEL_ALLOW_OPEN_PGP": "Permitir OpenPGP",
+		"LABEL_AUTO_VERIFY": "Verify signatures automatically",
 		"LABEL_SHOW_PHP_INFO": "Mostar informações PHP",
 		"LEGEND_ADMIN_PANEL_ACCESS_CREDENTIALS": "Credenciais de acesso ao Painel Administrativo",
 		"LABEL_CURRENT_PASSWORD": "Senha atual",
 		"LABEL_NEW_PASSWORD": "Nova senha",
 		"LABEL_REPEAT_PASSWORD": "Confirmar nova senha",
 		"LABEL_REQUIRE_VERIFICATION": "Exigir verificação do certificado SSL",
+		"CRYPTO": "Crypto",
 		"LABEL_ALLOW_SELF_SIGNED": "Permitir certificados auto-assinados"
 	},
 	"TAB_PACKAGES": {
@@ -133,6 +135,7 @@
 		"SECURE_OPTION_NONE": "Nenhuma",
 		"LABEL_ALLOW_SIEVE_SCRIPTS": "Permitir scripts sieve",
 		"LABEL_USE_SHORT_LOGIN": "Usar login curto",
+		"LABEL_LOWERCASE_LOGIN": "Lowercase login (case-insensitive)",
 		"LABEL_USE_AUTH": "Usar autenticação",
 		"LABEL_SET_SENDER": "Use login as sender",
 		"LABEL_AUTH_PLAIN_LINE": "Force single command AUTH PLAIN login",
@@ -142,7 +145,7 @@
 		"BUTTON_BACK_TO_IMAP": "Voltar para as configurações IMAP",
 		"BUTTON_BACK": "Voltar",
 		"BUTTON_UPDATE": "Atualizar",
-		"NEW_DOMAIN_DESC": "Esta configuração de domínio lhe permitirá trabalhar <br> com endereços de e-mail do <i>%NAME%<\/i>.",
+		"NEW_DOMAIN_DESC": "Esta configuração de domínio lhe permitirá trabalhar  com endereços de e-mail do <strong>%NAME%<\/strong>.",
 		"WHITE_LIST_ALERT": "Filtrar com lista dos únicos usuários do domínio que terão acesso ao webmail.\nUse um espaço como delimitador.\n"
 	},
 	"POPUPS_PLUGIN": {
@@ -166,17 +169,17 @@
 		"UNKNOWN_ERROR": "Erro desconhecido"
 	},
 	"NOTIFICATIONS": {
-		"REQUEST_ERROR": "Request failed",
-		"REQUEST_ABORTED": "Request is aborted",
-		"REQUEST_TIMEOUT": "Request timed out",
-		"INVALID_TOKEN": "Senha inválida",
-		"AUTH_ERROR": "Falha na autenticação",
-		"DOMAIN_ALREADY_EXISTS": "O domínio já existe",
-		"CANT_SAVE_PLUGIN_SETTINGS": "Não foi possível salvar as configurações",
-		"CANT_INSTALL_PACKAGE": "Erro ao instalar pacote de plugin",
-		"CANT_DELETE_PACKAGE": "Erro ao remover pacote de plugin",
-		"INVALID_PLUGIN_PACKAGE": "Pacote de plugins inválido",
-		"UNSUPPORTED_PLUGIN_PACKAGE": "Pacote de plugins insuportados",
-		"UNKNOWN_ERROR": "Erro desconhecido"
+		"RequestError": "Request failed",
+		"RequestAborted": "Request is aborted",
+		"RequestTimeout": "Request timed out",
+		"InvalidToken": "Senha inválida",
+		"AuthError": "Falha na autenticação",
+		"DomainAlreadyExists": "O domínio já existe",
+		"CantSavePluginSettings": "Não foi possível salvar as configurações",
+		"CantInstallPackage": "Erro ao instalar pacote de plugin",
+		"CantDeletePackage": "Erro ao remover pacote de plugin",
+		"InvalidPluginPackage": "Pacote de plugins inválido",
+		"UnsupportedPluginPackage": "Pacote de plugins insuportados",
+		"UnknownError": "Erro desconhecido"
 	}
 }

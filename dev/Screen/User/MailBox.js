@@ -67,6 +67,7 @@ export class MailBoxUserScreen extends AbstractScreen {
 	 * @returns {void}
 	 */
 	onRoute(folderHash, page, search, messageUid) {
+		// Only works when FolderUserStore.folderList() is loaded
 		const folder = getFolderFromHashMap(folderHash.replace(/~([\d]+)$/, ''));
 		if (folder) {
 			FolderUserStore.currentFolder(folder);
@@ -108,7 +109,7 @@ export class MailBoxUserScreen extends AbstractScreen {
 	 */
 	onBuild() {
 		doc.addEventListener('click', event =>
-			event.target.closest('#rl-right') && moveAction(false)
+			event.target.closest('#rl-right') && moveAction(0)
 		);
 	}
 

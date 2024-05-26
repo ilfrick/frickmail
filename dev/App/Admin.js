@@ -1,6 +1,6 @@
 import 'External/ko';
 
-import { Settings, SettingsGet } from 'Common/Globals';
+import { SettingsGet, SettingsAdmin } from 'Common/Globals';
 import { initThemes } from 'Stores/Theme';
 
 import Remote from 'Remote/Admin/Fetch';
@@ -10,6 +10,8 @@ import { LoginAdminScreen } from 'Screen/Admin/Login';
 
 import { startScreens } from 'Knoin/Knoin';
 import { AbstractApp } from 'App/Abstract';
+
+import { AskPopupView } from 'View/Popup/Ask';
 
 export class AdminApp extends AbstractApp {
 	constructor() {
@@ -23,7 +25,8 @@ export class AdminApp extends AbstractApp {
 	}
 
 	start() {
-		if (!Settings.app('adminAllowed')) {
+//		if (!Settings.app('adminAllowed')) {
+		if (!SettingsAdmin('allowed')) {
 			rl.route.root();
 			setTimeout(() => location.href = '/', 1);
 		} else if (SettingsGet('Auth')) {
@@ -34,3 +37,16 @@ export class AdminApp extends AbstractApp {
 		}
 	}
 }
+
+AskPopupView.credentials = function(sAskDesc, btnText) {
+	return new Promise(resolve => {
+		this.showModal([
+			sAskDesc,
+			view => resolve({username:view.username(), password:view.passphrase()}),
+			() => resolve(null),
+			true,
+			3,
+			btnText
+		]);
+	});
+};

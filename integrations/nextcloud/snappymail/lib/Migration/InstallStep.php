@@ -72,7 +72,7 @@ class InstallStep implements IRepairStep
 		if ('12345' == $sPassword || !$sPassword) {
 			$output->info('Generate admin password');
 			$sPassword = \substr(\base64_encode(\random_bytes(16)), 0, 12);
-			$oConfig->SetPassword($sPassword);
+			$oConfig->SetPassword(new \SnappyMail\SensitiveString($sPassword));
 			\RainLoop\Utils::saveFile(APP_PRIVATE_DATA . 'admin_password.txt', $sPassword . "\n");
 			$bSave = true;
 		}
@@ -85,11 +85,15 @@ class InstallStep implements IRepairStep
 //			$oDomain = \RainLoop\Model\Domain::fromIniArray('nextcloud', []);
 			$oDomain = new \RainLoop\Model\Domain('nextcloud');
 			$iSecurityType = \MailSo\Net\Enumerations\ConnectionSecurityType::NONE;
-			$oDomain->SetConfig(
-				'localhost', 143, $iSecurityType, true,
-				true, 'localhost', 4190, $iSecurityType,
-				'localhost', 25, $iSecurityType, true, true, false, false,
-				'');
+			$oDomain->ImapSettings()->host = 'localhost';
+			$oDomain->ImapSettings()->type = $iSecurityType;
+			$oDomain->ImapSettings()->shortLogin = true;
+			$oDomain->SieveSettings()->enabled = true;
+			$oDomain->SieveSettings()->host = 'localhost';
+			$oDomain->SieveSettings()->type = $iSecurityType;
+			$oDomain->SmtpSettings()->host = 'localhost';
+			$oDomain->SmtpSettings()->type = $iSecurityType;
+			$oDomain->SmtpSettings()->shortLogin = true;
 			$oProvider->Save($oDomain);
 			if (!$oConfig->Get('login', 'default_domain', '')) {
 				$oConfig->Set('login', 'default_domain', 'nextcloud');

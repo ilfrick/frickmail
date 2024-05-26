@@ -2,7 +2,6 @@
 
 namespace RainLoop\Actions;
 
-use RainLoop\Enumerations\Capa;
 use RainLoop\Notifications;
 use RainLoop\Utils;
 
@@ -45,9 +44,10 @@ trait Response
 
 	public function ExceptionResponse(\Throwable $oException) : array
 	{
-		$iErrorCode = 0;
-		$sErrorMessage = '';
+		$iErrorCode = Notifications::UnknownError;
+		$sErrorMessage = $oException->getMessage();
 		$sErrorMessageAdditional = '';
+		$iExceptionCode = 0;
 
 		if ($oException instanceof \RainLoop\Exceptions\ClientException) {
 			$iErrorCode = $oException->getCode();
@@ -56,8 +56,7 @@ trait Response
 			}
 			$sErrorMessageAdditional = $oException->getAdditionalMessage();
 		} else {
-			$iErrorCode = Notifications::UnknownError;
-			$sErrorMessage = $oException->getCode().' - '.$oException->getMessage();
+			$iExceptionCode = $oException->getCode();
 		}
 
 		$this->logException($oException->getPrevious() ?: $oException);
@@ -65,7 +64,8 @@ trait Response
 		return $this->DefaultResponse(false, [
 			'ErrorCode' => $iErrorCode,
 			'ErrorMessage' => $sErrorMessage,
-			'ErrorMessageAdditional' => $sErrorMessageAdditional
+			'ErrorMessageAdditional' => $sErrorMessageAdditional,
+			'ExceptionCode' => $iExceptionCode
 		]);
 	}
 
@@ -93,10 +93,7 @@ trait Response
 
 		if ($mResponse instanceof \MailSo\Mail\Message) {
 			$aResult = $mResponse->jsonSerialize();
-			if (!$this->Config()->Get('labs', 'date_from_headers', true) && $aResult['internalTimestamp']) {
-				$aResult['dateTimestamp'] = $aResult['internalTimestamp'];
-			}
-			if (!$sParent && \strlen($aResult['readReceipt']) && !\in_array('$forwarded', $aResult['flags'])) {
+			if (!$sParent && \strlen($aResult['readReceipt']) && !\in_array('$mdnsent', $aResult['flags']) && !\in_array('\\answered', $aResult['flags'])) {
 				$oAccount = $this->getAccountFromToken();
 				if ('1' === $this->Cacher($oAccount)->Get(\RainLoop\KeyPathHelper::ReadReceiptCache($oAccount->Email(), $aResult['folder'], $aResult['uid']), '0')) {
 					$aResult['readReceipt'] = '';

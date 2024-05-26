@@ -110,27 +110,19 @@ class ServiceActions
 
 			$sMethodName = 'Do'.$sAction;
 
-			$this->Logger()->Write('Action: '.$sMethodName, \LOG_INFO, 'JSON');
+			$this->oActions->logWrite('Action: '.$sMethodName, \LOG_INFO, 'JSON');
 
-			$aPost = $_POST ?? null;
-			if ($aPost) {
-				$this->oActions->SetActionParams($aPost, $sMethodName);
+			if ($_POST) {
+				$this->oActions->SetActionParams($_POST, $sMethodName);
+				$aPost = $_POST;
 				foreach ($aPost as $key => $value) {
-					if (false !== \stripos($key, 'Password')) {
+					// password & passphrase
+					if (false !== \stripos($key, 'pass')) {
 						$aPost[$key] = '*******';
+//						$this->oActions->logMask($value);
 					}
 				}
-/*
-				switch ($sMethodName)
-				{
-					case 'DoLogin':
-					case 'DoAdminLogin':
-					case 'DoAccountAdd':
-						$this->Logger()->AddSecret($this->oActions->GetActionParam('Password', ''));
-						break;
-				}
-*/
-				$this->Logger()->Write(Utils::jsonEncode($aPost), \LOG_INFO, 'POST', true);
+				$this->oActions->logWrite(Utils::jsonEncode($aPost), \LOG_INFO, 'POST');
 			} else if (3 < \count($this->aPaths) && $this->oHttp->IsGet()) {
 				$this->oActions->SetActionParams(array(
 					'RawKey' => empty($this->aPaths[3]) ? '' : $this->aPaths[3]
@@ -184,15 +176,15 @@ class ServiceActions
 
 		if ($this->Logger()->IsEnabled()) {
 			if (\strlen($sObResult)) {
-				$this->Logger()->Write($sObResult, \LOG_ERR, 'OB-DATA');
+				$this->oActions->logWrite($sObResult, \LOG_ERR, 'OB-DATA');
 			}
 
 			if ($oException) {
-				$this->Logger()->WriteException($oException, \LOG_ERR);
+				$this->oActions->logException($oException, \LOG_ERR);
 			}
 
-			$iLimit = (int) $this->Config()->Get('labs', 'log_ajax_response_write_limit', 0);
-			$this->Logger()->Write(0 < $iLimit && $iLimit < \strlen($sResult)
+			$iLimit = (int) $this->Config()->Get('logs', 'json_response_write_limit', 0);
+			$this->oActions->logWrite(0 < $iLimit && $iLimit < \strlen($sResult)
 					? \substr($sResult, 0, $iLimit).'...' : $sResult, \LOG_INFO, 'JSON');
 		}
 
@@ -226,7 +218,7 @@ class ServiceActions
 			} else if (empty($_FILES)) {
 				$iError = UPLOAD_ERR_INI_SIZE;
 			} else {
-				$iError = Enumerations\UploadError::EMPTY_FILES_DATA;
+				$iError = Enumerations\UploadError::EMPTY_FILE;
 			}
 
 			if (\method_exists($this->oActions, $sAction) && \is_callable(array($this->oActions, $sAction))) {
@@ -252,10 +244,10 @@ class ServiceActions
 
 		$sObResult = \ob_get_clean();
 		if (\strlen($sObResult)) {
-			$this->Logger()->Write($sObResult, \LOG_ERR, 'OB-DATA');
+			$this->oActions->logWrite($sObResult, \LOG_ERR, 'OB-DATA');
 		}
 
-		$this->Logger()->Write($sResult, \LOG_INFO, 'UPLOAD');
+		$this->oActions->logWrite($sResult, \LOG_INFO, 'UPLOAD');
 
 		return $sResult;
 	}
@@ -369,12 +361,12 @@ class ServiceActions
 		}
 
 		if (\strlen($sRawError)) {
-			$this->Logger()->Write($sRawError, \LOG_ERR);
+			$this->oActions->logWrite($sRawError, \LOG_ERR);
 			$this->Logger()->WriteDump($this->aPaths, \LOG_ERR, 'PATHS');
 		}
 
 		if ($oException) {
-			$this->Logger()->WriteException($oException, \LOG_ERR, 'RAW');
+			$this->oActions->logException($oException, \LOG_ERR, 'RAW');
 		}
 
 		return $sResult;
@@ -397,7 +389,7 @@ class ServiceActions
 				$sResult = $this->Cacher()->Get($sCacheFileName);
 			}
 
-			if (!\strlen($sResult)) {
+			if (!$sResult) {
 				$sResult = $this->oActions->compileLanguage($sLanguage, $bAdmin);
 				if ($sCacheFileName) {
 					$this->Cacher()->Set($sCacheFileName, $sResult);
@@ -466,7 +458,7 @@ class ServiceActions
 			$bCacheEnabled = !$bAppDebug && $this->Config()->Get('cache', 'system_data', true);
 			$sCacheFileName = '';
 			if ($bCacheEnabled) {
-				$sCacheFileName = KeyPathHelper::CssCache($sTheme, $this->oActions->Plugins()->Hash()) . $sMinify;
+				$sCacheFileName = '/CssCache/'.$this->oActions->Plugins()->Hash().'/'.$sTheme.'/'.APP_VERSION.'/' . $sMinify;
 				$this->oActions->verifyCacheByKey(\md5($sCacheFileName . ($bJson ? 1 : 0)));
 				$sResult = $this->Cacher()->Get($sCacheFileName);
 			}
@@ -481,7 +473,7 @@ class ServiceActions
 				}
 				catch (\Throwable $oException)
 				{
-					$this->Logger()->WriteException($oException, \LOG_ERR, 'LESS');
+					$this->oActions->logException($oException, \LOG_ERR, 'LESS');
 				}
 			}
 
@@ -526,7 +518,7 @@ class ServiceActions
 		$this->oHttp->ServerNoCache();
 
 		\header('Content-Type: text/plain; charset=utf-8');
-		$this->oActions->Logger()->Write('Pong', \LOG_INFO, 'PING');
+		$this->oActions->logWrite('Pong', \LOG_INFO, 'PING');
 		return 'Pong';
 	}
 
@@ -560,18 +552,16 @@ class ServiceActions
 				if (\is_array($aData) && !empty($aData['Email']) && isset($aData['Password'], $aData['Time']) &&
 					(0 === $aData['Time'] || \time() - 10 < $aData['Time']))
 				{
-					$sEmail = \trim($aData['Email']);
-					$sPassword = $aData['Password'];
-
 					$aAdditionalOptions = (isset($aData['AdditionalOptions']) && \is_array($aData['AdditionalOptions']))
 						? $aData['AdditionalOptions'] : [];
-
 					try
 					{
-						$oAccount = $this->oActions->LoginProcess($sEmail, $sPassword);
-
+						$oAccount = $this->oActions->LoginProcess(
+							\trim($aData['Email']),
+							new \SnappyMail\SensitiveString($aData['Password'])
+						);
 						if ($aAdditionalOptions) {
-							$bNeedToSettings = false;
+							$bSaveSettings = false;
 
 							$oSettings = $this->SettingsProvider()->Load($oAccount);
 							if ($oSettings) {
@@ -581,24 +571,20 @@ class ServiceActions
 								if ($sLanguage) {
 									$sLanguage = $this->oActions->ValidateLanguage($sLanguage);
 									if ($sLanguage !== $oSettings->GetConf('language', '')) {
-										$bNeedToSettings = true;
+										$bSaveSettings = true;
 										$oSettings->SetConf('language', $sLanguage);
 									}
 								}
 							}
 
-							if ($bNeedToSettings) {
-								$this->SettingsProvider()->Save($oAccount, $oSettings);
+							if ($bSaveSettings) {
+								$oSettings->save();
 							}
-						}
-
-						if ($oAccount instanceof Model\MainAccount) {
-							$this->oActions->SetAuthToken($oAccount);
 						}
 					}
 					catch (\Throwable $oException)
 					{
-						$this->Logger()->WriteException($oException);
+						$this->oActions->logException($oException);
 					}
 				}
 			}
@@ -632,7 +618,7 @@ class ServiceActions
 		$this->oHttp->ServerNoCache();
 		try {
 			$sResult = Utils::jsonEncode($this->oActions->AppData($bAdmin));
-			$this->Logger()->Write($sResult, \LOG_INFO, 'APPDATA');
+			$this->oActions->logWrite($sResult, \LOG_INFO, 'APPDATA');
 			return $sResult;
 		} catch (\Throwable $oException) {
 			$this->Logger()->WriteExceptionShort($oException);

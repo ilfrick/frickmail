@@ -51,15 +51,14 @@ class TAR
 		\header('Content-Transfer-Encoding: binary');
 		if (false !== $this->gzip) {
 			$name .= '.tgz';
-			$name = \preg_match('#^[\x01-\x7F]*$#D', $name) ? $name : '=?UTF-8?B?'.\base64_encode($name).'?=';
-			\header("Content-Disposition: attachment; filename={$name}");
-			\header("Content-Type: application/x-gzip; name={$name}");
+			$tname = \preg_match('#^[\x01-\x7F]*$#D', $name) ? $name : '=?UTF-8?B?'.\base64_encode($name).'?=';
+			\header("Content-Type: application/gzip; name=\"{$tname}\"");
 		} else {
 			$name .= '.tar';
-			$name = \preg_match('#^[\x01-\x7F]*$#D', $name) ? $name : '=?UTF-8?B?'.\base64_encode($name).'?=';
-			\header("Content-Disposition: attachment; filename={$name}");
-			\header("Content-Type: application/x-ustar; name={$name}");
+			$tname = \preg_match('#^[\x01-\x7F]*$#D', $name) ? $name : '=?UTF-8?B?'.\base64_encode($name).'?=';
+			\header("Content-Type: application/x-ustar; name=\"{$tname}\"");
 		}
+		\MailSo\Base\Http::setContentDisposition('attachment', ['filename' => $name]);
 	}
 
 	public function close() : void

@@ -1,13 +1,9 @@
 import ko from 'ko';
 
-import {
-	isArray
-} from 'Common/Utils';
-
 import { addObservablesTo, addSubscribablesTo, addComputablesTo } from 'External/ko';
 
 import { SaveSettingStatus } from 'Common/Enums';
-import { Settings, SettingsGet, SettingsCapa } from 'Common/Globals';
+import { SettingsAdmin, SettingsGet, SettingsCapa } from 'Common/Globals';
 import { translatorReload, convertLangName } from 'Common/Translator';
 
 import { AbstractViewSettings } from 'Knoin/AbstractViews';
@@ -24,11 +20,7 @@ export class AdminSettingsGeneral extends AbstractViewSettings {
 		super();
 
 		this.language = LanguageStore.language;
-		this.languages = LanguageStore.languages;
-
-		const aLanguagesAdmin = Settings.app('languagesAdmin');
-		this.languagesAdmin = ko.observableArray(isArray(aLanguagesAdmin) ? aLanguagesAdmin : []);
-		this.languageAdmin = ko.observable(SettingsGet('languageAdmin'));
+		this.languageAdmin = ko.observable(SettingsAdmin('language'));
 
 		this.theme = ThemeStore.theme;
 		this.themes = ThemeStore.themes;
@@ -107,14 +99,18 @@ export class AdminSettingsGeneral extends AbstractViewSettings {
 	}
 
 	selectLanguage() {
-		showScreenPopup(LanguagesPopupView, [this.language, this.languages(), LanguageStore.userLanguage()]);
+		showScreenPopup(LanguagesPopupView, [
+			this.language,
+			LanguageStore.languages,
+			LanguageStore.userLanguage()
+		]);
 	}
 
 	selectLanguageAdmin() {
 		showScreenPopup(LanguagesPopupView, [
 			this.languageAdmin,
-			this.languagesAdmin(),
-			SettingsGet('languageUsers')
+			SettingsAdmin('languages'),
+			SettingsAdmin('clientLanguage')
 		]);
 	}
 }

@@ -15,61 +15,71 @@ namespace MailSo\Imap;
  * @category MailSo
  * @package Imap
  */
-class NamespaceResult
+class NamespaceResult implements \JsonSerializable
 {
-	private string $sPersonal = '';
+	public array
+		$aPersonal = [],
+		$aOtherUsers = [],
+		$aShared = [];
 
-	private string $sPersonalDelimiter = '';
-/*
-	private string $sOtherUser = '';
-
-	private string $sOtherUserDelimiter = '';
-
-	private string $sShared = '';
-
-	private string $sSharedDelimiter = '';
-*/
 	function __construct(Response $oImapResponse)
 	{
-		$space = static::getNamespace($oImapResponse, 2);
-		if ($space) {
-			$this->sPersonal = $space[0];
-			$this->sPersonalDelimiter = $space[1];
+		if (!empty($oImapResponse->ResponseList[2])) {
+			foreach ($oImapResponse->ResponseList[2] as $entry) {
+				if (\is_array($entry) && 2 <= \count($entry)) {
+					$this->aPersonal[] = [
+						'prefix' => \array_shift($entry),
+						'delimiter' => \array_shift($entry),
+						'extension' => $entry
+					];
+				}
+			}
 		}
-/*
-		$space = static::getNamespace($oImapResponse, 3);
-		if ($space) {
-			$this->sOtherUser = $space[0];
-			$this->sOtherUserDelimiter = $space[1];
+		if (!empty($oImapResponse->ResponseList[3])) {
+			foreach ($oImapResponse->ResponseList[3] as $entry) {
+				if (\is_array($entry) && 2 <= \count($entry)) {
+					$this->aOtherUsers[] = [
+						'prefix' => \array_shift($entry),
+						'delimiter' => \array_shift($entry),
+						'extension' => $entry
+					];
+				}
+			}
 		}
-
-		$space = static::getNamespace($oImapResponse, 4);
-		if ($space) {
-			$this->sShared = $space[0];
-			$this->sSharedDelimiter = $space[1];
+		if (!empty($oImapResponse->ResponseList[4])) {
+			foreach ($oImapResponse->ResponseList[4] as $entry) {
+				if (\is_array($entry) && 2 <= \count($entry)) {
+					$this->aShared[] = [
+						'prefix' => \array_shift($entry),
+						'delimiter' => \array_shift($entry),
+						'extension' => $entry
+					];
+				}
+			}
 		}
-*/
 	}
 
-	public function GetPersonalNamespace() : string
+	public function GetPersonalPrefix() : string
 	{
-		return $this->sPersonal;
-	}
-
-	private static function getNamespace(Response $oImapResponse, int $section) : ?array
-	{
-		if (isset($oImapResponse->ResponseList[$section][0])
-		 && \is_array($oImapResponse->ResponseList[$section][0])
-		 && 2 <= \count($oImapResponse->ResponseList[$section][0]))
-		{
-			$sName = $oImapResponse->ResponseList[$section][0][0];
-			$sDelimiter = $oImapResponse->ResponseList[$section][0][1];
-			$sName = 'INBOX'.$sDelimiter === \substr(\strtoupper($sName), 0, 6)
-				? 'INBOX'.$sDelimiter.\substr($sName, 6)
-				: $sName;
-			return [$sName, $sDelimiter];
+		$sPrefix = '';
+		if (isset($this->aPersonal[0])) {
+			$sPrefix = $this->aPersonal[0]['prefix'];
+			$sDelimiter = $this->aPersonal[0]['delimiter'];
+			if ('INBOX'.$sDelimiter === \substr(\strtoupper($sPrefix), 0, 6)) {
+				$sPrefix = 'INBOX'.$sDelimiter.\substr($sPrefix, 6);
+			};
 		}
-		return null;
+		return $sPrefix;
 	}
 
+	#[\ReturnTypeWillChange]
+	public function jsonSerialize()
+	{
+		return array(
+			'@Object' => 'Object/Namespaces',
+			'personal' => $this->aPersonal,
+			'users' => $this->aOtherUsers,
+			'shared' => $this->aShared,
+		);
+	}
 }

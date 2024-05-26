@@ -2,7 +2,6 @@
 
 namespace RainLoop\Actions;
 
-use RainLoop\Enumerations\Capa;
 use RainLoop\Exceptions\ClientException;
 use RainLoop\Model\Account;
 use RainLoop\Notifications;
@@ -37,8 +36,13 @@ trait Messages
 				$oParams->iPrevUidNext = $aValues['uidNext'];
 			}
 			$oParams->bUseThreads = !empty($aValues['useThreads']);
-			if ($oParams->bUseThreads && isset($aValues['threadUid'])) {
-				$oParams->iThreadUid = $aValues['threadUid'];
+			if ($oParams->bUseThreads) {
+				if (isset($aValues['threadUid'])) {
+					$oParams->iThreadUid = $aValues['threadUid'];
+				}
+				if (isset($aValues['threadAlgorithm'])) {
+					$oParams->sThreadAlgorithm = $aValues['threadAlgorithm'];
+				}
 			}
 		} else {
 			// POST
@@ -51,6 +55,7 @@ trait Messages
 			$oParams->bUseThreads = !empty($this->GetActionParam('useThreads', '0'));
 			if ($oParams->bUseThreads) {
 				$oParams->iThreadUid = $this->GetActionParam('threadUid', '');
+				$oParams->sThreadAlgorithm = $this->GetActionParam('threadAlgorithm', '');
 			}
 		}
 
@@ -60,29 +65,28 @@ trait Messages
 
 		$oAccount = $this->initMailClientConnection();
 
+		$oSettingsLocal = $this->SettingsProvider(true)->Load($oAccount);
+		if ($oSettingsLocal instanceof \RainLoop\Settings) {
+			$oParams->bHideDeleted = !empty($oSettingsLocal->GetConf('HideDeleted', 1));
+		}
+
+//		$oParams->bUseSort = $this->ImapClient()->hasCapability('SORT');
+		$oParams->bUseSort = true;
+
 		if ($sHash) {
-//			$sFolderHash = $this->MailClient()->FolderHash($oParams->sFolderName);
 			$oInfo = $this->ImapClient()->FolderStatusAndSelect($oParams->sFolderName);
 			$aRequestHash = \explode('-', $sHash);
-			$sFolderHash = $oInfo->etag;
-			$sHash = $oParams->hash() . '-' . $sFolderHash;
-			if ($aRequestHash[1] == $sFolderHash) {
-				$this->verifyCacheByKey($sHash);
+			$sNewHash = $oParams->hash() . '-' . $oInfo->etag;
+			if ($aRequestHash[1] == $oInfo->etag) {
+				$this->verifyCacheByKey($sNewHash);
 			}
+			$sHash = $sNewHash;
 		}
 
 		try
 		{
 			if ($this->Config()->Get('cache', 'enable', true) && $this->Config()->Get('cache', 'server_uids', false)) {
 				$oParams->oCacher = $this->Cacher($oAccount);
-			}
-
-//			$oParams->bUseSort = $this->ImapClient->hasCapability('SORT');
-			$oParams->bUseSort = true;
-
-			$oSettingsLocal = $this->SettingsProvider(true)->Load($oAccount);
-			if ($oSettingsLocal instanceof \RainLoop\Settings) {
-				$oParams->bHideDeleted = !empty($oSettingsLocal->GetConf('HideDeleted', 1));
 			}
 
 //			\ignore_user_abort(true);
@@ -153,10 +157,21 @@ trait Messages
 	public function DoSendMessage() : array
 	{
 		$oAccount = $this->initMailClientConnection();
-
+/*
+		$aAuth = $this->GetActionParam('auth', null);
+		if ($aAuth) {
+			$oAccount->setSmtpUser($aAuth['username']);
+			$oAccount->setSmtpPass(new \SnappyMail\SensitiveString($aAuth['password']));
+//			if ($oAccount instanceof AdditionalAccount && !empty($aAuth['remember'])) {
+//				$oMainAccount = $this->getMainAccountFromToken();
+//				$aAccounts = $this->GetAccounts($oMainAccount);
+//				$this->SetAccounts($oMainAccount, $aAccounts);
+//			}
+		}
+*/
 		$oConfig = $this->Config();
 
-		$sSentFolder = $this->GetActionParam('saveFolder', '');
+		$sSaveFolder = $this->GetActionParam('saveFolder', '');
 		$aDraftInfo = $this->GetActionParam('draftInfo', null);
 
 		$oMessage = $this->buildMessage($oAccount, false);
@@ -174,9 +189,10 @@ trait Messages
 				);
 
 				if (false !== $iMessageStreamSize) {
-					$bDsn = !empty($this->GetActionParam('dsn', 0));
-					$bRequireTLS = !empty($this->GetActionParam('requireTLS', 0));
-					$this->smtpSendMessage($oAccount, $oMessage, $rMessageStream, $iMessageStreamSize, true, $bDsn, $bRequireTLS);
+					$this->smtpSendMessage($oAccount, $oMessage, $rMessageStream, $iMessageStreamSize, true,
+						!empty($this->GetActionParam('dsn', 0)),
+						!empty($this->GetActionParam('requireTLS', 0))
+					);
 
 					if (\is_array($aDraftInfo) && 3 === \count($aDraftInfo)) {
 						$sDraftInfoType = $aDraftInfo[0];
@@ -202,42 +218,73 @@ trait Messages
 						}
 					}
 
-					if (\strlen($sSentFolder)) {
+					if (\strlen($sSaveFolder)) {
+						$rAppendMessageStream = $rMessageStream;
+						$iAppendMessageStreamSize = $iMessageStreamSize;
 						try
 						{
-							if (!$oMessage->GetBcc()) {
-								if (\is_resource($rMessageStream)) {
-									\rewind($rMessageStream);
-								}
-
-								$this->Plugins()->RunHook('filter.send-message-stream',
-									array($oAccount, &$rMessageStream, &$iMessageStreamSize));
-
-								$this->ImapClient()->MessageAppendStream(
-									$sSentFolder, $rMessageStream, $iMessageStreamSize, array(MessageFlag::SEEN)
-								);
-							} else {
+							if ($oMessage->GetBcc()) {
 								$rAppendMessageStream = \MailSo\Base\ResourceRegistry::CreateMemoryResource();
-
 								$iAppendMessageStreamSize = \MailSo\Base\Utils::WriteStream(
 									$oMessage->ToStream(false), $rAppendMessageStream, 8192, true, true
 								);
-
-								$this->Plugins()->RunHook('filter.send-message-stream',
-									array($oAccount, &$rAppendMessageStream, &$iAppendMessageStreamSize));
-
-								$this->ImapClient()->MessageAppendStream(
-									$sSentFolder, $rAppendMessageStream, $iAppendMessageStreamSize, array(MessageFlag::SEEN)
-								);
-
-								if (\is_resource($rAppendMessageStream)) {
-									fclose($rAppendMessageStream);
+							} else {
+								if (\is_resource($rMessageStream)) {
+									\rewind($rMessageStream);
 								}
 							}
 						}
 						catch (\Throwable $oException)
 						{
+							$this->logException($oException, \LOG_ERR);
 							throw new ClientException(Notifications::CantSaveMessage, $oException);
+						}
+
+						try
+						{
+							$this->Plugins()->RunHook('filter.send-message-stream',
+								array($oAccount, &$rAppendMessageStream, &$iAppendMessageStreamSize));
+						}
+						catch (\Throwable $oException)
+						{
+							$this->logException($oException, \LOG_ERR);
+						}
+
+						try
+						{
+							$this->ImapClient()->MessageAppendStream(
+								$sSaveFolder, $rAppendMessageStream, $iAppendMessageStreamSize,
+								array(MessageFlag::SEEN)
+							);
+						}
+						catch (\Throwable $oException)
+						{
+							// Save folder not the same as default Sent folder, so try again
+							$oSettingsLocal = $this->SettingsProvider(true)->Load($oAccount);
+							if ($oSettingsLocal instanceof \RainLoop\Settings) {
+								$sSentFolder = (string) $oSettingsLocal->GetConf('SentFolder', '');
+								if (\strlen($sSentFolder) && $sSentFolder !== $sSaveFolder) {
+									$oException = null;
+									try
+									{
+										$this->ImapClient()->MessageAppendStream(
+											$sSentFolder, $rAppendMessageStream, $iAppendMessageStreamSize,
+											array(MessageFlag::SEEN)
+										);
+									}
+									catch (\Throwable $oException)
+									{
+									}
+								}
+							}
+							if ($oException) {
+								$this->logException($oException, \LOG_ERR);
+								throw new ClientException(Notifications::CantSaveMessage, $oException);
+							}
+						}
+
+						if (\is_resource($rAppendMessageStream) && $rAppendMessageStream !== $rMessageStream) {
+							\fclose($rAppendMessageStream);
 						}
 					}
 
@@ -263,6 +310,10 @@ trait Messages
 					$mResult = true;
 				}
 			}
+		}
+		catch (\MailSo\Smtp\Exceptions\LoginBadCredentialsException $oException)
+		{
+			throw new ClientException(Notifications::AuthError, $oException);
 		}
 		catch (ClientException $oException)
 		{
@@ -336,14 +387,15 @@ trait Messages
 					$sFolderFullName = $this->GetActionParam('messageFolder', '');
 					$iUid = (int) $this->GetActionParam('messageUid', 0);
 
-					$this->Cacher($oAccount)->Set(\RainLoop\KeyPathHelper::ReadReceiptCache($oAccount->Email(), $sFolderFullName, $iUid), '1');
-
 					if (\strlen($sFolderFullName) && 0 < $iUid) {
 						try
 						{
 							$this->MailClient()->MessageSetFlag($sFolderFullName, new SequenceSet($iUid), MessageFlag::MDNSENT, true, true);
 						}
-						catch (\Throwable $oException) {}
+						catch (\Throwable $oException)
+						{
+							$this->Cacher($oAccount)->Set(\RainLoop\KeyPathHelper::ReadReceiptCache($oAccount->Email(), $sFolderFullName, $iUid), '1');
+						}
 					}
 				}
 			}
@@ -423,6 +475,92 @@ trait Messages
 		try
 		{
 			$oMessage = $this->MailClient()->Message($sFolder, $iUid, true, $this->Cacher($oAccount));
+
+			$bAutoVerify = $this->Config()->Get('security', 'auto_verify_signatures', false);
+
+			// S/MIME signed. Verify it, so we have the raw mime body to show
+			if ($oMessage->smimeSigned && ($bAutoVerify || !$oMessage->smimeSigned['detached'])) try {
+				$bOpaque = !$oMessage->smimeSigned['detached'];
+				$sBody = $this->ImapClient()->FetchMessagePart(
+					$oMessage->Uid,
+					$oMessage->smimeSigned['partId']
+				);
+				$result = (new \SnappyMail\SMime\OpenSSL(''))->verify($sBody, null, $bOpaque);
+				if ($result) {
+					if ($bOpaque) {
+						$oMessage->smimeSigned['body'] = $result['body'];
+					}
+					$oMessage->smimeSigned['success'] = $result['success'];
+				}
+			} catch (\Throwable $e) {
+				$this->logException($e);
+			}
+
+			if ($bAutoVerify && $oMessage->pgpSigned) try {
+				$GPG = $this->GnuPG();
+				if ($GPG) {
+					if ($oMessage->pgpSigned['sigPartId']) {
+						$sPartId = $oMessage->pgpSigned['partId'];
+						$sSigPartId = $oMessage->pgpSigned['sigPartId'];
+						$aParts = [
+							FetchType::BODY_PEEK.'['.$sPartId.']',
+							// An empty section specification refers to the entire message, including the header.
+							// But Dovecot does not return it with BODY.PEEK[1], so we also use BODY.PEEK[1.MIME].
+							FetchType::BODY_PEEK.'['.$sPartId.'.MIME]',
+							FetchType::BODY_PEEK.'['.$sSigPartId.']'
+						];
+						$oFetchResponse = $this->ImapClient()->Fetch($aParts, $oMessage->Uid, true)[0];
+						$sBodyMime = $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sPartId.'.MIME]');
+						$info = $this->GnuPG()->verify(
+							\preg_replace('/\\r?\\n/su', "\r\n",
+								$sBodyMime . $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sPartId.']')
+							),
+							\preg_replace('/[^\x00-\x7F]/', '',
+								$oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sSigPartId.']')
+							)
+						);
+					} else {
+						// clearsigned text
+						$info = $this->GnuPG()->verify($oMessage->sPlain, '');
+					}
+					if (!empty($info[0]) && 0 == $info[0]['status']) {
+						$info = $info[0];
+						$oMessage->pgpSigned = [
+							'fingerprint' => $info['fingerprint'],
+							'success' => true
+						];
+					}
+				}
+			} catch (\Throwable $e) {
+				$this->logException($e);
+			}
+/*
+			if (!$oMessage->sPlain && !$oMessage->sHtml && !$oMessage->pgpEncrypted && !$oMessage->smimeEncrypted) {
+				$aAttachments = $oMessage->Attachments ?: [];
+				foreach ($aAttachments as $oAttachment) {
+//					\in_array($oAttachment->ContentType(), ['application/vnd.ms-tnef', 'application/ms-tnef'])
+					if ('winmail.dat' === \strtolower($oAttachment->FileName())) {
+						$sData = $this->ImapClient()->FetchMessagePart(
+							$oMessage->Uid,
+							$oAttachment->PartID()
+						);
+						$oTNEF = new \TNEFDecoder\TNEFAttachment;
+						$oTNEF->decodeTnef($sData);
+						foreach ($oTNEF->getFiles() as $oFile) {
+							if (\in_array($oFile->type, ['application/rtf', 'text/rtf'])) {
+								$rtf = new \SnappyMail\Rtf\Document($oFile->content);
+								$oMessage->setHtml($rtf->toHTML());
+							} else {
+								// List as attachment?
+								$oMapiAttachment = new \MailSo\Mail\Attachment($sFolder, $iUid, BodyStructure);
+								$oMessage->Attachments->append($oMapiAttachment);
+							}
+						}
+						break;
+					}
+				}
+			}
+*/
 		}
 		catch (\Throwable $oException)
 		{
@@ -430,7 +568,7 @@ trait Messages
 		}
 
 		if ($oMessage) {
-			$ETag = $oMessage->ETag($this->getAccountFromToken()->IncLogin());
+			$ETag = $oMessage->ETag($this->getAccountFromToken()->ImapUser());
 			$this->verifyCacheByKey($ETag);
 			$this->Plugins()->RunHook('filter.result-message', array($oMessage));
 			$this->cacheByKey($ETag);
@@ -580,7 +718,6 @@ trait Messages
 											?: \SnappyMail\File\MimeType::fromFilename($sFileName)
 											?: 'application/octet-stream'; // 'text/plain'
 
-//										$sFileName = $self->MainClearFileName($sFileName, $sContentType, $sMimeIndex);
 										$sTempName .= \SnappyMail\File\MimeType::toExtension($sContentType);
 
 										if ($self->FilesProvider()->PutFile($oAccount, $sTempName, $rResource)) {
@@ -599,7 +736,7 @@ trait Messages
 								?: \SnappyMail\File\MimeType::fromFilename($sTempName)
 								?: 'application/octet-stream'; // 'text/plain'
 							$aAttachments[$mIndex] = [
-//								'name' => $sFileName,
+//								'name' => '',
 								'tempName' => $sTempName,
 								'mimeType' => $sContentType
 //								'size' => $oFilesProvider->FileSize($oAccount, $sTempName)
@@ -615,122 +752,6 @@ trait Messages
 		}
 
 		return $this->DefaultResponse($aAttachments);
-	}
-
-	/**
-	 * https://datatracker.ietf.org/doc/html/rfc3156#section-5
-	 */
-	public function DoMessagePgpVerify() : array
-	{
-		$sFolderName = $this->GetActionParam('folder', '');
-		$iUid = (int) $this->GetActionParam('uid', 0);
-		$sBodyPart = $this->GetActionParam('bodyPart', '');
-		$sSigPart = $this->GetActionParam('sigPart', '');
-		if ($sBodyPart) {
-			$result = [
-				'text' => \preg_replace('/\\r?\\n/su', "\r\n", $sBodyPart),
-				'signature' => $this->GetActionParam('sigPart', '')
-			];
-		} else {
-			$sBodyPartId = $this->GetActionParam('bodyPartId', '');
-			$sSigPartId = $this->GetActionParam('sigPartId', '');
-//			$sMicAlg = $this->GetActionParam('micAlg', '');
-
-			$oAccount = $this->initMailClientConnection();
-
-			$oImapClient = $this->ImapClient();
-			$oImapClient->FolderExamine($sFolderName);
-
-			$aParts = [
-				FetchType::BODY_PEEK.'['.$sBodyPartId.']',
-				// An empty section specification refers to the entire message, including the header.
-				// But Dovecot does not return it with BODY.PEEK[1], so we also use BODY.PEEK[1.MIME].
-				FetchType::BODY_PEEK.'['.$sBodyPartId.'.MIME]'
-			];
-			if ($sSigPartId) {
-				$aParts[] = FetchType::BODY_PEEK.'['.$sSigPartId.']';
-			}
-
-			$oFetchResponse = $oImapClient->Fetch($aParts, $iUid, true)[0];
-
-			$sBodyMime = $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sBodyPartId.'.MIME]');
-			if ($sSigPartId) {
-				$result = [
-					'text' => \preg_replace('/\\r?\\n/su', "\r\n",
-						$sBodyMime . $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sBodyPartId.']')
-					),
-					'signature' => preg_replace('/[^\x00-\x7F]/', '',
-						$oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sSigPartId.']')
-					)
-				];
-			} else {
-				// clearsigned text
-				$result = [
-					'text' => $oFetchResponse->GetFetchValue(FetchType::BODY.'['.$sBodyPartId.']'),
-					'signature' => ''
-				];
-				$decode = (new \MailSo\Mime\HeaderCollection($sBodyMime))->ValueByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING);
-				if ('base64' === $decode) {
-					$result['text'] = \base64_decode($result['text']);
-				} else if ('quoted-printable' === $decode) {
-					$result['text'] = \quoted_printable_decode($result['text']);
-				}
-			}
-		}
-
-		// Try by default as OpenPGP.js sets useGnuPG to 0
-		if ($this->GetActionParam('tryGnuPG', 1)) {
-			$GPG = $this->GnuPG();
-			if ($GPG) {
-				$info = $this->GnuPG()->verify($result['text'], $result['signature']);
-//				$info = $this->GnuPG()->verifyStream($fp, $result['signature']);
-				if (empty($info[0])) {
-					$result = false;
-				} else {
-					$info = $info[0];
-
-					/**
-					* https://code.woboq.org/qt5/include/gpg-error.h.html
-					* status:
-						0 = GPG_ERR_NO_ERROR
-						1 = GPG_ERR_GENERAL
-						9 = GPG_ERR_NO_PUBKEY
-						117440513 = General error
-						117440520 = Bad signature
-					*/
-
-					$summary = \defined('GNUPG_SIGSUM_VALID') ? [
-						GNUPG_SIGSUM_VALID => 'The signature is fully valid.',
-						GNUPG_SIGSUM_GREEN => 'The signature is good but one might want to display some extra information. Check the other bits.',
-						GNUPG_SIGSUM_RED => 'The signature is bad. It might be useful to check other bits and display more information, i.e. a revoked certificate might not render a signature invalid when the message was received prior to the cause for the revocation.',
-						GNUPG_SIGSUM_KEY_REVOKED => 'The key or at least one certificate has been revoked.',
-						GNUPG_SIGSUM_KEY_EXPIRED => 'The key or one of the certificates has expired. It is probably a good idea to display the date of the expiration.',
-						GNUPG_SIGSUM_SIG_EXPIRED => 'The signature has expired.',
-						GNUPG_SIGSUM_KEY_MISSING => 'Can’t verify due to a missing key or certificate.',
-						GNUPG_SIGSUM_CRL_MISSING => 'The CRL (or an equivalent mechanism) is not available.',
-						GNUPG_SIGSUM_CRL_TOO_OLD => 'Available CRL is too old.',
-						GNUPG_SIGSUM_BAD_POLICY => 'A policy requirement was not met.',
-						GNUPG_SIGSUM_SYS_ERROR => 'A system error occurred.',
-//						GNUPG_SIGSUM_TOFU_CONFLICT = 'A TOFU conflict was detected.',
-					] : [];
-
-					// Verified, so no need to return $result['text'] and $result['signature']
-					$result = [
-						'fingerprint' => $info['fingerprint'],
-						'validity' => $info['validity'],
-						'status' => $info['status'],
-						'summary' => $info['summary'],
-						'message' => \implode("\n", \array_filter($summary, function($k) use ($info) {
-							return $info['summary'] & $k;
-						}, ARRAY_FILTER_USE_KEY))
-					];
-				}
-			} else {
-				$result = false;
-			}
-		}
-
-		return $this->DefaultResponse($result);
 	}
 
 	/**
@@ -761,8 +782,7 @@ trait Messages
 			$this->Plugins()->RunHook('filter.smtp-from', array($oAccount, $oMessage, &$sFrom));
 
 			$aHiddenRcpt = array();
-			if ($bAddHiddenRcpt)
-			{
+			if ($bAddHiddenRcpt) {
 				$this->Plugins()->RunHook('filter.smtp-hidden-rcpt', array($oAccount, $oMessage, &$aHiddenRcpt));
 			}
 
@@ -772,41 +792,40 @@ trait Messages
 			$oAccount->SmtpConnectAndLogin($this->Plugins(), $oSmtpClient);
 
 			if ($oSmtpClient->Settings->usePhpMail) {
-				if (\MailSo\Base\Utils::FunctionCallable('mail')) {
-					$aToCollection = $oMessage->GetTo();
-					if ($aToCollection && $oFrom) {
-						$sRawBody = \stream_get_contents($rMessageStream);
-						if (!empty($sRawBody)) {
-							$sMailTo = \trim($aToCollection->ToString(true));
-							$sMailSubject = \trim($oMessage->GetSubject());
-							$sMailSubject = 0 === \strlen($sMailSubject) ? '' : \MailSo\Base\Utils::EncodeUnencodedValue(
-								\MailSo\Base\Enumerations\Encoding::BASE64_SHORT, $sMailSubject);
+				if (!$sFrom || !\MailSo\Base\Utils::FunctionCallable('mail')) {
+					throw new ClientException(Notifications::CantSendMessage);
+				}
+				$oToCollection = $oMessage->GetTo();
+				if (!$oToCollection) {
+					throw new ClientException(Notifications::CantSendMessage);
+				}
+				$sRawBody = \stream_get_contents($rMessageStream);
+				if (empty($sRawBody)) {
+					throw new ClientException(Notifications::CantSendMessage);
+				}
+				$sMailTo = \trim($oToCollection->ToString(true));
+				$sMailSubject = \trim($oMessage->GetSubject());
+				$sMailSubject = \strlen($sMailSubject) ? \MailSo\Base\Utils::EncodeHeaderValue($sMailSubject) : '';
 
-							$sMailHeaders = $sMailBody = '';
-							list($sMailHeaders, $sMailBody) = \explode("\r\n\r\n", $sRawBody, 2);
-							unset($sRawBody);
+				$sMailHeaders = $sMailBody = '';
+				list($sMailHeaders, $sMailBody) = \explode("\r\n\r\n", $sRawBody, 2);
+				unset($sRawBody);
 
-							if ($this->Config()->Get('labs', 'mail_func_clear_headers', true)) {
-								$sMailHeaders = \MailSo\Base\Utils::RemoveHeaderFromHeaders($sMailHeaders, array(
-									MimeEnumHeader::TO_,
-									MimeEnumHeader::SUBJECT
-								));
-							}
+				if ($this->Config()->Get('labs', 'mail_func_clear_headers', true)) {
+					$sMailHeaders = \MailSo\Base\Utils::RemoveHeaderFromHeaders($sMailHeaders, array(
+						MimeEnumHeader::TO_,
+						MimeEnumHeader::SUBJECT
+					));
+				}
 
-							$this->Logger()->WriteDump(array(
-								$sMailTo, $sMailSubject, $sMailBody, $sMailHeaders
-							), \LOG_DEBUG);
+				$this->Logger()->WriteDump(array(
+					$sMailTo, $sMailSubject, $sMailBody, $sMailHeaders
+				), \LOG_DEBUG);
 
-							$bR = $this->Config()->Get('labs', 'mail_func_additional_parameters', false) ?
-								\mail($sMailTo, $sMailSubject, $sMailBody, $sMailHeaders, '-f'.$oFrom->GetEmail()) :
-								\mail($sMailTo, $sMailSubject, $sMailBody, $sMailHeaders);
-
-							if (!$bR) {
-								throw new ClientException(Notifications::CantSendMessage);
-							}
-						}
-					}
-				} else {
+				$bR = $this->Config()->Get('labs', 'mail_func_additional_parameters', false) ?
+					\mail($sMailTo, $sMailSubject, $sMailBody, $sMailHeaders, '-f'.$sFrom) :
+					\mail($sMailTo, $sMailSubject, $sMailBody, $sMailHeaders);
+				if (!$bR) {
 					throw new ClientException(Notifications::CantSendMessage);
 				}
 			} else if ($oSmtpClient->IsConnected()) {
@@ -906,8 +925,6 @@ trait Messages
 
 		if ($this->Config()->Get('security', 'hide_x_mailer_header', true)) {
 			$oMessage->DoesNotAddDefaultXMailer();
-		} else {
-			$oMessage->SetXMailer('SnappyMail/'.APP_VERSION);
 		}
 
 		$oMessage->SetFrom(new \MailSo\Mime\Email($oIdentity->Email(), $oIdentity->Name()));
@@ -946,25 +963,27 @@ trait Messages
 		return $oMessage;
 	}
 
+	/**
+	 * called by DoSaveMessage and DoSendMessage
+	 */
 	private function buildMessage(Account $oAccount, bool $bWithDraftInfo = true) : \MailSo\Mime\Message
 	{
 		$oMessage = new \MailSo\Mime\Message();
 
 		if ($this->Config()->Get('security', 'hide_x_mailer_header', true)) {
 			$oMessage->DoesNotAddDefaultXMailer();
-		} else {
-			$oMessage->SetXMailer('SnappyMail/'.APP_VERSION);
 		}
 
-		$sFrom = $this->GetActionParam('from', '');
-		$oMessage->SetFrom(\MailSo\Mime\Email::Parse($sFrom));
+		$oMessage->SetFrom(\MailSo\Mime\Email::Parse($this->GetActionParam('from', '')));
+		$oFrom = $oMessage->GetFrom();
+
 /*
-		$oFromIdentity = $this->GetIdentityByID($oAccount, $this->GetActionParam('identityID', ''));
-		if ($oFromIdentity)
+		$oIdentity = $this->GetIdentityByID($oAccount, $this->GetActionParam('identityID', ''));
+		if ($oIdentity)
 		{
 			$oMessage->SetFrom(new \MailSo\Mime\Email(
-				$oFromIdentity->Email(), $oFromIdentity->Name()));
-			if ($oAccount->Domain()->OutSetSender()) {
+				$oIdentity->Email(), $oIdentity->Name()));
+			if ($oAccount->Domain()->SmtpSettings()->setSender) {
 				$oMessage->SetSender(\MailSo\Mime\Email::Parse($oAccount->Email()));
 			}
 		}
@@ -973,14 +992,13 @@ trait Messages
 			$oMessage->SetFrom(\MailSo\Mime\Email::Parse($oAccount->Email()));
 		}
 */
-		$oFrom = $oMessage->GetFrom();
 		$oMessage->RegenerateMessageId($oFrom ? $oFrom->GetDomain() : '');
 
 		$oMessage->SetReplyTo(new \MailSo\Mime\EmailCollection($this->GetActionParam('replyTo', '')));
 
 		if (!empty($this->GetActionParam('readReceiptRequest', 0))) {
 			// Read Receipts Reference Main Account Email, Not Identities #147
-//			$oMessage->SetReadReceipt(($oFromIdentity ?: $oAccount)->Email());
+//			$oMessage->SetReadReceipt(($oIdentity ?: $oAccount)->Email());
 			$oMessage->SetReadReceipt($oFrom->GetEmail());
 		}
 
@@ -1006,6 +1024,11 @@ trait Messages
 		$oMessage->SetInReplyTo($this->GetActionParam('inReplyTo', ''));
 		$oMessage->SetReferences($this->GetActionParam('references', ''));
 
+		$aAutocrypt = $this->GetActionParam('autocrypt', []);
+		$oMessage->SetAutocrypt(
+			\array_map(fn($header)=>"addr={$header['addr']}; keydata={$header['keydata']}", $aAutocrypt)
+		);
+
 		$aFoundCids = array();
 		$aFoundDataURL = array();
 		$aFoundContentLocationUrls = array();
@@ -1015,11 +1038,14 @@ trait Messages
 			$aSigned = \explode("\r\n\r\n", $sSigned, 2);
 //			$sBoundary = \preg_replace('/^.+boundary="([^"]+)".+$/Dsi', '$1', $aSigned[0]);
 			$sBoundary = $this->GetActionParam('boundary', '');
+//			\preg_match('/protocol="(application/[^"]+)"/', $aSigned[0], $match);
+//			$sProtocol = $match[1][0];
+			$sProtocol = 'application/pgp-signature';
 
 			$oPart = new MimePart;
 			$oPart->Headers->AddByName(
 				MimeEnumHeader::CONTENT_TYPE,
-				'multipart/signed; micalg="pgp-sha256"; protocol="application/pgp-signature"; boundary="'.$sBoundary.'"'
+				'multipart/signed; micalg="pgp-sha256"; protocol="'.$sProtocol.'"; boundary="'.$sBoundary.'"'
 			);
 			$oPart->Body = $aSigned[1];
 			$oMessage->SubParts->append($oPart);
@@ -1029,28 +1055,7 @@ trait Messages
 			unset($sSigned);
 
 		} else if ($sEncrypted = $this->GetActionParam('encrypted', '')) {
-			$oPart = new MimePart;
-			$oPart->Headers->AddByName(
-				MimeEnumHeader::CONTENT_TYPE,
-				'multipart/encrypted; protocol="application/pgp-encrypted"'
-			);
-			$oMessage->SubParts->append($oPart);
-
-			$oAlternativePart = new MimePart;
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TYPE, 'application/pgp-encrypted');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_DISPOSITION, 'attachment');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, '7Bit');
-			$oAlternativePart->Body = \MailSo\Base\ResourceRegistry::CreateMemoryResourceFromString('Version: 1');
-			$oPart->SubParts->append($oAlternativePart);
-
-			$oAlternativePart = new MimePart;
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TYPE, 'application/octet-stream');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_DISPOSITION, 'inline; filename="msg.asc"');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, '7Bit');
-			$oAlternativePart->Body = \MailSo\Base\ResourceRegistry::CreateMemoryResourceFromString(\preg_replace('/\\r?\\n/su', "\r\n", \trim($sEncrypted)));
-			$oPart->SubParts->append($oAlternativePart);
-
-			unset($oAlternativePart);
+			$oMessage->addPgpEncrypted(\preg_replace('/\\r?\\n/su', "\r\n", \trim($sEncrypted)));
 			unset($sEncrypted);
 
 		} else if ($sHtml = $this->GetActionParam('html', '')) {
@@ -1059,19 +1064,18 @@ trait Messages
 			$oMessage->SubParts->append($oPart);
 
 			$sHtml = \MailSo\Base\HtmlUtils::BuildHtml($sHtml, $aFoundCids, $aFoundDataURL, $aFoundContentLocationUrls);
+
+			$aLinkedData = $this->GetActionParam('linkedData', []);
+			if ($aLinkedData) {
+				$sHtml = \str_replace('</head>', '<script type="application/ld+json">'.\json_encode($aLinkedData).'</script></head>', $sHtml);
+			}
+
 			$this->Plugins()->RunHook('filter.message-html', array($oAccount, $oMessage, &$sHtml));
 
 			// First add plain
 			$sPlain = $this->GetActionParam('plain', '') ?: \MailSo\Base\HtmlUtils::ConvertHtmlToPlain($sHtml);
 			$this->Plugins()->RunHook('filter.message-plain', array($oAccount, $oMessage, &$sPlain));
-			$oAlternativePart = new MimePart;
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TYPE, 'text/plain; charset=utf-8');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, 'quoted-printable');
-			$oAlternativePart->Body = \MailSo\Base\StreamWrappers\Binary::CreateStream(
-				\MailSo\Base\ResourceRegistry::CreateMemoryResourceFromString(\preg_replace('/\\r?\\n/su', "\r\n", \trim($sPlain))),
-				'convert.quoted-printable-encode'
-			);
-			$oPart->SubParts->append($oAlternativePart);
+			$oPart->addPlain($sPlain);
 			unset($sPlain);
 
 			// Now add HTML
@@ -1114,15 +1118,7 @@ trait Messages
 			} else {
 */
 			$this->Plugins()->RunHook('filter.message-plain', array($oAccount, $oMessage, &$sPlain));
-			$oAlternativePart = new MimePart;
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TYPE, 'text/plain; charset="utf-8"');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, 'quoted-printable');
-			$oAlternativePart->Body = \MailSo\Base\StreamWrappers\Binary::CreateStream(
-				\MailSo\Base\ResourceRegistry::CreateMemoryResourceFromString(\preg_replace('/\\r?\\n/su', "\r\n", \trim($sPlain))),
-				'convert.quoted-printable-encode'
-			);
-			$oMessage->SubParts->append($oAlternativePart);
-			unset($oAlternativePart);
+			$oMessage->addPlain($sPlain);
 			unset($sPlain);
 		}
 		unset($oPart);
@@ -1149,7 +1145,25 @@ trait Messages
 				}
 			}
 		}
-
+/*
+		// OpenPGP https://github.com/the-djmaze/snappymail/issues/1587
+		$sPublicKey = $this->GetActionParam('publicKey', '');
+		if ($sPublicKey) {
+			$oMessage->Attachments()->append(
+				new \MailSo\Mime\Attachment(
+					\fopen("data://text/plain,{$sPublicKey}", 'r'),
+					'OpenPGP_'.\md5($sPublicKey).'.asc',
+					\strlen($sPublicKey),
+					false,
+					false,
+					'',
+					array(),
+					'',
+					'application/pgp-keys'
+				)
+			);
+		}
+*/
 		foreach ($aFoundDataURL as $sCidHash => $sDataUrlString) {
 			$aMatch = array();
 			$sCID = '<'.$sCidHash.'>';
@@ -1173,10 +1187,31 @@ trait Messages
 			}
 		}
 
+		$oPassphrase = new \SnappyMail\SensitiveString($this->GetActionParam('signPassphrase', ''));
+
+		// GnuPG
 		$sFingerprint = $this->GetActionParam('signFingerprint', '');
-		$sPassphrase = $this->GetActionParam('signPassphrase', '');
 		if ($sFingerprint) {
 			$GPG = $this->GnuPG();
+/*
+			// https://github.com/the-djmaze/snappymail/issues/1587
+			if ($this->GetActionParam('attachPublicKey', false)) {
+				$sPublicKey = $GPG->export($sFingerprint);
+				$oMessage->Attachments()->append(
+					new \MailSo\Mime\Attachment(
+						\fopen("data://text/plain,{$sPublicKey}", 'r'),
+						"OpenPGP_0x{$sFingerprint}.asc",
+						\strlen($sPublicKey),
+						false,
+						false,
+						'',
+						array(),
+						'',
+						'application/pgp-keys'
+					)
+				);
+			}
+*/
 			$oBody = $oMessage->GetRootPart();
 			$resource = $oBody->ToStream();
 
@@ -1190,7 +1225,7 @@ trait Messages
 			$oMessage->SubParts->Clear();
 			$oMessage->Attachments()->Clear();
 
-			$GPG->addSignKey($sFingerprint, $sPassphrase);
+			$GPG->addSignKey($sFingerprint, $oPassphrase);
 			$GPG->setsignmode(GNUPG_SIG_MODE_DETACH);
 			$sSignature = $GPG->signStream($fp);
 			if (!$sSignature) {
@@ -1213,13 +1248,95 @@ trait Messages
 			$oSignaturePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, '7Bit');
 			$oSignaturePart->Body = $sSignature;
 			$oPart->SubParts->append($oSignaturePart);
+		} else {
+			$sCertificate = $this->GetActionParam('signCertificate', '');
+			$sPrivateKey = $this->GetActionParam('signPrivateKey', '');
+			if ('S/MIME' === $this->GetActionParam('sign', '')) {
+				$sID = $this->GetActionParam('identityID', '');
+				foreach ($this->GetIdentities($oAccount) as $oIdentity) {
+					if ($oIdentity && $oIdentity->smimeCertificate && $oIdentity->smimeKey
+					 && ($oIdentity->Id() === $sID || $oIdentity->Email() === $oFrom->GetEmail())
+					) {
+						$sCertificate = $oIdentity->smimeCertificate;
+						$sPrivateKey = $oIdentity->smimeKey;
+						break;
+					}
+				}
+			}
+/*
+			// https://github.com/the-djmaze/snappymail/issues/1587
+			if ($sCertificate && $this->GetActionParam('attachCertificate', false)) {
+				$oMessage->Attachments()->append(
+					new \MailSo\Mime\Attachment(
+						\fopen("data://text/plain,{$sCertificate}", 'r'),
+						'certificate.pem',
+						\strlen($sCertificate),
+						false,
+						false,
+						'',
+						array(),
+						'',
+						'application/pem-certificate-chain'
+					)
+				);
+			}
+*/
+			if ($sCertificate && $sPrivateKey) {
+				$oBody = $oMessage->GetRootPart();
+
+				$resource = $oBody->ToStream();
+				\MailSo\Base\StreamFilters\LineEndings::appendTo($resource);
+				$tmp = new \SnappyMail\File\Temporary('mimepart');
+				$tmp->writeFromStream($resource);
+
+				$oBody->Body = null;
+				$oBody->SubParts->Clear();
+				$oMessage->SubParts->Clear();
+				$oMessage->Attachments()->Clear();
+
+				$detached = true;
+
+				$SMIME = $this->SMIME();
+				$SMIME->setCertificate($sCertificate);
+				$SMIME->setPrivateKey($sPrivateKey, $oPassphrase);
+				$sSignature = $SMIME->sign($tmp, $detached);
+
+				if (!$sSignature) {
+					throw new \RuntimeException('S/MIME sign() failed');
+				}
+
+				$oPart = new MimePart;
+				$oMessage->SubParts->append($oPart);
+				if ($detached) {
+					$oPart->Headers->AddByName(
+						MimeEnumHeader::CONTENT_TYPE,
+						'multipart/signed; micalg="sha-256"; protocol="application/pkcs7-signature"'
+					);
+
+					$fp = $tmp->fopen();
+					\rewind($fp);
+					$oBody->Raw = $fp;
+					$oPart->SubParts->append($oBody);
+
+					$oSignaturePart = new MimePart;
+					$oSignaturePart->Headers->AddByName(MimeEnumHeader::CONTENT_TYPE, 'application/pkcs7-signature; name="signature.p7s"');
+					$oSignaturePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, 'base64');
+					$oSignaturePart->Body = $sSignature;
+					$oPart->SubParts->append($oSignaturePart);
+				} else {
+					$oPart->Headers->AddByName(
+						MimeEnumHeader::CONTENT_TYPE,
+						'application/pkcs7-mime; smime-type=signed-data; name="smime.p7m"'
+					);
+					$oPart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, 'base64');
+					$oPart->Body = $sSignature;
+				}
+			}
 		}
 
 		$aFingerprints = \json_decode($this->GetActionParam('encryptFingerprints', ''), true);
 		if ($aFingerprints) {
-			$GPG = $this->GnuPG();
-			$oBody = $oMessage->GetRootPart();
-			$resource = $oBody->ToStream();
+			$resource = $oMessage->GetRootPart()->ToStream();
 			$fp = \fopen('php://temp', 'r+b');
 //			\stream_copy_to_stream($resource, $fp); // Fails
 			while (!\feof($resource)) \fwrite($fp, \fread($resource, 8192));
@@ -1227,31 +1344,49 @@ trait Messages
 			$oMessage->SubParts->Clear();
 			$oMessage->Attachments()->Clear();
 
+			$GPG = $this->GnuPG();
 			foreach ($aFingerprints as $sFingerprint) {
 				$GPG->addEncryptKey($sFingerprint);
 			}
-			$sEncrypted = $GPG->encryptStream($fp);
+			$oMessage->addPgpEncrypted($GPG->encryptStream($fp));
+		} else {
+			$aCertificates = $this->GetActionParam('encryptCertificates', []);
+			if ($aCertificates) {
+				$oBody = $oMessage->GetRootPart();
 
-			$oPart = new MimePart;
-			$oPart->Headers->AddByName(
-				MimeEnumHeader::CONTENT_TYPE,
-				'multipart/encrypted; protocol="application/pgp-encrypted"'
-			);
-			$oMessage->SubParts->append($oPart);
+				$resource = $oBody->ToStream();
+				\MailSo\Base\StreamFilters\LineEndings::appendTo($resource);
+				$tmp = new \SnappyMail\File\Temporary('mimepart');
+				$tmp->writeFromStream($resource);
 
-			$oAlternativePart = new MimePart;
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TYPE, 'application/pgp-encrypted');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_DISPOSITION, 'attachment');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, '7Bit');
-			$oAlternativePart->Body = \MailSo\Base\ResourceRegistry::CreateMemoryResourceFromString('Version: 1');
-			$oPart->SubParts->append($oAlternativePart);
+				$oBody->Body = null;
+				$oBody->SubParts->Clear();
+				$oMessage->SubParts->Clear();
+				$oMessage->Attachments()->Clear();
 
-			$oAlternativePart = new MimePart;
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TYPE, 'application/octet-stream');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_DISPOSITION, 'inline; filename="msg.asc"');
-			$oAlternativePart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, '7Bit');
-			$oAlternativePart->Body = \MailSo\Base\ResourceRegistry::CreateMemoryResourceFromString($sEncrypted);
-			$oPart->SubParts->append($oAlternativePart);
+				$SMIME = $this->SMIME();
+				$certificates = $SMIME->certificates();
+				// Load certificates by id
+				foreach ($aCertificates as &$sCertificate) {
+					if (!\str_contains($sCertificate, '-----BEGIN CERTIFICATE-----')) {
+						foreach ($certificates as $certificate) {
+							if ($certificate['id'] === $sCertificate) {
+								$sCertificate = $SMIME->getCertificate($certificate['file']);
+							}
+						}
+					}
+				}
+				$sEncrypted = $SMIME->encrypt($tmp, $aCertificates);
+
+				$oPart = new MimePart;
+				$oMessage->SubParts->append($oPart);
+				$oPart->Headers->AddByName(
+					MimeEnumHeader::CONTENT_TYPE,
+					'application/pkcs7-mime; smime-type=enveloped-data; name="smime.p7m"'
+				);
+				$oPart->Headers->AddByName(MimeEnumHeader::CONTENT_TRANSFER_ENCODING, 'base64');
+				$oPart->Body = $sEncrypted;
+			}
 		}
 
 		$this->Plugins()->RunHook('filter.build-message', array($oMessage));

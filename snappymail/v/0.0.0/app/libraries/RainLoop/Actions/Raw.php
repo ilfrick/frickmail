@@ -76,6 +76,19 @@ trait Raw
 		return false;
 	}
 
+	private function clearFileName(string $sFileName, string $sContentType, string $sMimeIndex, int $iMaxLength = 250): string
+	{
+		$sFileName = !\strlen($sFileName) ? \preg_replace('/[^a-zA-Z0-9]/', '.', (empty($sMimeIndex) ? '' : $sMimeIndex . '.') . $sContentType) : $sFileName;
+		$sClearedFileName = \MailSo\Base\Utils::StripSpaces(\preg_replace('/[\.]+/', '.', $sFileName));
+		$sExt = \MailSo\Base\Utils::GetFileExtension($sClearedFileName);
+
+		if (10 < $iMaxLength && $iMaxLength < \strlen($sClearedFileName) - \strlen($sExt)) {
+			$sClearedFileName = \substr($sClearedFileName, 0, $iMaxLength) . (empty($sExt) ? '' : '.' . $sExt);
+		}
+
+		return \MailSo\Base\Utils::SecureFileName(\MailSo\Base\Utils::Utf8Clear($sClearedFileName));
+	}
+
 	/**
 	 * Message, Message Attachment or Zip
 	 */
@@ -99,6 +112,8 @@ trait Raw
 			$sRangeStart = $aMatch[1];
 			$sRangeEnd = $aMatch[2];
 			$bIsRangeRequest = true;
+		} else {
+			$this->verifyCacheByKey($sRawKey);
 		}
 
 		$sMimeIndex = isset($aValues['mimeIndex']) ? (string) $aValues['mimeIndex'] : '';
@@ -106,8 +121,10 @@ trait Raw
 		$sFileNameIn = isset($aValues['fileName']) ? (string) $aValues['fileName'] : '';
 
 		if (!empty($aValues['fileHash'])) {
-			$this->verifyCacheByKey($sRawKey);
-
+			$rResource = $this->FilesProvider()->GetFile($oAccount, (string) $aValues['fileHash']);
+			if (!\is_resource($rResource)) {
+				return false;
+			}
 			// https://github.com/the-djmaze/snappymail/issues/144
 			if ('.pdf' === \substr($sFileNameIn,-4)) {
 				$sContentTypeOut = 'application/pdf'; // application/octet-stream
@@ -116,23 +133,13 @@ trait Raw
 					?: \SnappyMail\File\MimeType::fromFilename($sFileNameIn)
 					?: 'application/octet-stream';
 			}
-
-			$sFileNameOut = $this->MainClearFileName($sFileNameIn, $sContentTypeIn, $sMimeIndex);
-
-			$rResource = $this->FilesProvider()->GetFile($oAccount, (string) $aValues['fileHash']);
-			if (\is_resource($rResource)) {
-				\header('Content-Type: '.$sContentTypeOut);
-				\header('Content-Disposition: attachment; '.
-					\trim(\MailSo\Base\Utils::EncodeHeaderUtf8AttributeValue('filename', $sFileNameOut)));
-
-				\header('Accept-Ranges: none');
-				\header('Content-Transfer-Encoding: binary');
-
-				\MailSo\Base\Utils::FpassthruWithTimeLimitReset($rResource);
-				return true;
-			}
-
-			return false;
+			$sFileNameOut = $this->clearFileName($sFileNameIn, $sContentTypeIn, $sMimeIndex);
+			\header('Content-Type: '.$sContentTypeOut);
+			\MailSo\Base\Http::setContentDisposition('attachment', ['filename' => $sFileNameOut]);
+			\header('Accept-Ranges: none');
+			\header('Content-Transfer-Encoding: binary');
+			\MailSo\Base\Utils::FpassthruWithTimeLimitReset($rResource);
+			return true;
 		}
 
 		$sFolder = isset($aValues['folder']) ? (string) $aValues['folder'] : '';
@@ -140,8 +147,6 @@ trait Raw
 		if (empty($sFolder) || 1 > $iUid) {
 			return false;
 		}
-
-		$this->verifyCacheByKey($sRawKey);
 
 		$this->initMailClientConnection();
 
@@ -166,7 +171,7 @@ trait Raw
 					if ($sFileNameIn) {
 						$sFileName = $sFileNameIn;
 					}
-					$sFileName = $self->MainClearFileName($sFileName, $sContentType, $sMimeIndex);
+					$sFileName = $self->clearFileName($sFileName, $sContentType, $sMimeIndex);
 
 					if ('.pdf' === \substr($sFileName, -4)) {
 						// https://github.com/the-djmaze/snappymail/issues/144
@@ -187,15 +192,13 @@ trait Raw
 						{
 							if ($bThumbnail) {
 								$oImage = static::loadImage($rResource, $bDetectImageOrientation, 48);
-								\header('Content-Disposition: inline; '.
-									\trim(\MailSo\Base\Utils::EncodeHeaderUtf8AttributeValue('filename', $sFileName.'_thumb60x60.png')));
+								\MailSo\Base\Http::setContentDisposition('inline', ['filename' => $sFileName.'_thumb60x60.png']);
 								$oImage->show('png');
 //								$oImage->show('webp'); // Little Britain: "Safari says NO"
 								exit;
 							} else if ($bDetectImageOrientation) {
 								$oImage = static::loadImage($rResource, $bDetectImageOrientation);
-								\header('Content-Disposition: inline; '.
-									\trim(\MailSo\Base\Utils::EncodeHeaderUtf8AttributeValue('filename', $sFileName)));
+								\MailSo\Base\Http::setContentDisposition('inline', ['filename' => $sFileName]);
 								$oImage->show();
 //								$oImage->show('webp'); // Little Britain: "Safari says NO"
 								exit;
@@ -211,9 +214,7 @@ trait Raw
 
 					if (!\headers_sent()) {
 						\header('Content-Type: '.$sContentType);
-						\header('Content-Disposition: '.($bDownload ? 'attachment' : 'inline').'; '.
-							\trim(\MailSo\Base\Utils::EncodeHeaderUtf8AttributeValue('filename', $sFileName)));
-
+						\MailSo\Base\Http::setContentDisposition($bDownload ? 'attachment' : 'inline', ['filename' => $sFileName]);
 						\header('Accept-Ranges: bytes');
 						\header('Content-Transfer-Encoding: binary');
 					}
@@ -257,7 +258,8 @@ trait Raw
 						\MailSo\Base\Utils::FpassthruWithTimeLimitReset($rResource);
 					}
 				}
-			}, $sFolder, $iUid, $sMimeIndex);
+			}, $sFolder, $iUid, $sMimeIndex
+		);
 	}
 
 	private static function loadImage($resource, bool $bDetectImageOrientation = false, int $iThumbnailBoxSize = 0) : \SnappyMail\Image

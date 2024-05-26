@@ -3,7 +3,7 @@ module.exports = {
 //	extends: ['eslint:recommended', 'plugin:prettier/recommended'],
 	extends: ['eslint:recommended'],
 	parserOptions: {
-		ecmaVersion: 6,
+		ecmaVersion: 11,
 		sourceType: 'module'
 	},
 	env: {
@@ -35,7 +35,9 @@ module.exports = {
 		// vendors/bootstrap/bootstrap.native.js
 		'BSN': "readonly",
 		// Mailvelope
-		'mailvelope': "readonly"
+		'mailvelope': "readonly",
+		// Punycode
+		'IDN': "readonly"
 	},
 	// http://eslint.org/docs/rules/
 	rules: {

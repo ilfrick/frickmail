@@ -1,19 +1,38 @@
 <div class="legend" data-i18n="TAB_SECURITY/LEGEND_SECURITY"></div>
 <div class="form-horizontal">
 	<div class="control-group">
+		<div data-bind="component: {
+			name: 'Checkbox',
+			params: {
+				label: 'TAB_SECURITY/LABEL_USE_IMAGE_PROXY',
+				value: proxyExternalImages
+			}
+		}"></div>
+	</div>
+</div>
+<div class="legend" data-i18n="TAB_SECURITY/CRYPTO"></div>
+<div class="form-horizontal">
+	<div class="control-group">
 		<div>
 			<div data-bind="component: {
 				name: 'Checkbox',
 				params: {
-					value: useLocalProxyForExternalImages,
-					label: 'TAB_SECURITY/LABEL_USE_IMAGE_PROXY'
+					label: 'GnuPG',
+					value: capaGnuPG
 				}
 			}"></div>
 			<div data-bind="component: {
 				name: 'Checkbox',
 				params: {
-					value: capaOpenPGP,
-					label: 'TAB_SECURITY/LABEL_ALLOW_OPEN_PGP'
+					label: 'OpenPGP.js',
+					value: capaOpenPGP
+				}
+			}"></div>
+			<div data-bind="component: {
+				name: 'Checkbox',
+				params: {
+					label: 'TAB_SECURITY/LABEL_AUTO_VERIFY',
+					value: autoVerifySignatures
 				}
 			}"></div>
 		</div>
@@ -46,6 +65,7 @@
 		<input type="text" autocomplete="off" autocorrect="off" autocapitalize="off"
 			pattern="[A-Z2-7]{16,}"
 			data-bind="textInput: adminTOTP">
+		<button type="button" data-bind="visible:!adminTOTP(), click:generateTOTP">Generate</button>
 	</div>
 	<div class="control-group">
 		<label></label>

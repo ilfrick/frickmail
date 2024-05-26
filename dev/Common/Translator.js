@@ -22,7 +22,7 @@ const
 
 	getNotificationMessage = code => {
 		let key = getKeyByValue(Notifications, code);
-		return key ? I18N_DATA.NOTIFICATIONS[i18nKey(key).replace('_NOTIFICATION', '_ERROR')] : '';
+		return key ? I18N_DATA.NOTIFICATIONS[key] : '';
 	},
 
 	fromNow = date => relativeTime(Math.round((date.getTime() - Date.now()) / 1000));
@@ -45,8 +45,7 @@ export const
 			}
 		}
 		if (Intl.RelativeTimeFormat) {
-			let rtf = new Intl.RelativeTimeFormat(doc.documentElement.lang);
-			return rtf.format(seconds, unit);
+			return (new Intl.RelativeTimeFormat(doc.documentElement.lang)).format(seconds, unit);
 		}
 		// Safari < 14
 		abs = Math.abs(seconds);
@@ -62,7 +61,7 @@ export const
 	 * @returns {string}
 	 */
 	i18n = (key, valueList, defaulValue) => {
-		let result = null == defaulValue ? key : defaulValue;
+		let result = defaulValue ?? key;
 		let path = key.split('/');
 		if (I18N_DATA[path[0]] && path[1]) {
 			result = I18N_DATA[path[0]][path[1]] || result;
@@ -102,8 +101,7 @@ export const
 
 	timestampToString = (timeStampInUTC, formatStr) => {
 		const now = Date.now(),
-			time = 0 < timeStampInUTC ? Math.min(now, timeStampInUTC * 1000) : (0 === timeStampInUTC ? now : 0);
-
+			time = 0 < timeStampInUTC ? timeStampInUTC * 1000 : (0 === timeStampInUTC ? now : 0);
 		if (31536000000 < time) {
 			const m = new Date(time), h = LanguageStore.hourCycle();
 			switch (formatStr) {
@@ -144,7 +142,7 @@ export const
 				time = Date.parse(element.dateTime) / 1000;
 			}
 
-			let key = element.dataset.momentFormat;
+			let key = element.dataset.timeFormat;
 			if (key) {
 				element.textContent = timestampToString(time, key);
 				if ('FULL' !== key && 'FROMNOW' !== key) {
@@ -212,14 +210,13 @@ export const
 				script.remove();
 				resolve();
 			};
-			script.onerror = () => reject(new Error('Language '+language+' failed'));
+			script.onerror = () => reject(Error('Language '+language+' failed'));
 			script.src = langLink(language, admin);
 	//		script.async = true;
 			doc.head.append(script);
 		}),
 
 	/**
-	 *
 	 * @param {string} language
 	 * @param {boolean=} isEng = false
 	 * @returns {string}
@@ -229,6 +226,8 @@ export const
 			'LANGS_NAMES' + (true === isEng ? '_EN' : '') + '/' + language,
 			null,
 			language
-		);
+		),
+
+	baseCollator = numeric => new Intl.Collator(doc.documentElement.lang, {numeric: !!numeric, sensitivity: 'base'});
 
 init();

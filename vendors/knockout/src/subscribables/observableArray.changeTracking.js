@@ -1,5 +1,5 @@
 const arrayChangeEventName = 'arrayChange';
-ko.extenders['trackArrayChanges'] = (target, options) => {
+ko['extenders']['trackArrayChanges'] = (target, options) => {
     // Use the provided options--each call to trackArrayChanges overwrites the previously set options
     target.compareArrayOptions = {};
     if (typeof options == "object") {
@@ -31,37 +31,36 @@ ko.extenders['trackArrayChanges'] = (target, options) => {
     target.afterSubscriptionRemove = event => {
         underlyingAfterSubscriptionRemoveFunction?.call(target, event);
         if (event === arrayChangeEventName && !target.hasSubscriptionsForEvent(arrayChangeEventName)) {
-            changeSubscription?.dispose();
-            spectateSubscription?.dispose();
+            changeSubscription?.['dispose']();
+            spectateSubscription?.['dispose']();
             spectateSubscription = changeSubscription = null;
             trackingChanges = false;
             previousContents = undefined;
         }
     };
 
-    function trackChanges() {
+    function notifyChanges() {
+        if (pendingChanges) {
+            // Make a copy of the current contents and ensure it's an array
+            var currentContents = [].concat(target.peek() || []), changes;
 
-        function notifyChanges() {
-            if (pendingChanges) {
-                // Make a copy of the current contents and ensure it's an array
-                var currentContents = [].concat(target.peek() || []), changes;
+            // Compute the diff and issue notifications, but only if someone is listening
+            if (target.hasSubscriptionsForEvent(arrayChangeEventName)) {
+                changes = getChanges(previousContents, currentContents);
+            }
 
-                // Compute the diff and issue notifications, but only if someone is listening
-                if (target.hasSubscriptionsForEvent(arrayChangeEventName)) {
-                    changes = getChanges(previousContents, currentContents);
-                }
+            // Eliminate references to the old, removed items, so they can be GCed
+            previousContents = currentContents;
+            cachedDiff = null;
+            pendingChanges = 0;
 
-                // Eliminate references to the old, removed items, so they can be GCed
-                previousContents = currentContents;
-                cachedDiff = null;
-                pendingChanges = 0;
-
-                if (changes?.length) {
-                    target.notifySubscribers(changes, arrayChangeEventName);
-                }
+            if (changes?.length) {
+                target.notifySubscribers(changes, arrayChangeEventName);
             }
         }
+    }
 
+    function trackChanges() {
         if (trackingChanges) {
             // Whenever there's a new subscription and there are pending notifications, make sure all previous
             // subscriptions are notified of the change so that all subscriptions are in sync.
@@ -72,13 +71,13 @@ ko.extenders['trackArrayChanges'] = (target, options) => {
         trackingChanges = true;
 
         // Track how many times the array actually changed value
-        spectateSubscription = target.subscribe(() => ++pendingChanges, null, "spectate");
+        spectateSubscription = target['subscribe'](() => ++pendingChanges, null, "spectate");
 
         // Each time the array changes value, capture a clone so that on the next
         // change it's possible to produce a diff
         previousContents = [].concat(target.peek() || []);
         cachedDiff = null;
-        changeSubscription = target.subscribe(notifyChanges);
+        changeSubscription = target['subscribe'](notifyChanges);
     }
 
     function getChanges(previousContents, currentContents) {
@@ -102,16 +101,15 @@ ko.extenders['trackArrayChanges'] = (target, options) => {
         var diff = [],
             arrayLength = rawArray.length,
             argsLength = args.length,
-            offset = 0;
+            offset = 0,
+            pushDiff = (status, value, index) =>
+                diff[diff.length] = { 'status': status, 'value': value, 'index': index };
 
-        function pushDiff(status, value, index) {
-            return diff[diff.length] = { 'status': status, 'value': value, 'index': index };
-        }
         switch (operationName) {
             case 'push':
                 offset = arrayLength;
             case 'unshift':
-                for (let index = 0; index < argsLength; index++) {
+                for (let index = 0; index < argsLength; ++index) {
                     pushDiff('added', args[index], offset + index);
                 }
                 break;

@@ -26,6 +26,7 @@ const
 		imapType: 0,
 		imapTimeout: 300,
 		imapShortLogin: false,
+		imapLowerLogin: true,
 		// SSL
 		imapSslVerify_peer: false,
 		imapSslAllow_self_signed: false,
@@ -44,12 +45,14 @@ const
 		sievePort: 4190,
 		sieveType: 0,
 		sieveTimeout: 10,
+		sieveAuthLiteral: true,
 
 		smtpHost: '',
 		smtpPort: 25,
 		smtpType: 0,
 		smtpTimeout: 60,
 		smtpShortLogin: false,
+		smtpLowerLogin: true,
 		smtpUseAuth: true,
 		smtpSetSender: false,
 		smtpAuthPlainLine: false,
@@ -69,6 +72,7 @@ const
 			secure: pInt(oDomain.imapType()),
 			timeout: oDomain.imapTimeout,
 			shortLogin: !!oDomain.imapShortLogin(),
+			lowerLogin: !!oDomain.imapLowerLogin(),
 			ssl: {
 				verify_peer: !!oDomain.imapSslVerify_peer(),
 				verify_peer_name: !!oDomain.imapSslVerify_peer(),
@@ -92,6 +96,7 @@ const
 			secure: pInt(oDomain.smtpType()),
 			timeout: oDomain.smtpTimeout,
 			shortLogin: !!oDomain.smtpShortLogin(),
+			lowerLogin: !!oDomain.smtpLowerLogin(),
 			ssl: {
 				verify_peer: !!oDomain.smtpSslVerify_peer(),
 				verify_peer_name: !!oDomain.smtpSslVerify_peer(),
@@ -104,11 +109,13 @@ const
 		},
 		Sieve: {
 			enabled: !!oDomain.sieveEnabled(),
+			authLiteral: !!oDomain.sieveAuthLiteral(),
 			host: oDomain.sieveHost,
 			port: oDomain.sievePort,
 			secure: pInt(oDomain.sieveType()),
 			timeout: oDomain.sieveTimeout,
 			shortLogin: !!oDomain.imapShortLogin(),
+			lowerLogin: !!oDomain.imapLowerLogin(),
 			ssl: {
 				verify_peer: !!oDomain.imapSslVerify_peer(),
 				verify_peer_name: !!oDomain.imapSslVerify_peer(),
@@ -306,21 +313,43 @@ export class DomainPopupView extends AbstractViewPopup {
 		this.testingSmtpError(false);
 	}
 
+	autoconfig() {
+		let domain = this.name();
+		Remote.request('AdminDomainAutoconfig', (iError, oData) => {
+			if (oData?.Result?.config) {
+				let server = oData.Result.config.incomingServer[0];
+				this.imapHost(server.hostname);
+				this.imapPort(server.port);
+				this.imapType('STARTTLS' === server.socketType ? 2 : ('SSL' === server.socketType ? 1 : 0));
+				this.imapShortLogin('%EMAILADDRESS%' !== server.username);
+
+				server = oData.Result.config.outgoingServer[0];
+				this.smtpHost(server.hostname);
+				this.smtpPort(server.port);
+				this.smtpType('STARTTLS' === server.socketType ? 2 : ('SSL' === server.socketType ? 1 : 0));
+				this.smtpShortLogin('%EMAILADDRESS%' !== server.username);
+				this.smtpUseAuth(!!server.authentication);
+				this.smtpUsePhpMail(false);
+			}
+		}, {domain});
+	}
+
 	onShow(oDomain) {
 		this.saving(false);
 		this.clearTesting();
 		this.edit(false);
 		this.imapCapabilities([
+			'BINARY',
 			'LIST-STATUS',
 			'METADATA',
 			'MOVE',
+			'NAMESPACE',
+			'PREVIEW',
 			'SORT',
-			'THREAD',
-			'BINARY',
 			'STATUS=SIZE',
-			'PREVIEW'
+			'THREAD'
 		]);
-		this.imapDisabled_capabilities(['PREVIEW','STATUS=SIZE']);
+		this.imapDisabled_capabilities(['METADATA','PREVIEW','STATUS=SIZE']);
 		forEachObjectEntry(domainDefaults, (key, value) => this[key](value));
 		this.enableSmartPorts(true);
 		if (oDomain) {
@@ -343,6 +372,8 @@ export class DomainPopupView extends AbstractViewPopup {
 					this[key]?.(value);
 				}
 			});
+			this.name(IDN.toUnicode(this.name()));
+			this.aliasName(IDN.toUnicode(this.aliasName()));
 			this.imapCapabilities(this.imapCapabilities.concat(this.imapDisabled_capabilities()).unique());
 			this.enableSmartPorts(true);
 		}

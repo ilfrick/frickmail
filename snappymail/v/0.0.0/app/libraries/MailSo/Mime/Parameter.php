@@ -27,18 +27,17 @@ class Parameter implements \JsonSerializable
 		$this->sValue = $sValue;
 	}
 
-	public static function CreateFromParameterLine(string $sRawParam) : self
+	public static function FromString(string $sRawParam) : self
 	{
 		$oParameter = new self('', '');
-		return $oParameter->Parse($sRawParam);
-	}
 
-	public function Reset() : self
-	{
-		$this->sName = '';
-		$this->sValue = '';
+		$aParts = \explode('=', $sRawParam, 2);
+		$oParameter->sName = \trim(\trim($aParts[0]), '"\'');
+		if (2 === \count($aParts)) {
+			$oParameter->sValue = \trim(\trim($aParts[1]), '"\'');
+		}
 
-		return $this;
+		return $oParameter;
 	}
 
 	public function Name() : string
@@ -56,20 +55,6 @@ class Parameter implements \JsonSerializable
 		$this->sValue = $sValue;
 	}
 
-	public function Parse(string $sRawParam, string $sSeparator = '=') : self
-	{
-		$this->Reset();
-
-		$aParts = \explode($sSeparator, $sRawParam, 2);
-
-		$this->sName = \trim(\trim($aParts[0]), '"\'');
-		if (2 === \count($aParts)) {
-			$this->sValue = \trim(\trim($aParts[1]), '"\'');
-		}
-
-		return $this;
-	}
-
 	public function ToString(bool $bConvertSpecialsName = false) : string
 	{
 		if (!\strlen($this->sName)) {
@@ -81,9 +66,7 @@ class Parameter implements \JsonSerializable
 			\strtolower(Enumerations\Parameter::FILENAME)
 		)))
 		{
-			return $this->sName . '="' . \MailSo\Base\Utils::EncodeUnencodedValue(
-				\MailSo\Base\Enumerations\Encoding::BASE64_SHORT,
-				$this->sValue) . '"';
+			return $this->sName . '="' . \MailSo\Base\Utils::EncodeHeaderValue($this->sValue) . '"';
 		}
 
 		return $this->sName . '="' . $this->sValue . '"';

@@ -2,6 +2,7 @@
 
 namespace RainLoop\Actions;
 
+use RainLoop\Enumerations\Capa;
 use RainLoop\Notifications;
 use RainLoop\Utils;
 use RainLoop\Model\Account;
@@ -10,6 +11,7 @@ use RainLoop\Model\AdditionalAccount;
 use RainLoop\Providers\Storage\Enumerations\StorageType;
 use RainLoop\Exceptions\ClientException;
 use SnappyMail\Cookies;
+use SnappyMail\SensitiveString;
 
 trait UserAuth
 {
@@ -19,71 +21,68 @@ trait UserAuth
 	private $oAdditionalAuthAccount = false;
 	private $oMainAuthAccount = false;
 
+	public function DoResealCryptKey() : array
+	{
+		return $this->DefaultResponse(
+			$this->getMainAccountFromToken()->resealCryptKey(
+				new SensitiveString($this->GetActionParam('passphrase', ''))
+			)
+		);
+	}
+
 	/**
 	 * @throws \RainLoop\Exceptions\ClientException
 	 */
-	public function resolveLoginCredentials(string &$sEmail,
-		#[\SensitiveParameter]
-		string &$sPassword,
-		string &$sLogin): void
+	protected function resolveLoginCredentials(string $sEmail, SensitiveString $oPassword): array
 	{
+		$sEmail = \SnappyMail\IDN::emailToAscii(\MailSo\Base\Utils::Trim($sEmail));
+
 		$this->Plugins()->RunHook('login.credentials.step-1', array(&$sEmail));
 
-		$sEmail = \MailSo\Base\Utils::Trim($sEmail);
-		if ($this->Config()->Get('login', 'login_lowercase', true)) {
-			$sEmail = \mb_strtolower($sEmail);
-		}
+		$oDomain = null;
+		$oDomainProvider = $this->DomainProvider();
 
+		// When email address is missing the domain, try to add it
 		if (!\str_contains($sEmail, '@')) {
-			$this->logWrite('The email address "' . $sEmail . '" is not complete', \LOG_INFO, 'LOGIN');
-
-			$bAdded = false;
-
+			$this->logWrite("The email address '{$sEmail}' is incomplete", \LOG_INFO, 'LOGIN');
 			if ($this->Config()->Get('login', 'determine_user_domain', false)) {
-				$sUserHost = \trim($this->Http()->GetHost(true, true));
-				$this->logWrite('Determined user domain: ' . $sUserHost, \LOG_INFO, 'LOGIN');
+				$sUserHost = \SnappyMail\IDN::toAscii($this->Http()->GetHost(false, true));
+				$this->logWrite("Determined user domain: {$sUserHost}", \LOG_INFO, 'LOGIN');
 
+				// Determine without wildcard
 				$aDomainParts = \explode('.', $sUserHost);
 				$iLimit = \min(\count($aDomainParts), 14);
-
-				$oDomainProvider = $this->DomainProvider();
 				while (0 < $iLimit--) {
-					$sLine = \implode('.', $aDomainParts);
-
-					$oDomain = $oDomainProvider->Load($sLine, false);
+					$sDomain = \implode('.', $aDomainParts);
+					$oDomain = $oDomainProvider->Load($sDomain, false);
 					if ($oDomain) {
-						$bAdded = true;
-						$this->logWrite('Check "' . $sLine . '": OK (' . $sEmail . ' > ' . $sEmail . '@' . $sLine . ')',
-							\LOG_INFO, 'LOGIN');
-
-						$sEmail .= '@' . $sLine;
+						$sEmail .= '@' . $sDomain;
+						$this->logWrite("Check '{$sDomain}': OK", \LOG_INFO, 'LOGIN');
 						break;
 					} else {
-						$this->logWrite('Check "' . $sLine . '": NO', \LOG_INFO, 'LOGIN');
+						$this->logWrite("Check '{$sDomain}': NO", \LOG_INFO, 'LOGIN');
 					}
-
 					\array_shift($aDomainParts);
 				}
 
-				if (!$bAdded) {
+				// Else determine with wildcard
+				if (!$oDomain) {
 					$oDomain = $oDomainProvider->Load($sUserHost, true);
 					if ($oDomain) {
-						$bAdded = true;
-						$this->logWrite('Check "' . $sUserHost . '" with wildcard: OK (' . $sEmail . ' > ' . $sEmail . '@' . $sUserHost . ')',
-							\LOG_INFO, 'LOGIN');
-
 						$sEmail .= '@' . $sUserHost;
+						$this->logWrite("Check '{$sUserHost}' with wildcard: OK", \LOG_INFO, 'LOGIN');
 					} else {
-						$this->logWrite('Check "' . $sUserHost . '" with wildcard: NO', \LOG_INFO, 'LOGIN');
+						$this->logWrite("Check '{$sUserHost}' with wildcard: NO", \LOG_INFO, 'LOGIN');
 					}
 				}
 
-				if (!$bAdded) {
-					$this->logWrite('Domain was not found!', \LOG_INFO, 'LOGIN');
+				if (!$oDomain) {
+					$this->logWrite("Domain '{$sUserHost}' was not determined!", \LOG_INFO, 'LOGIN');
 				}
 			}
 
-			if (!$bAdded) {
+			// Else try default domain
+			if (!$oDomain) {
 				$sDefDomain = \trim($this->Config()->Get('login', 'default_domain', ''));
 				if (\strlen($sDefDomain)) {
 					if ('HTTP_HOST' === $sDefDomain || 'SERVER_NAME' === $sDefDomain) {
@@ -91,62 +90,81 @@ trait UserAuth
 					} else if ('gethostname' === $sDefDomain) {
 						$sDefDomain = \gethostname();
 					}
-					$this->logWrite('Default domain "' . $sDefDomain . '" was used. (' . $sEmail . ' > ' . $sEmail . '@' . $sDefDomain . ')',
-						\LOG_INFO, 'LOGIN');
-
 					$sEmail .= '@' . $sDefDomain;
+					$this->logWrite("Default domain '{$sDefDomain}' will be used.", \LOG_INFO, 'LOGIN');
 				} else {
 					$this->logWrite('Default domain not configured.', \LOG_INFO, 'LOGIN');
 				}
 			}
 		}
 
+		$sPassword = (string) $oPassword;
 		$this->Plugins()->RunHook('login.credentials.step-2', array(&$sEmail, &$sPassword));
+		$this->logMask($sPassword);
 
-		$sLogin = $sEmail;
-		if ($this->Config()->Get('login', 'login_lowercase', true)) {
-			$sLogin = \mb_strtolower($sLogin);
+		$sImapUser = $sEmail;
+		$sSmtpUser = $sEmail;
+		if (\str_contains($sEmail, '@')
+		 && ($oDomain || ($oDomain = $oDomainProvider->Load(\MailSo\Base\Utils::getEmailAddressDomain($sEmail), true)))
+		) {
+			$sEmail = $oDomain->ImapSettings()->fixUsername($sEmail, false);
+			$sImapUser = $oDomain->ImapSettings()->fixUsername($sImapUser);
+			$sSmtpUser = $oDomain->SmtpSettings()->fixUsername($sSmtpUser);
 		}
 
-		$this->logMask($sPassword);
-		$this->Plugins()->RunHook('login.credentials', array(&$sEmail, &$sLogin, &$sPassword));
-		$this->logMask($sPassword);
+		$this->Plugins()->RunHook('login.credentials', array(&$sEmail, &$sImapUser, &$sPassword, &$sSmtpUser));
+
+		$oPassword->setValue($sPassword);
+
+		return [
+			'email' => $sEmail,
+			'domain' => $oDomain,
+			'imapUser' => $sImapUser,
+			'smtpUser' => $sSmtpUser,
+			'pass' => $oPassword
+		];
 	}
 
 	/**
 	 * @throws \RainLoop\Exceptions\ClientException
 	 */
-	public function LoginProcess(string &$sEmail,
-		#[\SensitiveParameter]
-		string &$sPassword,
-		bool $bMainAccount = true
-	): Account
+	public function LoginProcess(string $sEmail, SensitiveString $oPassword, bool $bMainAccount = true): Account
 	{
-		$sInputEmail = $sEmail;
+		$sCredentials = $this->resolveLoginCredentials($sEmail, $oPassword);
 
-		$sLogin = '';
-		$this->resolveLoginCredentials($sEmail, $sPassword, $sLogin);
-
-		if (!\str_contains($sEmail, '@') || !\strlen($sPassword)) {
+		if (!\str_contains($sCredentials['email'], '@') || !\strlen($oPassword)) {
 			throw new ClientException(Notifications::InvalidInputArgument);
 		}
 
 		$oAccount = null;
 		try {
-			$oAccount = $bMainAccount
-				? MainAccount::NewInstanceFromCredentials($this, $sEmail, $sLogin, $sPassword, true)
-				: AdditionalAccount::NewInstanceFromCredentials($this, $sEmail, $sLogin, $sPassword, true);
+			$oAccount = $bMainAccount ? new MainAccount : new AdditionalAccount;
+			$oAccount->setCredentials(
+				$sCredentials['domain'],
+				$sCredentials['email'],
+				$sCredentials['imapUser'],
+				$oPassword,
+				$sCredentials['smtpUser']
+//				,new SensitiveString($oPassword)
+			);
+			$this->Plugins()->RunHook('filter.account', array($oAccount));
 			if (!$oAccount) {
-				throw new ClientException(Notifications::AuthError);
+				throw new ClientException(Notifications::AccountFilterError);
 			}
 		} catch (\Throwable $oException) {
-			$this->LoggerAuthHelper($oAccount, $this->getAdditionalLogParamsByUserLogin($sInputEmail));
+			$this->LoggerAuthHelper($oAccount, $sEmail);
 			throw $oException;
 		}
 
 		$this->imapConnect($oAccount, true);
 		if ($bMainAccount) {
 			$this->StorageProvider()->Put($oAccount, StorageType::SESSION, Utils::GetSessionToken(), 'true');
+
+			// Must be here due to bug #1241
+			$this->SetMainAuthAccount($oAccount);
+			$this->Plugins()->RunHook('login.success', array($oAccount));
+
+			$this->SetAuthToken($oAccount);
 		}
 
 		return $oAccount;
@@ -168,28 +186,25 @@ trait UserAuth
 	{
 		$this->Http()->ServerNoCache();
 		$oMainAccount = $this->getMainAccountFromToken(false);
-		if ($sEmail && $oMainAccount && $this->GetCapa(\RainLoop\Enumerations\Capa::ADDITIONAL_ACCOUNTS)) {
+		if ($sEmail && $oMainAccount && $this->GetCapa(Capa::ADDITIONAL_ACCOUNTS)) {
 			$oAccount = null;
-			if ($oMainAccount->Email() === $sEmail) {
-				$this->SetAdditionalAuthToken($oAccount);
-				return true;
-			}
-			$sEmail = \MailSo\Base\Utils::IdnToAscii($sEmail);
-			$aAccounts = $this->GetAccounts($oMainAccount);
-			if (!isset($aAccounts[$sEmail])) {
-				throw new ClientException(Notifications::AccountDoesNotExist);
-			}
-			$oAccount = AdditionalAccount::NewInstanceFromTokenArray(
-				$this, $aAccounts[$sEmail]
-			);
-			if (!$oAccount) {
-				throw new ClientException(Notifications::AccountSwitchFailed);
-			}
+			if ($oMainAccount->Email() !== $sEmail) {
+				$sEmail = \SnappyMail\IDN::emailToAscii($sEmail);
+				$aAccounts = $this->GetAccounts($oMainAccount);
+				if (!isset($aAccounts[$sEmail])) {
+					throw new ClientException(Notifications::AccountDoesNotExist);
+				}
+				$oAccount = AdditionalAccount::NewInstanceFromTokenArray(
+					$this, $aAccounts[$sEmail]
+				);
+				if (!$oAccount) {
+					throw new ClientException(Notifications::AccountSwitchFailed);
+				}
 
-			// Test the login
-			$oImapClient = new \MailSo\Imap\ImapClient;
-			$this->imapConnect($oAccount, false, $oImapClient);
-
+				// Test the login
+				$oImapClient = new \MailSo\Imap\ImapClient;
+				$this->imapConnect($oAccount, false, $oImapClient);
+			}
 			$this->SetAdditionalAuthToken($oAccount);
 			return true;
 		}
@@ -259,7 +274,7 @@ trait UserAuth
 							$this->oMainAuthAccount = $oMainAuthAccount;
 						} else {
 							$this->StorageProvider()->Clear($oMainAuthAccount, StorageType::SESSION, $sToken);
-							\SnappyMail\Log::notice('TOKENS', 'SESSION_TOKEN value invalid: ' . \gettype($sTokenValue));
+							\SnappyMail\Log::notice('TOKENS', 'SESSION_TOKEN value invalid: ' . \get_debug_type($sTokenValue));
 						}
 					} else {
 						\SnappyMail\Log::notice('TOKENS', 'AUTH_SPEC_TOKEN_KEY invalid');
@@ -326,11 +341,14 @@ trait UserAuth
 			\SnappyMail\Log::notice(self::AUTH_SIGN_ME_TOKEN_KEY, 'decrypt');
 			$aResult = \SnappyMail\Crypt::DecryptUrlSafe($sSignMeToken, 'signme');
 			if (isset($aResult['e'], $aResult['u']) && \SnappyMail\UUID::isValid($aResult['u'])) {
+				if (!isset($aResult['c'])) {
+					$aTokenData['c'] = \array_key_last($aTokenData);
+					$aTokenData['d'] = \end($aTokenData);
+				}
 				return $aResult;
 			}
 			\SnappyMail\Log::notice(self::AUTH_SIGN_ME_TOKEN_KEY, 'invalid');
-			// Don't clear due to login checkbox
-//			Cookies::clear(self::AUTH_SIGN_ME_TOKEN_KEY);
+			Cookies::clear(self::AUTH_SIGN_ME_TOKEN_KEY);
 		}
 		return null;
 	}
@@ -345,7 +363,8 @@ trait UserAuth
 			\SnappyMail\Crypt::EncryptUrlSafe([
 				'e' => $oAccount->Email(),
 				'u' => $uuid,
-				$data[0] => \base64_encode($data[1])
+				'c' => $data[0],
+				'd' => \base64_encode($data[1])
 			], 'signme'),
 			\time() + 3600 * 24 * 30 // 30 days
 		);
@@ -367,8 +386,8 @@ trait UserAuth
 					throw new \RuntimeException("server token not found for {$aTokenData['e']}/.sign_me/{$aTokenData['u']}");
 				}
 				$aAccountHash = \SnappyMail\Crypt::Decrypt([
-					\array_key_last($aTokenData),
-					\base64_decode(\end($aTokenData)),
+					$aTokenData['c'],
+					\base64_decode($aTokenData['d']),
 					$sAuthToken
 				], 'signme');
 				if (!\is_array($aAccountHash)) {
@@ -386,8 +405,7 @@ trait UserAuth
 			catch (\Throwable $oException)
 			{
 				\SnappyMail\Log::warning(self::AUTH_SIGN_ME_TOKEN_KEY, $oException->getMessage());
-				// Don't clear due to smctoken cookie missing at initialization and login checkbox
-//				$this->ClearSignMeData();
+				$this->ClearSignMeData();
 			}
 		}
 		return null;

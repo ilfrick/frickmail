@@ -2,6 +2,7 @@ import ko from 'ko';
 
 //import { koComputable } from 'External/ko';
 import { SettingsCapa, SettingsGet } from 'Common/Globals';
+import { loadAccountsAndIdentities } from 'Common/UtilsUser';
 
 import { AccountUserStore } from 'Stores/User/Account';
 import { IdentityUserStore } from 'Stores/User/Identity';
@@ -64,7 +65,7 @@ export class UserSettingsAccounts /*extends AbstractViewSettings*/ {
 					rl.route.root();
 					setTimeout(() => location.reload(), 1);
 				} else {
-					rl.app.accountsAndIdentities();
+					loadAccountsAndIdentities();
 				}
 			}, {
 				emailToDelete: accountToRemove.email
@@ -88,7 +89,7 @@ export class UserSettingsAccounts /*extends AbstractViewSettings*/ {
 
 	accountsAndIdentitiesAfterMove() {
 		Remote.request('AccountsAndIdentitiesSortOrder', null, {
-			Accounts: AccountUserStore.getEmailAddresses().filter(v => v != SettingsGet('mainEmail')),
+			Accounts: AccountUserStore.filter(item => item.isAdditional()).map(item => item.email),
 			Identities: IdentityUserStore.map(item => (item ? item.id() : ""))
 		});
 	}

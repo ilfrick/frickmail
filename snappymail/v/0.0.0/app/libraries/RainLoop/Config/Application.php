@@ -57,6 +57,10 @@ class Application extends \RainLoop\Config\AbstractConfig
 			}
 		}
 
+		if (!\in_array($this->Get('logs', 'time_zone', ''), \DateTimeZone::listIdentifiers())) {
+			$this->Set('logs', 'time_zone', 'UTC');
+		}
+
 		return $bResult;
 	}
 
@@ -91,6 +95,18 @@ class Application extends \RainLoop\Config\AbstractConfig
 	public function Set(string $sSectionKey, string $sParamKey, $mParamValue) : void
 	{
 		// Workarounds for the changed application structure
+		if ('webmail' === $sSectionKey) {
+			if ('language_admin' === $sSectionKey) {
+				$sSectionKey = 'admin_panel';
+				$sParamKey = 'language';
+			}
+		}
+		if ('security' === $sSectionKey) {
+			if (\str_starts_with($sParamKey, 'admin_panel_')) {
+				$sSectionKey = 'admin_panel';
+				$sParamKey = \str_replace('admin_panel_', '', $sParamKey);
+			}
+		}
 		if ('labs' === $sSectionKey) {
 			if (\str_starts_with($sParamKey, 'imap_')) {
 				$sSectionKey = 'imap';
@@ -112,29 +128,26 @@ class Application extends \RainLoop\Config\AbstractConfig
 				$sSectionKey = 'imap';
 				$sParamKey = 'fetch_new_messages';
 			}
+			if ('login_fault_delay' === $sParamKey) {
+				$sSectionKey = 'login';
+				$sParamKey = 'fault_delay';
+			}
+			if ('log_ajax_response_write_limit' === $sParamKey) {
+				$sSectionKey = 'logs';
+				$sParamKey = 'json_response_write_limit';
+			}
 		}
 		parent::Set($sSectionKey, $sParamKey, $mParamValue);
 	}
 
-	public function SetPassword(
-		#[\SensitiveParameter]
-		string $sPassword
-	) : void
+	public function SetPassword(\SnappyMail\SensitiveString $oPassword) : void
 	{
-		$this->Set('security', 'admin_password', \password_hash($sPassword, PASSWORD_DEFAULT));
+		$this->Set('security', 'admin_password', \password_hash($oPassword, PASSWORD_DEFAULT));
 	}
 
-	public function ValidatePassword(
-		#[\SensitiveParameter]
-		string $sPassword
-	) : bool
+	public function ValidatePassword(\SnappyMail\SensitiveString $oPassword) : bool
 	{
-		$sConfigPassword = (string) $this->Get('security', 'admin_password', '');
-		if (32 == \strlen($sPassword) && \md5(APP_SALT.$sPassword.APP_SALT) === $sConfigPassword) {
-			$this->SetPassword($sPassword);
-			return true;
-		}
-		return \strlen($sPassword) && \password_verify($sPassword, $sConfigPassword);
+		return \strlen($oPassword) && \password_verify($oPassword, $this->Get('security', 'admin_password', ''));
 	}
 
 	public function Save() : bool
@@ -170,7 +183,6 @@ class Application extends \RainLoop\Config\AbstractConfig
 				'allow_user_background'       => array(false),
 
 				'language'                    => array('en', 'Language used by default'),
-				'language_admin'              => array('en', 'Admin Panel interface language'),
 				'allow_languages_on_settings' => array(true, 'Allow language selection on settings screen'),
 
 				'allow_additional_accounts'   => array(true),
@@ -201,6 +213,7 @@ Warning: only enable when server does not do this, else double compression error
 				'mysql_ssl_ca'      => array('', 'PEM format certificate'),
 				'mysql_ssl_verify'  => array(true),
 				'mysql_ssl_ciphers' => array('', 'HIGH'),
+				'sqlite_global'     => array(\is_file(APP_PRIVATE_DATA . '/AddressBook.sqlite')),
 				'suggestions_limit' => array(20)
 			),
 
@@ -208,14 +221,14 @@ Warning: only enable when server does not do this, else double compression error
 				'custom_server_signature' => array('SnappyMail'),
 				'x_xss_protection_header' => array('1; mode=block'),
 
-				'openpgp'                 => array(false),
+				'gnupg'                   => array(true),
+				'openpgp'                 => array(true),
+				'auto_verify_signatures'  => array(false),
 
 				'allow_admin_panel'       => array(true, 'Access settings'),
 				'admin_login'             => array('admin', 'Login and password for web admin panel'),
 				'admin_password'          => array(''),
 				'admin_totp'              => array(''),
-				'admin_panel_host'        => array(''),
-				'admin_panel_key'         => array('admin'),
 
 				'force_https'             => array(false),
 				'hide_x_mailer_header'    => array(true),
@@ -240,10 +253,11 @@ Default is "site=same-origin;site=none"')
 				'login'    => array('admin', 'Login and password for web admin panel'),
 				'password' => array(''),
 				'totp'     => array(''),
+*/
 				'host'     => array(''),
 				'key'      => array('admin'),
-*/
-				'allow_update' => array(false)
+				'allow_update' => array(false),
+				'language'     => array('en', 'Admin Panel interface language'),
 			),
 
 			'ssl' => array(
@@ -257,7 +271,6 @@ Default is "site=same-origin;site=none"')
 			),
 
 			'capa' => array(
-				'quota' => array(true),
 				'dangerous_actions' => array(true, 'Allow clear folder and delete messages without moving to trash'),
 				'attachments_actions' => array(true, 'Allow download attachments as Zip (and optionally others)')
 			),
@@ -277,16 +290,16 @@ When this value is gethostname, the gethostname() value is used.
 				'determine_user_language' => array(true, 'Detect language from browser header `Accept-Language`'),
 				'determine_user_domain' => array(false, 'Like default_domain but then HTTP_HOST/SERVER_NAME without www.'),
 
-				'login_lowercase' => array(true),
-
-				'sign_me_auto' => array(\RainLoop\Enumerations\SignMeType::DEFAULT_OFF,
+				'sign_me_auto' => array(\RainLoop\Enumerations\SignMeType::DefaultOff,
 					'This option allows webmail to remember the logged in user
 once they closed the browser window.
 
 Values:
   "DefaultOff" - can be used, disabled by default;
   "DefaultOn"  - can be used, enabled by default;
-  "Unused"     - cannot be used')
+  "Unused"     - cannot be used'),
+
+				'fault_delay' => array(5, 'When login fails, wait N seconds before responding'),
 			),
 
 			'plugins' => array(
@@ -370,7 +383,9 @@ Examples:
 				'auth_logging' => array(false, 'Enable auth logging in a separate file (for fail2ban)'),
 				'auth_logging_filename' => array('fail2ban/auth-{date:Y-m-d}.txt'),
 				'auth_logging_format' => array('[{date:Y-m-d H:i:s}] Auth failed: ip={request:ip} user={imap:login} host={imap:host} port={imap:port}'),
-				'auth_syslog' => array(false, 'Enable auth logging to syslog for fail2ban')
+				'auth_syslog' => array(false, 'Enable auth logging to syslog for fail2ban'),
+
+				'json_response_write_limit' => array(300),
 			),
 
 			'debug' => array(
@@ -391,7 +406,6 @@ Enables caching in the system'),
 
 				'index' => array('v1', 'Additional caching key. If changed, cache is purged'),
 
-				'fast_cache_driver' => array('files', 'Can be: files, APCU, memcache, redis (beta)'),
 				'fast_cache_index' => array('v1', 'Additional caching key. If changed, fast cache is purged'),
 
 				'http' => array(true, 'Browser-level cache. If enabled, caching is maintainted without using files'),
@@ -413,13 +427,8 @@ Enables caching in the system'),
 			),
 
 			'labs' => array(
-				'date_from_headers' => array(true, 'Display message RFC 2822 date and time header, instead of the arrival internal date.'),
-				'allow_message_append' => array(false),
-				'login_fault_delay' => array(5, 'When login fails, wait N seconds before responding'),
-				'log_ajax_response_write_limit' => array(300),
+				'allow_message_append' => array(false, 'Allow drag & drop .eml files from system into messages list'),
 				'smtp_show_server_errors' => array(false),
-				'sieve_auth_plain_initial' => array(true),
-				'sieve_allow_fileinto_inbox' => array(false),
 				'mail_func_clear_headers' => array(true, 'PHP mail() remove To and Subject headers'),
 				'mail_func_additional_parameters' => array(false, 'PHP mail() set -f emailaddress'),
 				'folders_spec_limit' => array(50),
@@ -428,10 +437,6 @@ Enables caching in the system'),
 				'custom_login_link' => array(''),
 				'custom_logout_link' => array(''),
 				'http_client_ip_check_proxy' => array(false),
-				'fast_cache_memcache_host' => array('127.0.0.1'),
-				'fast_cache_memcache_port' => array(11211),
-				'fast_cache_redis_host' => array('127.0.0.1'),
-				'fast_cache_redis_port' => array(6379),
 				'use_local_proxy_for_external_images' => array(true),
 				'image_exif_auto_rotate' => array(false),
 				'cookie_default_path' => array(''),

@@ -1,4 +1,4 @@
-ko.extenders = {
+ko['extenders'] = {
     'debounce': (target, timeout) => target.limit(callback => debounce(callback, timeout)),
 
     'rateLimit': (target, timeout) => target.limit(callback => throttle(callback, timeout)),
@@ -10,9 +10,8 @@ ko.extenders = {
     }
 };
 
-var primitiveTypes = { 'undefined':1, 'boolean':1, 'number':1, 'string':1 };
 function valuesArePrimitiveAndEqual(a, b) {
-    return (a === null || primitiveTypes[typeof(a)]) ? (a === b) : false;
+    return a === b && a !== Object(a);
 }
 
 function throttle(callback, timeout) {
@@ -34,5 +33,3 @@ function debounce(callback, timeout) {
         timeoutInstance = setTimeout(callback, timeout);
     };
 }
-
-ko.exportSymbol('extenders', ko.extenders);

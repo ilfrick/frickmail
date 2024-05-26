@@ -2,8 +2,39 @@
 
 namespace RainLoop\Actions;
 
+use RainLoop\Enumerations\Capa;
+
 trait Contacts
 {
+	/**
+	 * @var \RainLoop\Providers\AddressBook
+	 */
+	protected $oAddressBookProvider = null;
+
+	public function AddressBookProvider(?\RainLoop\Model\Account $oAccount = null): \RainLoop\Providers\AddressBook
+	{
+		if (null === $this->oAddressBookProvider) {
+			$oDriver = null;
+			try {
+//				if ($this->oConfig->Get('contacts', 'enable', false)) {
+				if ($this->GetCapa(Capa::CONTACTS)) {
+					$oDriver = $this->fabrica('address-book', $oAccount);
+				}
+				if ($oAccount && $oDriver) {
+					$oDriver->SetEmail($this->GetMainEmail($oAccount));
+					$oDriver->setDAVClientConfig($this->getContactsSyncData($oAccount));
+				}
+			} catch (\Throwable $e) {
+				\SnappyMail\LOG::error('AddressBook', $e->getMessage()."\n".$e->getTraceAsString());
+				$oDriver = null;
+//				$oDriver = new \RainLoop\Providers\AddressBook\PdoAddressBook();
+			}
+			$this->oAddressBookProvider = new \RainLoop\Providers\AddressBook($oDriver);
+			$this->oAddressBookProvider->SetLogger($this->oLogger);
+		}
+
+		return $this->oAddressBookProvider;
+	}
 
 	public function DoSaveContactsSyncData() : array
 	{
@@ -172,6 +203,7 @@ trait Contacts
 		if (!isset($aData['Mode'])) {
 			$aData['Mode'] = empty($aData['Enable']) ? 0 : 1;
 		}
+//		$oAccount = $this->getAccountFromToken();
 		$oMainAccount = $this->getMainAccountFromToken();
 		if ($aData['Password']) {
 			$aData['Password'] = \SnappyMail\Crypt::EncryptToJSON($aData['Password'], $oMainAccount->CryptKey());
@@ -187,6 +219,7 @@ trait Contacts
 
 	protected function getContactsSyncData(\RainLoop\Model\Account $oAccount) : ?array
 	{
+//		$oAccount = $this->getAccountFromToken();
 		$sData = $this->StorageProvider()->Get($oAccount,
 			\RainLoop\Providers\Storage\Enumerations\StorageType::CONFIG,
 			'contacts_sync'
