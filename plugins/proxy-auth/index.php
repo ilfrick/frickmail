@@ -118,7 +118,7 @@ class ProxyAuthPlugin extends \RainLoop\Plugins\AbstractPlugin
 		if ($sProxyRequest) {
 			/* create master user login from remote user header and settings */
 			$sEmail = $sRemoteUser . $sMasterSeparator . $sMasterUser;
-			$sPassword = \trim($this->Config()->getDecrypted('plugin', 'master_password', ''));
+			$sPassword =  new \SnappyMail\SensitiveString(\trim($this->Config()->getDecrypted('plugin', 'master_password', '')));
 
 			try
 			{
