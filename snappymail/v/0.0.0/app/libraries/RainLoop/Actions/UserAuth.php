@@ -37,7 +37,11 @@ trait UserAuth
 	{
 		$sEmail = \SnappyMail\IDN::emailToAscii(\MailSo\Base\Utils::Trim($sEmail));
 
-		$this->Plugins()->RunHook('login.credentials.step-1', array(&$sEmail));
+		$sNewEmail = $sEmail;
+		$this->Plugins()->RunHook('login.credentials.step-1', array(&$sNewEmail));
+		if ($sNewEmail) {
+			$sEmail = $sNewEmail;
+		}
 
 		$oDomain = null;
 		$oDomainProvider = $this->DomainProvider();
@@ -98,9 +102,13 @@ trait UserAuth
 			}
 		}
 
-		$sPassword = (string) $oPassword;
-		$this->Plugins()->RunHook('login.credentials.step-2', array(&$sEmail, &$sPassword));
+		$sNewEmail = $sEmail;
+		$sPassword = $oPassword->getValue();
+		$this->Plugins()->RunHook('login.credentials.step-2', array(&$sNewEmail, &$sPassword));
 		$this->logMask($sPassword);
+		if ($sNewEmail) {
+			$sEmail = $sNewEmail;
+		}
 
 		$sImapUser = $sEmail;
 		$sSmtpUser = $sEmail;
@@ -112,15 +120,18 @@ trait UserAuth
 			$sSmtpUser = $oDomain->SmtpSettings()->fixUsername($sSmtpUser);
 		}
 
-		$this->Plugins()->RunHook('login.credentials', array(&$sEmail, &$sImapUser, &$sPassword, &$sSmtpUser));
+		$sNewEmail = $sEmail;
+		$sNewImapUser = $sImapUser;
+		$sNewSmtpUser = $sSmtpUser;
+		$this->Plugins()->RunHook('login.credentials', array(&$sNewEmail, &$sNewImapUser, &$sPassword, &$sNewSmtpUser));
 
 		$oPassword->setValue($sPassword);
 
 		return [
-			'email' => $sEmail,
+			'email' => $sNewEmail ?: $sEmail,
 			'domain' => $oDomain,
-			'imapUser' => $sImapUser,
-			'smtpUser' => $sSmtpUser,
+			'imapUser' => $sNewImapUser ?: $sImapUser,
+			'smtpUser' => $sNewSmtpUser ?: $sSmtpUser,
 			'pass' => $oPassword
 		];
 	}
