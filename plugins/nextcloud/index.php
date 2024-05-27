@@ -74,14 +74,14 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public function loginCredentials(string &$sEmail, string &$sLogin, ?string &$sPassword = null) : void
 	{
 		$ocUser = \OC::$server->getUserSession()->getUser();
-		$sEmail = $ocUser->getEMailAddress() ?: $oc->user->getPrimaryEMailAddress();
+		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress();
 		$sLogin = $ocUser->getUID();
 	}
 
 	public function loginCredentials2(string &$sEmail, ?string &$sPassword = null) : void
 	{
 		$ocUser = \OC::$server->getUserSession()->getUser();
-		$sEmail = $ocUser->getEMailAddress() ?: $oc->user->getPrimaryEMailAddress();
+		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress();
 	}
 
 	public function beforeLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
@@ -243,7 +243,7 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 				}
 				if (!$sEmail) {
 					$sEmail = $ocUser->getEMailAddress();
-//						?: $oc->user->getPrimaryEMailAddress();
+//						?: $ocUser->getPrimaryEMailAddress();
 				}
 /*
 				if ($config->getAppValue('snappymail', 'snappymail-autologin-oidc', false)) {
