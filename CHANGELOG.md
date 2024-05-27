@@ -1,3 +1,13 @@
+## 2.36.3 – 2024-05-27
+
+### Changed
+- UserAuth prevent plugin errors (like the Nextcloud plugin did)
+
+### Fixed
+- Undefined variable $aTokenData
+  [#1567](https://github.com/the-djmaze/snappymail/issues/1567)
+
+
 ## 2.36.2 – 2024-05-26
 
 ### Added

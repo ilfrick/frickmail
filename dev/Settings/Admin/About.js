@@ -78,6 +78,10 @@ export class AdminSettingsAbout /*extends AbstractViewSettings*/ {
 		});
 	}
 
+	clearCache() {
+		Remote.request('AdminClearCache');
+	}
+
 	updateCoreData() {
 		if (!this.coreUpdating()) {
 			this.coreUpdating(true);
