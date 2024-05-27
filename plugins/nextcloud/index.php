@@ -4,8 +4,8 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME = 'Nextcloud',
-		VERSION = '2.36',
-		RELEASE  = '2024-05-26',
+		VERSION = '2.36.1',
+		RELEASE  = '2024-05-27',
 		CATEGORY = 'Integrations',
 		DESCRIPTION = 'Integrate with Nextcloud v20+',
 		REQUIRED = '2.36.2';
@@ -74,14 +74,14 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public function loginCredentials(string &$sEmail, string &$sLogin, ?string &$sPassword = null) : void
 	{
 		$ocUser = \OC::$server->getUserSession()->getUser();
-		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress();
+		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress() ?: $sEmail;
 		$sLogin = $ocUser->getUID();
 	}
 
 	public function loginCredentials2(string &$sEmail, ?string &$sPassword = null) : void
 	{
 		$ocUser = \OC::$server->getUserSession()->getUser();
-		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress();
+		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress() ?: $sEmail;
 	}
 
 	public function beforeLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
