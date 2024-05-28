@@ -12,11 +12,11 @@ class LdapMailAccountsPlugin extends AbstractPlugin
 {
 	const
 		NAME     = 'LDAP Mail Accounts',
-		VERSION  = '2.1.1',
+		VERSION  = '2.2.0',
 		AUTHOR   = 'cm-schl',
 		URL      = 'https://github.com/cm-sch',
-		RELEASE  = '2024-03-16',
-		REQUIRED = '2.35.3',
+		RELEASE  = '2024-05-28',
+		REQUIRED = '2.36.1',
 		CATEGORY = 'Accounts',
 		DESCRIPTION = 'Add additional mail accounts the SnappyMail user has access to by a LDAP query. Basing on the work of FWest98 (https://github.com/FWest98).';
 

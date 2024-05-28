@@ -8,6 +8,8 @@ Version 2.0.0 changes the way additional mail accounts get their e-mail address:
 Now it is also possible to overwrite the mail address of the main account: if a user logs into SnappyMail with a username and SnappyMail added the configured default domain the mail address of the main account could have been some not existing address like "username@default-domain.com". This could have happend when using the Nextcloud SnappyMail integration that offers an automatic login using the Nextcloud username.
 The plugin now can be configured to overwrite the username or mail address used at login with a mail address found inside ldap.
 
+Version 2.2.0 adds compatibility with SnappyMail 2.36.1 and later where some changes were introduced that made the plugin unusable. This version also adds the possibility to delete the .cryptkey file on evere login. For more information see the `Configuration` section below.
+
 ### Configuration
 - Install and activate the plugin using the SnappyMail Admin Panel -> menu Extensions.
 - Click on the gear symbol beside the plugin to open the configration dialog.
