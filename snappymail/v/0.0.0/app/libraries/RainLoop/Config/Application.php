@@ -96,7 +96,7 @@ class Application extends \RainLoop\Config\AbstractConfig
 	{
 		// Workarounds for the changed application structure
 		if ('webmail' === $sSectionKey) {
-			if ('language_admin' === $sSectionKey) {
+			if ('language_admin' === $sParamKey) {
 				$sSectionKey = 'admin_panel';
 				$sParamKey = 'language';
 			}
@@ -136,6 +136,16 @@ class Application extends \RainLoop\Config\AbstractConfig
 				$sSectionKey = 'logs';
 				$sParamKey = 'json_response_write_limit';
 			}
+		}
+		if ('language' === $sParamKey) {
+			$aLang = \SnappyMail\L10n::getLanguages('admin_panel' === $sSectionKey);
+			$sLanguage = \strtr($mParamValue, '_', '-');
+			if (!\in_array($sLanguage, $aLang)) {
+				if (\str_contains($sLanguage, '-')) {
+					$sLanguage = \strtok($sLanguage, '-');
+				}
+			}
+			$mParamValue = \in_array($sLanguage, $aLang) ? $sLanguage : 'en';
 		}
 		parent::Set($sSectionKey, $sParamKey, $mParamValue);
 	}
