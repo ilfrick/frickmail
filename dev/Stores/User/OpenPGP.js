@@ -16,6 +16,8 @@ import { Passphrases } from 'Storage/Passphrases';
 import { baseCollator } from 'Common/Translator';
 
 const
+	loaded = () => !!window.openpgp,
+
 	findOpenPGPKey = (keys, query/*, sign*/) =>
 		keys.find(key =>
 			key.for(query) || query == key.id || query == key.fingerprint
@@ -134,23 +136,36 @@ export const OpenPGPUserStore = new class {
 	}
 
 	loadKeyrings() {
-		if (window.openpgp) {
-			loadOpenPgpKeys(publicKeysItem).then(keys => {
+		if (loaded()) {
+			loadOpenPgpKeys(publicKeysItem)
+			.then(keys => {
 				this.publicKeys(dedup(keys));
 				console.log('openpgp.js public keys loaded');
-			});
-			loadOpenPgpKeys(privateKeysItem).then(keys => {
-				this.privateKeys(dedup(keys));
-				console.log('openpgp.js private keys loaded');
+			})
+			.finally(() => {
+				loadOpenPgpKeys(privateKeysItem)
+				.then(keys => {
+					this.privateKeys(dedup(keys));
+					console.log('openpgp.js private keys loaded');
+				})
+				.finally(() => {
+					/*SettingsGet('loadBackupKeys') && */this.loadBackupKeys();
+				});
 			});
 		}
+	}
+
+	loadBackupKeys() {
+		Remote.request('GetPGPKeys',
+			(iError, oData) => !iError && oData.Result && this.importKeys(oData.Result)
+		);
 	}
 
 	/**
 	 * @returns {boolean}
 	 */
 	isSupported() {
-		return !!window.openpgp;
+		return loaded();
 	}
 
 	importKey(armoredKey) {
@@ -158,7 +173,7 @@ export const OpenPGPUserStore = new class {
 	}
 
 	async importKeys(keys) {
-		if (window.openpgp) {
+		if (loaded()) {
 			const privateKeys = this.privateKeys(),
 				publicKeys = this.publicKeys();
 			for (const armoredKey of keys) try {
@@ -185,7 +200,7 @@ export const OpenPGPUserStore = new class {
 		keyPair.revocationCertificate
 	 */
 	storeKeyPair(keyPair) {
-		if (window.openpgp) {
+		if (loaded()) {
 			openpgp.readKey({armoredKey:keyPair.publicKey}).then(key => {
 				this.publicKeys.push(new OpenPgpKeyModel(keyPair.publicKey, key));
 				storeOpenPgpKeys(this.publicKeys, publicKeysItem);

@@ -1,3 +1,48 @@
+## 2.36.3 – 2024-05-27
+
+### Changed
+- UserAuth prevent plugin errors (like the Nextcloud plugin did)
+
+### Fixed
+- Undefined variable $aTokenData
+  [#1567](https://github.com/the-djmaze/snappymail/issues/1567)
+
+
+## 2.36.2 – 2024-05-26
+
+### Added
+- "copy to" action in menu's for
+  [#1559](https://github.com/the-djmaze/snappymail/issues/1559)
+- Log signal info for
+  [#1569](https://github.com/the-djmaze/snappymail/issues/1569)
+- OpenPGP.js automatically import backup keys from server
+
+### Changed
+- Improved "remember me" cookie handling
+- Update Basque by @Thadah
+- Update Portuguese by @ner00
+
+### Fixed
+- "Account already exists"
+  [#1561](https://github.com/the-djmaze/snappymail/issues/1561)
+- Properly escape path separator in tar.php file list regex by @sevmonster
+  [#1562](https://github.com/the-djmaze/snappymail/pull/1562)
+- Prevent mkdir() error
+  [#1565](https://github.com/the-djmaze/snappymail/issues/1565)
+- SCRAM Exception when trying to log in to SMTP
+  [#1575](https://github.com/the-djmaze/snappymail/issues/1575)
+- Error when redirected back to instance after Gmail OAuth
+  [#1580](https://github.com/the-djmaze/snappymail/issues/1580)
+- Uncaught TypeError: hasPublicKeyForEmails(...).then is not a function
+  [#1589](https://github.com/the-djmaze/snappymail/issues/1589)
+- Undefined variable $sFilename
+- GPG/PGP exec() return false handling
+
+### Nextcloud
+- OIDC login active again by @avinash-0007
+  [#1572](https://github.com/the-djmaze/snappymail/pull/1572)
+
+
 ## 2.36.1 – 2024-04-23
 
 ### Added
@@ -29,6 +74,9 @@
 - Content encoding and type detection in JavaScript could fail due to case-sensitivity.
 - Extensions set logger failed
 - GnuPG check open_basedir and if shell_exec is disabled
+  [#1385](https://github.com/the-djmaze/snappymail/issues/1385)
+  [#1496](https://github.com/the-djmaze/snappymail/issues/1496)
+  [#1555](https://github.com/the-djmaze/snappymail/issues/1555)
 - Hide pagination when search result has no messages
 - Prevent mbstring error before setup.php
 - Prevent MessagesPerPage Infinity

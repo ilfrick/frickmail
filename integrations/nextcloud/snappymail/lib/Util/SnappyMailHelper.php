@@ -91,9 +91,18 @@ class SnappyMailHelper
 */
 				if ($doLogin && $aCredentials[1] && $aCredentials[2]) {
 					try {
-						$oAccount = $oActions->LoginProcess($aCredentials[1], $aCredentials[2]);
-						if ($oAccount && $oConfig->Get('login', 'sign_me_auto', \RainLoop\Enumerations\SignMeType::DefaultOff) === \RainLoop\Enumerations\SignMeType::DefaultOn) {
-							$oActions->SetSignMeToken($oAccount);
+						$ocSession = \OC::$server->getSession();
+						if ($ocSession->get('is_oidc')) {
+							$pwd = new \SnappyMail\SensitiveString($aCredentials[1]);
+							$oAccount = $oActions->LoginProcess($aCredentials[1], $pwd);
+							if ($oAccount) {
+								$oActions->SetSignMeToken($oAccount);
+							}
+						} else {
+							$oAccount = $oActions->LoginProcess($aCredentials[1], $aCredentials[2]);
+							if ($oAccount && $oConfig->Get('login', 'sign_me_auto', \RainLoop\Enumerations\SignMeType::DefaultOff) === \RainLoop\Enumerations\SignMeType::DefaultOn) {
+								$oActions->SetSignMeToken($oAccount);
+							}	
 						}
 					} catch (\Throwable $e) {
 						// Login failure, reset password to prevent more attempts
@@ -140,22 +149,22 @@ class SnappyMailHelper
 		// If the current user ID is identical to login ID (not valid when using account switching),
 		// this has the second priority.
 		if ($ocSession['snappymail-nc-uid'] == $sUID) {
-/*
+
 			// If OpenID Connect (OIDC) is enabled and used for login, use this.
 			// https://apps.nextcloud.com/apps/oidc_login
-			// DISABLED https://github.com/the-djmaze/snappymail/issues/1420#issuecomment-1933045917
 			if ($config->getAppValue('snappymail', 'snappymail-autologin-oidc', false)) {
 				if ($ocSession->get('is_oidc')) {
 					// IToken->getPassword() ???
 					if ($sAccessToken = $ocSession->get('oidc_access_token')) {
-						return [$sUID, 'oidc@nextcloud', $sAccessToken];
+						$sEmail = $config->getUserValue($sUID, 'settings', 'email');
+						return [$sUID, $sEmail, $sAccessToken];
 					}
 					\SnappyMail\Log::debug('Nextcloud', 'OIDC access_token missing');
 				} else {
 					\SnappyMail\Log::debug('Nextcloud', 'No OIDC login');
 				}
 			}
-*/
+
 			// Only use the user's password in the current session if they have
 			// enabled auto-login using Nextcloud username or email address.
 			$sEmail = '';

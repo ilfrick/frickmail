@@ -11,16 +11,27 @@
 				dateRegEx = /(TZID=(?<tz>[^:]+):)?(?<year>[0-9]{4})(?<month>[0-9]{2})(?<day>[0-9]{2})T(?<hour>[0-9]{2})(?<minute>[0-9]{2})(?<second>[0-9]{2})(?<utc>Z?)/,
 				parseDate = str => {
 					let parts = dateRegEx.exec(str)?.groups,
-						options = {dateStyle: 'long', timeStyle: 'short'};
+						options = {dateStyle: 'long', timeStyle: 'short'},
+						date = (parts ? new Date(
+							parseInt(parts.year, 10),
+							parseInt(parts.month, 10) - 1,
+							parseInt(parts.day, 10),
+							parseInt(parts.hour, 10),
+							parseInt(parts.minute, 10),
+							parseInt(parts.second, 10)
+						) : new Date(str));
 					parts?.tz && (options.timeZone = parts.tz);
-					return (parts ? new Date(
-						parseInt(parts.year, 10),
-						parseInt(parts.month, 10) - 1,
-						parseInt(parts.day, 10),
-						parseInt(parts.hour, 10),
-						parseInt(parts.minute, 10),
-						parseInt(parts.second, 10)
-					) : new Date(str)).format(options);
+					try {
+						return date.format(options);
+					} catch (e) {
+						console.error(e);
+						if (options.timeZone) {
+							// TODO: handle messy vtimezones
+//							VTIMEZONEs[options.timeZone];
+							options.timeZone = undefined;
+							return date.format(options);
+						}
+					}
 				};
 
 			attachmentsPlace.after(Element.fromHTML(`

@@ -6,8 +6,8 @@ class ProxyAuthPlugin extends \RainLoop\Plugins\AbstractPlugin
 		NAME     = 'Proxy Auth',
 		AUTHOR   = 'Philipp',
 		URL      = 'https://www.mundhenk.org/',
-		VERSION  = '0.3',
-		RELEASE  = '2024-03-27',
+		VERSION  = '0.4',
+		RELEASE  = '2024-05-26',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		LICENSE  = 'MIT',
@@ -118,7 +118,7 @@ class ProxyAuthPlugin extends \RainLoop\Plugins\AbstractPlugin
 		if ($sProxyRequest) {
 			/* create master user login from remote user header and settings */
 			$sEmail = $sRemoteUser . $sMasterSeparator . $sMasterUser;
-			$sPassword = \trim($this->Config()->getDecrypted('plugin', 'master_password', ''));
+			$sPassword =  new \SnappyMail\SensitiveString(\trim($this->Config()->getDecrypted('plugin', 'master_password', '')));
 
 			try
 			{

@@ -21,7 +21,7 @@ abstract class Account implements \JsonSerializable
 
 	private ?SensitiveString $oSmtpPass = null;
 
-	private Domain $oDomain;
+	private ?Domain $oDomain = null;
 
 	public function Email() : string
 	{
@@ -49,7 +49,7 @@ abstract class Account implements \JsonSerializable
 //		return $this->sSmtpUser ?: $this->sEmail ?: $this->sImapUser;
 	}
 
-	public function Domain() : Domain
+	public function Domain() : ?Domain
 	{
 		return $this->oDomain;
 	}

@@ -18,8 +18,6 @@ import { OpenPgpGeneratePopupView } from 'View/Popup/OpenPgpGenerate';
 import { SMimeUserStore } from 'Stores/User/SMime';
 import { SMimeImportPopupView } from 'View/Popup/SMimeImport';
 
-import Remote from 'Remote/User/Fetch';
-
 export class UserSettingsSecurity extends AbstractViewSettings {
 	constructor() {
 		super();
@@ -62,9 +60,7 @@ export class UserSettingsSecurity extends AbstractViewSettings {
 	}
 
 	importToOpenPGP() {
-		OpenPGPUserStore.isSupported() && Remote.request('GetPGPKeys',
-			(iError, oData) => !iError && oData.Result && OpenPGPUserStore.importKeys(oData.Result)
-		);
+		OpenPGPUserStore.loadBackupKeys();
 	}
 
 	importToSMime() {

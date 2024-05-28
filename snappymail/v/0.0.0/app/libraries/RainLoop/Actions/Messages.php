@@ -1145,7 +1145,25 @@ trait Messages
 				}
 			}
 		}
-
+/*
+		// OpenPGP https://github.com/the-djmaze/snappymail/issues/1587
+		$sPublicKey = $this->GetActionParam('publicKey', '');
+		if ($sPublicKey) {
+			$oMessage->Attachments()->append(
+				new \MailSo\Mime\Attachment(
+					\fopen("data://text/plain,{$sPublicKey}", 'r'),
+					'OpenPGP_'.\md5($sPublicKey).'.asc',
+					\strlen($sPublicKey),
+					false,
+					false,
+					'',
+					array(),
+					'',
+					'application/pgp-keys'
+				)
+			);
+		}
+*/
 		foreach ($aFoundDataURL as $sCidHash => $sDataUrlString) {
 			$aMatch = array();
 			$sCID = '<'.$sCidHash.'>';
@@ -1171,9 +1189,29 @@ trait Messages
 
 		$oPassphrase = new \SnappyMail\SensitiveString($this->GetActionParam('signPassphrase', ''));
 
+		// GnuPG
 		$sFingerprint = $this->GetActionParam('signFingerprint', '');
 		if ($sFingerprint) {
 			$GPG = $this->GnuPG();
+/*
+			// https://github.com/the-djmaze/snappymail/issues/1587
+			if ($this->GetActionParam('attachPublicKey', false)) {
+				$sPublicKey = $GPG->export($sFingerprint);
+				$oMessage->Attachments()->append(
+					new \MailSo\Mime\Attachment(
+						\fopen("data://text/plain,{$sPublicKey}", 'r'),
+						"OpenPGP_0x{$sFingerprint}.asc",
+						\strlen($sPublicKey),
+						false,
+						false,
+						'',
+						array(),
+						'',
+						'application/pgp-keys'
+					)
+				);
+			}
+*/
 			$oBody = $oMessage->GetRootPart();
 			$resource = $oBody->ToStream();
 
@@ -1225,6 +1263,24 @@ trait Messages
 					}
 				}
 			}
+/*
+			// https://github.com/the-djmaze/snappymail/issues/1587
+			if ($sCertificate && $this->GetActionParam('attachCertificate', false)) {
+				$oMessage->Attachments()->append(
+					new \MailSo\Mime\Attachment(
+						\fopen("data://text/plain,{$sCertificate}", 'r'),
+						'certificate.pem',
+						\strlen($sCertificate),
+						false,
+						false,
+						'',
+						array(),
+						'',
+						'application/pem-certificate-chain'
+					)
+				);
+			}
+*/
 			if ($sCertificate && $sPrivateKey) {
 				$oBody = $oMessage->GetRootPart();
 

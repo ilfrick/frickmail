@@ -4,11 +4,11 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME = 'Nextcloud',
-		VERSION = '2.35',
-		RELEASE  = '2024-03-29',
+		VERSION = '2.36.2',
+		RELEASE  = '2024-05-27',
 		CATEGORY = 'Integrations',
 		DESCRIPTION = 'Integrate with Nextcloud v20+',
-		REQUIRED = '2.36.0';
+		REQUIRED = '2.36.2';
 
 	public function Init() : void
 	{
@@ -35,13 +35,12 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 			$this->addTemplate('templates/PopupsNextcloudFiles.html');
 			$this->addTemplate('templates/PopupsNextcloudCalendars.html');
-/*
-			$this->addHook('login.credentials.step-2', 'loginCredentials2');
-			$this->addHook('login.credentials', 'loginCredentials');
+
+//			$this->addHook('login.credentials.step-2', 'loginCredentials2');
+//			$this->addHook('login.credentials', 'loginCredentials');
 			$this->addHook('imap.before-login', 'beforeLogin');
 			$this->addHook('smtp.before-login', 'beforeLogin');
 			$this->addHook('sieve.before-login', 'beforeLogin');
-*/
 		} else {
 			\SnappyMail\Log::debug('Nextcloud', 'NOT integrated');
 			// \OC::$server->getConfig()->getAppValue('snappymail', 'snappymail-no-embed');
@@ -73,23 +72,24 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	public function loginCredentials(string &$sEmail, string &$sLogin, ?string &$sPassword = null) : void
 	{
-		$ocUser = \OC::$server->getUserSession()->getUser();
-		$sEmail = $ocUser->getEMailAddress() ?: $oc->user->getPrimaryEMailAddress();
-		$sLogin = $ocUser->getUID();
+		/**
+		 * This has an issue.
+		 * When user changes email address, all settings are gone as the new
+		 * _data_/_default_/storage/{domain}/{local-part} is used
+		 */
+//		$ocUser = \OC::$server->getUserSession()->getUser();
+//		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress() ?: $sEmail;
 	}
 
 	public function loginCredentials2(string &$sEmail, ?string &$sPassword = null) : void
 	{
 		$ocUser = \OC::$server->getUserSession()->getUser();
-		$sEmail = $ocUser->getEMailAddress() ?: $oc->user->getPrimaryEMailAddress();
+		$sEmail = $ocUser->getEMailAddress() ?: $ocUser->getPrimaryEMailAddress() ?: $sEmail;
 	}
 
 	public function beforeLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
 	{
-		$oSettings->username = \OC::$server->getUserSession()->getUser()->getUID();
-/*
 		// https://apps.nextcloud.com/apps/oidc_login
-		// DISABLED https://github.com/the-djmaze/snappymail/issues/1420#issuecomment-1933045917
 		if (\OC::$server->getConfig()->getAppValue('snappymail', 'snappymail-autologin-oidc', false)
 		 && \OC::$server->getSession()->get('is_oidc')
 //		 && $oClient->supportsAuthType('OAUTHBEARER') // v2.28
@@ -100,7 +100,6 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 				\array_unshift($oSettings->SASLMechanisms, 'OAUTHBEARER');
 			}
 		}
-*/
 	}
 
 	/*
@@ -244,7 +243,7 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 				}
 				if (!$sEmail) {
 					$sEmail = $ocUser->getEMailAddress();
-//						?: $oc->user->getPrimaryEMailAddress();
+//						?: $ocUser->getPrimaryEMailAddress();
 				}
 /*
 				if ($config->getAppValue('snappymail', 'snappymail-autologin-oidc', false)) {

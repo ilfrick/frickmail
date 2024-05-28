@@ -10,8 +10,8 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		NAME     = 'Avatars',
 		AUTHOR   = 'SnappyMail',
 		URL      = 'https://snappymail.eu/',
-		VERSION  = '1.16',
-		RELEASE  = '2024-03-12',
+		VERSION  = '1.17',
+		RELEASE  = '2024-05-26',
 		REQUIRED = '2.25.0',
 		CATEGORY = 'Contacts',
 		LICENSE  = 'MIT',
@@ -304,6 +304,7 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$sDomain = \preg_replace('/^(.+\\.)?(paypal\\.[a-z][a-z])$/D', 'paypal.com', $sDomain);
 		$sDomain = \preg_replace('/^facebookmail.com$/D', 'facebook.com', $sDomain);
 		$sDomain = \preg_replace('/^dhlparcel.nl$/D', 'dhl.com', $sDomain);
+		$sDomain = \preg_replace('/^amazon.nl$/D', 'amazon.com', $sDomain);
 		$sDomain = \preg_replace('/^.+\\.([^.]+\\.[^.]+)$/D', '$1', $sDomain);
 		return $sDomain;
 	}

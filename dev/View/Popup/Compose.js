@@ -914,10 +914,9 @@ export class ComposePopupView extends AbstractViewPopup {
 					oLastMessage.headers().valuesByName('autocrypt').forEach(value => {
 						let autocrypt = new MimeHeaderAutocryptModel(value);
 						if (autocrypt.addr && autocrypt.keydata) {
-							PgpUserStore.hasPublicKeyForEmails([autocrypt.addr]).then(result =>
-								result || PgpUserStore.importKey(autocrypt.pem(), true, true)
-//								result || showScreenPopup(OpenPgpImportPopupView, [autocrypt.pem()])
-							);
+							PgpUserStore.hasPublicKeyForEmails([autocrypt.addr])
+							|| PgpUserStore.importKey(autocrypt.pem(), true, true)
+//							|| showScreenPopup(OpenPgpImportPopupView, [autocrypt.pem()])
 						}
 					});
 				} break;
@@ -1566,6 +1565,10 @@ export class ComposePopupView extends AbstractViewPopup {
 						params.signed = signed.toString();
 						params.boundary = signed.boundary;
 						data = signed;
+/*
+						Object.entries(PgpUserStore.getPublicKeyOfEmails([getEmail(this.from())]) || {})
+						.forEach(([k,v]) => params.publicKey = v);
+*/
 					} catch (e) {
 						sign = false;
 						console.error(e);
@@ -1579,6 +1582,7 @@ export class ComposePopupView extends AbstractViewPopup {
 //						params.signData = data.toString();
 						params.signFingerprint = signOptions[i][1].fingerprint;
 						params.signPassphrase = pass;
+//						params.attachPublicKey = false;
 					} else {
 						sign = false;
 					}
@@ -1589,6 +1593,7 @@ export class ComposePopupView extends AbstractViewPopup {
 					params.sign = 'S/MIME';
 //					params.signCertificate = identity.smimeCertificate();
 //					params.signPrivateKey = identity.smimeKey();
+//					params.attachCertificate = false;
 					if (identity.smimeKeyEncrypted()) {
 						const pass = await Passphrases.ask(identity,
 							i18n('SMIME/PRIVATE_KEY_OF', {EMAIL: identity.email()}),
