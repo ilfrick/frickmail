@@ -18,7 +18,7 @@ export class AdvancedSearchPopupView extends AbstractViewPopup {
 			text: '',
 			keyword: '',
 			repliedValue: -1,
-			selectedDateValue: -1,
+			selectedDateValue: 0,
 			selectedTreeValue: '',
 
 			hasAttachment: false,
@@ -55,9 +55,9 @@ export class AdvancedSearchPopupView extends AbstractViewPopup {
 
 			selectedDates: () => {
 				translateTrigger();
-				let prefix = 'SEARCH/DATE_';
+				let prefix = 'SEARCH/SINCE_';
 				return [
-					{ id: -1, name: i18n(prefix + 'ALL') },
+					{ id: 0, name: i18n('SEARCH/DATE_ALL') },
 					{ id: 3, name: i18n(prefix + '3_DAYS') },
 					{ id: 7, name: i18n(prefix + '7_DAYS') },
 					{ id: 30, name: i18n(prefix + 'MONTH') },
@@ -100,7 +100,7 @@ export class AdvancedSearchPopupView extends AbstractViewPopup {
 		append('text', self.text().trim());
 		append('keyword', self.keyword());
 		append('in', self.selectedTreeValue());
-		if (-1 < self.selectedDateValue()) {
+		if (0 < self.selectedDateValue()) {
 			let d = new Date();
 			d.setDate(d.getDate() - self.selectedDateValue());
 			append('since', d.toISOString().split('T')[0]);
@@ -136,8 +136,7 @@ export class AdvancedSearchPopupView extends AbstractViewPopup {
 		self.text(pString(params.get('text')));
 		self.keyword(pString(params.get('keyword')));
 		self.selectedTreeValue(pString(params.get('in')));
-//		self.selectedDateValue(params.get('since'));
-		self.selectedDateValue(-1);
+		self.selectedDateValue(0);
 		self.hasAttachment(params.has('attachment'));
 		self.starred(params.has('flagged'));
 		self.unseen(params.has('unseen'));
