@@ -67,8 +67,9 @@ trait AdminDomains
 			$this->GetActionParam('username'),
 			new \SnappyMail\SensitiveString('********')
 		);
+		$sEmail = $sCredentials['email'];
 		return $this->DefaultResponse(array(
-			'email' => $sCredentials['email'],
+			'email' => $sEmail,
 			'login' => $sCredentials['imapUser'],
 			'domain' => $sCredentials['domain'],
 			'whitelist' => $sCredentials['domain'] ? $sCredentials['domain']->ValidateWhiteList($sEmail) : null
