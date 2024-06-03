@@ -890,7 +890,7 @@ export class ComposePopupView extends AbstractViewPopup {
 		}
 
 		if (options.mode && oLastMessage) {
-			let encrypted,
+			let usePlain,
 				sCc = '',
 				sDate = timestampToString(oLastMessage.dateTimestamp(), 'FULL'),
 				sSubject = oLastMessage.subject(),
@@ -998,18 +998,14 @@ export class ComposePopupView extends AbstractViewPopup {
 					break;
 
 				default:
-					encrypted = PgpUserStore.isEncrypted(sText);
-					if (encrypted) {
+					usePlain = PgpUserStore.isEncrypted(sText) || isPlainEditor() || !oLastMessage.isHtml();
+					if (usePlain) {
 						sText = oLastMessage.plain();
 					}
 			}
 
 			this.editor(editor => {
-				encrypted || editor.setHtml(sText);
-				if (encrypted || isPlainEditor()) {
-					editor.modePlain();
-				}
-				encrypted && editor.setPlain(sText);
+				usePlain ? (editor.modePlain() | editor.setPlain(sText)) : editor.setHtml(sText);
 				this.setSignature(identity, options.mode);
 				this.setFocusInPopup();
 			});
@@ -1510,6 +1506,8 @@ export class ComposePopupView extends AbstractViewPopup {
 			do {
 				l = Text.length;
 				Text = Text
+					// Remove line duplication
+					.replace(/<br><\/div>/gi, '</div>')
 					// Remove Microsoft Office styling
 					.replace(/(<[^>]+[;"'])\s*mso-[a-z-]+\s*:[^;"']+/gi, '$1')
 					// Remove hubspot data-hs- attributes
