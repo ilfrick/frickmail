@@ -20,7 +20,6 @@ const
 	SignMeOn = 1,
 	SignMeUnused = 2;
 
-
 export class LoginUserView extends AbstractViewLogin {
 	constructor() {
 		super();
