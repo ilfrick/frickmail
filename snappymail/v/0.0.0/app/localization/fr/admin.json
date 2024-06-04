@@ -147,8 +147,8 @@
 		"BUTTON_UPDATE": "Modifier",
 		"NEW_DOMAIN_DESC": "Cette configuration de domaine vous permettra de travailler  avec <strong>%NAME%<\/strong> dans les adresses électroniques.",
 		"WHITE_LIST_ALERT": "Liste des utilisateurs du domaine auxquels le webmail est autorisé à accéder.\nUtilisez un espace comme séparateur.",
-		"VALID_SPAM_HEADERS": "Valid SPAM headers",
-		"VALID_VIRUS_HEADERS": "Valid virus headers"
+		"VALID_SPAM_HEADERS": "En-têtes SPAM valides",
+		"VALID_VIRUS_HEADERS": "En-têtes de virus valides"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Extension",
