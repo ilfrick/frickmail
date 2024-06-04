@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Tilbake",
 		"BUTTON_UPDATE": "Oppdater",
 		"NEW_DOMAIN_DESC": "Dette domeneoppsettet lar deg jobbe  med e-postadresser ved <strong>%NAME%<\/strong>.",
-		"WHITE_LIST_ALERT": "Liste over domenebrukere som programmet skal ha tilgang til.\nHold verdier adskilt med mellomrom."
+		"WHITE_LIST_ALERT": "Liste over domenebrukere som programmet skal ha tilgang til.\nHold verdier adskilt med mellomrom.",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Tillegg",

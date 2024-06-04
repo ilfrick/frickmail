@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Zurück",
 		"BUTTON_UPDATE": "Aktualisieren",
 		"NEW_DOMAIN_DESC": "Diese Domain Konfiguration wird es dir möglich machen mit <strong>%NAME%<\/strong> Mailadressen zu arbeiten.",
-		"WHITE_LIST_ALERT": "Liste der User, die Webmail abrufen darf.\nVerwenden Sie Leerzeichen als Trennsymbol."
+		"WHITE_LIST_ALERT": "Liste der User, die Webmail abrufen darf.\nVerwenden Sie Leerzeichen als Trennsymbol.",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Erweiterung",

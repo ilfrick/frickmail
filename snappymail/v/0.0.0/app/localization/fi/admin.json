@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Takaisin",
 		"BUTTON_UPDATE": "Päivitä",
 		"NEW_DOMAIN_DESC": "Tämän verkkotunnuksen asetukset sallivat käyttää  <strong>%NAME%<strong> säkhöpostiosoitteita.",
-		"WHITE_LIST_ALERT": "Lista domain käyttäjistä joihin webmaililla on oikeus.\nErottele välilyönnillä.\n"
+		"WHITE_LIST_ALERT": "Lista domain käyttäjistä joihin webmaililla on oikeus.\nErottele välilyönnillä.\n",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Lisäosa",

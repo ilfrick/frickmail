@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Trở về",
 		"BUTTON_UPDATE": "Cập nhật",
 		"NEW_DOMAIN_DESC": "Thiết lập tên miền cho phép bạn thao tác với với địa chỉ email của <strong>%NAME%<\/strong>.",
-		"WHITE_LIST_ALERT": "Danh sách những người dùng tên miền mà webmail được quyền truy cập.\nSử dụng dấu cách làm dấu phân cách mỗi tên.\n"
+		"WHITE_LIST_ALERT": "Danh sách những người dùng tên miền mà webmail được quyền truy cập.\nSử dụng dấu cách làm dấu phân cách mỗi tên.\n",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Tiện ích mở rộng",

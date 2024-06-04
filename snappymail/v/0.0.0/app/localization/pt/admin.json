@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Voltar",
 		"BUTTON_UPDATE": "Atualizar",
 		"NEW_DOMAIN_DESC": "Esta configuração de domínio vai permitir trabalhar com endereços email <strong>%NAME%<\/strong>.",
-		"WHITE_LIST_ALERT": "Lista de utilizadores do domínio aos quais o webmail terá permissão para aceder.\nUsar espaços para delimitar.\n"
+		"WHITE_LIST_ALERT": "Lista de utilizadores do domínio aos quais o webmail terá permissão para aceder.\nUsar espaços para delimitar.\n",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Extensão",

@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Retour",
 		"BUTTON_UPDATE": "Modifier",
 		"NEW_DOMAIN_DESC": "Cette configuration de domaine vous permettra de travailler  avec <strong>%NAME%<\/strong> dans les adresses électroniques.",
-		"WHITE_LIST_ALERT": "Liste des utilisateurs du domaine auxquels le webmail est autorisé à accéder.\nUtilisez un espace comme séparateur."
+		"WHITE_LIST_ALERT": "Liste des utilisateurs du domaine auxquels le webmail est autorisé à accéder.\nUtilisez un espace comme séparateur.",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Extension",

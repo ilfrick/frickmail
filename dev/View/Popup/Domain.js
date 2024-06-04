@@ -39,6 +39,8 @@ const
 		imapMessage_all_headers: false,
 		imapMessage_list_limit: 10000,
 		imapSearch_filter: '',
+		imapSpam_headers: '',
+		imapVirus_headers: '',
 
 		sieveEnabled: false,
 		sieveHost: '',
@@ -80,15 +82,17 @@ const
 			},
 			disabled_capabilities:  oDomain.imapDisabled_capabilities(),
 			folder_list_limit: pInt(oDomain.imapFolder_list_limit()),
-			message_list_limit: pInt(oDomain.imapMessage_list_limit())
+			message_list_limit: pInt(oDomain.imapMessage_list_limit()),
 /*
 			expunge_all_on_delete: ,
 			fast_simple_search: ,
 			fetch_new_messages: ,
 			force_select: ,
 			message_all_headers: ,
-			search_filter:
 */
+			search_filter: oDomain.imapSearch_filter(),
+			spam_headers: oDomain.imapSpam_headers(),
+			virus_headers: oDomain.imapVirus_headers()
 		},
 		SMTP: {
 			host: oDomain.smtpHost,

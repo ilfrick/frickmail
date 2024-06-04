@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Terug",
 		"BUTTON_UPDATE": "Update",
 		"NEW_DOMAIN_DESC": "Dit domein stelt u in staat om met <strong>%NAME%<\/strong> e-mail adressen te werken.",
-		"WHITE_LIST_ALERT": "Lijst van gebruikers die dit domein mogen gebruiken.\nGebruik een spatie als scheidingsteken."
+		"WHITE_LIST_ALERT": "Lijst van gebruikers die dit domein mogen gebruiken.\nGebruik een spatie als scheidingsteken.",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Extensie",

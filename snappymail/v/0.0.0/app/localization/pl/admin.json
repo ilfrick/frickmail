@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Wstecz",
 		"BUTTON_UPDATE": "Zaktualizuj",
 		"NEW_DOMAIN_DESC": "Konfiguracja tej domeny pozwala na pracę z adresami e-mail: <strong>%NAME%<\/strong>",
-		"WHITE_LIST_ALERT": "Lista użytkowników domeny, którzy mogą uzyskać dostęp z tego webmaila.\nUżyj spacji do rozdzielenia.\n"
+		"WHITE_LIST_ALERT": "Lista użytkowników domeny, którzy mogą uzyskać dostęp z tego webmaila.\nUżyj spacji do rozdzielenia.\n",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Wtyczka",
