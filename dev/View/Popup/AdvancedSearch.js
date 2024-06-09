@@ -55,8 +55,18 @@ export class AdvancedSearchPopupView extends AbstractViewPopup {
 
 			selectedDates: () => {
 				translateTrigger();
+				// We should think about migrating all SEARCH/DATE_ to either SEARCH/SINCE_DATE or SEARCH/BEFORE_DATE
+				// and adjust the prefix accordingly
+				// let prefix_since = 'SEARCH/SINCE_DATE_';
 				let prefix = 'SEARCH/SINCE_';
+				let prefix_before = 'SEARCH/BEFORE_DATE_';
 				return [
+					{ id: -365, name: i18n(prefix_before + 'YEAR') },
+					{ id: -180, name: i18n(prefix_before + '6_MONTHS') },
+					{ id: -90, name: i18n(prefix_before + '3_MONTHS') },
+					{ id: -30, name: i18n(prefix_before + 'MONTH') },
+					{ id: -7, name: i18n(prefix_before + '7_DAYS') },
+					{ id: -3, name: i18n(prefix_before + '3_DAYS') },
 					{ id: 0, name: i18n('SEARCH/DATE_ALL') },
 					{ id: 3, name: i18n(prefix + '3_DAYS') },
 					{ id: 7, name: i18n(prefix + '7_DAYS') },
@@ -104,6 +114,11 @@ export class AdvancedSearchPopupView extends AbstractViewPopup {
 			let d = new Date();
 			d.setDate(d.getDate() - self.selectedDateValue());
 			append('since', d.toISOString().split('T')[0]);
+		}
+		else if (-1 > self.selectedDateValue()) {
+			let d = new Date();
+			d.setDate(d.getDate() + self.selectedDateValue());
+			append('before', d.toISOString().split('T')[0]);
 		}
 
 		let result = decodeURIComponent(new URLSearchParams(data).toString());
