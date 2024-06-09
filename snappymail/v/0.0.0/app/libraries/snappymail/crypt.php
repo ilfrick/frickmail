@@ -64,18 +64,20 @@ abstract class Crypt
 	) /* : mixed */
 	{
 		if (3 === \count($data) && isset($data[0], $data[1], $data[2]) && \strlen($data[0])) {
-			try {
-				$fn = "{$data[0]}Decrypt";
-				if (\method_exists(__CLASS__, $fn)) {
+			$fn = "{$data[0]}Decrypt";
+			if (\method_exists(__CLASS__, $fn)) {
+				Log::warning('Crypt', "{$fn} does not exists");
+			} else {
+				try {
 					$result = static::{$fn}($data[2], $data[1], $key);
 					if (\is_string($result)) {
 						return static::jsonDecode($result);
 					}
+					throw new \Exception('invalid $data or $key');
+				} catch (\Throwable $e) {
+					Log::error('Crypt', "{$fn}(): {$e->getMessage()}");
 				}
-			} catch (\Throwable $e) {
-				Log::error('Crypt', "{$fn}(): {$e->getMessage()}");
 			}
-			Log::warning('Crypt', 'Decrypt() invalid $data or $key');
 		} else {
 			Log::warning('Crypt', 'Decrypt() invalid $data');
 		}
