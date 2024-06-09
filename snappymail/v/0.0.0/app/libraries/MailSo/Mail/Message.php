@@ -506,7 +506,9 @@ class Message implements \JsonSerializable
 			'spamScore' => $this->bIsSpam ? 100 : $this->SpamScore,
 			'spamResult' => $this->sSpamResult,
 			'isSpam' => $this->bIsSpam,
+			// RainLoop had the date_from_headers option
 			'dateTimestamp' => $this->iHeaderTimeStampInUTC ?: $this->iInternalTimeStampInUTC,
+			'dateTimestampSource' => $this->iHeaderTimeStampInUTC ? 'header' : 'internal',
 
 			// \MailSo\Mime\EmailCollection
 			'from' => $this->oFrom,

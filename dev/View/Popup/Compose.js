@@ -500,7 +500,7 @@ export class ComposePopupView extends AbstractViewPopup {
 					this.sendError(true);
 					this.sendErrorDesc(
 						getNotification(iError, data?.ErrorMessage, Notifications.CantSendMessage)
-						+ "\n" + data?.ErrorMessageAdditional
+						+ "\n" + (data?.ErrorMessageAdditional || data?.ErrorMessage)
 					);
 				};
 				try {
@@ -535,9 +535,13 @@ export class ComposePopupView extends AbstractViewPopup {
 										}
 										this.savedErrorDesc(msg);
 									} else {
-										params.signPassphrase && Passphrases.delete(identity);
 										this.sendError(true);
 										sendFailed(iError, data);
+										// Remove remembered passphrase as it could be wrong
+										let key = ('S/MIME' === params.sign) ? identity : null;
+										params.signFingerprint
+										&& this.signOptions.forEach(option => ('GnuPG' === option[0]) && (key = option[1]));
+										key && Passphrases.delete(key);
 									}
 								} else {
 									if (arrayLength(this.aDraftInfo) > 0) {
@@ -886,7 +890,7 @@ export class ComposePopupView extends AbstractViewPopup {
 		}
 
 		if (options.mode && oLastMessage) {
-			let encrypted,
+			let usePlain,
 				sCc = '',
 				sDate = timestampToString(oLastMessage.dateTimestamp(), 'FULL'),
 				sSubject = oLastMessage.subject(),
@@ -994,18 +998,14 @@ export class ComposePopupView extends AbstractViewPopup {
 					break;
 
 				default:
-					encrypted = PgpUserStore.isEncrypted(sText);
-					if (encrypted) {
+					usePlain = PgpUserStore.isEncrypted(sText) || isPlainEditor() || !oLastMessage.isHtml();
+					if (usePlain) {
 						sText = oLastMessage.plain();
 					}
 			}
 
 			this.editor(editor => {
-				encrypted || editor.setHtml(sText);
-				if (encrypted || isPlainEditor()) {
-					editor.modePlain();
-				}
-				encrypted && editor.setPlain(sText);
+				usePlain ? (editor.modePlain() | editor.setPlain(sText)) : editor.setHtml(sText);
 				this.setSignature(identity, options.mode);
 				this.setFocusInPopup();
 			});
@@ -1506,6 +1506,8 @@ export class ComposePopupView extends AbstractViewPopup {
 			do {
 				l = Text.length;
 				Text = Text
+					// Remove line duplication
+					.replace(/<br><\/div>/gi, '</div>')
 					// Remove Microsoft Office styling
 					.replace(/(<[^>]+[;"'])\s*mso-[a-z-]+\s*:[^;"']+/gi, '$1')
 					// Remove hubspot data-hs- attributes
@@ -1546,12 +1548,11 @@ export class ComposePopupView extends AbstractViewPopup {
 				alternative.children.push(data);
 				data = alternative;
 			}
-			let sign = true;
+			let isSigned = false;
 			for (let i = 0; i < signOptions.length; ++i) {
 				if ('OpenPGP' == signOptions[i][0]) {
 					try {
 						// Doesn't sign attachments
-						params.html = params.plain = '';
 						let signed = new MimePart;
 						signed.headers['Content-Type'] =
 							'multipart/signed; micalg="pgp-sha256"; protocol="application/pgp-signature"';
@@ -1562,6 +1563,8 @@ export class ComposePopupView extends AbstractViewPopup {
 						signature.headers['Content-Transfer-Encoding'] = '7Bit';
 						signature.body = await OpenPGPUserStore.sign(data.toString(), signOptions[i][1], 1);
 						signed.children.push(signature);
+						isSigned = true;
+						params.html = params.plain = '';
 						params.signed = signed.toString();
 						params.boundary = signed.boundary;
 						data = signed;
@@ -1569,13 +1572,11 @@ export class ComposePopupView extends AbstractViewPopup {
 						Object.entries(PgpUserStore.getPublicKeyOfEmails([getEmail(this.from())]) || {})
 						.forEach(([k,v]) => params.publicKey = v);
 */
+						break;
 					} catch (e) {
-						sign = false;
 						console.error(e);
 					}
-					break;
-				}
-				if ('GnuPG' == signOptions[i][0]) {
+				} else if ('GnuPG' == signOptions[i][0]) {
 					// TODO: sign in PHP fails
 					let pass = await GnuPGUserStore.sign(signOptions[i][1]);
 					if (null != pass) {
@@ -1583,12 +1584,10 @@ export class ComposePopupView extends AbstractViewPopup {
 						params.signFingerprint = signOptions[i][1].fingerprint;
 						params.signPassphrase = pass;
 //						params.attachPublicKey = false;
-					} else {
-						sign = false;
+						isSigned = true;
+						break;
 					}
-					break;
-				}
-				if ('S/MIME' == signOptions[i][0]) {
+				} else if ('S/MIME' == signOptions[i][0]) {
 					// TODO: sign in PHP fails
 					params.sign = 'S/MIME';
 //					params.signCertificate = identity.smimeCertificate();
@@ -1601,14 +1600,13 @@ export class ComposePopupView extends AbstractViewPopup {
 						);
 						if (null != pass) {
 							params.signPassphrase = pass.password;
-//							pass.remember && Passphrases.handle(identity, pass.password);
-						} else {
-							sign = false;
+							pass.remember && Passphrases.handle(identity, pass.password);
+							isSigned = true;
 						}
 					}
 				}
 			}
-			if (signOptions.length && !sign) {
+			if (signOptions.length && !isSigned) {
 				throw 'Signing failed';
 			}
 

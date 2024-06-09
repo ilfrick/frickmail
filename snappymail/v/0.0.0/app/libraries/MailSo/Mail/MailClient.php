@@ -76,18 +76,32 @@ class MailClient
 			MimeHeader::X_DKIM_AUTHENTICATION_RESULTS,
 			MimeHeader::LIST_UNSUBSCRIBE,
 			// https://autocrypt.org/level1.html#the-autocrypt-header
-			MimeHeader::AUTOCRYPT,
-			// SPAM
-			MimeHeader::X_SPAM_STATUS,
-			MimeHeader::X_SPAM_FLAG,
-			MimeHeader::X_SPAM_INFO,
-			MimeHeader::X_SPAMD_RESULT,
-			MimeHeader::X_BOGOSITY,
-			// Virus
-			MimeHeader::X_VIRUS,
-			MimeHeader::X_VIRUS_SCANNED,
-			MimeHeader::X_VIRUS_STATUS
+			MimeHeader::AUTOCRYPT
 		);
+
+		// SPAM
+		$spam_headers = \explode(',', $this->oImapClient->Settings->spam_headers);
+		if (\in_array('rspamd', $spam_headers)) {
+			$aHeaders[] = MimeHeader::X_SPAMD_RESULT;
+		}
+		if (\in_array('spamassassin', $spam_headers)) {
+			$aHeaders[] = MimeHeader::X_SPAM_STATUS;
+			$aHeaders[] = MimeHeader::X_SPAM_FLAG;
+			$aHeaders[] = MimeHeader::X_SPAM_INFO;
+		}
+		if (\in_array('bogofilter', $spam_headers)) {
+			$aHeaders[] = MimeHeader::X_BOGOSITY;
+		}
+
+		// Virus
+		$virus_headers = \explode(',', $this->oImapClient->Settings->virus_headers);
+		if (\in_array('rspamd', $virus_headers)) {
+			$aHeaders[] = MimeHeader::X_VIRUS;
+		}
+		if (\in_array('clamav', $virus_headers)) {
+			$aHeaders[] = MimeHeader::X_VIRUS_SCANNED;
+			$aHeaders[] = MimeHeader::X_VIRUS_STATUS;
+		}
 
 		\RainLoop\Api::Actions()->Plugins()->RunHook('imap.message-headers', array(&$aHeaders));
 

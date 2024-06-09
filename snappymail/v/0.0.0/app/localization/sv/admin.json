@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Tillbaka",
 		"BUTTON_UPDATE": "Uppdatera",
 		"NEW_DOMAIN_DESC": "Denna domän konfiguration gör att du kan arbeta med <strong>%NAME%<\/strong> e-postadresser.",
-		"WHITE_LIST_ALERT": "Lista över domänanvändare som tillåts.\nAnvända ett utrymme som avgränsare.\n"
+		"WHITE_LIST_ALERT": "Lista över domänanvändare som tillåts.\nAnvända ett utrymme som avgränsare.\n",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Tillägget",

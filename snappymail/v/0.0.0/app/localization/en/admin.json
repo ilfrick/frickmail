@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Back",
 		"BUTTON_UPDATE": "Update",
 		"NEW_DOMAIN_DESC": "This domain configuration will allow you to work with <strong>%NAME%<\/strong> email addresses.",
-		"WHITE_LIST_ALERT": "List of domain users webmail is allowed to access.\nUse a space as delimiter.\n"
+		"WHITE_LIST_ALERT": "List of domain users webmail is allowed to access.\nUse a space as delimiter.\n",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Extension",

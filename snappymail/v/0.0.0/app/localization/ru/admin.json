@@ -146,7 +146,9 @@
 		"BUTTON_BACK": "Назад",
 		"BUTTON_UPDATE": "Обновить",
 		"NEW_DOMAIN_DESC": "Эта конфигурация позволит вам работать с <strong>%NAME%<\/strong> адресами.",
-		"WHITE_LIST_ALERT": "Список пользователей домена к которым разрешен доступ.\nИспользуйте пробел в качестве разделителя.\n"
+		"WHITE_LIST_ALERT": "Список пользователей домена к которым разрешен доступ.\nИспользуйте пробел в качестве разделителя.\n",
+		"VALID_SPAM_HEADERS": "Valid SPAM headers",
+		"VALID_VIRUS_HEADERS": "Valid virus headers"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Плагин",
