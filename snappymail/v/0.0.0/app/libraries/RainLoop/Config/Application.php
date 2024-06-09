@@ -138,14 +138,7 @@ class Application extends \RainLoop\Config\AbstractConfig
 			}
 		}
 		if ('language' === $sParamKey) {
-			$aLang = \SnappyMail\L10n::getLanguages('admin_panel' === $sSectionKey);
-			$sLanguage = \strtr($mParamValue, '_', '-');
-			if (!\in_array($sLanguage, $aLang)) {
-				if (\str_contains($sLanguage, '-')) {
-					$sLanguage = \strtok($sLanguage, '-');
-				}
-			}
-			$mParamValue = \in_array($sLanguage, $aLang) ? $sLanguage : 'en';
+			$mParamValue = \SnappyMail\L10n::validLanguage($mParamValue, 'admin_panel' === $sSectionKey) ?: 'en';
 		}
 		parent::Set($sSectionKey, $sParamKey, $mParamValue);
 	}

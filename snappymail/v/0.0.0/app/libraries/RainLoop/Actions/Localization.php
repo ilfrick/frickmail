@@ -30,38 +30,15 @@ trait Localization
 
 	public function ValidateLanguage(string $sLanguage, string $sDefault = '', bool $bAdmin = false, bool $bAllowEmptyResult = false): string
 	{
-		$aLang = \SnappyMail\L10n::getLanguages($bAdmin);
+		$sResult = \SnappyMail\L10n::validLanguage($sLanguage, $bAdmin)
+		?: \SnappyMail\L10n::validLanguage($sDefault, $bAdmin);
 
-		$sLanguage = \strtr($sLanguage, '_', '-');
-		$sDefault  = \strtr($sDefault, '_', '-');
-
-		if (\in_array($sLanguage, $aLang)) {
-			return $sLanguage;
-		}
-
-		if (\str_contains($sLanguage, '-')) {
-			$sLanguage = \strtok($sLanguage, '-');
-			if (\in_array($sLanguage, $aLang)) {
-				return $sLanguage;
-			}
-		}
-
-		if (\in_array($sDefault, $aLang)) {
-			return $sDefault;
-		}
-		if (\str_contains($sDefault, '-')) {
-			$sDefault = \strtok($sDefault, '-');
-			if (\in_array($sDefault, $aLang)) {
-				return $sDefault;
-			}
-		}
-
-		if ($bAllowEmptyResult) {
-			return '';
+		if ($sResult || $bAllowEmptyResult) {
+			return $sResult ?: '';
 		}
 
 		$sResult = $this->Config()->Get($bAdmin ? 'admin_panel' : 'webmail', 'language', 'en');
-		return \in_array($sResult, $aLang) ? $sResult : 'en';
+		return \SnappyMail\L10n::validLanguage($sResult, $bAdmin) ? $sResult : 'en';
 	}
 
 	public function detectClientLanguage(bool $bAdmin): string
