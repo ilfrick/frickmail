@@ -65,7 +65,7 @@ abstract class Crypt
 	{
 		if (3 === \count($data) && isset($data[0], $data[1], $data[2]) && \strlen($data[0])) {
 			$fn = "{$data[0]}Decrypt";
-			if (\method_exists(__CLASS__, $fn)) {
+			if (!\method_exists(__CLASS__, $fn)) {
 				Log::warning('Crypt', "{$fn} does not exists");
 			} else {
 				try {
