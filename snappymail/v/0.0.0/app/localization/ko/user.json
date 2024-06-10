@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "보안",
 		"LABEL_AUTOLOGOUT": "자동 로그아웃",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "설정하지 않음"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "설정하지 않음"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "언어",

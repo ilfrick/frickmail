@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Segurança",
 		"LABEL_AUTOLOGOUT": "Terminar sessão auto.",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Nunca"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Nunca"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Idioma",

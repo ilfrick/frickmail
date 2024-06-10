@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Sikkerhet",
 		"LABEL_AUTOLOGOUT": "Logg ut automatisk etter",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Aldri"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Aldri"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Språk",

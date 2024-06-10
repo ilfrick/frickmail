@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Biztonság",
 		"LABEL_AUTOLOGOUT": "Automatikus kijelentkezés",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Soha"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Soha"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Nyelv",

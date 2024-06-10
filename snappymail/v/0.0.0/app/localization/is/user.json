@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Öryggi",
 		"LABEL_AUTOLOGOUT": "Sjálfvirk útskráning",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Aldrei"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Aldrei"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Tungumál",

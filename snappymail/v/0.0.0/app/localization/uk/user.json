@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Безпека",
 		"LABEL_AUTOLOGOUT": "Автовихід",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Ніколи"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Ніколи"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Мова",

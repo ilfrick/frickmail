@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "An ninh",
 		"LABEL_AUTOLOGOUT": "Tự động đăng xuất",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Không tự động đăng xuất"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Không tự động đăng xuất"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Ngôn ngữ",

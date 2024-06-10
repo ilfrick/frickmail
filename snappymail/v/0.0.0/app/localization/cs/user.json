@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Zabezpečení",
 		"LABEL_AUTOLOGOUT": "Automatické odhlášení",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Nikdy"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Nikdy"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Jazyk",

@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Turvallisuus",
 		"LABEL_AUTOLOGOUT": "Automaattinen uloskirjautuminen",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Ei koskaan"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Ei koskaan"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Kieli",

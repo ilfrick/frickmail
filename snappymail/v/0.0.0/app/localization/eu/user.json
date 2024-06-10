@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Segurtasuna",
 		"LABEL_AUTOLOGOUT": "Saioa automatikoki itxi",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Inoiz"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Inoiz"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Hizkuntza",

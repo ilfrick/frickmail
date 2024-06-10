@@ -35,6 +35,7 @@ export const SettingsUserStore = new class {
 			hideDeleted: 1,
 			unhideKolabFolders: 0,
 			autoLogout: 0,
+			keyPassForget: 15,
 			showUnreadCount: 0,
 			messageNewWindow: 0,
 			messageReadAuto: 0,
@@ -157,5 +158,6 @@ export const SettingsUserStore = new class {
 		self.checkMailInterval(pInt(SettingsGet('CheckMailInterval')));
 		self.messageReadDelay(pInt(SettingsGet('MessageReadDelay')));
 		self.autoLogout(pInt(SettingsGet('AutoLogout')));
+		self.keyPassForget(pInt(SettingsGet('keyPassForget')));
 	}
 };

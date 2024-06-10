@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Ασφάλεια",
 		"LABEL_AUTOLOGOUT": "Αυτόματη αποσύνδεση",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Ποτέ"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Ποτέ"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Γλώσσα",

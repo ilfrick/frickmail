@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Varnost",
 		"LABEL_AUTOLOGOUT": "Samodejna odjava",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Nikoli"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Nikoli"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Jezik",

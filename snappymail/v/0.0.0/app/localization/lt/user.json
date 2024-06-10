@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Sauga",
 		"LABEL_AUTOLOGOUT": "Automatinis atsijungimas",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Niekada"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Niekada"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Kalba",

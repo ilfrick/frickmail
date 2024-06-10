@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Turvalisus",
 		"LABEL_AUTOLOGOUT": "Automaatne välja logimine",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "Mitte kunagi"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "Mitte kunagi"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "Keel",

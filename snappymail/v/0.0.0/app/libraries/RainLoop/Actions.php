@@ -598,6 +598,7 @@ class Actions
 						'UseCheckboxesInList' => (bool) $oConfig->Get('defaults', 'view_use_checkboxes', true),
 						'showNextMessage' => (bool) $oConfig->Get('defaults', 'view_show_next_message', false),
 						'AutoLogout' => (int) $oConfig->Get('defaults', 'autologout', 30),
+						'keyPassForget' => 15,
 						'AllowDraftAutosave' => (bool) $oConfig->Get('defaults', 'allow_draft_autosave', true),
 						'ContactsAutosave' => (bool) $oConfig->Get('defaults', 'contacts_autosave', true)
 					],
@@ -691,6 +692,7 @@ class Actions
 					$aResult['showNextMessage'] = (bool)$oSettings->GetConf('showNextMessage', $aResult['showNextMessage']);
 					$aResult['AllowDraftAutosave'] = (bool)$oSettings->GetConf('AllowDraftAutosave', $aResult['AllowDraftAutosave']);
 					$aResult['AutoLogout'] = (int)$oSettings->GetConf('AutoLogout', $aResult['AutoLogout']);
+					$aResult['keyPassForget'] = (int)$oSettings->GetConf('keyPassForget', $aResult['keyPassForget']);
 					$aResult['Layout'] = (int)$oSettings->GetConf('Layout', $aResult['Layout']);
 					$aResult['Resizer4Width'] = (int)$oSettings->GetConf('Resizer4Width', 0);
 					$aResult['Resizer5Width'] = (int)$oSettings->GetConf('Resizer5Width', 0);

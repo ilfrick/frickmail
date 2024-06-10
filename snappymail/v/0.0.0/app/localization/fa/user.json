@@ -443,7 +443,8 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "امنیت",
 		"LABEL_AUTOLOGOUT": "خروج خودکار",
-		"AUTOLOGIN_NEVER_OPTION_NAME": "هرگز"
+		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"NEVER": "هرگز"
 	},
 	"SETTINGS_GENERAL": {
 		"LANGUAGE": "زبان",
