@@ -443,7 +443,7 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Bezpieczeństwo",
 		"LABEL_AUTOLOGOUT": "Automatyczne wylogowanie",
-		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"FORGET_KEY_PASS": "Zapomnij hasło klucza prywatnego",
 		"NEVER": "Nigdy"
 	},
 	"SETTINGS_GENERAL": {
