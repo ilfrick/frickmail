@@ -224,7 +224,7 @@ export class AppUser extends AbstractApp {
 						setTimeout(() => mailToHelper(SettingsGet('mailToEmail')), 500);
 
 						if (!localStorage.getItem('register_protocol_offered')) {
-							// When auto-login is active
+							console.log('register mailto protocol');
 							navigator.registerProtocolHandler?.(
 								'mailto',
 								location.protocol + '//' + location.host + location.pathname + '?mailto&to=%s',
