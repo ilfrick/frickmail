@@ -119,7 +119,11 @@ trait Status
 		}
 		if (\property_exists(__TRAIT__, $name)) {
 			if ('MAILBOXID' === $name) {
-				$this->MAILBOXID = \base64_encode(\is_array($value) ? $value[0] : $value);
+				// https://github.com/the-djmaze/snappymail/issues/1640
+				$value = \is_array($value) ? \reset($value) : $value;
+				if (\is_string($value)) {
+					$this->MAILBOXID = \base64_encode($value);
+				}
 			} else {
 				$this->$name = (int) $value;
 			}
