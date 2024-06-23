@@ -103,6 +103,7 @@ export class MessageModel extends AbstractModel {
 			plain: '',
 			html: '',
 			dateTimestamp: 0,
+			dateTimestampSource: 0,
 
 			deleted: false,
 
