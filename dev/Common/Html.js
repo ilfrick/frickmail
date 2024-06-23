@@ -312,6 +312,10 @@ export const
 		// https://github.com/the-djmaze/snappymail/issues/1125
 		tmpl.content.querySelectorAll('form,button').forEach(oElement => replaceWithChildren(oElement));
 
+		let body = tmpl.content.querySelector('.mail-body');
+		[...tmpl.content.querySelectorAll('.mail-body + .mail-body')]
+			.forEach(oElement => body.append(...oElement.childNodes));
+
 		[...tmpl.content.querySelectorAll('*')].forEach(oElement => {
 			const name = oElement.tagName,
 				oStyle = oElement.style;
