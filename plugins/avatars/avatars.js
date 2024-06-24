@@ -117,51 +117,48 @@
 	 */
 	addEventListener('DOMContentLoaded', () => {
 //		rl.pluginSettingsGet('avatars', 'nextcloud');
-		if (parent.OC) {
-			const OC = () => parent.OC,
+		if (parent.OC?.requestToken) {
+			const OC = parent.OC,
 				nsDAV = 'DAV:',
 				nsNC = 'http://nextcloud.com/ns',
 				nsCard = 'urn:ietf:params:xml:ns:carddav',
 				getElementsByTagName = (parent, namespace, localName) => parent.getElementsByTagNameNS(namespace, localName),
 				getElementValue = (parent, namespace, localName) =>
-					getElementsByTagName(parent, namespace, localName)?.item(0)?.textContent,
-				generateUrl = path => OC().webroot + '/remote.php' + path;
-			if (OC().requestToken) {
-				fetch(generateUrl(`/dav/addressbooks/users/${OC().currentUser}/contacts/`), {
-					mode: 'same-origin',
-					cache: 'no-cache',
-					redirect: 'error',
-					credentials: 'same-origin',
-					method: 'REPORT',
-					headers: {
-						requesttoken: OC().requestToken,
-						'Content-Type': 'application/xml; charset=utf-8',
-						Depth: 1
-					},
-					body: '<x4:addressbook-query xmlns:x4="urn:ietf:params:xml:ns:carddav"><x0:prop xmlns:x0="DAV:"><x4:address-data><x4:prop name="EMAIL"/></x4:address-data><x3:has-photo xmlns:x3="http://nextcloud.com/ns"/></x0:prop></x4:addressbook-query>'
-				})
-				.then(response => (response.status < 400) ? response.text() : Promise.reject(new Error({ response })))
-				.then(text => {
-					const
-						xmlParser = new DOMParser(),
-						responseList = getElementsByTagName(
-							xmlParser.parseFromString(text, 'application/xml').documentElement,
-							nsDAV,
-							'response');
-					for (let i = 0; i < responseList.length; ++i) {
-						const item = responseList.item(i);
-						if (1 == getElementValue(item, nsNC, 'has-photo')) {
-							[...getElementValue(item, nsCard, 'address-data').matchAll(/EMAIL.*?:([^@\r\n]+@[^@\r\n]+)/g)]
-							.forEach(match => {
-								ncAvatars.set(
-									match[1].toLowerCase(),
-									getElementValue(item, nsDAV, 'href') + '?photo'
-								);
-							});
-						}
+					getElementsByTagName(parent, namespace, localName)?.item(0)?.textContent;
+			fetch(`${OC.webroot}/remote.php/dav/addressbooks/users/${OC.currentUser}/contacts/`, {
+				mode: 'same-origin',
+				cache: 'no-cache',
+				redirect: 'error',
+				credentials: 'same-origin',
+				method: 'REPORT',
+				headers: {
+					requesttoken: OC.requestToken,
+					'Content-Type': 'application/xml; charset=utf-8',
+					Depth: 1
+				},
+				body: '<x4:addressbook-query xmlns:x4="urn:ietf:params:xml:ns:carddav"><x0:prop xmlns:x0="DAV:"><x4:address-data><x4:prop name="EMAIL"/></x4:address-data><x3:has-photo xmlns:x3="http://nextcloud.com/ns"/></x0:prop></x4:addressbook-query>'
+			})
+			.then(response => (response.status < 400) ? response.text() : Promise.reject(new Error({ response })))
+			.then(text => {
+				const
+					xmlParser = new DOMParser(),
+					responseList = getElementsByTagName(
+						xmlParser.parseFromString(text, 'application/xml').documentElement,
+						nsDAV,
+						'response');
+				for (let i = 0; i < responseList.length; ++i) {
+					const item = responseList.item(i);
+					if (1 == getElementValue(item, nsNC, 'has-photo')) {
+						[...getElementValue(item, nsCard, 'address-data').matchAll(/EMAIL.*?:([^@\r\n]+@[^@\r\n]+)/g)]
+						.forEach(match => {
+							ncAvatars.set(
+								match[1].toLowerCase(),
+								getElementValue(item, nsDAV, 'href') + '?photo'
+							);
+						});
 					}
-				});
-			}
+				}
+			});
 		}
 	});
 

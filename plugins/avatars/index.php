@@ -172,6 +172,7 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		if (\class_exists('OC') && isset(\OC::$server)) {
 			$aResult[] = \RainLoop\Plugins\Property::NewInstance('nextcloud')->SetLabel('Lookup Nextcloud Contacts')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
+//				->SetAllowedInJs(true)
 				->SetDefaultValue(false);
 		}
 */
