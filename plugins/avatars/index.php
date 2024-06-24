@@ -10,12 +10,12 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		NAME     = 'Avatars',
 		AUTHOR   = 'SnappyMail',
 		URL      = 'https://snappymail.eu/',
-		VERSION  = '1.17',
-		RELEASE  = '2024-05-26',
+		VERSION  = '1.18',
+		RELEASE  = '2024-06-24',
 		REQUIRED = '2.25.0',
 		CATEGORY = 'Contacts',
 		LICENSE  = 'MIT',
-		DESCRIPTION = 'Show graphic of sender in message and messages list (supports BIMI, Gravatar and identicon, Contacts is still TODO)';
+		DESCRIPTION = 'Show graphic of sender in message and messages list (supports BIMI, Gravatar, favicon and identicon, Contacts is still TODO)';
 
 	public function Init() : void
 	{
@@ -72,6 +72,7 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			if (!$this->Config()->Get('plugin', 'delay', true)
 			 && ($this->Config()->Get('plugin', 'gravatar', false)
 				|| ($this->Config()->Get('plugin', 'bimi', false) && 'pass' == $mFrom['dkimStatus'])
+				|| ($this->Config()->Get('plugin', 'favicon', false) && 'pass' == $mFrom['dkimStatus'])
 			 )
 			) try {
 				// Base64Url
@@ -134,12 +135,14 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 				->SetDefaultValue(true),
 			\RainLoop\Plugins\Property::NewInstance('bimi')->SetLabel('BIMI')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
-//				->SetAllowedInJs(true)
 				->SetDefaultValue(false)
 				->SetDescription('https://bimigroup.org/ (DKIM header must be valid)'),
+			\RainLoop\Plugins\Property::NewInstance('favicon')->SetLabel('Favicon')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
+				->SetDefaultValue(false)
+				->SetDescription('Fetch favicon from domain (DKIM header must be valid)'),
 			\RainLoop\Plugins\Property::NewInstance('gravatar')->SetLabel('Gravatar')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
-//				->SetAllowedInJs(true)
 				->SetDefaultValue(false)
 				->SetDescription('https://wikipedia.org/wiki/Gravatar'),
 		]);
@@ -147,7 +150,6 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			defined('RainLoop\\Enumerations\\PluginPropertyType::SELECT')
 				? \RainLoop\Plugins\Property::NewInstance('identicon')->SetLabel('Identicon')
 					->SetType(\RainLoop\Enumerations\PluginPropertyType::SELECT)
-//					->SetAllowedInJs(true)
 					->SetDefaultValue([
 						['id' => '', 'name' => 'Name characters else silhouette'],
 						['id' => 'identicon', 'name' => 'Name characters else squares'],
@@ -156,7 +158,6 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 					->SetDescription('https://wikipedia.org/wiki/Identicon')
 				: \RainLoop\Plugins\Property::NewInstance('identicon')->SetLabel('Identicon')
 					->SetType(\RainLoop\Enumerations\PluginPropertyType::SELECTION)
-//					->SetAllowedInJs(true)
 					->SetDefaultValue(['','identicon','jdenticon'])
 					->SetDescription('empty = default, identicon = squares, jdenticon = Triangles shape')
 				,
@@ -171,7 +172,6 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		if (\class_exists('OC') && isset(\OC::$server)) {
 			$aResult[] = \RainLoop\Plugins\Property::NewInstance('nextcloud')->SetLabel('Lookup Nextcloud Contacts')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
-//				->SetAllowedInJs(true)
 				->SetDefaultValue(false);
 		}
 */
@@ -289,11 +289,10 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 					break;
 				}
 			}
-/*
-			if (!$aResult) {
-				$aResult = static::getFavicon($sEmail, $sDomain);
+
+			if (!$aResult && $this->Config()->Get('plugin', 'favicon', false)) {
+				$aResult = static::getFavicon($sDomain);
 			}
-*/
 		}
 
 		return $aResult;
@@ -311,9 +310,12 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private static function cacheImage(string $sEmail, array $aResult) : void
 	{
-		$sEmailId = \sha1(\mb_strtolower(\SnappyMail\IDN::emailToAscii($sEmail)));
 		if (!\is_dir(\APP_PRIVATE_DATA . 'avatars')) {
 			\mkdir(\APP_PRIVATE_DATA . 'avatars', 0700);
+		}
+		$sEmailId = \mb_strtolower(\SnappyMail\IDN::emailToAscii($sEmail));
+		if (\str_contains($sEmail, '@')) {
+			$sEmailId = \sha1($sEmailId);
 		}
 		\file_put_contents(
 			\APP_PRIVATE_DATA . 'avatars/' . $sEmailId . \SnappyMail\File\MimeType::toExtension($aResult[0]),
@@ -326,33 +328,61 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 	{
 		$sEmail = \mb_strtolower(\SnappyMail\IDN::emailToAscii($sEmail));
 		$aFiles = \glob(\APP_PRIVATE_DATA . "avatars/{$sEmail}.*");
+		if (!$aFiles && \str_contains($sEmail, '@')) {
+			$sEmailId = \sha1($sEmail);
+			$aFiles = \glob(\APP_PRIVATE_DATA . "avatars/{$sEmailId}.*");
+			if (!$aFiles) {
+				$sDomain = \explode('@', $sEmail);
+				$sDomain = \array_pop($sDomain);
+				$aFiles = \glob(\APP_PRIVATE_DATA . "avatars/{$sDomain}.*");
+			}
+		}
 		if ($aFiles) {
-			\MailSo\Base\Http::setLastModified(\filemtime($aFiles[0]));
 			return [
 				\SnappyMail\File\MimeType::fromFile($aFiles[0]),
-				\file_get_contents($aFiles[0])
-			];
-		}
-		$sEmailId = \sha1($sEmail);
-		$aFiles = \glob(\APP_PRIVATE_DATA . "avatars/{$sEmailId}.*");
-		if ($aFiles) {
-			\MailSo\Base\Http::setLastModified(\filemtime($aFiles[0]));
-			return [
-				\mime_content_type($aFiles[0]),
 				\file_get_contents($aFiles[0])
 			];
 		}
 		return null;
 	}
 
-	private static function getFavicon(string $sEmail, string $sDomain) : ?array
+	private static function getFavicon(string $sDomain) : ?array
 	{
 		$aResult = static::getUrl('https://' . $sDomain . '/favicon.ico')
 			?: static::getUrl('https://' . static::serviceDomain($sDomain) . '/favicon.ico')
-			?: static::getUrl('https://www.' . static::serviceDomain($sDomain) . '/favicon.ico');
-		// Also detect <link rel="shortcut icon" href="...">
+			?: static::getUrl('https://www.' . static::serviceDomain($sDomain) . '/favicon.ico')
+			?: static::getUrl("https://www.google.com/s2/favicons?sz=48&domain_url={$sDomain}")
+			?: static::getUrl("https://api.faviconkit.com/{$sDomain}/48")
+//			?: static::getUrl("https://api.statvoo.com/favicon/{$sDomain}")
+		;
+/*
+		Also detect the following?
+
+		<link sizes="16x16" rel="shortcut icon" type="image/x-icon" href="/..." />
+		<link sizes="16x16" rel="shortcut icon" type="image/png" href="/..." />
+		<link sizes="32x32" rel="shortcut icon" type="image/png" href="/..." />
+		<link sizes="96x96" rel="shortcut icon" type="image/png" href="/..." />
+
+		<link sizes="36x36" rel="icon" type="image/png" href="/..." />
+		<link sizes="48x48" rel="icon" type="image/png" href="/..." />
+		<link sizes="72x72" rel="icon" type="image/png" href="/..." />
+		<link sizes="96x96" rel="icon" type="image/png" href="/..." />
+		<link sizes="144x144" rel="icon" type="image/png" href="/..." />
+		<link sizes="192x192" rel="icon" type="image/png" href="/..." />
+
+		<link sizes="57x57" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="60x60" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="72x72" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="76x76" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="114x114" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="120x120" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="144x144" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="152x152" rel="apple-touch-icon" type="image/png" href="/" />
+		<link sizes="180x180" rel="apple-touch-icon" type="image/png" href="/..." />
+		<link sizes="192x192" rel="apple-touch-icon" type="image/png" href="/..." />
+*/
 		if ($aResult) {
-			static::cacheImage($sEmail, $aResult);
+			static::cacheImage($sDomain, $aResult);
 		}
 		return $aResult;
 	}
