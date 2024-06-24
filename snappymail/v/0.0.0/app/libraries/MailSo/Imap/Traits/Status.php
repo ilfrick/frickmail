@@ -123,6 +123,8 @@ trait Status
 				$value = \is_array($value) ? \reset($value) : $value;
 				if (\is_string($value)) {
 					$this->MAILBOXID = \base64_encode($value);
+				} else {
+					\error_log("{$this->FullName} invalid MAILBOXID value");
 				}
 			} else {
 				$this->$name = (int) $value;
@@ -162,12 +164,17 @@ trait Status
 			 && isset($oResponse->ResponseList[3])
 			 && \is_array($oResponse->ResponseList[3])
 			) {
-				$c = \count($oResponse->ResponseList[3]);
+				$c = \count($oResponse->ResponseList[3]) - 1;
 				for ($i = 0; $i < $c; $i += 2) {
-					$bResult |= $this->setStatusItem(
-						$oResponse->ResponseList[3][$i],
-						$oResponse->ResponseList[3][$i+1]
-					);
+					if ($c > $i) {
+						$bResult |= $this->setStatusItem(
+							$oResponse->ResponseList[3][$i],
+							$oResponse->ResponseList[3][$i+1]
+						);
+					} else {
+						// https://github.com/the-djmaze/snappymail/issues/1640
+						\error_log("{$this->FullName} STATUS missing value for {$oResponse->ResponseList[3][$i]}");
+					}
 				}
 				$this->hasStatus = $bResult;
 			}
