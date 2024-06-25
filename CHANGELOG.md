@@ -1,3 +1,44 @@
+## 2.36.4 – 2024-06-25
+
+### Added
+- Customize private key passphrase expiration interval
+  [#1545](https://github.com/the-djmaze/snappymail/discussions/1545)
+- AdvancedSearch support for filtering mails before a given date
+  [#1606](https://github.com/the-djmaze/snappymail/pull/1606) by @codiflow
+- Control valid spam and virus headers
+  [#1607](https://github.com/the-djmaze/snappymail/issues/1607)
+- Remember S/MIME private Key without function
+  [#1611](https://github.com/the-djmaze/snappymail/issues/1611)
+- Resize compose dialog
+- Magnetic theme
+  [#1637](https://github.com/the-djmaze/snappymail/pull/1637) by @TheCuteFoxxy
+
+### Changed
+- Improved signing messages by allowing to choose between the options
+- Improved language detection code
+- More detailed Decrypt errors
+- Update French by @hguilbert
+- Update Polish by @tinola
+- Update Portuguese by @ner00
+- Update Spanish by @huloza
+
+### Fixed
+- Default language error
+- Undefined $sEmail in DoAdminDomainMatch
+- Handling Autocrypt header failed on `=`
+  [#1608](https://github.com/the-djmaze/snappymail/issues/1608)
+- Blank lines are inserted when editing draft
+  [#1609](https://github.com/the-djmaze/snappymail/issues/1609)
+- Workaround Cyrus MAILBOXID bug (disable OBJECTID capability by default due to impact)
+  [#1640](https://github.com/the-djmaze/snappymail/issues/1640)
+- Workaround HTML with multiple body elements or MIME with multiple text/html
+  [#1641](https://github.com/the-djmaze/snappymail/issues/1641)
+
+### Nextcloud
+- OIDC stay logged in
+  [#1620](https://github.com/the-djmaze/snappymail/pull/1620) by @avinash-0007
+
+
 ## 2.36.3 – 2024-05-27
 
 ### Changed
@@ -25,8 +66,8 @@
 ### Fixed
 - "Account already exists"
   [#1561](https://github.com/the-djmaze/snappymail/issues/1561)
-- Properly escape path separator in tar.php file list regex by @sevmonster
-  [#1562](https://github.com/the-djmaze/snappymail/pull/1562)
+- Properly escape path separator in tar.php file list regex
+  [#1562](https://github.com/the-djmaze/snappymail/pull/1562) by @sevmonster
 - Prevent mkdir() error
   [#1565](https://github.com/the-djmaze/snappymail/issues/1565)
 - SCRAM Exception when trying to log in to SMTP
@@ -39,8 +80,8 @@
 - GPG/PGP exec() return false handling
 
 ### Nextcloud
-- OIDC login active again by @avinash-0007
-  [#1572](https://github.com/the-djmaze/snappymail/pull/1572)
+- OIDC login active again
+  [#1572](https://github.com/the-djmaze/snappymail/pull/1572) by @avinash-0007
 
 
 ## 2.36.1 – 2024-04-23
@@ -102,10 +143,10 @@
   [#1501](https://github.com/the-djmaze/snappymail/issues/1501)
 - Button to change S/MIME private key passphrase
   [#1505](https://github.com/the-djmaze/snappymail/issues/1505)
-- Belarusian by @spoooyders
-  [#1512](https://github.com/the-djmaze/snappymail/pull/1512)
+- Belarusian
+  [#1512](https://github.com/the-djmaze/snappymail/pull/1512) by @spoooyders
 - Log some domain idn_to_ascii issues
-  [#1513](https://github.com/the-djmaze/snappymail/pull/1513)
+  [#1513](https://github.com/the-djmaze/snappymail/issues/1513)
 
 ### Changed
 - On folder/mailbox rename, also rename all children instead of reloading all
@@ -208,9 +249,9 @@
 - Crash on importing corrupt OpenPGP keys
 - Crash on old browsers instead of showing error
 - Ignore popups on logoutReload()
-  [#1467](https://github.com/the-djmaze/snappymail/pull/1467)
+  [#1467](https://github.com/the-djmaze/snappymail/issues/1467)
 - Custom SASLMechanisms fail in IMAP when the connection is secure
-  [#1484](https://github.com/the-djmaze/snappymail/pull/1484)
+  [#1484](https://github.com/the-djmaze/snappymail/pull/1484) by @botsarenthuman
 
 
 ## 2.35.2 – 2024-02-27
@@ -410,8 +451,8 @@
 - Run full GetUids() in background when message_list_limit is set
 - MessageListThreadsMap as background task when message_list_limit is set
 - Properly set CACHEDIR.TAG
-- Sending group email to all contact addresses by @rezaei92
-  [#1286](https://github.com/the-djmaze/snappymail/pull/1286)
+- Sending group email to all contact addresses
+  [#1286](https://github.com/the-djmaze/snappymail/pull/1286) by @rezaei92
 
 ### Changed
 - Default IMAP message_list_limit to 10000
@@ -419,8 +460,8 @@
 - Improved Squire WYSIWYG
 - Sort real attachments and inline attachments for
   [#1360](https://github.com/the-djmaze/snappymail/issues/1360)
-- Nextcloud Theme fixes and improvements by @hampoelz
-  [#1363](https://github.com/the-djmaze/snappymail/pull/1363)
+- Nextcloud Theme fixes and improvements
+  [#1363](https://github.com/the-djmaze/snappymail/pull/1363) by @hampoelz
 - Improve display of attachments
   [#1361](https://github.com/the-djmaze/snappymail/issues/1361)
 - Rename messageVisibility to messageVisible
@@ -434,8 +475,8 @@
 - Preview tooltip shows "null" when PREVIEW capability is disabled
 
 ### Nextcloud
-- Improved language handling by @avinash-0007
-  [#1362](https://github.com/the-djmaze/snappymail/pull/1362)
+- Improved language handling
+  [#1362](https://github.com/the-djmaze/snappymail/pull/1362) by @avinash-0007
 - FilterLanguage had wrong parameter order
 - Use NextcloudV25+ theme by default
 
@@ -456,8 +497,8 @@
   [#1344](https://github.com/the-djmaze/snappymail/issues/1344)
 - NO Mailbox does not exist, or must be subscribed to")
   [#1354](https://github.com/the-djmaze/snappymail/issues/1354)
-- Flag indicators are added to wrong message by @SergeyMosin
-  [#1347](https://github.com/the-djmaze/snappymail/pull/1347)
+- Flag indicators are added to wrong message
+  [#1347](https://github.com/the-djmaze/snappymail/pull/1347) by @SergeyMosin
 - Squire: issue when using the enter key in a reply window
   [#1296](https://github.com/the-djmaze/snappymail/issues/1296)
 - Squire: crash on cut/delete range
@@ -571,8 +612,8 @@
   [#1308](https://github.com/the-djmaze/snappymail/issues/1308)
 - With email open, "delete" doesn't delete #1274
   [#1274](https://github.com/the-djmaze/snappymail/issues/1274)
-- Fix threading view in Thunderbird (others?) by @tkasch
-  [#1304](https://github.com/the-djmaze/snappymail/pull/1304)
+- Fix threading view in Thunderbird (others?)
+  [#1304](https://github.com/the-djmaze/snappymail/pull/1304) by @tkasch
 
 
 ## 2.29.1 – 2023-10-02
@@ -586,18 +627,18 @@
 ### Added
 - Modern UI / Nextcloud Theme
   [#629](https://github.com/the-djmaze/snappymail/pull/629) by @hampoelz
-- "Add/Edit signature" label to PopupsIdentity.html by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
+- "Add/Edit signature" label to PopupsIdentity.html
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
 - use calendar icon in message list for messages with '.ics' or 'text/calendar' attachments by @SergeyMosin
   [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- Show unseen message count when the message list is threaded by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- in mobile mode hide folders(left) panel when a folder is clicked by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- spellcheck the subject when 'allowSpellcheck' setting is true by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- 'collapse_blockquotes', 'allow_spellcheck' and 'mail_list_grouped' to admin settings ('defaults' section) by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
+- Show unseen message count when the message list is threaded
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
+- in mobile mode hide folders(left) panel when a folder is clicked
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
+- spellcheck the subject when 'allowSpellcheck' setting is true
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
+- 'collapse_blockquotes', 'allow_spellcheck' and 'mail_list_grouped' to admin settings ('defaults' section)
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
 - Browser support for autocompleting TOTP code
   [#1251](https://github.com/the-djmaze/snappymail/issues/1251)
 
@@ -608,10 +649,10 @@
   [#1199](https://github.com/the-djmaze/snappymail/issues/1199)
 - Draft code to improve mobile breakpoints
   [#1150](https://github.com/the-djmaze/snappymail/issues/1150)
-- address input: space character can trigger '_parseValue' if the email address looks complete by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- if applicable set '\\answered' or '$forwarded' flag after a message is sent so the proper icon is shown in the message list view by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
+- address input: space character can trigger '_parseValue' if the email address looks complete
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
+- if applicable set '\\answered' or '$forwarded' flag after a message is sent so the proper icon is shown in the message list view
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
 
 ### Fixed
 - CHARSET is not valid in UTF8 mode
@@ -624,39 +665,39 @@
   [#1220](https://github.com/the-djmaze/snappymail/issues/1220)
 - "Request failed" on message move
   [#1220](https://github.com/the-djmaze/snappymail/issues/1220)
-- Unwrapped text nodes attached to squire._root by @SergeyMosin
-  [#1234](https://github.com/the-djmaze/snappymail/pull/1234)
+- Unwrapped text nodes attached to squire._root
+  [#1234](https://github.com/the-djmaze/snappymail/pull/1234) by @SergeyMosin
 - Extra wrapper div is added in Squire every time a Draft is open (or closed) after save.
   [#1208](https://github.com/the-djmaze/snappymail/issues/1208)
 - foreach() argument must be of type array|object
   [#1237](https://github.com/the-djmaze/snappymail/issues/1237)
-- `<font>` tag 'style' is lost in replies by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- unseen indicator is not shown in thread view when 'listGrouped' settings is false by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
+- `<font>` tag 'style' is lost in replies
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
+- unseen indicator is not shown in thread view when 'listGrouped' settings is false
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
 - TOTP plugin is dependent on ctype
   [#1250](https://github.com/the-djmaze/snappymail/issues/1250)
 
 ### Nextcloud
-- iFrame mode: click on unified search result opens inner iFrame by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- set 'smremember' cookie if 'sign_me_auto' is set to 'DefaultOn' when using 'snappymail-autologin*', otherwise nextcloud users need to re-login when the browser is re-opened. by @SergeyMosin
-  [#1248](https://github.com/the-djmaze/snappymail/pull/1248)
-- Improve UX of "Put in Calendar" option in plugin by @theronakpatel
-  [#1259](https://github.com/the-djmaze/snappymail/pull/1259)
+- iFrame mode: click on unified search result opens inner iFrame
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
+- set 'smremember' cookie if 'sign_me_auto' is set to 'DefaultOn' when using 'snappymail-autologin*', otherwise nextcloud users need to re-login when the browser is re-opened
+  [#1248](https://github.com/the-djmaze/snappymail/pull/1248) by @SergeyMosin
+- Improve UX of "Put in Calendar" option in plugin
+  [#1259](https://github.com/the-djmaze/snappymail/pull/1259) by @theronakpatel
 
 
 ## 2.28.4 – 2023-07-10
 
 ### Added
-- application.ini msg_default_action by @SergeyMosin
-  [#1204](https://github.com/the-djmaze/snappymail/pull/1204)
-- application.ini view_show_next_message by @SergeyMosin
-  [#1204](https://github.com/the-djmaze/snappymail/pull/1204)
-- application.ini view_images by @SergeyMosin
-  [#1204](https://github.com/the-djmaze/snappymail/pull/1204)
-- nextcloud add ability to include custom php file in InstallStep migration by @SergeyMosin
-  [#1197](https://github.com/the-djmaze/snappymail/pull/1197)
+- application.ini msg_default_action
+  [#1204](https://github.com/the-djmaze/snappymail/pull/1204) by @SergeyMosin
+- application.ini view_show_next_message
+  [#1204](https://github.com/the-djmaze/snappymail/pull/1204) by @SergeyMosin
+- application.ini view_images
+  [#1204](https://github.com/the-djmaze/snappymail/pull/1204) by @SergeyMosin
+- nextcloud add ability to include custom php file in InstallStep migration
+  [#1197](https://github.com/the-djmaze/snappymail/pull/1197) by @SergeyMosin
 - Support plugin for Squire editor
   [#1192](https://github.com/the-djmaze/snappymail/issues/1192)
 
@@ -664,14 +705,14 @@
 - only show 'Add "domain.tld" as an application for mailto links?' message after login (firefox shows the message on every reload otherwise).
   [#1204](https://github.com/the-djmaze/snappymail/issues/1204)
 - Convert getPdoAccessData() : array to a RainLoop\Pdo\Settings object instance
-- New bidi buttons to Squire editor by @rezaei92
-  [#1200](https://github.com/the-djmaze/snappymail/pull/1200)
+- New bidi buttons to Squire editor
+  [#1200](https://github.com/the-djmaze/snappymail/pull/1200) by @rezaei92
 
 ### Fixed
 - Undefined constant PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT
   [#1205](https://github.com/the-djmaze/snappymail/issues/1205)
-- 'reloadTime' function result is passed into 'setInterval' instead of the function by @SergeyMosin
-  [#1204](https://github.com/the-djmaze/snappymail/pull/1204)
+- 'reloadTime' function result is passed into 'setInterval' instead of the function
+  [#1204](https://github.com/the-djmaze/snappymail/pull/1204) by @SergeyMosin
 - UNKNOWN-CTE Invalid data in MIME part
   [#1186](https://github.com/the-djmaze/snappymail/issues/1186)
 
@@ -734,10 +775,10 @@
 ### Changed
 - Optical issue with input fields for mail and folder search
   [#1149](https://github.com/the-djmaze/snappymail/issues/1149)
-- Update Chinese translation by @mayswind
-  [#1157](https://github.com/the-djmaze/snappymail/pull/1157)
-- Update Polish translation by @tinola
-  [#1156](https://github.com/the-djmaze/snappymail/pull/1156)
+- Update Chinese translation
+  [#1157](https://github.com/the-djmaze/snappymail/pull/1157) by @mayswind
+- Update Polish translation
+  [#1156](https://github.com/the-djmaze/snappymail/pull/1156) by @tinola
 
 ### Fixed
 - Undefined SIG constants
@@ -766,18 +807,18 @@
 - Allow empty message body when there are attachments
   [#1052](https://github.com/the-djmaze/snappymail/issues/1052)
 - PHP inherit logger as Trait
-- Update Portuguese by @ner00
-  [#1124](https://github.com/the-djmaze/snappymail/pull/1124)
-- Update Traditional Chinese (Taiwan) by @chiyi4488
-  [#1107](https://github.com/the-djmaze/snappymail/pull/1107)
-- Update Russian by @konkere
-  [#1108](https://github.com/the-djmaze/snappymail/pull/1108)
-- Update Italian by @cm-schl
-  [#1094](https://github.com/the-djmaze/snappymail/pull/1094)
-- Update French by @hguilbert
-  [#1102](https://github.com/the-djmaze/snappymail/pull/1102)
-- Update German by @cm-schl
-  [#1087](https://github.com/the-djmaze/snappymail/pull/1087)
+- Update Portuguese
+  [#1124](https://github.com/the-djmaze/snappymail/pull/1124) by @ner00
+- Update Traditional Chinese (Taiwan)
+  [#1107](https://github.com/the-djmaze/snappymail/pull/1107) by @chiyi4488
+- Update Russian
+  [#1108](https://github.com/the-djmaze/snappymail/pull/1108) by @konkere
+- Update Italian
+  [#1094](https://github.com/the-djmaze/snappymail/pull/1094) by @cm-schl
+- Update French
+  [#1102](https://github.com/the-djmaze/snappymail/pull/1102) by @hguilbert
+- Update German
+  [#1087](https://github.com/the-djmaze/snappymail/pull/1087) by @cm-schl
 
 ### Fixed
 - Show messagelist timeout/abort error for
@@ -838,8 +879,8 @@
 - Workaround Upgrade with Nextcloud stuck in Maintenance mode
   [#1046](https://github.com/the-djmaze/snappymail/issues/1046)
 - Use Actions()->decodeRawKey()
-- French language updated by @hguilbert
-  [#1045](https://github.com/the-djmaze/snappymail/pull/1045)
+- French language updated
+  [#1045](https://github.com/the-djmaze/snappymail/pull/1045) by @hguilbert
 - Sorting in folders not working
   [#1022](https://github.com/the-djmaze/snappymail/issues/1022)
 - Allow saving draft with empty body
@@ -903,15 +944,15 @@
 ### Changed
 - Improved FolderCollection handling
 - MODSEQ requires 64-bit int
-- Update russian language by @Akrobs
-  [#994](https://github.com/the-djmaze/snappymail/pull/994)
+- Update russian language
+  [#994](https://github.com/the-djmaze/snappymail/pull/994) by @Akrobs
 - Don't make font bigger when screen > 1400px
 - Put top menu "accountPlace" inside top-system-dropdown-id
 - Put attachment controls inside attachmentsPlace
 - Show message toolbar on screens > 1400px
   [#970](https://github.com/the-djmaze/snappymail/issues/970)
-- Chinese updated by @mayswind
-  [#1011](https://github.com/the-djmaze/snappymail/pull/1011)
+- Chinese updated
+  [#1011](https://github.com/the-djmaze/snappymail/pull/1011) by @mayswind
 - Prevent folder/messages flags conflict by using the right name `attributes` for Folders
 - FolderInformation() use jsonSerialize()
 - Squire space handling on paste use `\u00A0` instead of `&nbsp;` for
@@ -954,16 +995,16 @@
 
 ### Changed
 - Reduce/simplify CSS footprint
-- Use the System/Browser font by default by @HeySora
-  [#988](https://github.com/the-djmaze/snappymail/pull/988)
+- Use the System/Browser font by default
+  [#988](https://github.com/the-djmaze/snappymail/pull/988) by @HeySora
 - Make layout fully responsive using matchMedia('(max-width: 799px)')
 - Move brotli and gzip compress option to application.ini
 - After page refreshes in background whilst editing a draft, the space bar stops working
   [#860](https://github.com/the-djmaze/snappymail/issues/860)
-- Updated Portuguese by @ner00
-  [#984](https://github.com/the-djmaze/snappymail/pull/984)
-- Updated French by @hguilbert
-  [#985](https://github.com/the-djmaze/snappymail/pull/985)
+- Updated Portuguese
+  [#984](https://github.com/the-djmaze/snappymail/pull/984) by @ner00
+- Updated French
+  [#985](https://github.com/the-djmaze/snappymail/pull/985) by @hguilbert
 
 ### Fixed
 - unset border-box for message body
@@ -1059,8 +1100,8 @@
 - Workaround "server connection error"
   [#936](https://github.com/the-djmaze/snappymail/issues/936)
 - Cleanup AbstractViewPopup handling
-- Italian translation by @lota
-  [#948](https://github.com/the-djmaze/snappymail/pull/948)
+- Italian translation
+  [#948](https://github.com/the-djmaze/snappymail/pull/948) by @lota
 - Replace Element.fromHTML() with createElement()
 
 ### Fixed
@@ -1108,8 +1149,8 @@
 ## 2.25.5 – 2023-02-09
 
 ### Added
-- New dark themes by @TheCuteFoxxy
-  [#925](https://github.com/the-djmaze/snappymail/pull/925)
+- New dark themes
+  [#925](https://github.com/the-djmaze/snappymail/pull/925) by @TheCuteFoxxy
 - External images option 'Always when DKIM is valid' for
   [#201](https://github.com/the-djmaze/snappymail/issues/201)
 - Image whitelist menu on message for
@@ -1149,8 +1190,8 @@
 ### Added
 - message maximum quoted text level for speed.
   [#902](https://github.com/the-djmaze/snappymail/issues/902)
-- LoveDark Theme by @TheCuteFoxxy
-  [#913](https://github.com/the-djmaze/snappymail/pull/913)
+- LoveDark Theme
+  [#913](https://github.com/the-djmaze/snappymail/pull/913) by @TheCuteFoxxy
 
 ### Changed
 - Moved pluginEnable() to \SnappyMail\Repository::enablePackage()
@@ -1232,8 +1273,8 @@
   [#188](https://github.com/the-djmaze/snappymail/issues/188)
 - /static/.htaccess as mentioned by @dbiczo in
   [#895](https://github.com/the-djmaze/snappymail/issues/895)
-- Update nb-NO language by @master3395
-  [#896](https://github.com/the-djmaze/snappymail/pull/896)
+- Update nb-NO language
+  [#896](https://github.com/the-djmaze/snappymail/pull/896) by @master3395
 - \RainLoop\Utils::SetCookie() to \SnappyMail\Cookies::set()
 - Merge \MailSo\Base\Utils::RecRmDir() and \MailSo\Base\Utils::RecTimeDirRemove()
 
@@ -1258,8 +1299,8 @@
 - Support RFC 8689
 - Nextcloud move themes outside of app folder
   [#875](https://github.com/the-djmaze/snappymail/issues/875)
-- Add check to unregister system addressbook by @akhil1508
-  [#879](https://github.com/the-djmaze/snappymail/pull/879)
+- Add check to unregister system addressbook
+  [#879](https://github.com/the-djmaze/snappymail/pull/879) by @akhil1508
 
 ### Changed
 - material-design checkbox use hidden input for accessibility
@@ -1283,8 +1324,8 @@
 ## 2.25.0 – 2023-01-26
 
 ### Changed
-- Right margin to folder search input wrapper by @codiflow
-  [#871](https://github.com/the-djmaze/snappymail/pull/871)
+- Right margin to folder search input wrapper
+  [#871](https://github.com/the-djmaze/snappymail/pull/871) by @codiflow
 - Almost all request params now use JavaScript camelCase instead of CamelCase
 - #rl-content to use flex for better layout control
 - Decode some Copernica link tracking
@@ -1313,8 +1354,8 @@
 ### Added
 - Preparations for RFC 8689
 - Add admin setting for the contacts suggestions limit
-- A button to clear folder search input field by @codiflow
-  [#847](https://github.com/the-djmaze/snappymail/pull/847)
+- A button to clear folder search input field
+  [#847](https://github.com/the-djmaze/snappymail/pull/847) by @codiflow
 - Preparations for custom SMTP credentials handling for
   [#859](https://github.com/the-djmaze/snappymail/issues/859)
   [#458](https://github.com/the-djmaze/snappymail/issues/458)
@@ -1330,8 +1371,8 @@
   [#849](https://github.com/the-djmaze/snappymail/issues/849)
 - 64-bit PHP was required
   [#852](https://github.com/the-djmaze/snappymail/issues/852)
-- Update fr-FR translations by @dominiquefournier
-  [#854](https://github.com/the-djmaze/snappymail/pull/854)
+- Update fr-FR translations
+  [#854](https://github.com/the-djmaze/snappymail/pull/854) by @dominiquefournier
 - Move createDomain & createDomainAlias buttons below table
 - Move some Nextcloud SnappyMailHelper code to new InstallStep
 - Cleanup messages cache handling
@@ -1357,8 +1398,8 @@
 ### Added
 - Support for search criterias ON, SENTON, SENTSINCE and SENTBEFORE
 - New 'forward as attachment' glyph
-- NC integration app metadata: add links to admin and dev docs by @p-bo
-  [#820](https://github.com/the-djmaze/snappymail/pull/820)
+- NC integration app metadata: add links to admin and dev docs
+  [#820](https://github.com/the-djmaze/snappymail/pull/820) by @p-bo
 - Clicking on messagelist grouped date/from searches on that date/from
   [#815](https://github.com/the-djmaze/snappymail/issues/815)
 - Nextcloud Improved file picker layout
@@ -1372,16 +1413,16 @@
 - Resolve layout issues by changing from `fixed` to `relative`
   [#686](https://github.com/the-djmaze/snappymail/issues/686)
 - Cache handling of messagelist changed due to etag issues
-- Improve german and italian translation by @cm-schl
-  [#846](https://github.com/the-djmaze/snappymail/pull/846)
+- Improve german and italian translation
+  [#846](https://github.com/the-djmaze/snappymail/pull/846) by @cm-schl
 
 ### Fixed
 - Searching on Nextcloud search
   [#787](https://github.com/the-djmaze/snappymail/issues/787)
 - Workaround another Nextcloud disallowed .htaccess
   [#790](https://github.com/the-djmaze/snappymail/issues/790)
-- Compact display of folders in nextcloud by @makoehr
-  [#824](https://github.com/the-djmaze/snappymail/pull/824)
+- Compact display of folders in nextcloud
+  [#824](https://github.com/the-djmaze/snappymail/pull/824) by @makoehr
 - Admin -> Contacts PDO test failed when using different AddressBookInterface
 - KolabAddressBook errors
 - Forgot debug js/css setting change in Nextcloud
@@ -1433,8 +1474,8 @@
 ### Changed
 - Disable sorting when viewing message thread
   [#445](https://github.com/the-djmaze/snappymail/issues/445)
-- Update Chinese translation by @mayswind
-  [#794](https://github.com/the-djmaze/snappymail/pull/794)
+- Update Chinese translation
+  [#794](https://github.com/the-djmaze/snappymail/pull/794) by @mayswind
 - No need to call IMAP EXAMINE when current folder already SELECT
 - Thread view now has tree indentation
 
@@ -1547,8 +1588,8 @@
 ### Fixed
 - Loosing HTML signature in account identity under settings
   [#750](https://github.com/the-djmaze/snappymail/issues/750)
-- Plugin configuration did not load anymore when type was SELECTION by @cm-schl
-  [#753](https://github.com/the-djmaze/snappymail/pull/753)
+- Plugin configuration did not load anymore when type was SELECTION
+  [#753](https://github.com/the-djmaze/snappymail/pull/753) by @cm-schl
 - Nextcloud Default theme shows gray text on gray background
   [#754](https://github.com/the-djmaze/snappymail/issues/754)
 - Only run JSON hooks when $sAction is set
@@ -1812,8 +1853,8 @@
   [#638](https://github.com/the-djmaze/snappymail/issues/638)
 
 ### Fixed
-- ldap-identities-plugin by @cm-schl
-  [#647](https://github.com/the-djmaze/snappymail/pull/647)
+- ldap-identities-plugin
+  [#647](https://github.com/the-djmaze/snappymail/pull/647) by @cm-schl
 - OpenSSL v3 ciphers issue
   [#641](https://github.com/the-djmaze/snappymail/issues/641)
 
@@ -1912,8 +1953,8 @@
   [#620](https://github.com/the-djmaze/snappymail/issues/620)
 - PutinICS does is not working for all calendar events
   [#622](https://github.com/the-djmaze/snappymail/issues/622)
-- Update readme by @cm-schl
-  [#617](https://github.com/the-djmaze/snappymail/pull/617)
+- Update readme
+  [#617](https://github.com/the-djmaze/snappymail/pull/617) by @cm-schl
 
 
 ## 2.20.0 – 2022-11-03
@@ -2007,8 +2048,8 @@
   [#638](https://github.com/the-djmaze/snappymail/issues/638)
 
 ### Fixed
-- ldap-identities-plugin by @cm-schl
-  [#647](https://github.com/the-djmaze/snappymail/pull/647)
+- ldap-identities-plugin
+  [#647](https://github.com/the-djmaze/snappymail/pull/647) by @cm-schl
 - OpenSSL v3 ciphers issue
   [#641](https://github.com/the-djmaze/snappymail/issues/641)
 
@@ -2107,8 +2148,8 @@
   [#620](https://github.com/the-djmaze/snappymail/issues/620)
 - PutinICS does is not working for all calendar events
   [#622](https://github.com/the-djmaze/snappymail/issues/622)
-- Update readme by @cm-schl
-  [#617](https://github.com/the-djmaze/snappymail/pull/617)
+- Update readme
+  [#617](https://github.com/the-djmaze/snappymail/pull/617) by @cm-schl
 
 
 ## 2.20.0 – 2022-11-03
