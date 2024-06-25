@@ -353,7 +353,7 @@ export class DomainPopupView extends AbstractViewPopup {
 			'STATUS=SIZE',
 			'THREAD'
 		]);
-		this.imapDisabled_capabilities(['METADATA','PREVIEW','STATUS=SIZE']);
+		this.imapDisabled_capabilities(['METADATA','OBJECTID','PREVIEW','STATUS=SIZE']);
 		forEachObjectEntry(domainDefaults, (key, value) => this[key](value));
 		this.enableSmartPorts(true);
 		if (oDomain) {

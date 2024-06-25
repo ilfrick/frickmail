@@ -119,12 +119,12 @@ trait Status
 		}
 		if (\property_exists(__TRAIT__, $name)) {
 			if ('MAILBOXID' === $name) {
-				// https://github.com/the-djmaze/snappymail/issues/1640
 				$value = \is_array($value) ? \reset($value) : $value;
 				if (\is_string($value)) {
 					$this->MAILBOXID = \base64_encode($value);
 				} else {
-					\error_log("{$this->FullName} invalid MAILBOXID value");
+					// Cyrus bug https://github.com/the-djmaze/snappymail/issues/1640
+					\error_log("{$this->FullName} invalid MAILBOXID value. Disable the OBJECTID capability.");
 				}
 			} else {
 				$this->$name = (int) $value;
