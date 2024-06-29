@@ -20,14 +20,12 @@
 							parseInt(parts.minute, 10),
 							parseInt(parts.second, 10)
 						) : new Date(str));
-					parts?.tz && (options.timeZone = parts.tz);
+					parts?.tz && (options.timeZone = windowsVTIMEZONEs[parts.tz] || parts.tz);
 					try {
 						return date.format(options);
 					} catch (e) {
 						console.error(e);
 						if (options.timeZone) {
-							// TODO: handle messy vtimezones
-//							VTIMEZONEs[options.timeZone];
 							options.timeZone = undefined;
 							return date.format(options);
 						}
