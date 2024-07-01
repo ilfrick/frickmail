@@ -13,6 +13,7 @@
 					'profile',
 					// Access IMAP and SMTP through OAUTH
 					'https://graph.microsoft.com/IMAP.AccessAsUser.All',
+//					'https://graph.microsoft.com/Mail.ReadWrite'
 					'https://graph.microsoft.com/Mail.Send'
 /*					// Legacy:
 					'https://outlook.office.com/SMTP.Send',
