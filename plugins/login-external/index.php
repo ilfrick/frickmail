@@ -6,8 +6,8 @@ class LoginExternalPlugin extends \RainLoop\Plugins\AbstractPlugin
 		NAME     = 'Login External',
 		AUTHOR   = 'SnappyMail',
 		URL      = 'https://snappymail.eu/',
-		VERSION  = '1.3',
-		RELEASE  = '2024-03-27',
+		VERSION  = '1.4',
+		RELEASE  = '2024-07-01',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		LICENSE  = 'MIT',
@@ -31,9 +31,12 @@ class LoginExternalPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 		try
 		{
-			$oAccount = $oActions->LoginProcess($sEmail, $sPassword);
+			// Convert password to SensitiveString type
+			$oPassword = new \SnappyMail\SensitiveString($sPassword);
+			$oAccount = $oActions->LoginProcess($sEmail, $oPassword);
 			if (!$oAccount instanceof \RainLoop\Model\MainAccount) {
 				$oAccount = null;
+				\SnappyMail\LOG::info(\get_class($this), 'LoginProcess failed');
 			}
 		}
 		catch (\Throwable $oException)
@@ -53,7 +56,7 @@ class LoginExternalPlugin extends \RainLoop\Plugins\AbstractPlugin
 				if ($oException instanceof \RainLoop\Exceptions\ClientException) {
 					$aResult['ErrorCode'] = $oException->getCode();
 				} else {
-					$aResult['ErrorCode'] = Notifications::AuthError;
+					$aResult['ErrorCode'] = \RainLoop\Notifications::AuthError;
 				}
 			}
 			echo \json_encode($aResult);
