@@ -1,10 +1,10 @@
 (rl => {
-	const client_id = rl.pluginSettingsGet('login-gmail', 'client_id'),
+	const client_id = rl.pluginSettingsGet('login-o365', 'client_id'),
 		login = () => {
 			document.location = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?' + (new URLSearchParams({
 				response_type: 'code',
 				client_id: client_id,
-				redirect_uri: document.location.href + '?LoginGMail',
+				redirect_uri: document.location.href + '?LoginO365',
 				scope: [
 					// Associate personal info
 					'openid',
@@ -19,7 +19,7 @@
 					'https://outlook.office.com/IMAP.AccessAsUser.All'
 */
 				].join(' '),
-				state: 'gmail', // + rl.settings.app('token') + localStorage.getItem('smctoken')
+				state: 'o365', // + rl.settings.app('token') + localStorage.getItem('smctoken')
 				// Force authorize screen, so we always get a refresh_token
 				access_type: 'offline',
 				prompt: 'consent'
@@ -28,7 +28,7 @@
 
 	if (client_id) {
 		addEventListener('sm-user-login', e => {
-			if (event.detail.get('Email').includes('@gmail.com')) {
+			if (event.detail.get('Email').includes('@hotmail.com')) {
 				e.preventDefault();
 				login();
 			}

@@ -4,6 +4,10 @@
  * I'm not going to pay, so feel free to fix this code yourself.
  * https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth
  * https://answers.microsoft.com/en-us/msoffice/forum/all/configuration-for-imap-pop-and-smtp-with-oauth-in/3db47d43-25ac-4e0b-b957-22585e6caf15
+ *
+ * https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps
+ *
+ * redirect_uri=https://{DOMAIN}/?LoginO365
  */
 
 use RainLoop\Model\MainAccount;
@@ -153,7 +157,10 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 			\RainLoop\Plugins\Property::NewInstance('client_secret')
 				->SetLabel('Client Secret')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING)
-				->SetEncrypted()
+				->SetEncrypted(),
+			\RainLoop\Plugins\Property::NewInstance('tenant_id')
+				->SetLabel('Tenant ID')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING)
 		];
 	}
 
