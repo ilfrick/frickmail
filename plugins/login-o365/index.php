@@ -19,8 +19,8 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 	const
 		NAME     = 'Office365/Outlook OAuth2',
 		VERSION  = '0.1',
-		RELEASE  = '2024-03-27',
-		REQUIRED = '2.36.0',
+		RELEASE  = '2024-07-01',
+		REQUIRED = '2.36.5',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'Office365/Outlook IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
 
