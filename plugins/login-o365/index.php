@@ -8,6 +8,7 @@
  * https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps
  *
  * redirect_uri=https://{DOMAIN}/?LoginO365
+ * redirect_uri=https://{DOMAIN}/LoginO365
  */
 
 use RainLoop\Model\MainAccount;
@@ -23,10 +24,10 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 		CATEGORY = 'Login',
 		DESCRIPTION = 'Office365/Outlook IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
 
-	// Microsoft make up your mind! documentation has "/oauth2/v2.0/" or "/v2.0/oauth2/" ???
+	// https://login.microsoftonline.com/{{tenant}}/v2.0/.well-known/openid-configuration
 	const
-		LOGIN_URI = 'https://login.microsoftonline.com/common/oauth2/v2.0/auth',
-		TOKEN_URI = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
+		LOGIN_URI = 'https://login.microsoftonline.com/{{tenant}}/oauth2/v2.0/auth',
+		TOKEN_URI = 'https://login.microsoftonline.com/{{tenant}}/oauth2/v2.0/token';
 
 	private static ?array $auth = null;
 
@@ -63,7 +64,7 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 		try
 		{
 			if (isset($_GET['error'])) {
-				throw new \RuntimeException($_GET['error']);
+				throw new \RuntimeException("{$_GET['error']}: {$_GET['error_description']}");
 			}
 			if (!isset($_GET['code']) || empty($_GET['state']) || 'o365' !== $_GET['state']) {
 				$oActions->Location(\RainLoop\Utils::WebPath());
@@ -77,7 +78,7 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 
 			$iExpires = \time();
 			$aResponse = $oO365->getAccessToken(
-				static::TOKEN_URI,
+				\str_replace('{{tenant}}', $this->Config()->Get('plugin', 'tenant', 'common'), static::TOKEN_URI),
 				'authorization_code',
 				array(
 					'code' => $_GET['code'],
@@ -108,7 +109,7 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 			$iExpires += $aResponse['expires_in'];
 
 			$oO365->setAccessToken($sAccessToken);
-			$aUserInfo = $oO365->fetch('https://www.googleapis.com/oauth2/v2/userinfo');
+			$aUserInfo = $oO365->fetch('https://graph.microsoft.com/oidc/userinfo"');
 			if (200 != $aUserInfo['code']) {
 				throw new \RuntimeException("HTTP: {$aResponse['code']}");
 			}
@@ -160,13 +161,17 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 				->SetEncrypted(),
 			\RainLoop\Plugins\Property::NewInstance('tenant_id')
 				->SetLabel('Tenant ID')
-				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING)
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING),
+			\RainLoop\Plugins\Property::NewInstance('tenant')->SetLabel('Tenant')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::SELECTION)
+				->SetDefaultValue(['common','consumers','organizations'])
+				->SetAllowedInJs()
 		];
 	}
 
 	public function clientLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
 	{
-		if ($oAccount instanceof MainAccount && \str_ends_with($oAccount->Email(), '@o365.com')) {
+		if ($oAccount instanceof MainAccount && \str_ends_with($oAccount->Email(), '@hotmail.com')) {
 			$oActions = \RainLoop\Api::Actions();
 			try {
 				$aData = static::$auth ?: \SnappyMail\Crypt::DecryptFromJSON(
@@ -183,7 +188,7 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 					$oO365 = $this->o365Connector();
 					if ($oO365) {
 						$aRefreshTokenResponse = $oO365->getAccessToken(
-							static::TOKEN_URI,
+							\str_replace('{{tenant}}', $this->Config()->Get('plugin', 'tenant', 'common'), static::TOKEN_URI),
 							'refresh_token',
 							array('refresh_token' => $aData['refresh_token'])
 						);

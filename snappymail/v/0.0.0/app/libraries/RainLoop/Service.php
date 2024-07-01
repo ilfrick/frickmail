@@ -66,12 +66,9 @@ abstract class Service
 		}
 
 		$sQuery = \trim($_SERVER['QUERY_STRING'] ?? '');
-/*
 		if (!empty($_SERVER['PATH_INFO'])) {
-			$sQuery = "{$_SERVER['PATH_INFO']}&{$sQuery}";
-			$_SERVER['REQUEST_URI'] = \substr($_SERVER['REQUEST_URI'],0, -\strlen($_SERVER['REQUEST_URI']));
+			$sQuery = \ltrim($_SERVER['PATH_INFO'],'/') . '&' . $sQuery;
 		}
-*/
 		$iPos = \strpos($sQuery, '&');
 		if (0 < $iPos) {
 			$sQuery = \substr($sQuery, 0, $iPos);

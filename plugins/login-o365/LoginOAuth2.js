@@ -1,7 +1,8 @@
 (rl => {
 	const client_id = rl.pluginSettingsGet('login-o365', 'client_id'),
+		tenant = rl.pluginSettingsGet('login-o365', 'tenant'),
 		login = () => {
-			document.location = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?' + (new URLSearchParams({
+			document.location = 'https://login.microsoftonline.com/'+tenant+'/oauth2/v2.0/authorize?' + (new URLSearchParams({
 				response_type: 'code',
 				client_id: client_id,
 				redirect_uri: document.location.href + '?LoginO365',
