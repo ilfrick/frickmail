@@ -1,5 +1,4 @@
 <FilesMatch "index\.php">
-	allow from all
 	AcceptPathInfo On
 </FilesMatch>
 
