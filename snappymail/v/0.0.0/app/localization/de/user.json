@@ -162,16 +162,16 @@
 		"HAS_VIRUS_WARNING": "WARNUNG: Virus erkannt",
 		"TAGS": "Schlagworte",
 		"NEW_TAG": "Neues Schlagwort",
-		"ENABLE_TRACKING_LINKS": "Enable tracking links",
-		"TRACKING_ENABLED": "Links are now tracked when clicked!"
+		"ENABLE_TRACKING_LINKS": "Aktiviere Tracking-Links",
+		"TRACKING_ENABLED": "Tracking-Links sind nun aktiv!"
 	},
 	"MESSAGE_TAGS": {
 		"$important": "Wichtig",
-		"$todo": "Machen",
+		"$todo": "Zu erledigen",
 		"$label1": "Wichtig",
-		"$label2": "Arbeit",
+		"$label2": "Dienstlich",
 		"$label3": "Persönlich",
-		"$label4": "Machen",
+		"$label4": "Zu erledigen",
 		"$label5": "Später"
 	},
 	"READ_RECEIPT": {
@@ -220,7 +220,7 @@
 		"ADD_MENU_TAGS": "Schlagwörter",
 		"BUTTON_SHARE_ALL": "Jeder",
 		"BUTTON_SYNC": "Synchronisierung (CardDAV)",
-		"SEND_TO_ALL_CONTACT_EMAILS": "Send to all contact emails"
+		"SEND_TO_ALL_CONTACT_EMAILS": "An alle E-Mail-Adressen schreiben"
 	},
 	"COMPOSE": {
 		"LINK_SHOW_INPUTS": "alle Felder anzeigen",
