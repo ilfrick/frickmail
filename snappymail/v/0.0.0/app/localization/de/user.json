@@ -266,7 +266,7 @@
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Hinzufügen",
 		"BUTTON_UPDATE_IDENTITY": "Aktualisieren",
-		"SIGNATURE": "Signature",
+		"SIGNATURE": "Signatur",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Diese Signatur in Antworten vor dem zitierten Text einfügen"
 	},
 	"POPUPS_CREATE_FOLDER": {
@@ -289,7 +289,7 @@
 		"VERIFY": "Überprüfen",
 		"GOOD_SIGNATURE": "Gültige Unterschrift von %USER%",
 		"ERROR": "%TYPE%-Fehler: %ERROR%",
-		"CREATE_SELF_SIGNED": "Create self-signed",
+		"CREATE_SELF_SIGNED": "Erstelle selbst-signiertes Zertifikat",
 		"VALID_UNTIL": "Gültig bis",
 		"PRIVATE_KEY": "Privater Schlüssel",
 		"CHANGE_PASS": "Passphrase ändern",
