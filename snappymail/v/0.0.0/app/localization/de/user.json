@@ -146,7 +146,7 @@
 		"MENU_VIEW_ORIGINAL": "Original anzeigen",
 		"HTML_VIEW": "Zeige Nachricht als HTML",
 		"PLAIN_VIEW": "Zeige Nachricht im Klartext",
-		"SWAP_COLORS": "Tausche Standard-/Hintergrundfarbe",
+		"SWAP_COLORS": "Tausche Standard-\/Hintergrundfarbe",
 		"MENU_DOWNLOAD_ORIGINAL": "Als .eml-Datei herunterladen",
 		"MENU_FILTER_SIMILAR": "Ähnliche Nachrichten",
 		"MENU_PRINT": "Drucken",
@@ -283,7 +283,7 @@
 		"TITLE_CLEARING_PROCESS": "Ordner wird gelöscht ..."
 	},
 	"CRYPTO": {
-		"SIGN": "Unterschrift",
+		"SIGN": "Unterschreiben",
 		"ENCRYPT": "Verschlüsseln",
 		"DECRYPT": "Entschlüsseln",
 		"VERIFY": "Überprüfen",
@@ -415,7 +415,7 @@
 		"INDENTDECREASE": "Einzug verkleinern",
 		"INDENTINCREASE": "Einzug vergrößern",
 		"LINK": "Hyperlink",
-		"IMAGEURL": "Bild URL",
+		"IMAGEURL": "Bild-URL",
 		"IMAGEUPLOAD": "Bilddatei auswählen",
 		"UNDO": "Rückgängig",
 		"REDO": "Wiederholen",
@@ -443,7 +443,7 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Sicherheit",
 		"LABEL_AUTOLOGOUT": "Automatische Abmeldung",
-		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"FORGET_KEY_PASS": "Passphrase für privaten Schlüssel vergessen",
 		"NEVER": "Nie"
 	},
 	"SETTINGS_GENERAL": {
@@ -463,10 +463,10 @@
 		"HIDE_DELETED_MESSAGES": "Zum Löschen markierte Nachrichten ausblenden",
 		"USE_CHECKBOXES_IN_LIST": "Kontrollkästchen in der Liste anzeigen",
 		"USE_THREADS": "Als Unterhaltungen anzeigen",
-		"THREAD_ALGORITHM": "Threads algorithm",
+		"THREAD_ALGORITHM": "Verfahren für Unterhaltungen",
 		"REPLY_SAME_FOLDER": "Antworten im gleichen Ordner wie die Nachricht, auf die geantwortet wurde, abspeichern",
 		"PREFER_HTML": "HTML gegenüber Klartext bevorzugen",
-		"PREFER_HTML_INFO": "Nachrichten können manchmal in beiden Formaten empfangen werden. Diese Option setzt, ob die Nachricht standardmäßig in HTML oder als Klartext angezeigt wird.",
+		"PREFER_HTML_INFO": "Nachrichten können manchmal in beiden Formaten empfangen werden. Diese Option legt fest, ob die Nachricht standardmäßig in HTML oder als Klartext angezeigt wird.",
 		"REMOVE_COLORS": "Entferne Hintergrund- und Textfarben aus der Nachricht",
 		"ALLOW_STYLES": "Erlaube erweiterte Darstellungen in Nachrichten (CSS <style>)",
 		"MESSAGE_PER_PAGE": "Nachrichten pro Seite",
@@ -485,7 +485,7 @@
 		"LIST_SIMPLE_ATTACHMENTS": "Vereinfachte Liste der Anhänge",
 		"LIST_MESSAGES_GROUPED": "Nachrichten bei Sortierung nach Datum oder Absender gruppieren",
 		"EXTERNAL_IMAGES": "Externe Bilder",
-		"IMAGES_OPTION_ASK": "Jedesmal Fragen",
+		"IMAGES_OPTION_ASK": "Jedesmal fragen",
 		"IMAGES_OPTION_WHITELIST": "Nutze Ausnahmeliste oder frage den Benutzer",
 		"IMAGES_OPTION_ALWAYS": "Immer anzeigen",
 		"IMAGES_WHITELIST": "Ausnahmeliste für Bilder",
@@ -546,10 +546,10 @@
 	"SETTINGS_OPENPGP": {
 		"BUTTON_IMPORT_KEY": "Schlüssel importieren",
 		"BUTTON_GENERATE_KEY_PAIR": "Schlüssel generieren",
-		"IMPORT_FROM_SERVER": "Import from server",
+		"IMPORT_FROM_SERVER": "Vom Server importieren",
 		"TITLE_PRIVATE": "Privat",
 		"TITLE_PUBLIC": "Öffentlich",
-		"GET_MAILVELOPE": "Lade das Mailvelope Browser Addon herunter."
+		"GET_MAILVELOPE": "Lade das Mailvelope Browser-Addon herunter."
 	},
 	"SHORTCUTS_HELP": {
 		"LEGEND_SHORTCUTS_HELP": "Tastaturkürzel-Hilfe",
@@ -598,7 +598,7 @@
 		"DomainAlreadyExists": "Diese Domain existiert bereits",
 		"DomainNotAllowed": "Diese Domain ist nicht zugelassen.",
 		"AccountNotAllowed": "Konto ist nicht zugelassen.",
-		"CryptKeyError": "Your login passphrase has changed",
+		"CryptKeyError": "Ihr Anmeldekennwort wurde geändert",
 		"ContactsSyncError": "Fehler bei Kontakte-Synchronisierung",
 		"CantGetMessageList": "Die Nachrichtenliste ist nicht verfügbar",
 		"CantGetMessage": "Diese Nachricht ist nicht verfügbar",
