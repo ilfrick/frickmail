@@ -49,14 +49,14 @@
 	"TAB_LOGIN": {
 		"LEGEND_LOGIN_SCREEN": "Anmeldebildschirm",
 		"LABEL_DEFAULT_DOMAIN": "Standarddomain",
-		"LABEL_DETERMINE_USER_DOMAIN": "Versuche Domain des Benutzers zu ermitteln",
+		"LABEL_DETERMINE_USER_DOMAIN": "Domain des Benutzers automatisch ermitteln",
 		"LABEL_ALLOW_LANGUAGES_ON_LOGIN": "Sprachauswahl bei der Anmeldung zulassen",
 		"LABEL_DETERMINE_USER_LANGUAGE": "Sprache des Benutzers automatisch ermitteln"
 	},
 	"TAB_BRANDING": {
 		"LEGEND_BRANDING": "Branding",
 		"LABEL_PAGE_TITLE": "Seitentitel",
-		"LABEL_LOADING_DESCRIPTION": "Beschreibung Ladevorgang",
+		"LABEL_LOADING_DESCRIPTION": "Beschreibungstext für Ladevorgang",
 		"LABEL_FAVICON_URL": "Favicon"
 	},
 	"TAB_CONTACTS": {
@@ -90,8 +90,8 @@
 		"LABEL_CURRENT_PASSWORD": "Aktuelles Passwort",
 		"LABEL_NEW_PASSWORD": "Neues Passwort",
 		"LABEL_REPEAT_PASSWORD": "Wiederholen",
-		"LABEL_REQUIRE_VERIFICATION": "Verlangen, dass das verwendete SSL-Zertifikat signiert ist",
-		"CRYPTO": "Krypto",
+		"LABEL_REQUIRE_VERIFICATION": "Nur signierte SSL-Zertifikate akzeptieren",
+		"CRYPTO": "Kryptographie",
 		"LABEL_ALLOW_SELF_SIGNED": "Selbst-signierte Zertifikate erlauben"
 	},
 	"TAB_PACKAGES": {
