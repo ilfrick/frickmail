@@ -290,12 +290,12 @@
 		"GOOD_SIGNATURE": "Gültige Unterschrift von %USER%",
 		"ERROR": "%TYPE%-Fehler: %ERROR%",
 		"CREATE_SELF_SIGNED": "Create self-signed",
-		"VALID_UNTIL": "Valid until",
-		"PRIVATE_KEY": "Private key",
-		"CHANGE_PASS": "Change passphrase",
-		"CURRENT_PASS": "Current passphrase",
-		"NEW_PASS": "New passphrase",
-		"ASK_CRYPTKEY_PASS": "Your login passphrase has changed. Please fill in your old login passphrase to decrypt data"
+		"VALID_UNTIL": "Gültig bis",
+		"PRIVATE_KEY": "Privater Schlüssel",
+		"CHANGE_PASS": "Passphrase ändern",
+		"CURRENT_PASS": "Aktuelle Passphrase",
+		"NEW_PASS": "Neue Passphrase",
+		"ASK_CRYPTKEY_PASS": "Ihr Anmeldekennwort wurde geändert. Bitte geben Sie Ihr altes Kennwort ein, um die Daten zu entschlüsseln."
 	},
 	"OPENPGP": {
 		"POPUP_IMPORT_TITLE": "OpenPGP-Schlüssel importieren",
