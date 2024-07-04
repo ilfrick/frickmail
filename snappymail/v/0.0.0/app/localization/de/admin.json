@@ -79,20 +79,20 @@
 		"BUTTON_ADD_DOMAIN": "Domain hinzufügen",
 		"BUTTON_ADD_ALIAS": "Alias hinzufügen",
 		"DELETE_ARE_YOU_SURE": "Sind Sie sicher?",
-		"HTML_DOMAINS_HELPER": "Liste der Domains, die Webmail abrufen darf.\n<br>\nKlicken Sie auf den Namen, um die Domain zu konfigurieren."
+		"HTML_DOMAINS_HELPER": "Liste der Domains, die Webmail-Nutzer verwenden dürfen.\n<br>\nKlicken Sie auf den Namen, um die Domain zu konfigurieren."
 	},
 	"TAB_SECURITY": {
 		"LEGEND_SECURITY": "Sicherheit",
 		"LABEL_USE_IMAGE_PROXY": "Lokalen Proxy für externe Bilder verwenden",
-		"LABEL_AUTO_VERIFY": "Signatures automatisch überprüfen",
+		"LABEL_AUTO_VERIFY": "Signaturen automatisch überprüfen",
 		"LABEL_SHOW_PHP_INFO": "PHP-Informationen anzeigen",
 		"LEGEND_ADMIN_PANEL_ACCESS_CREDENTIALS": "Adminpanel-Zugangsdaten",
 		"LABEL_CURRENT_PASSWORD": "Aktuelles Passwort",
 		"LABEL_NEW_PASSWORD": "Neues Passwort",
 		"LABEL_REPEAT_PASSWORD": "Wiederholen",
-		"LABEL_REQUIRE_VERIFICATION": "Nur signierte SSL-Zertifikate akzeptieren",
+		"LABEL_REQUIRE_VERIFICATION": "Signiertes SSL-Zertifikat erfordern",
 		"CRYPTO": "Kryptographie",
-		"LABEL_ALLOW_SELF_SIGNED": "Selbst-signierte Zertifikate erlauben"
+		"LABEL_ALLOW_SELF_SIGNED": "Selbst-signiertes Zertifikat akzeptieren"
 	},
 	"TAB_PACKAGES": {
 		"LABEL_ENABLE_PLUGINS": "Erweiterungen aktivieren",
@@ -137,7 +137,7 @@
 		"LABEL_USE_SHORT_LOGIN": "Kurze Benutzernamen verwenden",
 		"LABEL_LOWERCASE_LOGIN": "Login in Kleinbuchstaben konvertieren",
 		"LABEL_USE_AUTH": "Authentifizierung verwenden",
-		"LABEL_SET_SENDER": "Verwenden Sie die Anmeldung als Absender",
+		"LABEL_SET_SENDER": "Login-Namen als Absender verwenden",
 		"LABEL_AUTH_PLAIN_LINE": "Einzelnen AUTH PLAIN Befehl bei der Anmeldung erzwingen",
 		"LABEL_USE_PHP_MAIL": "PHPs mail()-Funktion verwenden",
 		"BUTTON_WHITE_LIST": "Whitelist",
@@ -145,10 +145,10 @@
 		"BUTTON_BACK_TO_IMAP": "Zurück zu IMAP-Einstellungen",
 		"BUTTON_BACK": "Zurück",
 		"BUTTON_UPDATE": "Aktualisieren",
-		"NEW_DOMAIN_DESC": "Diese Domain Konfiguration wird es dir möglich machen mit <strong>%NAME%<\/strong> Mailadressen zu arbeiten.",
+		"NEW_DOMAIN_DESC": "Diese Domain-Konfiguration erlaubt die Verwendung von <strong>%NAME%<\/strong> Mail-Adressen.",
 		"WHITE_LIST_ALERT": "Liste der Domain-User, die Webmail verwenden dürfen.\nVerwenden Sie Leerzeichen als Trennsymbol.",
-		"VALID_SPAM_HEADERS": "Gültige Spam-Header",
-		"VALID_VIRUS_HEADERS": "Gültige Virus-Header"
+		"VALID_SPAM_HEADERS": "Spam-Header beachten",
+		"VALID_VIRUS_HEADERS": "Virus-Header beachten"
 	},
 	"POPUPS_PLUGIN": {
 		"TITLE_PLUGIN": "Erweiterung",
