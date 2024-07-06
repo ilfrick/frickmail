@@ -61,6 +61,12 @@ class FetchController extends Controller {
 				]);
 			}
 
+			if (!empty($_POST['snappymail-app_path'])) {
+				$oConfig = \RainLoop\Api::Config();
+				$oConfig->Set('webmail', 'app_path', $_POST['snappymail-app_path']);
+				$oConfig->Save();
+			}
+
 			if (!empty($_POST['import-rainloop'])) {
 				return new JSONResponse([
 					'status' => 'success',

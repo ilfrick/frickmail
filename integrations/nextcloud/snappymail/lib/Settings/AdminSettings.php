@@ -62,6 +62,16 @@ class AdminSettings implements ISettings
 			}
 		}
 
+		// Prevent "Failed loading /nextcloud/snappymail/v/2.N.N/static/js/min/libs.min.js"
+		$app_path = $oConfig->Get('webmail', 'app_path');
+		if (!$app_path) {
+			$app_path = \OC::$server->getAppManager()->getAppWebPath('snappymail') . '/app/';
+			$oConfig->Set('webmail', 'app_path', $app_path);
+			$oConfig->Set('webmail', 'theme', 'NextcloudV25+');
+			$oConfig->Save();
+		}
+		$parameters['snappymail-app_path'] = $oConfig->Get('webmail', 'app_path', false);
+
 		\OCP\Util::addScript('snappymail', 'snappymail');
 		return new TemplateResponse('snappymail', 'admin-local', $parameters);
 	}
