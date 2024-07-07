@@ -74,8 +74,10 @@ const
 //					vmDom.addEventListener('close', () => vm.modalVisible(false));
 
 					// show/hide popup/modal
+					// transitionend is called for each property, so we only listen to `top`
+					// as defined in CSS by `dialog:not(.animate)`
 					const endShowHide = e => {
-						if (e.target === vmDom) {
+						if (e.target === vmDom && 'top' === e.propertyName) {
 							if (vmDom.classList.contains('animate')) {
 								vm.afterShow?.();
 								fireEvent('rl-vm-visible', vm);
