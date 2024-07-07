@@ -10,9 +10,9 @@ const getURL = (add = '') => serverRequest('Json') + pString(add),
 checkResponseError = data => {
 	const err = data ? data.ErrorCode : null;
 	if (Notifications.InvalidToken === err) {
-		console.error(getNotification(err));
+		console.error(getNotification(err) + ` (${data.ErrorMessageAdditional})`);
 //		alert(getNotification(err));
-		rl.logoutReload();
+		setTimeout(rl.logoutReload, 5000);
 	} else if ([
 			Notifications.AuthError,
 			Notifications.ConnectionError,
