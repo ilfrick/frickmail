@@ -78,9 +78,11 @@ const
 						if (e.target === vmDom) {
 							if (vmDom.classList.contains('animate')) {
 								vm.afterShow?.();
+								fireEvent('rl-vm-visible', vm);
 							} else {
 								vmDom.close();
 								vm.afterHide?.();
+//								fireEvent('rl-vm-hidden', vm);
 							}
 						}
 					};
