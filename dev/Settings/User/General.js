@@ -30,6 +30,8 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 	constructor() {
 		super();
 
+		this.mailto = ko.observable(!!navigator.registerProtocolHandler);
+
 		this.language = LanguageStore.language;
 		this.languages = LanguageStore.languages;
 		this.hourCycle = LanguageStore.hourCycle;
@@ -180,5 +182,15 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 
 	selectLanguage() {
 		showScreenPopup(LanguagesPopupView, [this.language, this.languages(), LanguageStore.userLanguage()]);
+	}
+
+	registerMailto() {
+		navigator.registerProtocolHandler(
+			'mailto',
+			location.protocol + '//' + location.host + location.pathname + '?mailto&to=%s',
+			(SettingsGet('title') || 'SnappyMail')
+		);
+		alert(i18n('GLOBAL/DONE'));
+		this.mailto(0);
 	}
 }

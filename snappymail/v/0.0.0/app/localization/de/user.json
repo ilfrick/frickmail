@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "Nutze Ausnahmeliste oder frage den Benutzer",
 		"IMAGES_OPTION_ALWAYS": "Immer anzeigen",
 		"IMAGES_WHITELIST": "Ausnahmeliste für Bilder",
-		"MESSAGE_POPUP_WINDOW": "In neuem Fenster statt Tab anzeigen"
+		"MESSAGE_POPUP_WINDOW": "In neuem Fenster statt Tab anzeigen",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Empfänger automatisch zu Ihrem Adressbuch hinzuzufügen",

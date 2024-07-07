@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "Whitelist of vragen",
 		"IMAGES_OPTION_ALWAYS": "Altijd tonen",
 		"IMAGES_WHITELIST": "Afbeeldingen whitelist",
-		"MESSAGE_POPUP_WINDOW": "Openen in een nieuw venster i.p.v. tab"
+		"MESSAGE_POPUP_WINDOW": "Openen in een nieuw venster i.p.v. tab",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Automatisch ontvangers toevoegen aan uw adresboek",

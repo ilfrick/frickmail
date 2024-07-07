@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "Белы спіс альбо запытваць",
 		"IMAGES_OPTION_ALWAYS": "Показваць заўсёды",
 		"IMAGES_WHITELIST": "Фарматы з белага спісу",
-		"MESSAGE_POPUP_WINDOW": "Усплываючае вакно ў новым вакне замест карткі"
+		"MESSAGE_POPUP_WINDOW": "Усплываючае вакно ў новым вакне замест карткі",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Аўтаматычна дадаваць атрымальнікаў лістоў у адрасную кнігу",

@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "Usa whitelist o chiedi",
 		"IMAGES_OPTION_ALWAYS": "Visualizza sempre",
 		"IMAGES_WHITELIST": "Whitelist per immagini",
-		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab"
+		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Aggiungi automaticamente le persone che ti inviano mail alla rubrica",

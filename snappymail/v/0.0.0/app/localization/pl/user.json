@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "Dodaj do białej listy lub pytaj",
 		"IMAGES_OPTION_ALWAYS": "Zawsze pokazuj",
 		"IMAGES_WHITELIST": "Biała lista obrazów",
-		"MESSAGE_POPUP_WINDOW": "Pokaż w nowym oknie zamiast w nowej karcie"
+		"MESSAGE_POPUP_WINDOW": "Pokaż w nowym oknie zamiast w nowej karcie",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Automatycznie dodawaj odbiorców do książki adresowej",

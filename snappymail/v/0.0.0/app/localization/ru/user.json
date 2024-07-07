@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "Белый список или спрашивать",
 		"IMAGES_OPTION_ALWAYS": "Показать всегда",
 		"IMAGES_WHITELIST": "Форматы из белого списка",
-		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab"
+		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Автоматически добавлять получателей писем в адресную книгу",

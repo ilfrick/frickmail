@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "白名单或询问",
 		"IMAGES_OPTION_ALWAYS": "总是显示",
 		"IMAGES_WHITELIST": "图片白名单",
-		"MESSAGE_POPUP_WINDOW": "弹出页面使用新窗口代替新选项卡"
+		"MESSAGE_POPUP_WINDOW": "弹出页面使用新窗口代替新选项卡",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "自动添加到您的地址簿",

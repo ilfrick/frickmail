@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "白名單或詢問",
 		"IMAGES_OPTION_ALWAYS": "永遠顯示",
 		"IMAGES_WHITELIST": "圖片白名單",
-		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab"
+		"MESSAGE_POPUP_WINDOW": "Popup in new window instead of tab",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "自動新增收件者至通訊錄",

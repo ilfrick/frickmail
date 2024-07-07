@@ -489,7 +489,8 @@
 		"IMAGES_OPTION_WHITELIST": "Lista blanca o preguntar",
 		"IMAGES_OPTION_ALWAYS": "Mostrar siempre",
 		"IMAGES_WHITELIST": "Lista blanca de imágenes",
-		"MESSAGE_POPUP_WINDOW": "Popup en nueva ventana en lugar de pestaña"
+		"MESSAGE_POPUP_WINDOW": "Popup en nueva ventana en lugar de pestaña",
+		"MAILTO": "Register as 'mailto:' links handler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Agregar automáticamente destinatarios a la libreta de direcciones",
