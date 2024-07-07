@@ -18,8 +18,6 @@ import { MimeHeaderCollectionModel } from 'Model/MimeHeaderCollection';
 //import { MimeHeaderAutocryptModel } from 'Model/MimeHeaderAutocrypt';
 import { AbstractModel } from 'Knoin/AbstractModel';
 
-import PreviewHTML from 'Html/PreviewMessage.html';
-
 import { LanguageStore } from 'Stores/Language';
 
 import Remote from 'Remote/User/Fetch';
@@ -27,6 +25,62 @@ import Remote from 'Remote/User/Fetch';
 import { MimeToMessage } from 'Mime/Utils';
 
 const
+	PreviewHTML = `<html>
+<head>
+	<meta charset="utf-8">
+	<title></title>
+	<style>
+html, body {
+	margin: 0;
+	padding: 0;
+}
+
+header {
+	background: rgba(125,128,128,0.3);
+	border-bottom: 1px solid #888;
+}
+
+header h1 {
+	font-size: 120%;
+}
+
+header * {
+	margin: 5px 0;
+}
+
+header time {
+	float: right;
+}
+
+blockquote {
+	border-left: 2px solid rgba(125,128,128,0.5);
+	margin: 0;
+	padding: 0 0 0 10px;
+}
+
+pre {
+	white-space: pre-wrap;
+	word-wrap: break-word;
+	word-break: normal;
+}
+
+body > * {
+	padding: 0.5em 1em;
+}
+
+#attachments > * {
+	border: 1px solid rgba(125,128,128,0.5);
+	padding: 0.25em;
+	margin-right: 1em;
+}
+#attachments > *::before {
+	content: '📎 ';
+}
+	</style>
+</head>
+<body></body>
+</html>`,
+
 	msgHtml = msg => cleanHtml(msg.html(), msg.attachments(), '#rl-msg-' + msg.hash),
 
 	toggleTag = (message, keyword) => {
