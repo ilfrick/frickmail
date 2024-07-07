@@ -11,12 +11,10 @@
 */
 		addEventListener('rl-vm-visible', e => {
 			const view = e.detail;
-/* Not working
 			if (view && 'PopupsCompose' === view.viewModelTemplateID) {
-				view.to(rl.settings.get('DemoEmail'));
+				view.to('<' + rl.settings.get('Email') + '>');
 //				view.to(view.from());
 			}
-*/
 			if (view && 'PopupsAsk' === view.viewModelTemplateID) {
 				view.passphrase('demo');
 			}
