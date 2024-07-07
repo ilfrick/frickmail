@@ -456,6 +456,10 @@ and called in JavaScript using rl.pluginRemoteRequest().
 	event.detail = the ViewModel class
 	Happens after the full build (vm.onBuild()) and contains viewModelDom
 
+### rl-vm-visible
+	event.detail = the ViewModel class
+	Happens after the model is made visible (vm.afterShow())
+
 ### sm-admin-login
 	event.detail = FormData
 	cancelable using preventDefault()
