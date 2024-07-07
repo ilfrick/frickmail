@@ -185,9 +185,10 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 	}
 
 	registerMailto() {
+		console.log(`mailto = ${location.protocol}//${location.host}${location.pathname}?mailto`);
 		navigator.registerProtocolHandler(
 			'mailto',
-			location.protocol + '//' + location.host + location.pathname + '?mailto&to=%s',
+			`${location.protocol}//${location.host}${location.pathname}?mailto&to=%s`,
 			(SettingsGet('title') || 'SnappyMail')
 		);
 		alert(i18n('GLOBAL/DONE'));
