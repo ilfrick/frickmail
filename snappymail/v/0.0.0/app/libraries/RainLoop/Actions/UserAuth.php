@@ -205,9 +205,13 @@ trait UserAuth
 				if (!isset($aAccounts[$sEmail])) {
 					throw new ClientException(Notifications::AccountDoesNotExist);
 				}
-				$oAccount = AdditionalAccount::NewInstanceFromTokenArray(
-					$this, $aAccounts[$sEmail]
-				);
+				try {
+					$oAccount = AdditionalAccount::NewInstanceFromTokenArray(
+						$this, $aAccounts[$sEmail], true
+					);
+				} catch (\Throwable $e) {
+					throw new ClientException(Notifications::AccountSwitchFailed, $e);
+				}
 				if (!$oAccount) {
 					throw new ClientException(Notifications::AccountSwitchFailed);
 				}
