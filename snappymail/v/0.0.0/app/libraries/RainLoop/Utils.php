@@ -69,9 +69,13 @@ class Utils
 	public static function GetConnectionToken() : string
 	{
 		$oActions = \RainLoop\Api::Actions();
-		$oAccount = $oActions->getAccountFromToken(false) ?: $oActions->getMainAccountFromToken(false);
+		$oAccount = $oActions->getAccountFromToken(false);
 		if ($oAccount) {
-			return $oAccount->Hash();
+			return '2-' . \sha1(APP_SALT.$oAccount->Hash());
+		}
+		$oAccount = $oActions->getMainAccountFromToken(false);
+		if ($oAccount) {
+			return '1-' . \sha1(APP_SALT.$oAccount->Hash());
 		}
 		$sToken = \SnappyMail\Cookies::get(self::CONNECTION_TOKEN);
 		if (!$sToken) {
@@ -83,7 +87,8 @@ class Utils
 
 	public static function GetCsrfToken() : string
 	{
-		return \sha1('Csrf'.APP_SALT.self::GetConnectionToken().'Token'.APP_SALT);
+		return self::GetConnectionToken();
+//		return \sha1('Csrf'.APP_SALT.self::GetConnectionToken().'Token'.APP_SALT);
 	}
 
 	public static function UpdateConnectionToken() : void

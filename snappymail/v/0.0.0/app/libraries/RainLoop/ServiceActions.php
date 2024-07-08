@@ -94,14 +94,15 @@ class ServiceActions
 				throw new Exceptions\ClientException(Notifications::InvalidInputArgument, null, 'Action unknown');
 			}
 
-			$xtoken = $token = Utils::GetCsrfToken();
+			$token = Utils::GetCsrfToken();
 			if (isset($_SERVER['HTTP_X_SM_TOKEN'])) {
-				$xtoken = $_SERVER['HTTP_X_SM_TOKEN'];
+				if ($_SERVER['HTTP_X_SM_TOKEN'] !== $token) {
+					throw new Exceptions\ClientException(Notifications::InvalidToken, null, 'HTTP Token mismatch');
+				}
 			} else if ($this->oHttp->IsPost()) {
-				$xtoken = $_POST['XToken'] ?? '';
-			}
-			if ($xtoken !== $token) {
-				throw new Exceptions\ClientException(Notifications::InvalidToken, null, 'Token mismatch');
+				if (empty($_POST['XToken']) || $_POST['XToken'] !== $token) {
+					throw new Exceptions\ClientException(Notifications::InvalidToken, null, 'XToken Token mismatch');
+				}
 			}
 
 			if ($this->oActions instanceof ActionsAdmin && 0 === \stripos($sAction, 'Admin') && !\in_array($sAction, ['AdminLogin', 'AdminLogout'])) {
@@ -617,9 +618,7 @@ class ServiceActions
 		\header('Content-Type: application/json; charset=utf-8');
 		$this->oHttp->ServerNoCache();
 		try {
-			$sResult = Utils::jsonEncode($this->oActions->AppData($bAdmin));
-			$this->oActions->logWrite($sResult, \LOG_INFO, 'APPDATA');
-			return $sResult;
+			return Utils::jsonEncode($this->oActions->AppData($bAdmin));
 		} catch (\Throwable $oException) {
 			$this->Logger()->WriteExceptionShort($oException);
 			\MailSo\Base\Http::StatusHeader(500);
