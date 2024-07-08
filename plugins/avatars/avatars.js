@@ -76,6 +76,8 @@
 			if (rl.pluginSettingsGet('avatars', 'delay')) {
 				queue.push([msg, fn]);
 				runQueue();
+			} else if (msg.avatar) {
+				fn(getAvatarUrl(msg));
 			}
 		},
 		runQueue = (() => {
@@ -88,6 +90,8 @@
 						item[1](url);
 						item = queue.shift();
 						continue;
+					} else if (item[0].avatar) {
+						item[1](getAvatarUrl(item[0]));
 					} else if (!avatars.has(uid)) {
 						let from = item[0].from[0];
 						rl.pluginRemoteRequest((iError, data) => {
@@ -104,7 +108,6 @@
 							bimiSelector: getBimiSelector(item[0]),
 							email: from.email
 						});
-						break;
 					}
 				}
 				runQueue();
@@ -112,10 +115,22 @@
 			}
 		}).debounce(1000);
 
-	/**
-	 * Loads images from Nextcloud contacts
-	 */
-	addEventListener('DOMContentLoaded', () => {
+//	addEventListener('DOMContentLoaded', () => {
+		/**
+		 * Modify templates
+		 */
+		getEl('MailMessageList').content.querySelectorAll('.messageCheckbox')
+			.forEach(el => el.append(Element.fromHTML(`<img class="fromPic" data-bind="fromPic:$data" loading="lazy">`)));
+		const messageItemHeader = getEl(templateId).content.querySelector('.messageItemHeader');
+		if (messageItemHeader) {
+			messageItemHeader.prepend(Element.fromHTML(
+				`<img class="fromPic" data-bind="visible: viewUserPicVisible, attr: {'src': viewUserPic() }" loading="lazy">`
+			));
+		}
+
+		/**
+		 * Loads images from Nextcloud contacts
+		 */
 //		rl.pluginSettingsGet('avatars', 'nextcloud');
 		if (parent.OC?.requestToken) {
 			const OC = parent.OC,
@@ -160,24 +175,21 @@
 				}
 			});
 		}
-	});
+//	});
 
+	/**
+	 * Used by MailMessageList
+	 */
 	ko.bindingHandlers.fromPic = {
 		init: (element, self, dummy, msg) => {
 			try {
 				if (msg?.from?.[0]) {
 					let url = getAvatar(msg),
-						from = msg.from[0],
 						fn = url=>{element.src = url};
 					if (url) {
 						fn(url);
-					} else if (msg.avatar) {
-						if (msg.avatar?.startsWith('data:')) {
-							fn(msg.avatar);
-						} else {
-							element.onerror = () => setIdenticon(from, fn);
-							fn(getAvatarUrl(msg));
-						}
+					} else if (msg.avatar?.startsWith('data:')) {
+						fn(msg.avatar);
 					} else {
 						addQueue(msg, fn);
 					}
@@ -190,17 +202,6 @@
 
 	addEventListener('rl-view-model.create', e => {
 		if (templateId === e.detail.viewModelTemplateID) {
-
-			const
-				template = getEl(templateId),
-				messageItemHeader = template.content.querySelector('.messageItemHeader');
-
-			if (messageItemHeader) {
-				messageItemHeader.prepend(Element.fromHTML(
-					`<img class="fromPic" data-bind="visible: viewUserPicVisible, attr: {'src': viewUserPic() }" loading="lazy">`
-				));
-			}
-
 			let view = e.detail;
 			view.viewUserPic = ko.observable('');
 			view.viewUserPicVisible = ko.observable(false);
@@ -225,11 +226,6 @@
 					}
 				}
 			});
-		}
-
-		if ('MailMessageList' === e.detail.viewModelTemplateID) {
-			getEl('MailMessageList').content.querySelectorAll('.messageCheckbox')
-				.forEach(el => el.append(Element.fromHTML(`<img class="fromPic" data-bind="fromPic:$data" loading="lazy">`)));
 		}
 	});
 

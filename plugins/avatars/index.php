@@ -10,8 +10,8 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 		NAME     = 'Avatars',
 		AUTHOR   = 'SnappyMail',
 		URL      = 'https://snappymail.eu/',
-		VERSION  = '1.18',
-		RELEASE  = '2024-06-24',
+		VERSION  = '1.19',
+		RELEASE  = '2024-07-08',
 		REQUIRED = '2.33.0',
 		CATEGORY = 'Contacts',
 		LICENSE  = 'MIT',
@@ -28,7 +28,12 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$this->addJs("{$identicon}.js");
 		}
 		// https://github.com/the-djmaze/snappymail/issues/714
-		if ($this->Config()->Get('plugin', 'service', true) || !$this->Config()->Get('plugin', 'delay', true)) {
+		if ($this->Config()->Get('plugin', 'service', true)
+//		 || !$this->Config()->Get('plugin', 'delay', true)
+		 || $this->Config()->Get('plugin', 'gravatar', false)
+		 || $this->Config()->Get('plugin', 'bimi', false)
+		 || $this->Config()->Get('plugin', 'favicon', false)
+		) {
 			$this->addHook('json.after-message', 'JsonMessage');
 			$this->addHook('json.after-messagelist', 'JsonMessageList');
 		}
@@ -69,8 +74,8 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$mFrom = $mFrom->jsonSerialize();
 		}
 		if (\is_array($mFrom)) {
-			if (!$this->Config()->Get('plugin', 'delay', true)
-			 && ($this->Config()->Get('plugin', 'gravatar', false)
+			if (/*!$this->Config()->Get('plugin', 'delay', true)
+			 && */($this->Config()->Get('plugin', 'gravatar', false)
 				|| ($this->Config()->Get('plugin', 'bimi', false) && 'pass' == $mFrom['dkimStatus'])
 				|| ($this->Config()->Get('plugin', 'favicon', false) && 'pass' == $mFrom['dkimStatus'])
 			 )
