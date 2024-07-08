@@ -258,7 +258,7 @@
 		"TITLE_ADD_ACCOUNT": "Account toevoegen?",
 		"BUTTON_ADD_ACCOUNT": "Toevoegen",
 		"TITLE_UPDATE_ACCOUNT": "Account updaten?",
-		"BUTTON_UPDATE_ACCOUNT": "Update"
+		"BUTTON_UPDATE_ACCOUNT": "Bijwerken"
 	},
 	"POPUPS_IDENTITY": {
 		"TITLE_ADD_IDENTITY": "Identiteit toevoegen?",
@@ -443,7 +443,7 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "Beveiliging",
 		"LABEL_AUTOLOGOUT": "Automatisch uitloggen",
-		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"FORGET_KEY_PASS": "Vergeet privésleutel wachtwoord",
 		"NEVER": "Nooit"
 	},
 	"SETTINGS_GENERAL": {
@@ -490,7 +490,7 @@
 		"IMAGES_OPTION_ALWAYS": "Altijd tonen",
 		"IMAGES_WHITELIST": "Afbeeldingen whitelist",
 		"MESSAGE_POPUP_WINDOW": "Openen in een nieuw venster i.p.v. tab",
-		"MAILTO": "Register as 'mailto:' links handler"
+		"MAILTO": "Registreer als 'mailto:'-linkhandler"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Automatisch ontvangers toevoegen aan uw adresboek",
