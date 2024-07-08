@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Altijd indien mogelijk",
 		"BUTTON_ADD_CONTACT": "Contactpersoon Toevoegen",
 		"BUTTON_CREATE_CONTACT": "Toevoegen",
-		"BUTTON_UPDATE_CONTACT": "Bijwerken",
 		"BUTTON_IMPORT": "Importeer (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Exporteer (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Exporteer (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Kies uw taal"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Account toevoegen?",
+		"TITLE_ADD_ACCOUNT": "Account toevoegen",
 		"BUTTON_ADD_ACCOUNT": "Toevoegen",
-		"TITLE_UPDATE_ACCOUNT": "Account updaten?",
-		"BUTTON_UPDATE_ACCOUNT": "Bijwerken"
+		"TITLE_UPDATE_ACCOUNT": "Account wijzigen"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Identiteit toevoegen?",
-		"TITLE_UPDATE_IDENTITY": "Identiteit bijwerken?",
+		"TITLE_ADD_IDENTITY": "Identiteit toevoegen",
+		"TITLE_UPDATE_IDENTITY": "Identiteit bijwerken",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Toevoegen",
-		"BUTTON_UPDATE_IDENTITY": "Bijwerken",
 		"SIGNATURE": "Handtekening",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Plaats deze handtekening vóór geciteerde tekst in antwoorden"
 	},

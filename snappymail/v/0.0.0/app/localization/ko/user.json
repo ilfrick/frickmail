@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "연락처 추가",
 		"BUTTON_CREATE_CONTACT": "생성",
-		"BUTTON_UPDATE_CONTACT": "업데이트",
 		"BUTTON_IMPORT": "가져오기 (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "내보내기 (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "내보내기 (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "언어 선택"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "계정을 추가할까요?",
+		"TITLE_ADD_ACCOUNT": "계정을 추가할까요",
 		"BUTTON_ADD_ACCOUNT": "추가",
-		"TITLE_UPDATE_ACCOUNT": "계정을 업데이트할까요?",
-		"BUTTON_UPDATE_ACCOUNT": "업데이트"
+		"TITLE_UPDATE_ACCOUNT": "계정을 업데이트할까요"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "신원을 새로 추가할까요?",
-		"TITLE_UPDATE_IDENTITY": "신원을 업데이트할까요?",
+		"TITLE_ADD_IDENTITY": "신원을 새로 추가할까요",
+		"TITLE_UPDATE_IDENTITY": "신원을 업데이트할까요",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "추가",
-		"BUTTON_UPDATE_IDENTITY": "업데이트",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "회신 시 이 서명을 인용문 이전에 삽입"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "필터를 생성할까요?",
-		"TITLE_EDIT_FILTER": "필터를 업데이트할까요?",
+		"TITLE_CREATE_FILTER": "필터를 생성할까요",
+		"TITLE_EDIT_FILTER": "필터를 업데이트할까요",
 		"LEGEND_CONDITIONS": "조건",
 		"LEGEND_ACTIONS": "동작",
 		"BUTTON_ADD_CONDITION": "조건 추가",

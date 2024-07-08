@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "可能的話永遠",
 		"BUTTON_ADD_CONTACT": "新增連絡人",
 		"BUTTON_CREATE_CONTACT": "建立",
-		"BUTTON_UPDATE_CONTACT": "更新",
 		"BUTTON_IMPORT": "匯入 (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "匯出 (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "匯出 (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "選取語言"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "是否要新增帳戶？",
+		"TITLE_ADD_ACCOUNT": "是否要新增帳戶",
 		"BUTTON_ADD_ACCOUNT": "新增",
-		"TITLE_UPDATE_ACCOUNT": "是否要更新帳戶？",
-		"BUTTON_UPDATE_ACCOUNT": "更新"
+		"TITLE_UPDATE_ACCOUNT": "是否要更新帳戶"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "是否要新增識別檔？",
-		"TITLE_UPDATE_IDENTITY": "是否要更新識別檔？",
+		"TITLE_ADD_IDENTITY": "是否要新增識別檔",
+		"TITLE_UPDATE_IDENTITY": "是否要更新識別檔",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "新增",
-		"BUTTON_UPDATE_IDENTITY": "更新",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "在回覆引用的訊息前插入此簽名"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "是否要建立篩選器？",
-		"TITLE_EDIT_FILTER": "是否要更新篩選器？",
+		"TITLE_CREATE_FILTER": "是否要建立篩選器",
+		"TITLE_EDIT_FILTER": "是否要更新篩選器",
 		"LEGEND_CONDITIONS": "條件",
 		"LEGEND_ACTIONS": "操作",
 		"BUTTON_ADD_CONDITION": "新增條件",

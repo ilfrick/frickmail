@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Legg til kontakt",
 		"BUTTON_CREATE_CONTACT": "Lag",
-		"BUTTON_UPDATE_CONTACT": "Oppdater",
 		"BUTTON_IMPORT": "Importer (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Eksporter (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Eksporter (csv)",
@@ -257,15 +256,13 @@
 	"POPUPS_ADD_ACCOUNT": {
 		"TITLE_ADD_ACCOUNT": "Legg til konto",
 		"BUTTON_ADD_ACCOUNT": "Legg til",
-		"TITLE_UPDATE_ACCOUNT": "Oppdater konto",
-		"BUTTON_UPDATE_ACCOUNT": "Oppdater"
+		"TITLE_UPDATE_ACCOUNT": "Oppdater konto"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Vil du legge til en identitet?",
+		"TITLE_ADD_IDENTITY": "Vil du legge til en identitet",
 		"TITLE_UPDATE_IDENTITY": "Oppdater identitet",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Legg til",
-		"BUTTON_UPDATE_IDENTITY": "Oppdater",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Legg til denne signaturen før sitert tekst"
 	},
@@ -323,7 +320,7 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Vil du lage et filter?",
+		"TITLE_CREATE_FILTER": "Vil du lage et filter",
 		"TITLE_EDIT_FILTER": "Oppdater filter",
 		"LEGEND_CONDITIONS": "Betingelser",
 		"LEGEND_ACTIONS": "Handlinger",

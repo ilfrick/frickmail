@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Ekle",
 		"BUTTON_CREATE_CONTACT": "Oluştur",
-		"BUTTON_UPDATE_CONTACT": "Güncelle",
 		"BUTTON_IMPORT": "İçe Aktar (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Dışa Aktar (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Dışa Aktar (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Dil Seçimi"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Hesap Ekle?",
+		"TITLE_ADD_ACCOUNT": "Hesap Ekle",
 		"BUTTON_ADD_ACCOUNT": "Ekle",
-		"TITLE_UPDATE_ACCOUNT": "Update Account?",
-		"BUTTON_UPDATE_ACCOUNT": "Update"
+		"TITLE_UPDATE_ACCOUNT": "Update Account"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Kimlik Ekle?",
-		"TITLE_UPDATE_IDENTITY": "Kimlik Güncelle?",
+		"TITLE_ADD_IDENTITY": "Kimlik Ekle",
+		"TITLE_UPDATE_IDENTITY": "Kimlik Güncelle",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Ekle",
-		"BUTTON_UPDATE_IDENTITY": "Güncelle",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Insert this signature before quoted text in replies"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Create a filter?",
-		"TITLE_EDIT_FILTER": "Update filter?",
+		"TITLE_CREATE_FILTER": "Create a filter",
+		"TITLE_EDIT_FILTER": "Update filter",
 		"LEGEND_CONDITIONS": "Conditions",
 		"LEGEND_ACTIONS": "Actions",
 		"BUTTON_ADD_CONDITION": "Add a Condition",

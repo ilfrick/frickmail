@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Προσθήκη επαφής",
 		"BUTTON_CREATE_CONTACT": "Δημιουργία",
-		"BUTTON_UPDATE_CONTACT": "Ενημέρωση",
 		"BUTTON_IMPORT": "Εισαγωγή (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Εξαγωγή (csv, vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Εξαγωγή (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Επιλέξτε τη γλώσσα σας"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Προσθήκη λογαριασμού;",
+		"TITLE_ADD_ACCOUNT": "Προσθήκη λογαριασμού",
 		"BUTTON_ADD_ACCOUNT": "Προσθήκη",
-		"TITLE_UPDATE_ACCOUNT": "Ενημέρωση λογαριασμού;",
-		"BUTTON_UPDATE_ACCOUNT": "Ενημέρωση"
+		"TITLE_UPDATE_ACCOUNT": "Ενημέρωση λογαριασμού"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Προσθήκη ταυτότητας;",
-		"TITLE_UPDATE_IDENTITY": "Ενημέρωση ταυτότητας;",
+		"TITLE_ADD_IDENTITY": "Προσθήκη ταυτότητας",
+		"TITLE_UPDATE_IDENTITY": "Ενημέρωση ταυτότητας",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Προσθήκη",
-		"BUTTON_UPDATE_IDENTITY": "Ενημέρωση",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Προσθήκη της υπογραφής πριν το προτότυπο κείμενο στις απαντήσεις"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Δημιουργία φίλτρου;",
-		"TITLE_EDIT_FILTER": "Ενημέρωση φίλτρου;",
+		"TITLE_CREATE_FILTER": "Δημιουργία φίλτρου",
+		"TITLE_EDIT_FILTER": "Ενημέρωση φίλτρου",
 		"LEGEND_CONDITIONS": "Συνθήκες",
 		"LEGEND_ACTIONS": "Ενέργειες",
 		"BUTTON_ADD_CONDITION": "Προσθήκη συνθήκης",

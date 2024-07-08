@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Névjegy hozzáadás",
 		"BUTTON_CREATE_CONTACT": "Létrehozás",
-		"BUTTON_UPDATE_CONTACT": "Frissítés",
 		"BUTTON_IMPORT": "Importálás (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Export (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Export (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Nyelv kiválasztás"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Új fiók?",
+		"TITLE_ADD_ACCOUNT": "Új fiók",
 		"BUTTON_ADD_ACCOUNT": "Hozzáadás",
-		"TITLE_UPDATE_ACCOUNT": "Fiók frissítése?",
-		"BUTTON_UPDATE_ACCOUNT": "Frissítés"
+		"TITLE_UPDATE_ACCOUNT": "Fiók frissítése"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Identitás hozzáadás?",
-		"TITLE_UPDATE_IDENTITY": "Frissítsük az identitást?",
+		"TITLE_ADD_IDENTITY": "Identitás hozzáadás",
+		"TITLE_UPDATE_IDENTITY": "Frissítsük az identitást",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Hozzáadás",
-		"BUTTON_UPDATE_IDENTITY": "Frissítés",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Szúrja be ezt az aláírást az idézett szöveg elé a válaszokban"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Szűrő létrehozás?",
-		"TITLE_EDIT_FILTER": "Szűrő frissítés?",
+		"TITLE_CREATE_FILTER": "Szűrő létrehozás",
+		"TITLE_EDIT_FILTER": "Szűrő frissítés",
 		"LEGEND_CONDITIONS": "Feltételek",
 		"LEGEND_ACTIONS": "Műveletek",
 		"BUTTON_ADD_CONDITION": "Feltétel hozzáadás",

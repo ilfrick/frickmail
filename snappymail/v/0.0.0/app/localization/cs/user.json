@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Přidat kontakt",
 		"BUTTON_CREATE_CONTACT": "Vytvořit",
-		"BUTTON_UPDATE_CONTACT": "Aktualizovat",
 		"BUTTON_IMPORT": "Importovat (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Exportovat (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Exportovat (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Zvolte jazyk"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Přidat účet?",
+		"TITLE_ADD_ACCOUNT": "Přidat účet",
 		"BUTTON_ADD_ACCOUNT": "Přidat",
-		"TITLE_UPDATE_ACCOUNT": "Upravit účet?",
-		"BUTTON_UPDATE_ACCOUNT": "Upravit"
+		"TITLE_UPDATE_ACCOUNT": "Upravit účet"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Opravdu přidat?",
-		"TITLE_UPDATE_IDENTITY": "Uložit změny?",
+		"TITLE_ADD_IDENTITY": "Opravdu přidat",
+		"TITLE_UPDATE_IDENTITY": "Uložit změny",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Přidat",
-		"BUTTON_UPDATE_IDENTITY": "Uložit",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "V odpovědích vložit podpis před citovaný text."
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Vytvořit filtr?",
-		"TITLE_EDIT_FILTER": "Změnit filtr?",
+		"TITLE_CREATE_FILTER": "Vytvořit filtr",
+		"TITLE_EDIT_FILTER": "Změnit filtr",
 		"LEGEND_CONDITIONS": "Podmínka",
 		"LEGEND_ACTIONS": "Akce",
 		"BUTTON_ADD_CONDITION": "Přidat podmínku",

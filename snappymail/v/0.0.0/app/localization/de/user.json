@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Wenn möglich",
 		"BUTTON_ADD_CONTACT": "Kontakt hinzufügen",
 		"BUTTON_CREATE_CONTACT": "Kontakt anlegen",
-		"BUTTON_UPDATE_CONTACT": "Kontakt aktualisieren",
 		"BUTTON_IMPORT": "Import (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Export (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Export (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Sprache auswählen"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Konto hinzufügen?",
+		"TITLE_ADD_ACCOUNT": "Konto hinzufügen",
 		"BUTTON_ADD_ACCOUNT": "Hinzufügen",
-		"TITLE_UPDATE_ACCOUNT": "Konto aktualisieren?",
-		"BUTTON_UPDATE_ACCOUNT": "Aktualisieren"
+		"TITLE_UPDATE_ACCOUNT": "Konto aktualisieren"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Identität hinzufügen?",
-		"TITLE_UPDATE_IDENTITY": "Identität aktualisieren?",
+		"TITLE_ADD_IDENTITY": "Identität hinzufügen",
+		"TITLE_UPDATE_IDENTITY": "Identität aktualisieren",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Hinzufügen",
-		"BUTTON_UPDATE_IDENTITY": "Aktualisieren",
 		"SIGNATURE": "Signatur",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Diese Signatur in Antworten vor dem zitierten Text einfügen"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "Privater S\/MIME-Schlüssel von %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Filter erstellen?",
-		"TITLE_EDIT_FILTER": "Filter bearbeiten?",
+		"TITLE_CREATE_FILTER": "Filter erstellen",
+		"TITLE_EDIT_FILTER": "Filter bearbeiten",
 		"LEGEND_CONDITIONS": "Bedingungen",
 		"LEGEND_ACTIONS": "Aktionen",
 		"BUTTON_ADD_CONDITION": "Bedingung hinzufügen",

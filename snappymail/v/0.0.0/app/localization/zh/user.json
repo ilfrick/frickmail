@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "总是 (如果可能)",
 		"BUTTON_ADD_CONTACT": "添加联系人",
 		"BUTTON_CREATE_CONTACT": "新增联系人",
-		"BUTTON_UPDATE_CONTACT": "更新联系人",
 		"BUTTON_IMPORT": "导入 (csv、vcf、vCard)",
 		"BUTTON_EXPORT_VCARD": "导出 (vcf、vCard)",
 		"BUTTON_EXPORT_CSV": "导出 (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "选择语言"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "添加账户？",
+		"TITLE_ADD_ACCOUNT": "添加账户",
 		"BUTTON_ADD_ACCOUNT": "添加",
-		"TITLE_UPDATE_ACCOUNT": "更新账户？",
-		"BUTTON_UPDATE_ACCOUNT": "更新"
+		"TITLE_UPDATE_ACCOUNT": "更新账户"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "添加身份？",
-		"TITLE_UPDATE_IDENTITY": "更新身份？",
+		"TITLE_ADD_IDENTITY": "添加身份",
+		"TITLE_UPDATE_IDENTITY": "更新身份",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "添加",
-		"BUTTON_UPDATE_IDENTITY": "更新",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "在回信中插入签名再引用来信"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "%EMAIL% 的 S\/MIME 私钥"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "创建筛选条件？",
-		"TITLE_EDIT_FILTER": "更新筛选条件？",
+		"TITLE_CREATE_FILTER": "创建筛选条件",
+		"TITLE_EDIT_FILTER": "更新筛选条件",
 		"LEGEND_CONDITIONS": "条件",
 		"LEGEND_ACTIONS": "操作",
 		"BUTTON_ADD_CONDITION": "添加条件",

@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "اضافه‌کردن تماس",
 		"BUTTON_CREATE_CONTACT": "ایجاد",
-		"BUTTON_UPDATE_CONTACT": "بروزرسانی",
 		"BUTTON_IMPORT": "وارد کردن(csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "صدور (csv, vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "صدور (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "زبان خود را انتخاب کنید"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "اضافه کردن کاربر؟",
+		"TITLE_ADD_ACCOUNT": "اضافه کردن کاربر",
 		"BUTTON_ADD_ACCOUNT": "اضافه کردن",
-		"TITLE_UPDATE_ACCOUNT": "بروزرسانی کاربر؟",
-		"BUTTON_UPDATE_ACCOUNT": "بروزرسانی"
+		"TITLE_UPDATE_ACCOUNT": "بروزرسانی کاربر"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "اضافه کردن هویت؟",
-		"TITLE_UPDATE_IDENTITY": "بروزرسانی هویت؟",
+		"TITLE_ADD_IDENTITY": "اضافه کردن هویت",
+		"TITLE_UPDATE_IDENTITY": "بروزرسانی هویت",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "اضافه‌کردن",
-		"BUTTON_UPDATE_IDENTITY": "بروزرسانی",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "قراردادن امضاء‌ قبل از متن مشخص شده در جواب"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "یک فیلتر ایجاد شود؟",
-		"TITLE_EDIT_FILTER": "بروزرسانی فیلتر؟",
+		"TITLE_CREATE_FILTER": "یک فیلتر ایجاد شود",
+		"TITLE_EDIT_FILTER": "بروزرسانی فیلتر",
 		"LEGEND_CONDITIONS": "شرایط",
 		"LEGEND_ACTIONS": "عملیات",
 		"BUTTON_ADD_CONDITION": "اضافه کردن یک شرط",

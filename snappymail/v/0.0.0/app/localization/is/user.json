@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Bæta við tengilið",
 		"BUTTON_CREATE_CONTACT": "Búa til",
-		"BUTTON_UPDATE_CONTACT": "Uppfæra",
 		"BUTTON_IMPORT": "Flytja inn (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Flytja út (csv, vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Flytja út (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Veldu tungumálið þitt"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Bæta við aðgangi?",
+		"TITLE_ADD_ACCOUNT": "Bæta við aðgangi",
 		"BUTTON_ADD_ACCOUNT": "Bæta við",
-		"TITLE_UPDATE_ACCOUNT": "Uppfæra aðgang?",
-		"BUTTON_UPDATE_ACCOUNT": "Uppfæra"
+		"TITLE_UPDATE_ACCOUNT": "Uppfæra aðgang"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Bæta við auðkenni?",
-		"TITLE_UPDATE_IDENTITY": "Uppfæra auðkenni?",
+		"TITLE_ADD_IDENTITY": "Bæta við auðkenni",
+		"TITLE_UPDATE_IDENTITY": "Uppfæra auðkenni",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Bæta við",
-		"BUTTON_UPDATE_IDENTITY": "Uppfæra",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Setja þessa undirskrift inn á undan tilvitnuðum texta þegar verið er að svara"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Búa til síu?",
-		"TITLE_EDIT_FILTER": "Uppfæra síu?",
+		"TITLE_CREATE_FILTER": "Búa til síu",
+		"TITLE_EDIT_FILTER": "Uppfæra síu",
 		"LEGEND_CONDITIONS": "Skilyrði",
 		"LEGEND_ACTIONS": "Aðgerðir",
 		"BUTTON_ADD_CONDITION": "Bæta við skilyrði",

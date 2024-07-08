@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Toujours si possible",
 		"BUTTON_ADD_CONTACT": "Ajouter un contact",
 		"BUTTON_CREATE_CONTACT": "Créer",
-		"BUTTON_UPDATE_CONTACT": "Modifier",
 		"BUTTON_IMPORT": "Importer (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Exporter (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Exporter (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Choisir la langue"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Ajouter un compte ?",
+		"TITLE_ADD_ACCOUNT": "Ajouter un compte",
 		"BUTTON_ADD_ACCOUNT": "Ajouter",
-		"TITLE_UPDATE_ACCOUNT": "Mettre à jour le compte ?",
-		"BUTTON_UPDATE_ACCOUNT": "Mettre à jour"
+		"TITLE_UPDATE_ACCOUNT": "Mettre à jour le compte"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Ajouter une identité ?",
-		"TITLE_UPDATE_IDENTITY": "Mettre à jour l'identité ?",
+		"TITLE_ADD_IDENTITY": "Ajouter une identité",
+		"TITLE_UPDATE_IDENTITY": "Mettre à jour l'identité",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Ajouter",
-		"BUTTON_UPDATE_IDENTITY": "Mettre à jour",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Insérer la signature avant le texte cité dans les réponses"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "Clé privée S\/MIME de %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Créer un filtre ?",
-		"TITLE_EDIT_FILTER": "Mettre à jour le filtre ?",
+		"TITLE_CREATE_FILTER": "Créer un filtre",
+		"TITLE_EDIT_FILTER": "Mettre à jour le filtre",
 		"LEGEND_CONDITIONS": "Conditions",
 		"LEGEND_ACTIONS": "Actions",
 		"BUTTON_ADD_CONDITION": "Ajouter une condition",

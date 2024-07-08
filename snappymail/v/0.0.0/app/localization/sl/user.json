@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Dodaj stik",
 		"BUTTON_CREATE_CONTACT": "Ustvari",
-		"BUTTON_UPDATE_CONTACT": "Posodobi",
 		"BUTTON_IMPORT": "Uvozi (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Izvozi (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Izvozi (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Izberite jezik"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Dodam račun?",
+		"TITLE_ADD_ACCOUNT": "Dodam račun",
 		"BUTTON_ADD_ACCOUNT": "Dodaj",
-		"TITLE_UPDATE_ACCOUNT": "Posodobim račun?",
-		"BUTTON_UPDATE_ACCOUNT": "Posodobi"
+		"TITLE_UPDATE_ACCOUNT": "Posodobim račun"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Dodam identiteto?",
-		"TITLE_UPDATE_IDENTITY": "Posodobim identiteto?",
+		"TITLE_ADD_IDENTITY": "Dodam identiteto",
+		"TITLE_UPDATE_IDENTITY": "Posodobim identiteto",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Dodaj",
-		"BUTTON_UPDATE_IDENTITY": "Posodobi",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Vstavi ta podpis pred citirano besedilo v odgovorih"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Ustvarim filter?",
-		"TITLE_EDIT_FILTER": "Posodobim filter?",
+		"TITLE_CREATE_FILTER": "Ustvarim filter",
+		"TITLE_EDIT_FILTER": "Posodobim filter",
 		"LEGEND_CONDITIONS": "Pogoji",
 		"LEGEND_ACTIONS": "Dejanja",
 		"BUTTON_ADD_CONDITION": "Dodaj pogoj",

@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "По возможности",
 		"BUTTON_ADD_CONTACT": "Добавить контакт",
 		"BUTTON_CREATE_CONTACT": "Сохранить",
-		"BUTTON_UPDATE_CONTACT": "Обновить",
 		"BUTTON_IMPORT": "Импорт (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Экспорт (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Экспорт (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Выберите язык"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Добавить ещё аккаунт?",
+		"TITLE_ADD_ACCOUNT": "Добавить ещё аккаунт",
 		"BUTTON_ADD_ACCOUNT": "Добавить",
-		"TITLE_UPDATE_ACCOUNT": "Обновить аккаунт?",
-		"BUTTON_UPDATE_ACCOUNT": "Обновить"
+		"TITLE_UPDATE_ACCOUNT": "Обновить аккаунт"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Добавить Профиль?",
-		"TITLE_UPDATE_IDENTITY": "Обновить Профиль?",
+		"TITLE_ADD_IDENTITY": "Добавить Профиль",
+		"TITLE_UPDATE_IDENTITY": "Обновить Профиль",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Добавить",
-		"BUTTON_UPDATE_IDENTITY": "Обновить",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Вставлять подпись перед цитированием текста в ответах"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Создать фильтр?",
-		"TITLE_EDIT_FILTER": "Обновить фильтр?",
+		"TITLE_CREATE_FILTER": "Создать фильтр",
+		"TITLE_EDIT_FILTER": "Обновить фильтр",
 		"LEGEND_CONDITIONS": "Правила",
 		"LEGEND_ACTIONS": "Действия",
 		"BUTTON_ADD_CONDITION": "Добавить правило",

@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Thêm liên hệ mới",
 		"BUTTON_CREATE_CONTACT": "Tạo",
-		"BUTTON_UPDATE_CONTACT": "Cập nhật",
 		"BUTTON_IMPORT": "Nhập thông tin (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Xuất thông tin (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Xuất (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Chọn ngôn ngữ"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Thêm tài khoản?",
+		"TITLE_ADD_ACCOUNT": "Thêm tài khoản",
 		"BUTTON_ADD_ACCOUNT": "Thêm vào",
-		"TITLE_UPDATE_ACCOUNT": "Cập nhật tài khoản?",
-		"BUTTON_UPDATE_ACCOUNT": "Cập nhật"
+		"TITLE_UPDATE_ACCOUNT": "Cập nhật tài khoản"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Thêm tên gọi mới?",
-		"TITLE_UPDATE_IDENTITY": "Cập nhật tên gọi?",
+		"TITLE_ADD_IDENTITY": "Thêm tên gọi mới",
+		"TITLE_UPDATE_IDENTITY": "Cập nhật tên gọi",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Thêm vào",
-		"BUTTON_UPDATE_IDENTITY": "Cập nhật",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Thêm chữ ký cuối thư này vào trước phần văn bản trích dẫn trong thư phản hồi"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Tạo một tấm lọc mới?",
-		"TITLE_EDIT_FILTER": "Cập nhật tấm lọc thư?",
+		"TITLE_CREATE_FILTER": "Tạo một tấm lọc mới",
+		"TITLE_EDIT_FILTER": "Cập nhật tấm lọc thư",
 		"LEGEND_CONDITIONS": "Điều kiện",
 		"LEGEND_ACTIONS": "Thao tác xử lý",
 		"BUTTON_ADD_CONDITION": "Thêm một điều kiện",

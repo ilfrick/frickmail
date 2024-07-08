@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Lisää yhteystieto",
 		"BUTTON_CREATE_CONTACT": "Luo",
-		"BUTTON_UPDATE_CONTACT": "Päivitä",
 		"BUTTON_IMPORT": "Tuo (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Vie (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Vie (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Valitse kieli"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Lisää tili?",
+		"TITLE_ADD_ACCOUNT": "Lisää tili",
 		"BUTTON_ADD_ACCOUNT": "Lisää",
-		"TITLE_UPDATE_ACCOUNT": "Päivitä tili?",
-		"BUTTON_UPDATE_ACCOUNT": "Päivitä"
+		"TITLE_UPDATE_ACCOUNT": "Päivitä tili"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Lisää identiteetti?",
-		"TITLE_UPDATE_IDENTITY": "Päivitä identiteetti?",
+		"TITLE_ADD_IDENTITY": "Lisää identiteetti",
+		"TITLE_UPDATE_IDENTITY": "Päivitä identiteetti",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Lisää",
-		"BUTTON_UPDATE_IDENTITY": "Päivitä",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Lisää tämä allekirjoitus ennen lainattua tekstiä vastauksissa"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Luo suodatin?",
-		"TITLE_EDIT_FILTER": "Päivitä suodatin?",
+		"TITLE_CREATE_FILTER": "Luo suodatin",
+		"TITLE_EDIT_FILTER": "Päivitä suodatin",
 		"LEGEND_CONDITIONS": "Ehdot",
 		"LEGEND_ACTIONS": "Toimenpiteet",
 		"BUTTON_ADD_CONDITION": "Lisää ehto",

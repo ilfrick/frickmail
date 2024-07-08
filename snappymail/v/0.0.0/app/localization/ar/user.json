@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "إضافة جهة إتصال",
 		"BUTTON_CREATE_CONTACT": "إنشاء",
-		"BUTTON_UPDATE_CONTACT": "تحديث",
 		"BUTTON_IMPORT": "إستيراد (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "تصدير كـ  (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "تصدير كـ  (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "حدّد لغتك"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "قم باضافة حساب؟",
+		"TITLE_ADD_ACCOUNT": "قم باضافة حساب",
 		"BUTTON_ADD_ACCOUNT": "إضافة",
-		"TITLE_UPDATE_ACCOUNT": "تحديث الحساب؟",
-		"BUTTON_UPDATE_ACCOUNT": "تحديث"
+		"TITLE_UPDATE_ACCOUNT": "تحديث الحساب"
 	},
 	"POPUPS_IDENTITY": {
 		"TITLE_ADD_IDENTITY": "إضافة هوية؟",
 		"TITLE_UPDATE_IDENTITY": "تحديث الهوية؟",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "إضافة",
-		"BUTTON_UPDATE_IDENTITY": "تحديث",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "قم بوضع التوقيع قبل النص المأخوذ من الرسائل في عملية الرد"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "إنشاء عامل تصفية؟",
-		"TITLE_EDIT_FILTER": "تحديث عامل التصفية؟",
+		"TITLE_CREATE_FILTER": "إنشاء عامل تصفية",
+		"TITLE_EDIT_FILTER": "تحديث عامل التصفية",
 		"LEGEND_CONDITIONS": "الشروط",
 		"LEGEND_ACTIONS": "التطبيقات",
 		"BUTTON_ADD_CONDITION": "إضافة تطبيق",

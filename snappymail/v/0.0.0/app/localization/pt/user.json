@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Sempre que possível",
 		"BUTTON_ADD_CONTACT": "Adicionar contacto",
 		"BUTTON_CREATE_CONTACT": "Criar",
-		"BUTTON_UPDATE_CONTACT": "Atualizar",
 		"BUTTON_IMPORT": "Importar (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Exportar (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Exportar (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Escolha o seu idioma"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Adicionar conta?",
+		"TITLE_ADD_ACCOUNT": "Adicionar conta",
 		"BUTTON_ADD_ACCOUNT": "Adicionar",
-		"TITLE_UPDATE_ACCOUNT": "Atualizar conta?",
-		"BUTTON_UPDATE_ACCOUNT": "Atualizar"
+		"TITLE_UPDATE_ACCOUNT": "Atualizar conta"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Adicionar identidade?",
-		"TITLE_UPDATE_IDENTITY": "Atualizar identidade?",
+		"TITLE_ADD_IDENTITY": "Adicionar identidade",
+		"TITLE_UPDATE_IDENTITY": "Atualizar identidade",
 		"LABEL": "Rótulo",
 		"BUTTON_ADD_IDENTITY": "Adicionar",
-		"BUTTON_UPDATE_IDENTITY": "Atualizar",
 		"SIGNATURE": "Assinatura",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Nas respostas, inserir esta assinatura acima da mensagem citada"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "Chave privada S\/MIME de %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Criar um filtro?",
-		"TITLE_EDIT_FILTER": "Atualizar um filtro?",
+		"TITLE_CREATE_FILTER": "Criar um filtro",
+		"TITLE_EDIT_FILTER": "Atualizar um filtro",
 		"LEGEND_CONDITIONS": "Condições",
 		"LEGEND_ACTIONS": "Ações",
 		"BUTTON_ADD_CONDITION": "Adicionar uma condição",

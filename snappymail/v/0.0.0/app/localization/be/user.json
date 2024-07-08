@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Па магчымасці",
 		"BUTTON_ADD_CONTACT": "Дадаць кантакт",
 		"BUTTON_CREATE_CONTACT": "Захаваць",
-		"BUTTON_UPDATE_CONTACT": "Абнавіць",
 		"BUTTON_IMPORT": "Імпарт (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Экспарт (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Экспарт (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Выберыце мову"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Дадаць яшчэ рахунак?",
+		"TITLE_ADD_ACCOUNT": "Дадаць яшчэ рахунак",
 		"BUTTON_ADD_ACCOUNT": "Дадаць",
-		"TITLE_UPDATE_ACCOUNT": "Абнавіць рахунак?",
-		"BUTTON_UPDATE_ACCOUNT": "Абнавіць"
+		"TITLE_UPDATE_ACCOUNT": "Абнавіць рахунак"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Дадаць Профіль?",
-		"TITLE_UPDATE_IDENTITY": "Абнавіць Профіль?",
+		"TITLE_ADD_IDENTITY": "Дадаць Профіль",
+		"TITLE_UPDATE_IDENTITY": "Абнавіць Профіль",
 		"LABEL": "Метка",
 		"BUTTON_ADD_IDENTITY": "Дадаць",
-		"BUTTON_UPDATE_IDENTITY": "Абнавіць",
 		"SIGNATURE": "Подпіс",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Выстаўляць подпіс перад цытаваннем тэксту ў адказах"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "прыватны ключ S\/MIME паведамлення %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Стварыць фільтр?",
-		"TITLE_EDIT_FILTER": "Абнавіць фільтр?",
+		"TITLE_CREATE_FILTER": "Стварыць фільтр",
+		"TITLE_EDIT_FILTER": "Абнавіць фільтр",
 		"LEGEND_CONDITIONS": "Правілы",
 		"LEGEND_ACTIONS": "Дзеянні",
 		"BUTTON_ADD_CONDITION": "Дадаць правіла",

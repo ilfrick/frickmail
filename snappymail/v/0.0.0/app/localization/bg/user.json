@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Добави контакт",
 		"BUTTON_CREATE_CONTACT": "Създай",
-		"BUTTON_UPDATE_CONTACT": "Обнови",
 		"BUTTON_IMPORT": "Импортирай (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Експортирай (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Експортирай (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Избери език"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Добавяне на акаунт?",
+		"TITLE_ADD_ACCOUNT": "Добавяне на акаунт",
 		"BUTTON_ADD_ACCOUNT": "Добави",
-		"TITLE_UPDATE_ACCOUNT": "Обнови акаунта?",
-		"BUTTON_UPDATE_ACCOUNT": "Обнови"
+		"TITLE_UPDATE_ACCOUNT": "Обнови акаунта"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Добавяне на идентичност?",
-		"TITLE_UPDATE_IDENTITY": "Обновяване на идентичност?",
+		"TITLE_ADD_IDENTITY": "Добавяне на идентичност",
+		"TITLE_UPDATE_IDENTITY": "Обновяване на идентичност",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Добавяне",
-		"BUTTON_UPDATE_IDENTITY": "Обновяване",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Подписа да се поставя преди цитирания текст при отговор"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Създай филтър?",
-		"TITLE_EDIT_FILTER": "Обнови филтъра?",
+		"TITLE_CREATE_FILTER": "Създай филтър",
+		"TITLE_EDIT_FILTER": "Обнови филтъра",
 		"LEGEND_CONDITIONS": "Условия",
 		"LEGEND_ACTIONS": "Действия",
 		"BUTTON_ADD_CONDITION": "Добави условие",

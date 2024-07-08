@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Tambah Kontak",
 		"BUTTON_CREATE_CONTACT": "Simpan",
-		"BUTTON_UPDATE_CONTACT": "Perbarui",
 		"BUTTON_IMPORT": "Impor (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Expor (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Expor (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Pilih bahasa"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Tambah Akun?",
+		"TITLE_ADD_ACCOUNT": "Tambah Akun",
 		"BUTTON_ADD_ACCOUNT": "Tambah",
-		"TITLE_UPDATE_ACCOUNT": "Perbarui Akun?",
-		"BUTTON_UPDATE_ACCOUNT": "Perbarui"
+		"TITLE_UPDATE_ACCOUNT": "Perbarui Akun"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Tambah Identitas?",
-		"TITLE_UPDATE_IDENTITY": "Perbarui Identitas?",
+		"TITLE_ADD_IDENTITY": "Tambah Identitas",
+		"TITLE_UPDATE_IDENTITY": "Perbarui Identitas",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Tambah",
-		"BUTTON_UPDATE_IDENTITY": "Perbarui",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Sisipkan tanda tangan ini sebelum teks kutipan pada balasan"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Buat filter?",
-		"TITLE_EDIT_FILTER": "Perbarui filter?",
+		"TITLE_CREATE_FILTER": "Buat filter",
+		"TITLE_EDIT_FILTER": "Perbarui filter",
 		"LEGEND_CONDITIONS": "Kondisi",
 		"LEGEND_ACTIONS": "Aksi",
 		"BUTTON_ADD_CONDITION": "Tambah kondisi",

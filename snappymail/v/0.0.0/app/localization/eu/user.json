@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Beti aukera badago",
 		"BUTTON_ADD_CONTACT": "Gehitu Kontaktua",
 		"BUTTON_CREATE_CONTACT": "Sortu",
-		"BUTTON_UPDATE_CONTACT": "Eguneratu",
 		"BUTTON_IMPORT": "Inportatu (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Esportatu (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Esportatu (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Aukeratu zure hizkuntza"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Kontua gehitu?",
+		"TITLE_ADD_ACCOUNT": "Kontua gehitu",
 		"BUTTON_ADD_ACCOUNT": "Gehitu",
-		"TITLE_UPDATE_ACCOUNT": "Kontua eguneratu?",
-		"BUTTON_UPDATE_ACCOUNT": "Eguneratu"
+		"TITLE_UPDATE_ACCOUNT": "Kontua eguneratu"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Nortasuna gehitu?",
-		"TITLE_UPDATE_IDENTITY": "Nortasuna eguneratu?",
+		"TITLE_ADD_IDENTITY": "Nortasuna gehitu",
+		"TITLE_UPDATE_IDENTITY": "Nortasuna eguneratu",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Gehitu",
-		"BUTTON_UPDATE_IDENTITY": "Eguneratu",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Txertatu sinadura hau erantzuteko testuaren aurretik"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Sortu iragazkia?",
-		"TITLE_EDIT_FILTER": "Eguneratu iragazkia?",
+		"TITLE_CREATE_FILTER": "Sortu iragazkia",
+		"TITLE_EDIT_FILTER": "Eguneratu iragazkia",
 		"LEGEND_CONDITIONS": "Baldintzak",
 		"LEGEND_ACTIONS": "Ekintzak",
 		"BUTTON_ADD_CONDITION": "Gehitu baldintza",

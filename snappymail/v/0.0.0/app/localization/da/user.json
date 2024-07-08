@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Tilføj kontakt",
 		"BUTTON_CREATE_CONTACT": "Ny kontakt",
-		"BUTTON_UPDATE_CONTACT": "Opdater kontakt",
 		"BUTTON_IMPORT": "Importer kontakter (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Eksporter kontakter (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Eksporter kontakter (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Vælg sprog"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Tilføj konto?",
+		"TITLE_ADD_ACCOUNT": "Tilføj konto",
 		"BUTTON_ADD_ACCOUNT": "Tilføj",
-		"TITLE_UPDATE_ACCOUNT": "Opdater konto?",
-		"BUTTON_UPDATE_ACCOUNT": "Opdater"
+		"TITLE_UPDATE_ACCOUNT": "Opdater konto"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Tilføj identitet?",
-		"TITLE_UPDATE_IDENTITY": "Opdater identitet?",
+		"TITLE_ADD_IDENTITY": "Tilføj identitet",
+		"TITLE_UPDATE_IDENTITY": "Opdater identitet",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Tilføj",
-		"BUTTON_UPDATE_IDENTITY": "Opdater",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Indsæt signatur før citeret tekst"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Opret filter?",
-		"TITLE_EDIT_FILTER": "Opdater filter?",
+		"TITLE_CREATE_FILTER": "Opret filter",
+		"TITLE_EDIT_FILTER": "Opdater filter",
 		"LEGEND_CONDITIONS": "Betingelser",
 		"LEGEND_ACTIONS": "Handlinger",
 		"BUTTON_ADD_CONDITION": "Tilføj betingelse",

@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Lägg till",
 		"BUTTON_CREATE_CONTACT": "Ny",
-		"BUTTON_UPDATE_CONTACT": "Uppdatera",
 		"BUTTON_IMPORT": "Importera (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Exportera (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Exportera (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Välj språk"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Lägg till konto?",
+		"TITLE_ADD_ACCOUNT": "Lägg till konto",
 		"BUTTON_ADD_ACCOUNT": "Lägg till",
-		"TITLE_UPDATE_ACCOUNT": "Uppdatera konto?",
-		"BUTTON_UPDATE_ACCOUNT": "Uppdatera"
+		"TITLE_UPDATE_ACCOUNT": "Uppdatera konto"
 	},
 	"POPUPS_IDENTITY": {
 		"TITLE_ADD_IDENTITY": "Lägg till identitet",
 		"TITLE_UPDATE_IDENTITY": "Uppdatera identitet",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Lägg till",
-		"BUTTON_UPDATE_IDENTITY": "Uppdatera",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Sätt denna signatur före citerad text i svar"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Skapa ett filter?",
-		"TITLE_EDIT_FILTER": "Uppdatera filter?",
+		"TITLE_CREATE_FILTER": "Skapa ett filter",
+		"TITLE_EDIT_FILTER": "Uppdatera filter",
 		"LEGEND_CONDITIONS": "Villkor",
 		"LEGEND_ACTIONS": "Handlingar",
 		"BUTTON_ADD_CONDITION": "Lägg till ett villkor",

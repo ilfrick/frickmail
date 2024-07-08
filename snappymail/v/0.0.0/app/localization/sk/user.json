@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Pridať kontakt",
 		"BUTTON_CREATE_CONTACT": "Vytvoriť",
-		"BUTTON_UPDATE_CONTACT": "Aktualizovať",
 		"BUTTON_IMPORT": "Importovať (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Exportovať (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Export (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Zvoľte jazyk"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Pridať účet?",
+		"TITLE_ADD_ACCOUNT": "Pridať účet",
 		"BUTTON_ADD_ACCOUNT": "Pridať",
-		"TITLE_UPDATE_ACCOUNT": "Upraviť účet?",
-		"BUTTON_UPDATE_ACCOUNT": "Upraviť"
+		"TITLE_UPDATE_ACCOUNT": "Upraviť účet"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Pridať identitu?",
-		"TITLE_UPDATE_IDENTITY": "Upraviť identitu?",
+		"TITLE_ADD_IDENTITY": "Pridať identitu",
+		"TITLE_UPDATE_IDENTITY": "Upraviť identitu",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Pridať",
-		"BUTTON_UPDATE_IDENTITY": "Upraviť",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "V odpovediach vložiť tento podpis nad citovaný text"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "Create a filter?",
-		"TITLE_EDIT_FILTER": "Update filter?",
+		"TITLE_CREATE_FILTER": "Create a filter",
+		"TITLE_EDIT_FILTER": "Update filter",
 		"LEGEND_CONDITIONS": "Conditions",
 		"LEGEND_ACTIONS": "Actions",
 		"BUTTON_ADD_CONDITION": "Add a Condition",

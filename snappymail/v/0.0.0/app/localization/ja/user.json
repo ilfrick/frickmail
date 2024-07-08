@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "連絡先を追加",
 		"BUTTON_CREATE_CONTACT": "作成",
-		"BUTTON_UPDATE_CONTACT": "更新",
 		"BUTTON_IMPORT": "インポート(csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "エクスポート(vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "エクスポート(csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "言語を選択"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "アカウントを追加しますか?",
+		"TITLE_ADD_ACCOUNT": "アカウントを追加しますか",
 		"BUTTON_ADD_ACCOUNT": "追加",
-		"TITLE_UPDATE_ACCOUNT": "アカウント更新しますか？",
-		"BUTTON_UPDATE_ACCOUNT": "更新"
+		"TITLE_UPDATE_ACCOUNT": "アカウント更新しますか"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "メールの表示名を追加しますか？",
-		"TITLE_UPDATE_IDENTITY": "メールの表示名を更新しますか？",
+		"TITLE_ADD_IDENTITY": "メールの表示名を追加しますか",
+		"TITLE_UPDATE_IDENTITY": "メールの表示名を更新しますか",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "追加",
-		"BUTTON_UPDATE_IDENTITY": "更新",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "返信の引用テキストの前に署名を挿入する"
 	},
@@ -323,8 +320,8 @@
 		"PRIVATE_KEY_OF": "S\/MIME private key of %EMAIL%"
 	},
 	"POPUPS_FILTER": {
-		"TITLE_CREATE_FILTER": "フィルターを作成しますか?",
-		"TITLE_EDIT_FILTER": "フィルターを更新しますか?",
+		"TITLE_CREATE_FILTER": "フィルターを作成しますか",
+		"TITLE_EDIT_FILTER": "フィルターを更新しますか",
 		"LEGEND_CONDITIONS": "条件",
 		"LEGEND_ACTIONS": "アクション",
 		"BUTTON_ADD_CONDITION": "条件の追加",

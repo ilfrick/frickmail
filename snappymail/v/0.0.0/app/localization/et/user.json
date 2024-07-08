@@ -195,7 +195,6 @@
 		"ALWAYS_IF_POSSIBLE": "Always if possible",
 		"BUTTON_ADD_CONTACT": "Lisa kontakt",
 		"BUTTON_CREATE_CONTACT": "Lisa",
-		"BUTTON_UPDATE_CONTACT": "Salvesta",
 		"BUTTON_IMPORT": "Impordi (csv, vcf, vCard)",
 		"BUTTON_EXPORT_VCARD": "Ekspordi (vcf, vCard)",
 		"BUTTON_EXPORT_CSV": "Ekspordi (csv)",
@@ -255,17 +254,15 @@
 		"TITLE_LANGUAGES": "Vali oma keel"
 	},
 	"POPUPS_ADD_ACCOUNT": {
-		"TITLE_ADD_ACCOUNT": "Lisan konto?",
+		"TITLE_ADD_ACCOUNT": "Lisan konto",
 		"BUTTON_ADD_ACCOUNT": "Lisa",
-		"TITLE_UPDATE_ACCOUNT": "Muudan kontot?",
-		"BUTTON_UPDATE_ACCOUNT": "Muuda"
+		"TITLE_UPDATE_ACCOUNT": "Muudan kontot"
 	},
 	"POPUPS_IDENTITY": {
-		"TITLE_ADD_IDENTITY": "Lisan identiteedi?",
-		"TITLE_UPDATE_IDENTITY": "Muudan identiteeti?",
+		"TITLE_ADD_IDENTITY": "Lisan identiteedi",
+		"TITLE_UPDATE_IDENTITY": "Muudan identiteeti",
 		"LABEL": "Label",
 		"BUTTON_ADD_IDENTITY": "Lisa",
-		"BUTTON_UPDATE_IDENTITY": "Muuda",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "Sisesta see signatuur kirjades enne tsiteeritud teksti"
 	},
