@@ -22,9 +22,7 @@ trait SMime
 				\RainLoop\Providers\Storage\Enumerations\StorageType::ROOT
 			), '/') . '/.smime';
 
-			if (!\is_dir($homedir)) {
-				\mkdir($homedir, 0700, true);
-			}
+			\MailSo\Base\Utils::mkdir($homedir);
 			if (!\is_writable($homedir)) {
 				throw new \Exception("smime homedir '{$homedir}' not writable");
 			}

@@ -143,10 +143,7 @@ class FileStorage implements \RainLoop\Providers\Storage\IStorage
 			}
 		}
 
-		if ($bMkDir && !empty($sFilePath) && !\is_dir($sFilePath) && !\mkdir($sFilePath, 0700, true))
-		{
-			throw new \RuntimeException('Can\'t make storage directory "'.$sFilePath.'"');
-		}
+		$bMkDir && !empty($sFilePath) && \MailSo\Base\Utils::mkdir($sFilePath);
 
 		return $sFilePath;
 	}

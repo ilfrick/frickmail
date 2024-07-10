@@ -25,6 +25,7 @@ class File implements \MailSo\Cache\DriverInterface
 	function __construct(string $sCacheFolder)
 	{
 		$this->sCacheFolder = \rtrim(\trim($sCacheFolder), '\\/').'/';
+		\MailSo\Base\Utils::mkdir($this->sCacheFolder);
 
 		// http://www.brynosaurus.com/cachedir/
 		$tag = $this->sCacheFolder . 'CACHEDIR.TAG';

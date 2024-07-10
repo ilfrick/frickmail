@@ -722,4 +722,19 @@ abstract class Utils
 		$aParts[] = $sDomain;
 		return \implode('@', $aParts);
 	}
+
+	public static function mkdir(string $directory) : void
+	{
+		if (!\is_dir($directory)) {
+			if (!\mkdir($directory, 0700, true)) {
+				throw new \RuntimeException("Failed to create directory {$directory}");
+			}
+			\clearstatcache();
+		}
+/*
+		if (!\is_writable($directory)) {
+			throw new \Exception("Failed to access directory {$directory}");
+		}
+*/
+	}
 }
