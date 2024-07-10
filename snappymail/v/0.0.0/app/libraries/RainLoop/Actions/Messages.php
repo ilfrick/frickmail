@@ -449,6 +449,11 @@ trait Messages
 		return $this->messageSetFlag(MessageFlag::FLAGGED, true);
 	}
 
+	public function DoMessageSetDeleted() : array
+	{
+		return $this->messageSetFlag(MessageFlag::DELETED, true);
+	}
+
 	public function DoMessageSetKeyword() : array
 	{
 		return $this->messageSetFlag($this->GetActionParam('keyword', ''), true);

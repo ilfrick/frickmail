@@ -36,6 +36,7 @@ import { baseCollator } from 'Common/Translator';
 
 const
 	isChecked = item => item.checked(),
+	isDeleted = item => item.isDeleted(),
 	replaceHash = hash => {
 		rl.route.off();
 		hasher.replaceHash(hash);
@@ -140,6 +141,14 @@ MessagelistUserStore.hasCheckedOrSelected = koComputable(() =>
 	| !!MessagelistUserStore.focusedMessage()
 	// Issue: not all are observed?
 	| !!MessagelistUserStore.find(isChecked)
+).extend({ rateLimit: 50 });
+
+MessagelistUserStore.hasCheckedOrSelectedAndDeleted = koComputable(
+	() => !!MessagelistUserStore.listCheckedOrSelected().find(isDeleted)
+).extend({ rateLimit: 50 });
+
+MessagelistUserStore.hasCheckedOrSelectedAndUndeleted = koComputable(
+	() => !!MessagelistUserStore.listCheckedOrSelected().find(item => !item?.isDeleted())
 ).extend({ rateLimit: 50 });
 
 MessagelistUserStore.notifyNewMessages = (folder, newMessages) => {
@@ -370,6 +379,14 @@ MessagelistUserStore.setAction = (sFolderFullName, iSetAction, messages) => {
 		messages.forEach(oMessage =>
 			oMessage.isFlagged() && rootUids.push(oMessage.uid) && oMessage.flags.remove('\\flagged')
 		);
+	} else if (iSetAction == MessageSetAction.SetDeleted) {
+		messages.forEach(oMessage =>
+			!oMessage.isDeleted() && rootUids.push(oMessage.uid) && oMessage.flags.push('\\deleted')
+		);
+	} else if (iSetAction == MessageSetAction.UnsetDeleted) {
+		messages.forEach(oMessage =>
+			oMessage.isDeleted() && rootUids.push(oMessage.uid) && oMessage.flags.remove('\\deleted')
+		);
 	}
 	rootUids = rootUids.validUnique();
 	length = rootUids.length;
@@ -397,6 +414,15 @@ MessagelistUserStore.setAction = (sFolderFullName, iSetAction, messages) => {
 					folder: sFolderFullName,
 					uids: rootUids.join(','),
 					setAction: iSetAction == MessageSetAction.SetFlag ? 1 : 0
+				});
+				break;
+
+			case MessageSetAction.SetDeleted:
+			case MessageSetAction.UnsetDeleted:
+				Remote.request('MessageSetDeleted', null, {
+					folder: sFolderFullName,
+					uids: rootUids.join(','),
+					setAction: iSetAction == MessageSetAction.SetDeleted ? 1 : 0
 				});
 				break;
 			// no default

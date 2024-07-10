@@ -112,7 +112,7 @@ export class AppUser extends AbstractApp {
 			case FolderType.Trash:
 				oMoveFolder = getFolderFromCacheList(FolderUserStore.trashFolder());
 				nSetSystemFoldersNotification = iFolderType;
-				bDelete = bDelete || UNUSED_OPTION_VALUE === FolderUserStore.trashFolder()
+				bDelete = bDelete/* || UNUSED_OPTION_VALUE === FolderUserStore.trashFolder()*/
 					|| sFromFolderFullName === FolderUserStore.spamFolder()
 					|| sFromFolderFullName === FolderUserStore.trashFolder();
 				break;

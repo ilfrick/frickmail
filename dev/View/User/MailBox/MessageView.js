@@ -1,6 +1,7 @@
 import ko from 'ko';
 import { addObservablesTo, addComputablesTo, addSubscribablesTo } from 'External/ko';
 
+import { UNUSED_OPTION_VALUE } from 'Common/Consts';
 import { ScopeFolderList, ScopeMessageList, ScopeMessageView } from 'Common/Enums';
 
 import {
@@ -98,6 +99,20 @@ export class MailMessageView extends AbstractViewRight {
 					if (message) {
 						currentMessage(null);
 						rl.app.moveMessagesToFolderType(folderType, message.folder, new Set([message.uid]), bDelete);
+					}
+				}, this.messageVisible),
+			createCommandSetHelper = action =>
+				createCommand(() => setAction(action), this.messageVisible),
+			createCommandDeleteHelper = () =>
+				createCommand(() => {
+					if (UNUSED_OPTION_VALUE === FolderUserStore.trashFolder() || '' === FolderUserStore.trashFolder()) {
+						setAction(MessageSetAction.SetDeleted);
+					} else {
+						const message = currentMessage();
+						if (message) {
+							currentMessage(null);
+							rl.app.moveMessagesToFolderType(FolderType.Trash, message.folder, new Set([message.uid]));
+						}
 					}
 				}, this.messageVisible);
 
@@ -197,6 +212,8 @@ export class MailMessageView extends AbstractViewRight {
 
 			pgpSupported: () => currentMessage() && PgpUserStore.isSupported(),
 
+			canBeUndeleted: () => currentMessage()?.isDeleted(),
+
 			messageListOrViewLoading:
 				() => MessagelistUserStore.isLoading() | MessageUserStore.loading()
 		});
@@ -231,7 +248,11 @@ export class MailMessageView extends AbstractViewRight {
 		this.forwardAsAttachmentCommand = createCommandReplyHelper(ComposeType.ForwardAsAttachment);
 		this.editAsNewCommand = createCommandReplyHelper(ComposeType.EditAsNew);
 
-		this.deleteCommand = createCommandActionHelper(FolderType.Trash);
+//		this.deleteCommand = createCommandActionHelper(FolderType.Trash);
+		// User setting hideDeleted || immediatelyMoveToTrash ??
+		this.deleteCommand = createCommandDeleteHelper();
+		// User setting !hideDeleted && !immediatelyMoveToTrash ??
+		this.undeleteCommand = createCommandSetHelper(MessageSetAction.UnsetDeleted);
 		this.deleteWithoutMoveCommand = createCommandActionHelper(FolderType.Trash, true);
 		this.archiveCommand = createCommandActionHelper(FolderType.Archive);
 		this.spamCommand = createCommandActionHelper(FolderType.Junk);

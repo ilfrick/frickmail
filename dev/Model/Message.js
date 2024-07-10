@@ -206,6 +206,7 @@ export class MessageModel extends AbstractModel {
 
 			isUnseen: () => !this.flags().includes('\\seen'),
 			isFlagged: () => this.flags().includes('\\flagged'),
+			isDeleted: () => this.flags().includes('\\deleted'),
 //			isJunk: () => this.flags().includes('$junk') && !this.flags().includes('$nonjunk'),
 //			isPhishing: () => this.flags().includes('$phishing'),
 
@@ -363,7 +364,7 @@ export class MessageModel extends AbstractModel {
 	lineAsCss(flags=1) {
 		let classes = [];
 		forEachObjectEntry({
-			deleted: this.deleted(),
+			deleted: this.deleted() || this.isDeleted(),
 			selected: this.selected(),
 			checked: this.checked(),
 			unseen: this.isUnseen(),
