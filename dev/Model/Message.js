@@ -159,8 +159,6 @@ export class MessageModel extends AbstractModel {
 			dateTimestamp: 0,
 			dateTimestampSource: 0,
 
-			deleted: false,
-
 			// Also used by Selector
 			focused: false,
 			selected: false,
@@ -364,7 +362,6 @@ export class MessageModel extends AbstractModel {
 	lineAsCss(flags=1) {
 		let classes = [];
 		forEachObjectEntry({
-			deleted: this.deleted() || this.isDeleted(),
 			selected: this.selected(),
 			checked: this.checked(),
 			unseen: this.isUnseen(),

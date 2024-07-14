@@ -470,23 +470,6 @@ MessagelistUserStore.moveMessages = (
 				if (page > MessagelistUserStore.pageCount()) {
 					setPage = MessagelistUserStore.pageCount();
 				}
-				if (MessagelistUserStore.threadUid()
-				 && MessagelistUserStore.length
-				 && MessagelistUserStore.find(item => item?.deleted() && item.uid == MessagelistUserStore.threadUid())
-				) {
-					const message = MessagelistUserStore.find(item => item && !item.deleted());
-					if (!message) {
-						if (1 < page) {
-							setPage = page - 1;
-						} else {
-							MessagelistUserStore.threadUid(0);
-							setPage = MessagelistUserStore.pageBeforeThread();
-						}
-					} else if (MessagelistUserStore.threadUid() != message.uid) {
-						MessagelistUserStore.threadUid(message.uid);
-						setPage = page;
-					}
-				}
 				if (setPage) {
 					MessagelistUserStore.page(setPage);
 					replaceHash(
@@ -544,7 +527,6 @@ MessagelistUserStore.moveMessages = (
 					currentMessage = null;
 					MessageUserStore.message(null);
 				}
-				item.deleted(true);
 				MessagelistUserStore.remove(item);
 			});
 		}

@@ -28,14 +28,10 @@ export class MessageCollectionModel extends AbstractCollectionModel
 	 */
 	static reviveFromJson(object/*, cached*/) {
 		let msg = MessageUserStore.message();
-		return super.reviveFromJson(object, message => {
+		return super.reviveFromJson(object, message =>
 			// If message is currently viewed, use that.
 			// Maybe then use msg.revivePropertiesFromJson(message) ?
-			message = (msg && msg.hash === message.hash) ? msg : MessageModel.reviveFromJson(message);
-			if (message) {
-				message.deleted(false);
-				return message;
-			}
-		});
+			(msg && msg.hash === message.hash) ? msg : MessageModel.reviveFromJson(message)
+		);
 	}
 }
