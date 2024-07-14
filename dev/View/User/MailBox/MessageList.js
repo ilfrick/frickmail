@@ -404,8 +404,11 @@ export class MailMessageList extends AbstractViewRight {
 
 	// User setting hideDeleted || immediatelyMoveToTrash ??
 	deleteCommand() {
-//		moveMessagesToFolderType(FolderType.Trash);
-		if (UNUSED_OPTION_VALUE === FolderUserStore.trashFolder() || '' === FolderUserStore.trashFolder()) {
+		/**
+		 * When FolderUserStore.trashFolder is set to "Do not use",
+		 * flag as \Deleted for removal by later EXPUNGE
+		 */
+		if (UNUSED_OPTION_VALUE === FolderUserStore.trashFolder()) {
 			listAction(
 				FolderUserStore.currentFolderFullName(),
 				MessageSetAction.SetDeleted,

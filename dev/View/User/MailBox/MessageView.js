@@ -105,7 +105,11 @@ export class MailMessageView extends AbstractViewRight {
 				createCommand(() => setAction(action), this.messageVisible),
 			createCommandDeleteHelper = () =>
 				createCommand(() => {
-					if (UNUSED_OPTION_VALUE === FolderUserStore.trashFolder() || '' === FolderUserStore.trashFolder()) {
+					/**
+					 * When FolderUserStore.trashFolder is set to "Do not use",
+					 * flag as \Deleted for removal by later EXPUNGE
+					 */
+					if (UNUSED_OPTION_VALUE === FolderUserStore.trashFolder()) {
 						setAction(MessageSetAction.SetDeleted);
 					} else {
 						const message = currentMessage();
