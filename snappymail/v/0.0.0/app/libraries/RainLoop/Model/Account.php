@@ -45,7 +45,7 @@ abstract class Account implements \JsonSerializable
 
 	public function SmtpUser() : string
 	{
-		return $this->sSmtpUser ?: $this->oDomain->SmtpSettings()->fixUsername($this->sEmail);
+		return $this->sSmtpUser ?: ($this->oDomain ? $this->oDomain->SmtpSettings()->fixUsername($this->sEmail) : '');
 //		return $this->sSmtpUser ?: $this->sEmail ?: $this->sImapUser;
 	}
 
