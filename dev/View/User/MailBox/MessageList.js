@@ -111,6 +111,8 @@ export class MailMessageList extends AbstractViewRight {
 
 		this.userUsageProc = FolderUserStore.quotaPercentage;
 
+		this.hideDeleted = SettingsUserStore.hideDeleted;
+
 		addObservablesTo(this, {
 			focusSearch: false
 		});

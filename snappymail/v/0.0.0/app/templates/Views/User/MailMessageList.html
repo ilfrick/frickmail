@@ -18,7 +18,7 @@
 		</a>
 		<a class="btn fontastic" data-bind="command: deleteCommand" data-i18n="[title]GLOBAL/DELETE">🗑</a>
 <!--
-		<a class="btn fontastic" data-bind="command: undeleteCommand" data-i18n="[title]GLOBAL/UNDELETE" style="transform:rotate(-180deg)">🗑</a>
+		<a class="btn fontastic" data-bind="command: undeleteCommand, hidden: hideDeleted" data-i18n="[title]GLOBAL/UNDELETE" style="transform:rotate(-180deg)">🗑</a>
 -->
 	</div>
 	<div class="btn-group dropdown" data-bind="registerBootstrapDropdown: true">
@@ -66,7 +66,7 @@
 			<li role="presentation" data-bind="command: deleteCommand">
 				<a href="#" tabindex="-1" data-icon="🗑" data-i18n="GLOBAL/DELETE"></a>
 			</li>
-			<li role="presentation" data-bind="command: undeleteCommand">
+			<li role="presentation" data-bind="command: undeleteCommand, hidden: hideDeleted">
 				<a href="#" tabindex="-1" data-icon="🗑" data-i18n="GLOBAL/UNDELETE" class="rotate"></a>
 			</li>
 			<li role="presentation" data-bind="visible: allowDangerousActions, command: deleteWithoutMoveCommand">
