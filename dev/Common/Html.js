@@ -623,6 +623,8 @@ export const
 		html = html
 			.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gim, (...args) =>
 				1 < args.length ? args[1].toString().replace(/\n/g, '<br>') : '')
+			// Remove line duplication
+			.replace(/<br><\/div>/gi, '</div>')
 			.replace(/\r?\n/g, '')
 			.replace(/\s+/gm, ' ');
 

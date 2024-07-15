@@ -1506,8 +1506,6 @@ export class ComposePopupView extends AbstractViewPopup {
 			do {
 				l = Text.length;
 				Text = Text
-					// Remove line duplication
-					.replace(/<br><\/div>/gi, '</div>')
 					// Remove Microsoft Office styling
 					.replace(/(<[^>]+[;"'])\s*mso-[a-z-]+\s*:[^;"']+/gi, '$1')
 					// Remove hubspot data-hs- attributes
