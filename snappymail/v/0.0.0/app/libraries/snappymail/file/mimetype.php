@@ -226,6 +226,10 @@ abstract class MimeType
 
 		'eml' => 'message/rfc822',
 		'mime' => 'message/rfc822',
+		// RFC 3464
+//		'u8dsn' => 'message/delivery-status',
+		// RFC 5337
+		'u8dsn' => 'message/global-delivery-status',
 
 		'txt' => 'text/plain',
 		'asp' => 'text/asp',
