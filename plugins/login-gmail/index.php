@@ -12,9 +12,9 @@ use RainLoop\Providers\Storage\Enumerations\StorageType;
 class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
-		NAME     = 'GMail OAuth2',
-		VERSION  = '2.36',
-		RELEASE  = '2024-04-23',
+		NAME     = 'Login GMail OAuth2',
+		VERSION  = '2.37',
+		RELEASE  = '2024-07-15',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'GMail IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
@@ -55,18 +55,18 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$oHttp = $oActions->Http();
 		$oHttp->ServerNoCache();
 
+		$uri = \preg_replace('/.LoginGMail.*$/D', '', $_SERVER['REQUEST_URI']);
+
 		try
 		{
 			if (isset($_GET['error'])) {
 				throw new \RuntimeException($_GET['error']);
 			}
-			if (!isset($_GET['code']) || empty($_GET['state']) || 'gmail' !== $_GET['state']) {
-				$oActions->Location(\RainLoop\Utils::WebPath());
-				exit;
+			if (isset($_GET['code']) && isset($_GET['state']) && 'gmail' === $_GET['state']) {
+				$oGMail = $this->gmailConnector();
 			}
-			$oGMail = $this->gmailConnector();
-			if (!$oGMail) {
-				$oActions->Location(\RainLoop\Utils::WebPath());
+			if (empty($oGMail)) {
+				$oActions->Location($uri);
 				exit;
 			}
 
@@ -137,7 +137,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 		{
 			$oActions->Logger()->WriteException($oException, \LOG_ERR);
 		}
-		$oActions->Location(\RainLoop\Utils::WebPath());
+		$oActions->Location($uri);
 		exit;
 	}
 
