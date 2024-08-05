@@ -1,8 +1,30 @@
 ((rl) => {
-	const EmptyOption = { id: -1, name: '' };
 	const Folders = ko.computed(() => {
-		return [EmptyOption, ...rl.app.folderList().map((f) => ({ name: f.name }))];
+		const
+			aResult = [{
+				id: -1,
+				name: ''
+			}],
+			sDeepPrefix = '\u00A0\u00A0\u00A0',
+			showUnsubscribed = true/*!SettingsUserStore.hideUnsubscribed()*/,
+			foldersWalk = folders => {
+				folders.forEach(oItem => {
+					if (showUnsubscribed || oItem.hasSubscriptions() || !oItem.exists) {
+						aResult.push({
+							id: oItem.fullName,
+							name: sDeepPrefix.repeat(oItem.deep) + oItem.detailedName()
+						});
+					}
+
+					if (oItem.subFolders.length) {
+						foldersWalk(oItem.subFolders());
+					}
+				});
+			};
+		foldersWalk(rl.app.folderList());
+		return aResult;
 	});
+
 	const Priorities = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 	const searchQ = ko.observable(''),
 		priority = ko.observable(1),
@@ -92,6 +114,7 @@
 		const advS = event.detail;
 		if (advS.viewModelTemplateID == 'PopupsAdvancedSearch') {
 			const button = document.createElement('button');
+			button.setAttribute('class', 'btn');
 			button.setAttribute('data-i18n', 'SFILTERS/CREATE_FILTER');
 			button.addEventListener('click', function () {
 				searchQ(advS.buildSearchString());
@@ -149,7 +172,7 @@
 		}
 	}
 
-	rl.addSettingsViewModel(SearchFiltersSettingsTab, 'STabSearchFilters', 'Filters', 'filters');
+	rl.addSettingsViewModel(SearchFiltersSettingsTab, 'STabSearchFilters', 'Search Filters', 'searchfilters');
 
 	class SearchFiltersPopupView extends rl.pluginPopupView {
 		constructor() {
