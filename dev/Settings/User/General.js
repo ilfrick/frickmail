@@ -6,7 +6,6 @@ import { LayoutSideView, LayoutBottomView } from 'Common/EnumsUser';
 import { setRefreshFoldersInterval } from 'Common/Folders';
 import { Settings, SettingsGet } from 'Common/Globals';
 import { WYSIWYGS } from 'Common/HtmlEditor';
-import { isArray } from 'Common/Utils';
 import { addSubscribablesTo, addComputablesTo } from 'External/ko';
 import { i18n, translateTrigger, translatorReload, convertLangName } from 'Common/Translator';
 
@@ -23,7 +22,6 @@ import { MessagelistUserStore } from 'Stores/User/Messagelist';
 
 import Remote from 'Remote/User/Fetch';
 
-import { IdentityPopupView } from 'View/Popup/Identity';
 import { LanguagesPopupView } from 'View/Popup/Languages';
 
 export class UserSettingsGeneral extends AbstractViewSettings {
@@ -75,13 +73,8 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 		addComputablesTo(this, {
 			languageFullName: () => convertLangName(this.language()),
 
-			identityMain: () => {
-				const list = this.identities();
-				return isArray(list) ? list.find(item => item && !item.id()) : null;
-			},
-
 			identityMainDesc: () => {
-				const identity = this.identityMain();
+				const identity = IdentityUserStore.main();
 				return identity ? identity.formattedName() : '---';
 			},
 
@@ -168,8 +161,7 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 	}
 
 	editMainIdentity() {
-		const identity = this.identityMain();
-		identity && showScreenPopup(IdentityPopupView, [identity]);
+		IdentityUserStore.main()?.edit?.();
 	}
 
 	testSoundNotification() {

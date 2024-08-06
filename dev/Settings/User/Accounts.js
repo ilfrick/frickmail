@@ -48,7 +48,7 @@ export class UserSettingsAccounts /*extends AbstractViewSettings*/ {
 	}
 
 	editIdentity(identity) {
-		showScreenPopup(IdentityPopupView, [identity]);
+		identity.edit();
 	}
 
 	/**
