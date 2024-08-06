@@ -314,10 +314,6 @@ export class ContactsPopupView extends AbstractViewPopup {
 		}
 	}
 
-	tryToClose() {
-		(false === this.onClose()) || this.close();
-	}
-
 	onClose() {
 		const contact = this.contact();
 		if (AskPopupView.hidden() && contact?.hasChanges()) {

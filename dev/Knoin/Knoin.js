@@ -167,7 +167,7 @@ const
 		if (screenName && fireEvent('sm-show-screen', screenName + (subPart ?  '/' + subPart : ''), 1)) {
 			// Close all popups
 			for (let vm of visiblePopups) {
-				(false === vm.onClose()) || vm.close();
+				vm.tryToClose();
 			}
 
 			let vmScreen = screen(screenName);
