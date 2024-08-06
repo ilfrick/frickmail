@@ -253,8 +253,10 @@ class Message implements \JsonSerializable
 				else if (\preg_match('@([\\d\\.]+)/([\\d\\.]+)@', $spam, $value)
 				  || \preg_match('@([\\d\\.]+)/([\\d\\.]+)@', $oHeaders->ValueByName(MimeHeader::X_SPAM_INFO), $value)
 				) {
-					$oMessage->sSpamResult = "{$value[1]} / {$value[2]}";
-					$oMessage->setSpamScore(100 * \floatval($value[1]) / \floatval($value[2]));
+					if ($threshold = \floatval($value[2])) {
+						$oMessage->setSpamScore(100 * \floatval($value[1]) / $threshold);
+						$oMessage->sSpamResult = "{$value[1]} / {$value[2]}";
+					}
 				}
 
 				$oMessage->bIsSpam = 'Yes' === \substr($spam, 0, 3)
