@@ -4,7 +4,9 @@ class SearchFiltersPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	public const
 		NAME = 'Search Filters',
-		VERSION = '0.0.2',
+		AUTHOR = 'AbdoBnHesham',
+		URL    = 'https://github.com/the-djmaze/snappymail/pull/1673',
+		VERSION = '0.2',
 		RELEASE = '2024-06-28',
 		REQUIRED = '2.36.3',
 		CATEGORY = 'General',
