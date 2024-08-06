@@ -1,9 +1,6 @@
 import { AbstractModel } from 'Knoin/AbstractModel';
 import { addObservablesTo, addComputablesTo } from 'External/ko';
 
-import { showScreenPopup } from 'Knoin/Knoin';
-import { IdentityPopupView } from 'View/Popup/Identity';
-
 export class IdentityModel extends AbstractModel {
 	/**
 	 * @param {string} id
@@ -31,7 +28,9 @@ export class IdentityModel extends AbstractModel {
 			smimeKey: '',
 			smimeCertificate: '',
 
-			askDelete: false
+			askDelete: false,
+
+			exists: false
 		});
 
 		addComputablesTo(this, {
@@ -49,9 +48,5 @@ export class IdentityModel extends AbstractModel {
 			email = this.email(),
 			label = this.label();
 		return (name ? `${name} ` : '') + `<${email}>` + (label ? ` (${label})` : '');
-	}
-
-	edit() {
-		showScreenPopup(IdentityPopupView, [this]);
 	}
 }

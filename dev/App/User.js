@@ -88,6 +88,8 @@ export class AppUser extends AbstractApp {
 		this.messageList = MessagelistUserStore;
 
 		this.ask = AskPopupView;
+
+		this.loadAccountsAndIdentities = loadAccountsAndIdentities;
 	}
 
 	/**

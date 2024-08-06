@@ -27,6 +27,8 @@ class Identity implements \JsonSerializable
 	private bool $pgpEncrypt = false;
 	private bool $pgpSign = false;
 
+	public bool $exists = true;
+
 	private ?SensitiveString $smimeKey = null;
 	private string $smimeCertificate = '';
 
@@ -155,7 +157,8 @@ class Identity implements \JsonSerializable
 			'pgpEncrypt' => $this->pgpEncrypt,
 			'pgpSign' => $this->pgpSign,
 			'smimeKey' => (string) $this->smimeKey,
-			'smimeCertificate' => $this->smimeCertificate
+			'smimeCertificate' => $this->smimeCertificate,
+			'exists' => $this->exists
 		);
 	}
 

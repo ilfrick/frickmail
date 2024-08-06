@@ -8,6 +8,7 @@ import { Settings, SettingsGet } from 'Common/Globals';
 import { WYSIWYGS } from 'Common/HtmlEditor';
 import { addSubscribablesTo, addComputablesTo } from 'External/ko';
 import { i18n, translateTrigger, translatorReload, convertLangName } from 'Common/Translator';
+import { editIdentity } from 'Common/UtilsUser';
 
 import { AbstractViewSettings } from 'Knoin/AbstractViews';
 import { showScreenPopup } from 'Knoin/Knoin';
@@ -161,7 +162,7 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 	}
 
 	editMainIdentity() {
-		IdentityUserStore.main()?.edit?.();
+		editIdentity(IdentityUserStore.main());
 	}
 
 	testSoundNotification() {

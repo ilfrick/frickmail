@@ -1,5 +1,4 @@
-import { koArrayWithDestroy } from 'External/ko';
-import { koComputable } from 'External/ko';
+import { koArrayWithDestroy, koComputable } from 'External/ko';
 import { isArray } from 'Common/Utils';
 
 export const IdentityUserStore = koArrayWithDestroy();
