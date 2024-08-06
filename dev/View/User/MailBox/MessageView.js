@@ -466,6 +466,11 @@ export class MailMessageView extends AbstractViewRight {
 			}
 		});
 
+		addShortcut('b', 'shift', [ScopeMessageList, ScopeMessageView], () => {
+			currentMessage()?.swapColors?.();
+			return false;
+		});
+
 		addShortcut('arrowup,arrowleft', 'meta', [ScopeMessageList, ScopeMessageView], () => {
 			this.goUpCommand();
 			return false;
