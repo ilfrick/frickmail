@@ -42,7 +42,9 @@ abstract class DateTimeHelper
 		}
 
 		$sDateTime = \trim(\preg_replace('/ \([a-zA-Z0-9]+\)$/', '', $sDateTime));
-		$oDateTime = \DateTime::createFromFormat(\DateTime::RFC2822, $sDateTime, static::GetUtcTimeZoneObject());
+		$sDateTime = \preg_replace('/ ([0-9]+:[0-9]+) /', ' $1:00 ', $sDateTime);
+		$oDateTime = \DateTime::createFromFormat(\DateTime::RFC2822, $sDateTime, static::GetUtcTimeZoneObject())
+			?: \DateTime::createFromFormat('d M Y H:i:s O', $sDateTime, static::GetUtcTimeZoneObject());
 		// 398045302 is 1982-08-13 00:08:22 the date RFC 822 was created
 		if (!$oDateTime || 398045302 > $oDateTime->getTimestamp()) {
 			\SnappyMail\Log::notice('', "Failed to parse RFC 2822 date '{$sDateTime}'");
