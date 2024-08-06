@@ -835,7 +835,7 @@ trait Messages
 				}
 			} else if ($oSmtpClient->IsConnected()) {
 				if ($iMessageStreamSize && $oSmtpClient->maxSize() && $iMessageStreamSize * 1.33 > $oSmtpClient->maxSize()) {
-					throw new ClientException(Notifications::ClientViewError, 'Message size '. ($iMessageStreamSize * 1.33) . ' bigger then max ' . $oSmtpClient->maxSize());
+					throw new ClientException(Notifications::ClientViewError, null, 'Message size '. ($iMessageStreamSize * 1.33) . ' bigger then max ' . $oSmtpClient->maxSize());
 				}
 
 				if (!empty($sFrom)) {
