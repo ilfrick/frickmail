@@ -73,9 +73,9 @@ abstract class Crypt
 					if (\is_string($result)) {
 						return static::jsonDecode($result);
 					}
-					throw new \Exception('invalid $data or $key');
+					throw new \RuntimeException('invalid $data or $key');
 				} catch (\Throwable $e) {
-					Log::error('Crypt', "{$fn}(): {$e->getMessage()}");
+					Log::error('Crypt', "{$fn}(): {$e->getMessage()}\n{$e->getTraceAsString()}");
 				}
 			}
 		} else {
