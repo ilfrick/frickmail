@@ -60,10 +60,9 @@ export class AbstractViewPopup extends AbstractView
 		this.keyScope.scope = name;
 		this.modalVisible = ko.observable(false).extend({ rateLimit: 0 });
 		this.close = () => this.modalVisible(false);
+		this.tryToClose = () => (false === this.onClose()) || this.close();
 		addShortcut('escape,close', '', name, () => {
-			if (this.modalVisible() && false !== this.onClose()) {
-				this.close();
-			}
+			this.modalVisible() && this.tryToClose();
 			return false;
 //			return true; Issue with supported modal close
 		});
