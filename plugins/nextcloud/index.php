@@ -298,9 +298,10 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$aResultLang = \SnappyMail\L10n::getLanguages($bAdmin);
 			$userId = \OC::$server->getUserSession()->getUser()->getUID();
 			$userLang = \OC::$server->getConfig()->getUserValue($userId, 'core', 'lang', 'en');
+			$userLang = \strtr($userLang, '_', '-');
 			$sLanguage = $this->determineLocale($userLang, $aResultLang);
 			// Check if $sLanguage is null
-			if ($sLanguage === null) {
+			if (!$sLanguage) {
 				$sLanguage = 'en'; // Assign 'en' if $sLanguage is null
 			}
 		}
@@ -321,17 +322,18 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 			return $langCode;
 		}
 
+		// Check without country code
+		if (\str_contains($langCode, '-')) {
+			$langCode = \explode('-', $langCode)[0];
+			if (\in_array($langCode, $languagesArray)) {
+				return $langCode;
+			}
+		}
+
 		// Check with uppercase country code
 		$langCodeWithUpperCase = $langCode . '-' . \strtoupper($langCode);
 		if (\in_array($langCodeWithUpperCase, $languagesArray)) {
 			return $langCodeWithUpperCase;
-		}
-
-		// Iterating to find a match starting with langCode
-		foreach ($languagesArray as $localeValue) {
-			if (\str_starts_with($localeValue, $langCode)) {
-				return $localeValue;
-			}
 		}
 
 		// If no match is found
