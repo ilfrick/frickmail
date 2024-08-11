@@ -66,8 +66,9 @@ if (!defined('APP_CONFIGURATION_NAME')) {
 }
 unset($sCustomConfiguration);
 
-$sData = is_file(APP_DATA_FOLDER_PATH.'DATA.php') ? file_get_contents(APP_DATA_FOLDER_PATH.'DATA.php') : '';
-define('APP_PRIVATE_DATA', APP_DATA_FOLDER_PATH.'_data_'.($sData ? md5($sData) : '').'/'.APP_PRIVATE_DATA_NAME.'/');
+//$sData = is_file(APP_DATA_FOLDER_PATH.'DATA.php') ? file_get_contents(APP_DATA_FOLDER_PATH.'DATA.php') : '';
+//define('APP_PRIVATE_DATA', APP_DATA_FOLDER_PATH.'_data_'.($sData ? md5($sData) : '').'/'.APP_PRIVATE_DATA_NAME.'/');
+define('APP_PRIVATE_DATA', APP_DATA_FOLDER_PATH.'_data_/'.APP_PRIVATE_DATA_NAME.'/');
 define('APP_PLUGINS_PATH', APP_PRIVATE_DATA.'plugins/');
 
 ini_set('default_charset', 'UTF-8');
