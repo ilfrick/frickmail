@@ -50,7 +50,7 @@ class Identities extends AbstractProvider
 		// If no primary identity is found, generate default one from account info
 		if (!$primaryIdentity) {
 			$primaryIdentity = new Identity('', $account->Email());
-			$primaryIdentity->exists = false;
+			$primaryIdentity->exists = !\RainLoop\Api::Config()->Get('webmail', 'popup_identity', true);
 			$identities[] = $primaryIdentity;
 		}
 

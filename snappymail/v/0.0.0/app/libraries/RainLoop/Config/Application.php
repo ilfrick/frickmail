@@ -190,6 +190,7 @@ class Application extends \RainLoop\Config\AbstractConfig
 
 				'allow_additional_accounts'   => array(true),
 				'allow_additional_identities' => array(true),
+				'popup_identity' => array(true, 'When identity is not set yet, open identity popup after login'),
 
 				'messages_per_page'           => array(20, 'Number of messages displayed on page by default'),
 				'message_read_delay'          => array(5, 'Mark message read after N seconds'),
