@@ -108,9 +108,8 @@ addComputablesTo(MessagelistUserStore, {
 	listCheckedOrSelected: () => {
 		const
 			selectedMessage = MessagelistUserStore.selectedMessage(),
-			focusedMessage = MessagelistUserStore.focusedMessage(),
 			checked = MessagelistUserStore.filter(item => isChecked(item));
-		return checked.length ? checked : (selectedMessage || focusedMessage ? [selectedMessage || focusedMessage] : []);
+		return checked.length ? checked : (selectedMessage ? [selectedMessage] : []);
 	},
 
 	listCheckedOrSelectedUidsWithSubMails: () => {
@@ -138,7 +137,6 @@ MessagelistUserStore.hasChecked = koComputable(
 
 MessagelistUserStore.hasCheckedOrSelected = koComputable(() =>
 	!!MessagelistUserStore.selectedMessage()
-	| !!MessagelistUserStore.focusedMessage()
 	// Issue: not all are observed?
 	| !!MessagelistUserStore.find(isChecked)
 ).extend({ rateLimit: 50 });
