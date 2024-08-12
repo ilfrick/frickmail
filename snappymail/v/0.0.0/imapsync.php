@@ -13,7 +13,7 @@ imapsync.php \
 
 use MailSo\Net\Enumerations\ConnectionSecurityType as SecurityType;
 
-if (4 > \count($_SERVER['argv']) || \in_array('--help', $_SERVER['argv'])) {
+if ('cli' !== PHP_SAPI || 4 > \count($_SERVER['argv']) || \in_array('--help', $_SERVER['argv'])) {
 echo 'OPTIONS
 
     usage: imapsync.php [options]

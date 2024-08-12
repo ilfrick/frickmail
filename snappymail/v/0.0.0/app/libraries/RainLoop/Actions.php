@@ -140,7 +140,7 @@ class Actions
 				. $oHttp->GetClientIp($this->oConfig->Get('labs', 'http_client_ip_check_proxy', false))
 				. '][PID:' . (\MailSo\Base\Utils::FunctionCallable('getmypid') ? \getmypid() : 'unknown')
 				. '][' . \MailSo\Base\Http::GetServer('SERVER_SOFTWARE', '~')
-				. '][' . (\MailSo\Base\Utils::FunctionCallable('php_sapi_name') ? \php_sapi_name() : '~')
+				. '][' . \PHP_SAPI
 				. '][Streams:' . \implode(',', \stream_get_transports())
 				. '][' . $oHttp->GetMethod() . ' ' . $oHttp->GetScheme() . '://' . $oHttp->GetHost(false) . \MailSo\Base\Http::GetServer('REQUEST_URI', '') . ']'
 			);
