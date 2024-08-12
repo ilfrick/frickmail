@@ -120,7 +120,7 @@ export class LoginUserView extends AbstractViewLogin {
 						}
 						this.submitError(getNotification(iError, oData?.ErrorMessage,
 							Notifications.UnknownError));
-						this.submitErrorAdditional(oData?.ErrorMessageAdditional);
+						this.submitErrorAdditional(oData?.ErrorMessageAdditional || oData?.message);
 					} else {
 						rl.setData(oData.Result);
 					}
