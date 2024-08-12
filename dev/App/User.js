@@ -149,7 +149,9 @@ export class AppUser extends AbstractApp {
 	}
 
 	logout() {
-		Remote.request('Logout', () => rl.logoutReload(Settings.app('customLogoutLink')));
+		Remote.request('Logout', (iError, data) =>
+			iError ? alert(data) : rl.logoutReload(Settings.app('customLogoutLink'))
+		);
 	}
 
 	bootstart() {
