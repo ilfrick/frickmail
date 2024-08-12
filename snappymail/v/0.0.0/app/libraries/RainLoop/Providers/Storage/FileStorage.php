@@ -8,15 +8,9 @@ class FileStorage implements \RainLoop\Providers\Storage\IStorage
 {
 	use \MailSo\Log\Inherit;
 
-	/**
-	 * @var string
-	 */
-	protected $sDataPath;
+	protected string $sDataPath;
 
-	/**
-	 * @var bool
-	 */
-	private $bLocal;
+	private bool $bLocal;
 
 	public function __construct(string $sStoragePath, bool $bLocal = false)
 	{
