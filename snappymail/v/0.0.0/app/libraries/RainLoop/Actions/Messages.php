@@ -480,6 +480,9 @@ trait Messages
 		try
 		{
 			$oMessage = $this->MailClient()->Message($sFolder, $iUid, true, $this->Cacher($oAccount));
+			if (!$oMessage) {
+				throw new \RuntimeException('Message not found');
+			}
 
 			$bAutoVerify = $this->Config()->Get('security', 'auto_verify_signatures', false);
 
@@ -572,13 +575,10 @@ trait Messages
 			throw new ClientException(Notifications::CantGetMessage, $oException);
 		}
 
-		if ($oMessage) {
-			$ETag = $oMessage->ETag($this->getAccountFromToken()->ImapUser());
-			$this->verifyCacheByKey($ETag);
-			$this->Plugins()->RunHook('filter.result-message', array($oMessage));
-			$this->cacheByKey($ETag);
-		}
-
+		$ETag = $oMessage->ETag($this->getAccountFromToken()->ImapUser());
+		$this->verifyCacheByKey($ETag);
+		$this->Plugins()->RunHook('filter.result-message', array($oMessage));
+		$this->cacheByKey($ETag);
 		return $this->DefaultResponse($oMessage);
 	}
 
