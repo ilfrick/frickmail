@@ -1,3 +1,8 @@
+## 2.37.2 – 2024-08-13
+
+### Nextcloud
+- Failed loading due to Office365 OAuth2 attempt #1703
+
 ## 2.37.1 – 2024-08-12
 
 ### Fixed
