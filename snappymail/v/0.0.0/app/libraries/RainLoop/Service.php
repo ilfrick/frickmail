@@ -66,9 +66,12 @@ abstract class Service
 		}
 
 		$sQuery = \trim($_SERVER['QUERY_STRING'] ?? '');
+/*
+		https://github.com/the-djmaze/snappymail/commit/47d18cafa38dd526b4221c2a72d1529e4fa1d255#r144395031
 		if (!empty($_SERVER['PATH_INFO'])) {
 			$sQuery = \ltrim($_SERVER['PATH_INFO'],'/') . '&' . $sQuery;
 		}
+*/
 		$iPos = \strpos($sQuery, '&');
 		if (0 < $iPos) {
 			$sQuery = \substr($sQuery, 0, $iPos);
