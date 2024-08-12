@@ -18,9 +18,9 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Office365/Outlook OAuth2',
-		VERSION  = '0.1',
-		RELEASE  = '2024-07-01',
-		REQUIRED = '2.36.5',
+		VERSION  = '0.2',
+		RELEASE  = '2024-08-13',
+		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'Office365/Outlook IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
 
@@ -45,8 +45,12 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addHook('filter.http-paths', 'httpPaths');
 	}
 
-	public function httpPaths(array $aPaths) : void
+	public function httpPaths(array &$aPaths) : void
 	{
+		if (!empty($_SERVER['PATH_INFO']) && \str_ends_with($_SERVER['PATH_INFO'], 'LoginO365')) {
+			$aPaths = ['LoginO365'];
+		}
+
 		if (!empty($aPaths[0]) && 'LoginO365' === $aPaths[0]) {
 			$oConfig = \RainLoop\Api::Config();
 			$oConfig->Set('security', 'secfetch_allow',
