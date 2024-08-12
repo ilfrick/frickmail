@@ -1,3 +1,57 @@
+## 2.37.0 – 2024-08-12
+
+### Added
+- JavaScript event `rl-vm-visible`
+- Detailed error message on account switch failure for
+  [#1594](https://github.com/the-djmaze/snappymail/issues/1594)
+- Workarounds for Microsoft OAuth2 (currently requires Apache AcceptPathInfo)
+  [#1645](https://github.com/the-djmaze/snappymail/issues/1645)
+- Support "mark for deletion"
+  [#1657](https://github.com/the-djmaze/snappymail/issues/1657) by @smsoft-ru
+- Invoke "Update Identity" pop up right after login (when not initialized)
+  [#1689](https://github.com/the-djmaze/snappymail/issues/1689)
+- Keyboard shortcut for "Swap default (background) color"
+  [#1690](https://github.com/the-djmaze/snappymail/issues/1690)
+
+### Changed
+- Updated gulp to v5
+- Replaced vulnerable gulp-header with gulp-append-prepend
+- Removed abandoned vulnerable rollup-plugin-html
+- Align save button in admin security settings
+- Made registerProtocolHandler('mailto') optional by activating at Settings -> General
+- Improved InvalidToken handling for
+  [#1653](https://github.com/the-djmaze/snappymail/issues/1653)
+- Cleanup localizations
+- Update French by @hguilbert
+- Update German by @tkasch
+- Update Polish by @tinola
+- Update Portuguese by @ner00
+
+### Fixed
+- prevent multiple afterShow() and afterHide() due to `transitionend` on multiple CSS properties
+- Attempt to read property "smimeSigned" on null
+- Refreshing mail list doesn't update current message
+  [#1654](https://github.com/the-djmaze/snappymail/issues/1654)
+- Deletion of CACHE folder causing error
+  [#1660](https://github.com/the-djmaze/snappymail/issues/1660)
+- Multiple line breaks are not displayed
+  [#1666](https://github.com/the-djmaze/snappymail/issues/1666)
+- RainLoop\Exceptions\ClientException::__construct(): Argument #2 ($oPrevious) must be of type ?Throwable, string given
+  [#1686](https://github.com/the-djmaze/snappymail/issues/1686)
+- SpamAssassin Division by zero
+  [#1694](https://github.com/the-djmaze/snappymail/issues/1694)
+- Failed to parse RFC 2822 date '6 Jul 2024 16:42:09 +0200'
+  [#1694](https://github.com/the-djmaze/snappymail/issues/1694)
+- Fix capabilities when THREAD is disabled
+  [#1698](https://github.com/the-djmaze/snappymail/pull/1698) by @akhil1508
+
+### Nextcloud
+- Failed loading due to incorrect `app_path`
+- Bugfix language detection
+- Allow multi-account in nc with oauth login
+  [#1699](https://github.com/the-djmaze/snappymail/pull/1699) by @akhil1508
+
+
 ## 2.36.4 – 2024-06-25
 
 ### Added
