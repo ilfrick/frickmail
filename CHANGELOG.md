@@ -1,3 +1,8 @@
+## 2.37.1 – 2024-08-12
+
+### Fixed
+- Gulp v5 broke the fonts
+
 ## 2.37.0 – 2024-08-12
 
 ### Added
