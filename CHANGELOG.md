@@ -1,12 +1,25 @@
 ## 2.37.2 – 2024-08-13
 
+### Added
+- Validate Fetch JSON response
+
+### Fixed
+- PATH_INFO bug due to Office365 OAuth login
+- Prevent logout loop on error
+
 ### Nextcloud
-- Failed loading due to Office365 OAuth2 attempt #1703
+- Failed loading due to Office365 OAuth2 attempt
+  [#1703](https://github.com/the-djmaze/snappymail/issues/1703)
+
 
 ## 2.37.1 – 2024-08-12
 
 ### Fixed
 - Gulp v5 broke the fonts
+
+### Nextcloud
+- Support v30
+
 
 ## 2.37.0 – 2024-08-12
 
