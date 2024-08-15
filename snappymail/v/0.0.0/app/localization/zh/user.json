@@ -11,7 +11,7 @@
 		"CLOSE": "关闭",
 		"CONTACTS": "联系人",
 		"DELETE": "删除",
-		"UNDELETE": "Undelete",
+		"UNDELETE": "撤销删除",
 		"DONE": "完成",
 		"EMAIL": "邮箱",
 		"FROM": "发件人",
@@ -60,12 +60,12 @@
 		"UNSEEN": "不可见",
 		"DATE": "日期",
 		"DATE_ALL": "所有邮件",
-		"BEFORE_3_DAYS": "Older then 3 days",
-		"BEFORE_7_DAYS": "Older then 1 week",
-		"BEFORE_MONTH": "Older then 1 month",
-		"BEFORE_3_MONTHS": "Older then 3 months",
-		"BEFORE_6_MONTHS": "Older then 6 months",
-		"BEFORE_YEAR": "Older then 1 year",
+		"BEFORE_3_DAYS": "3天以外",
+		"BEFORE_7_DAYS": "1周以外",
+		"BEFORE_MONTH": "1个月以外",
+		"BEFORE_3_MONTHS": "3个月以外",
+		"BEFORE_6_MONTHS": "半年以外",
+		"BEFORE_YEAR": "1年以外",
 		"SINCE_3_DAYS": "3天以内",
 		"SINCE_7_DAYS": "1周以内",
 		"SINCE_MONTH": "1个月以内",
@@ -262,7 +262,7 @@
 	"POPUPS_IDENTITY": {
 		"TITLE_ADD_IDENTITY": "添加身份",
 		"TITLE_UPDATE_IDENTITY": "更新身份",
-		"LABEL": "Label",
+		"LABEL": "",
 		"BUTTON_ADD_IDENTITY": "添加",
 		"SIGNATURE": "Signature",
 		"LABEL_SIGNATURE_INSERT_BEFORE": "在回信中插入签名再引用来信"
@@ -278,7 +278,7 @@
 		"DANGER_DESC_WARNING": "警告！",
 		"DANGER_DESC_HTML_1": "此操作将完全删除文件夹 <strong>%FOLDER%<\/strong> 中的所有邮件！",
 		"DANGER_DESC_HTML_2": "一旦操作执行，将不可中断和撤销！",
-		"TITLE_CLEARING_PROCESS": "文件夹清理中..."
+		"TITLE_CLEARING_PROCESS": "文件夹清理中…"
 	},
 	"CRYPTO": {
 		"SIGN": "签名",
@@ -391,8 +391,8 @@
 		"ERROR_UNKNOWN": "未知上传文件错误"
 	},
 	"EDITOR": {
-		"PLAIN": "HTML <-> TEXT",
-		"SOURCE": "HTML <-> SOURCE",
+		"PLAIN": "HTML <-> 纯文本",
+		"SOURCE": "HTML <-> 源代码",
 		"FONTFAMILY": "字体",
 		"FONTSIZE": "字号",
 		"DIR": "文本方向",
@@ -441,7 +441,7 @@
 	"SETTINGS_SECURITY": {
 		"LEGEND_SECURITY": "安全",
 		"LABEL_AUTOLOGOUT": "自动登出",
-		"FORGET_KEY_PASS": "Forget private key passphrase",
+		"FORGET_KEY_PASS": "忘记私钥密码",
 		"NEVER": "从不"
 	},
 	"SETTINGS_GENERAL": {
@@ -488,7 +488,7 @@
 		"IMAGES_OPTION_ALWAYS": "总是显示",
 		"IMAGES_WHITELIST": "图片白名单",
 		"MESSAGE_POPUP_WINDOW": "弹出页面使用新窗口代替新选项卡",
-		"MAILTO": "Register as 'mailto:' links handler"
+		"MAILTO": "注册成 mailto: 链接处理器"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "自动添加到您的地址簿",
