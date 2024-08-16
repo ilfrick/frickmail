@@ -40,8 +40,8 @@ export class AddressTest extends TestCommand
 		this.header_list  = new GrammarStringList;
 		this.key_list     = new GrammarStringList;
 		// rfc5260#section-6
-//		this.index        = new GrammarNumber;
-//		this.last         = false;
+		this.index        = new GrammarNumber;
+		this.last         = false;
 		// rfc5703#section-6
 //		this.mime
 //		this.anychild
@@ -67,7 +67,7 @@ export class AddressTest extends TestCommand
 			}
 		}
 		return result
-//			+ (this.last ? ' :last' : (this.index.value ? ' :index ' + this.index : ''))
+			+ (this.last ? ' :last' : (this.index.value ? ' :index ' + this.index : ''))
 			+ (this.comparator ? ' :comparator ' + this.comparator : '')
 			+ ' ' + this.address_part
 			+ ' ' + this.match_type
@@ -234,8 +234,8 @@ export class HeaderTest extends TestCommand
 		this.header_names = new GrammarStringList;
 		this.key_list     = new GrammarStringList;
 		// rfc5260#section-6
-//		this.index        = new GrammarNumber;
-//		this.last         = false;
+		this.index        = new GrammarNumber;
+		this.last         = false;
 		// rfc5703#section-6
 		this.mime         = false;
 		this.anychild     = false;
@@ -278,7 +278,7 @@ export class HeaderTest extends TestCommand
 			}
 		}
 		return result
-//			+ (this.last ? ' :last' : (this.index.value ? ' :index ' + this.index : ''))
+			+ (this.last ? ' :last' : (this.index.value ? ' :index ' + this.index : ''))
 			+ (this.comparator ? ' :comparator ' + this.comparator : '')
 			+ ' ' + this.match_type
 			+ ' ' + this.header_names
