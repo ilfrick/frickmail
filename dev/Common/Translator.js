@@ -184,6 +184,9 @@ export const
 			|| '';
 	},
 
+	getErrorMessage = (code, data) =>
+		getNotification(code) || data?.messageAdditional || data?.message || data,
+
 	/**
 	 * @param {*} code
 	 * @returns {string}

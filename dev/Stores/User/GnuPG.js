@@ -57,7 +57,7 @@ export const GnuPGUserStore = new class {
 									(iError, oData) => {
 										if (oData) {
 											if (iError) {
-												alert(oData.ErrorMessage);
+												alert(oData.message);
 											} else if (oData.Result) {
 												isPrivate
 													? this.privateKeys.remove(key)

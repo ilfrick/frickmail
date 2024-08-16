@@ -104,7 +104,7 @@ export const
 				// Repeat every 15 minutes?
 //				this.foldersTimeout = setTimeout(loadFolders, 900000);
 			})
-			.catch(() => fCallback && setTimeout(fCallback, 1, false));
+			.catch(e => fCallback && setTimeout(fCallback, 1, false, e));
 	};
 
 export class FolderCollectionModel extends AbstractCollectionModel

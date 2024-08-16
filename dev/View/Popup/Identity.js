@@ -54,7 +54,7 @@ export class IdentityPopupView extends AbstractViewPopup {
 						identity.smimeKey(oData.Result.pkey);
 						identity.smimeCertificate(oData.Result.x509);
 					} else {
-						this.submitError(oData.ErrorMessage);
+						this.submitError(oData.message);
 					}
 				}, {
 					name: identity.name(),
@@ -81,7 +81,7 @@ export class IdentityPopupView extends AbstractViewPopup {
 					if (oData.Result) {
 						identity.smimeKey(oData.Result);
 					} else {
-						this.submitError(oData.ErrorMessage);
+						this.submitError(oData.message);
 					}
 				}, {
 					privateKey: identity.smimeKey(),

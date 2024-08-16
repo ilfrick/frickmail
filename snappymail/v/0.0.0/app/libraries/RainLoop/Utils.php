@@ -70,11 +70,11 @@ class Utils
 	{
 		$oActions = \RainLoop\Api::Actions();
 		$oAccount = $oActions->getAccountFromToken(false);
+//		$oAccount = $oActions->getMainAccountFromToken(false);
 		if ($oAccount) {
-			return '2-' . \sha1(APP_SALT.$oAccount->Hash());
-		}
-		$oAccount = $oActions->getMainAccountFromToken(false);
-		if ($oAccount) {
+			if ($oAccount instanceof \RainLoop\Model\AdditionalAccount) {
+				return '2-' . \sha1(APP_SALT.$oAccount->Hash());
+			}
 			return '1-' . \sha1(APP_SALT.$oAccount->Hash());
 		}
 		$sToken = \SnappyMail\Cookies::get(self::CONNECTION_TOKEN);
@@ -82,7 +82,7 @@ class Utils
 			$sToken = \MailSo\Base\Utils::Sha1Rand(APP_SALT);
 			\SnappyMail\Cookies::set(self::CONNECTION_TOKEN, $sToken, \time() + 3600 * 24 * 30);
 		}
-		return \sha1('Connection'.APP_SALT.$sToken.'Token'.APP_SALT);
+		return '0-' . \sha1('Connection'.APP_SALT.$sToken.'Token'.APP_SALT);
 	}
 
 	public static function GetCsrfToken() : string

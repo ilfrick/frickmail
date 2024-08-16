@@ -499,8 +499,8 @@ export class ComposePopupView extends AbstractViewPopup {
 				const sendFailed = (iError, data) => {
 					this.sendError(true);
 					this.sendErrorDesc(
-						getNotification(iError, data?.ErrorMessage, Notifications.CantSendMessage)
-						+ "\n" + (data?.ErrorMessageAdditional || data?.ErrorMessage)
+						getNotification(iError, data?.message, Notifications.CantSendMessage)
+						+ "\n" + (data?.messageAdditional || data?.message)
 					);
 				};
 				try {
@@ -530,8 +530,8 @@ export class ComposePopupView extends AbstractViewPopup {
 									if (Notifications.CantSaveMessage === iError) {
 										this.sendSuccessButSaveError(true);
 										let msg = i18n('COMPOSE/SAVED_ERROR_ON_SEND');
-										if (data?.ErrorMessageAdditional) {
-											msg = msg + "\n" + data?.ErrorMessageAdditional;
+										if (data?.messageAdditional) {
+											msg = msg + "\n" + data?.messageAdditional;
 										}
 										this.savedErrorDesc(msg);
 									} else {
@@ -1151,7 +1151,7 @@ export class ComposePopupView extends AbstractViewPopup {
 			.on('onComplete', (id, result, data) => {
 				const attachment = this.getAttachmentById(id),
 					response = data?.Result || {},
-					errorCode = response.ErrorCode,
+					errorCode = response.code,
 					attachmentJson = result && response.Attachment;
 
 				let error = '';
@@ -1167,7 +1167,7 @@ export class ComposePopupView extends AbstractViewPopup {
 							.waiting(false)
 							.uploading(false)
 							.complete(true)
-							.error(error + '\n' + response.ErrorMessage);
+							.error(error + '\n' + response.message);
 					} else if (attachmentJson) {
 						attachment
 							.waiting(false)

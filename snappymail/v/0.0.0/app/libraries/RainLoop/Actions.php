@@ -828,7 +828,7 @@ class Actions
 			$sError = Enumerations\UploadError::getUserMessage($iError, $iClientError);
 
 			if (!empty($sError)) {
-				$aResponse['ErrorCode'] = $iClientError;
+				$aResponse['code'] = $iClientError;
 				$aResponse['Error'] = $sError;
 			}
 		}

@@ -13,11 +13,11 @@ trait Response
 	public function DefaultResponse($mResult, array $aAdditionalParams = array(), string $sActionName = '') : array
 	{
 		if (false === $mResult) {
-			if (!isset($aAdditionalParams['ErrorCode'])) {
-				$aAdditionalParams['ErrorCode'] = 0;
+			if (!isset($aAdditionalParams['code'])) {
+				$aAdditionalParams['code'] = 0;
 			}
-			if (!isset($aAdditionalParams['ErrorMessage'])) {
-				$aAdditionalParams['ErrorMessage'] = '';
+			if (!isset($aAdditionalParams['message'])) {
+				$aAdditionalParams['message'] = '';
 			}
 		}
 
@@ -36,9 +36,9 @@ trait Response
 	public function FalseResponse(int $iErrorCode = 0, string $sErrorMessage = '', string $sAdditionalErrorMessage = '') : array
 	{
 		return $this->DefaultResponse(false, [
-			'ErrorCode' => $iErrorCode,
-			'ErrorMessage' => $sErrorMessage,
-			'ErrorMessageAdditional' => $sAdditionalErrorMessage
+			'code' => $iErrorCode,
+			'message' => $sErrorMessage,
+			'messageAdditional' => $sAdditionalErrorMessage
 		]);
 	}
 
@@ -62,9 +62,9 @@ trait Response
 		$this->logException($oException->getPrevious() ?: $oException);
 
 		return $this->DefaultResponse(false, [
-			'ErrorCode' => $iErrorCode,
-			'ErrorMessage' => $sErrorMessage,
-			'ErrorMessageAdditional' => $sErrorMessageAdditional,
+			'code' => $iErrorCode,
+			'message' => $sErrorMessage,
+			'messageAdditional' => $sErrorMessageAdditional,
 			'ExceptionCode' => $iExceptionCode
 		]);
 	}

@@ -118,9 +118,9 @@ export class LoginUserView extends AbstractViewLogin {
 						if (Notifications.InvalidInputArgument == iError) {
 							iError = Notifications.AuthError;
 						}
-						this.submitError(getNotification(iError, oData?.ErrorMessage,
+						this.submitError(getNotification(iError, oData?.message,
 							Notifications.UnknownError));
-						this.submitErrorAdditional(oData?.ErrorMessageAdditional || oData?.message);
+						this.submitErrorAdditional(oData?.messageAdditional || oData?.message);
 					} else {
 						rl.setData(oData.Result);
 					}

@@ -123,9 +123,9 @@ window.rl = {
 					return Promise.reject(Notifications.JsonParse);
 					return {
 						Result: false,
-						ErrorCode: 952, // Notifications.JsonParse
-						ErrorMessage: e.message,
-						ErrorMessageAdditional: data
+						code: 952, // Notifications.JsonParse
+						message: e.message,
+						messageAdditional: data
 					}
 				}
 				*/

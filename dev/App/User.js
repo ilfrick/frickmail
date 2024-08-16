@@ -27,7 +27,7 @@ import {
 	getFolderFromCacheList
 } from 'Common/Cache';
 
-import { i18n, reloadTime } from 'Common/Translator';
+import { i18n, reloadTime, getErrorMessage } from 'Common/Translator';
 
 import { SettingsUserStore } from 'Stores/User/Settings';
 import { NotificationUserStore } from 'Stores/User/Notification';
@@ -150,7 +150,8 @@ export class AppUser extends AbstractApp {
 
 	logout() {
 		Remote.request('Logout', (iError, data) =>
-			iError ? alert(data) : rl.logoutReload(Settings.app('customLogoutLink'))
+			iError ? alert('Logout error: ' + getErrorMessage(iError, data))
+				: rl.logoutReload(Settings.app('customLogoutLink'))
 		);
 	}
 
@@ -183,9 +184,9 @@ export class AppUser extends AbstractApp {
 			SettingsUserStore.init();
 			ContactUserStore.init();
 
-			loadFolders(value => {
+			loadFolders((success, error) => {
 				try {
-					if (value) {
+					if (success) {
 						startScreens([
 							MailBoxUserScreen,
 							SettingsUserScreen
@@ -227,6 +228,7 @@ export class AppUser extends AbstractApp {
 						setTimeout(() => mailToHelper(SettingsGet('mailToEmail')), 500);
 					} else {
 						this.logout();
+						alert('Folders error: ' + getErrorMessage(0, error))
 					}
 				} catch (e) {
 					console.error(e);

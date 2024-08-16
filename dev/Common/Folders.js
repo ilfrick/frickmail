@@ -198,7 +198,7 @@ dropFilesInFolder = (sFolderFullName, files) => {
 			data.append('folder', sFolderFullName);
 			data.append('appendFile', file);
 			Remote.request('FolderAppend', (iError, data)=>{
-				iError && console.error(data.ErrorMessage);
+				iError && console.error(data.message);
 				0 == --count
 				&& FolderUserStore.currentFolderFullName() == sFolderFullName
 				&& MessagelistUserStore.reload(true, true);

@@ -68,7 +68,7 @@ export class AdminSettingsPackages extends AbstractViewSettings {
 			if (iError) {
 				this.packagesError(
 					getNotification(install ? Notifications.CantInstallPackage : Notifications.CantDeletePackage)
-					+ (data.ErrorMessage ? ':\n' + data.ErrorMessage : '')
+					+ (data.message ? ':\n' + data.message : '')
 				);
 			} else if (data.Result.Reload) {
 				location.reload();
@@ -113,8 +113,8 @@ export class AdminSettingsPackages extends AbstractViewSettings {
 				if (iError) {
 					plugin.enabled(disable);
 					this.packagesError(
-						(Notifications.UnsupportedPluginPackage === iError && data?.ErrorMessage)
-						? data.ErrorMessage
+						(Notifications.UnsupportedPluginPackage === iError && data?.message)
+						? data.message
 						: getNotification(iError)
 					);
 				}
