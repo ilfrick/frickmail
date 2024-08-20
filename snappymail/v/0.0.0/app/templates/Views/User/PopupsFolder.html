@@ -60,21 +60,22 @@
 	</div>
 	<div class="control-group" data-bind="if: ACLAllowed">
 		<label>ACL</label>
-		<div data-bind="foreach: ACL">
-			<details>
-				<summary data-bind="text: identifier"></summary>
-				<table class="table table-hover table-bordered" style="width:auto"><tbody>
-					<tr><td>mayAddItems</td><td class="fontastic" data-bind="text: mayAddItems ? '☑' : '☐'"></td></tr>
-					<tr><td>mayCreateChild</td><td class="fontastic" data-bind="text: mayCreateChild ? '☑' : '☐'"></td></tr>
-					<tr><td>mayDelete</td><td class="fontastic" data-bind="text: mayDelete ? '☑' : '☐'"></td></tr>
-					<tr><td>mayReadItems</td><td class="fontastic" data-bind="text: mayReadItems ? '☑' : '☐'"></td></tr>
-					<tr><td>mayRemoveItems</td><td class="fontastic" data-bind="text: mayRemoveItems ? '☑' : '☐'"></td></tr>
-					<tr><td>mayRename</td><td class="fontastic" data-bind="text: mayRename ? '☑' : '☐'"></td></tr>
-					<tr><td>maySetKeywords</td><td class="fontastic" data-bind="text: maySetKeywords ? '☑' : '☐'"></td></tr>
-					<tr><td>maySetSeen</td><td class="fontastic" data-bind="text: maySetSeen ? '☑' : '☐'"></td></tr>
-					<tr><td>maySubmit</td><td class="fontastic" data-bind="text: maySubmit ? '☑' : '☐'"></td></tr>
-				</tbody></table>
-			</details>
+		<div>
+			<table class="table table-hover" style="width:auto"><tbody>
+				<!-- ko foreach: folder()?.ACL -->
+				<tr>
+					<td data-bind="text: identifier"></td>
+					<td>
+						<button class="btn fontastic" data-bind="visible: mine, click: $root.editACL">👁</button>
+						<button class="btn fontastic" data-bind="visible: !mine(), click: $root.editACL">🖉</button>
+						<button class="btn fontastic" data-bind="visible: !mine(), click: $root.deleteACL">🗑</button>
+					</td>
+				</tr>
+				<!-- /ko -->
+				<tr><td></td><td>
+					<button class="btn fontastic" data-bind="visible: adminACL, click: createACL">✚</button>
+				</td></tr>
+			</tbody></table>
 		</div>
 	</div>
 </form>
