@@ -1,7 +1,6 @@
 import 'External/User/ko';
 
 import { SMAudio } from 'Common/Audio';
-import { pInt } from 'Common/Utils';
 import { mailToHelper, setLayoutResizer, dropdownsDetectVisibility, loadAccountsAndIdentities } from 'Common/UtilsUser';
 
 import {
@@ -192,7 +191,7 @@ export class AppUser extends AbstractApp {
 							SettingsUserScreen
 						]);
 
-						setRefreshFoldersInterval(pInt(SettingsGet('CheckMailInterval')));
+						setRefreshFoldersInterval(SettingsGet('CheckMailInterval'));
 
 						loadAccountsAndIdentities();
 

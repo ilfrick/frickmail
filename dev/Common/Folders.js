@@ -1,7 +1,8 @@
 import { RFC822 } from 'Common/File';
 import { getFolderInboxName, getFolderFromCacheList } from 'Common/Cache';
 import { baseCollator } from 'Common/Translator';
-import { isArray, arrayLength } from 'Common/Utils';
+import { SettingsGet } from 'Common/Globals';
+import { isArray, arrayLength, pInt } from 'Common/Utils';
 import { SettingsUserStore } from 'Stores/User/Settings';
 import { FolderUserStore } from 'Stores/User/Folder';
 import { MessagelistUserStore } from 'Stores/User/Messagelist';
@@ -9,13 +10,13 @@ import { MessagelistUserStore } from 'Stores/User/Messagelist';
 import Remote from 'Remote/User/Fetch';
 
 let refreshInterval,
-	// Default every 5 minutes
-	refreshFoldersInterval = 300000;
+	// Default every 15 minutes
+	refreshFoldersInterval = 900000;
 
 export const
 
 setRefreshFoldersInterval = minutes => {
-	refreshFoldersInterval = Math.max(5, minutes) * 60000;
+	refreshFoldersInterval = Math.max(1, pInt(SettingsGet('minRefreshInterval')), pInt(minutes)) * 60000;
 	clearInterval(refreshInterval);
 	refreshInterval = setInterval(() => {
 		const cF = FolderUserStore.currentFolderFullName(),
