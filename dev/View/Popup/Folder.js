@@ -39,7 +39,7 @@ export class FolderACLRightsModel extends AbstractModel {
 		json.rights = json.rights.split('');
 		return super.reviveFromJson(json);
 	}
-
+/*
 	get mayReadItems()   { return this.rights.includes('l') && this.rights.includes('r'); }
 	get mayAddItems()    { return this.rights.includes('i'); }
 	get mayRemoveItems() { return this.rights.includes('t') && this.rights.includes('e'); }
@@ -49,6 +49,7 @@ export class FolderACLRightsModel extends AbstractModel {
 	get mayRename()      { return this.rights.includes('x'); }
 	get mayDelete()      { return this.rights.includes('x'); }
 	get maySubmit()      { return this.rights.includes('p'); }
+*/
 }
 
 export class FolderPopupView extends AbstractViewPopup {
