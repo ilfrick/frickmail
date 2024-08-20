@@ -11,7 +11,10 @@
 			<input name="Name" type="text" class="span4" autofocus="" autocomplete="off" autocorrect="off" autocapitalize="off"
 				data-bind="textInput: name">
 			<div class="alert-error" data-bind="visible: savingError, text: savingError"></div>
-			<button type="button" data-bind="click: autoconfig">autoconfig</button>
+			<button class="btn" type="button" data-bind="click: autoconfig">
+				<i class="fontastic" data-bind="css: {'icon-spinner': detectingConfig()}">⚙</i>
+				autoconfig
+			</button>
 		</div>
 		<div class="span5 alert-info domain-desc" data-bind="visible: domainDesc, html: domainDesc"></div>
 	</div>

@@ -148,6 +148,8 @@ export class DomainPopupView extends AbstractViewPopup {
 			imapHostFocus: false,
 			sieveHostFocus: false,
 			smtpHostFocus: false,
+
+			detectingConfig: false
 		});
 		this.imapDisabled_capabilities = ko.observableArray();
 		this.imapCapabilities = ko.observableArray();
@@ -318,6 +320,7 @@ export class DomainPopupView extends AbstractViewPopup {
 	}
 
 	autoconfig() {
+		this.detectingConfig(true);
 		let domain = this.name();
 		Remote.request('AdminDomainAutoconfig', (iError, oData) => {
 			if (oData?.Result?.config) {
@@ -335,6 +338,7 @@ export class DomainPopupView extends AbstractViewPopup {
 				this.smtpUseAuth(!!server.authentication);
 				this.smtpUsePhpMail(false);
 			}
+			this.detectingConfig(false);
 		}, {domain});
 	}
 
