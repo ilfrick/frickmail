@@ -213,6 +213,13 @@ class Actions
 				case 'suggestions':
 					$mResult = [];
 					break;
+/*				// See function Cacher
+				case 'cache':
+					$mResult = new \MailSo\Cache\Drivers\File(
+						\trim($this->oConfig->Get('cache', 'path', '')) ?: APP_PRIVATE_DATA . 'cache'
+					);
+					break;
+*/
 			}
 		}
 
@@ -460,6 +467,9 @@ class Actions
 		return $this->oDomainProvider;
 	}
 
+	/**
+	 * bForceFile is only used by admin session token
+	 */
 	public function Cacher(?Model\Account $oAccount = null, bool $bForceFile = false): \MailSo\Cache\CacheClient
 	{
 		$sKey = '';
@@ -481,7 +491,6 @@ class Actions
 					\trim($this->oConfig->Get('cache', 'path', '')) ?: APP_PRIVATE_DATA . 'cache'
 				);
 			}
-//			$sDriver = \strtoupper(\trim($this->oConfig->Get('cache', 'fast_cache_driver', 'files')));
 			$oDriver->setPrefix($sKey);
 
 			$this->aCachers[$sIndexKey]->SetDriver($oDriver);
