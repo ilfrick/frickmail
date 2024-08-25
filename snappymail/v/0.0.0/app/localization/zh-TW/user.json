@@ -88,8 +88,19 @@
 		"TRASH_NAME": "垃圾桶",
 		"ARCHIVE_NAME": "封存"
 	},
-	"QUOTA": {
-		"TITLE": "配額使用"
+	"IMAP": {
+		"ACL_RIGHTS": "Rights",
+		"ACL_A": "Administer",
+		"ACL_E": "Expunge",
+		"ACL_I": "Insert messages",
+		"ACL_K": "Create sub-folders",
+		"ACL_L": "Show messages",
+		"ACL_P": "Send mail",
+		"ACL_R": "Select folder",
+		"ACL_S": "\\SEEN tag",
+		"ACL_T": "\\DELETED tag",
+		"ACL_W": "Other tags",
+		"ACL_X": "Delete\/Rename folder"
 	},
 	"MESSAGE_LIST": {
 		"BUTTON_RELOAD": "重新載入郵件清單",

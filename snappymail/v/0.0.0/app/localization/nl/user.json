@@ -88,8 +88,19 @@
 		"TRASH_NAME": "Verwijderde items",
 		"ARCHIVE_NAME": "Archief"
 	},
-	"QUOTA": {
-		"TITLE": "Quota gebruik"
+	"IMAP": {
+		"ACL_RIGHTS": "Rechten",
+		"ACL_A": "Beheren",
+		"ACL_E": "Uitwissen",
+		"ACL_I": "Berichten toevoegen",
+		"ACL_K": "Submappen maken",
+		"ACL_L": "Toon berichten",
+		"ACL_P": "Verstuur mail",
+		"ACL_R": "Map selecteren",
+		"ACL_S": "\\SEEN label",
+		"ACL_T": "\\DELETED label",
+		"ACL_W": "Andere labels",
+		"ACL_X": "Map verwijderen\/hernoemen"
 	},
 	"MESSAGE_LIST": {
 		"BUTTON_RELOAD": "Berichten controleren",

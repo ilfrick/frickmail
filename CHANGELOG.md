@@ -1,3 +1,28 @@
+## 2.37.3 – 2024-08-13
+
+### Added
+- Edit ACL rules
+  [#157](https://github.com/the-djmaze/snappymail/issues/157)
+- Change minimum new mail check interval
+  [#1678](https://github.com/the-djmaze/snappymail/issues/1678)
+- Sieve editor does not support "index" extension
+  [#1709](https://github.com/the-djmaze/snappymail/issues/1709)
+
+### Changed
+- Improved domain autoconfig interaction
+- Simplify sieve scripts list
+  [#1675](https://github.com/the-djmaze/snappymail/issues/1675)
+- Handling of (token) errors due to
+  [#1706](https://github.com/the-djmaze/snappymail/issues/1706)
+- Update Chinese by @Artoria2e5
+
+### Fixed
+- Thread sorting visible after disabling the imap capability
+  [#1574](https://github.com/the-djmaze/snappymail/issues/1574)
+- Creating new message impossible as long as a draft exists?
+  [#1710](https://github.com/the-djmaze/snappymail/issues/1710)
+
+
 ## 2.37.2 – 2024-08-13
 
 ### Added

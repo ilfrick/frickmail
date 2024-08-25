@@ -88,8 +88,19 @@
 		"TRASH_NAME": "已删除邮件",
 		"ARCHIVE_NAME": "存档"
 	},
-	"QUOTA": {
-		"TITLE": "存储空间使用量"
+	"IMAP": {
+		"ACL_RIGHTS": "Rights",
+		"ACL_A": "Administer",
+		"ACL_E": "Expunge",
+		"ACL_I": "Insert messages",
+		"ACL_K": "Create sub-folders",
+		"ACL_L": "Show messages",
+		"ACL_P": "Send mail",
+		"ACL_R": "Select folder",
+		"ACL_S": "\\SEEN tag",
+		"ACL_T": "\\DELETED tag",
+		"ACL_W": "Other tags",
+		"ACL_X": "Delete\/Rename folder"
 	},
 	"MESSAGE_LIST": {
 		"BUTTON_RELOAD": "刷新消息列表",
