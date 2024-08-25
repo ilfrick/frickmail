@@ -37,7 +37,11 @@ module.exports = {
 		// Mailvelope
 		'mailvelope': "readonly",
 		// Punycode
-		'IDN': "readonly"
+		'IDN': "readonly",
+		// Turndown
+		'TurndownService': "readonly",
+		// Marked
+		'marked': "readonly"
 	},
 	// http://eslint.org/docs/rules/
 	rules: {

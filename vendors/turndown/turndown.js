@@ -4,7 +4,6 @@
  */
 
 const TurndownService = (() => {
-  'use strict';
 
   const repeat = (character, count) => Array(count + 1).join(character),
 
