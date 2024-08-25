@@ -310,7 +310,7 @@
 		"STORE_PRIVATE_KEY_IN_GNUPG": "以 GnuPG 儲存私鑰在伺服器上",
 		"BACKUP_ON_SERVER": "在伺服器中儲存 (已加密)",
 		"BACKUP_PUBLIC_KEY_ON_SERVER": "在伺服器中儲存公鑰",
-		"BACKUP_PRIVATE_KEY_ON_SERVER": "在伺服器中儲存私鑰",
+		"BACKUP_PRIVATE_KEY_ON_SERVER": "在伺服器中儲存私鑰"
 	},
 	"SMIME": {
 		"POPUP_IMPORT_TITLE": "匯入 S\/MIME 證書",
