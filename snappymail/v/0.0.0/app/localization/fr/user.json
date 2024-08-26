@@ -89,18 +89,18 @@
 		"ARCHIVE_NAME": "Archive"
 	},
 	"IMAP": {
-		"ACL_RIGHTS": "Rights",
-		"ACL_A": "Administer",
-		"ACL_E": "Expunge",
-		"ACL_I": "Insert messages",
-		"ACL_K": "Create sub-folders",
-		"ACL_L": "Show messages",
-		"ACL_P": "Send mail",
-		"ACL_R": "Select folder",
-		"ACL_S": "\\SEEN tag",
-		"ACL_T": "\\DELETED tag",
-		"ACL_W": "Other tags",
-		"ACL_X": "Delete\/Rename folder"
+		"ACL_RIGHTS": "Droits",
+		"ACL_A": "Administrer",
+		"ACL_E": "Supprimer",
+		"ACL_I": "Insérer des messages",
+		"ACL_K": "Créer des sous-dossiers",
+		"ACL_L": "Afficher les messages",
+		"ACL_P": "Envoyer un courrier",
+		"ACL_R": "Sélectionner un dossier",
+		"ACL_S": "\\VUE balise",
+		"ACL_T": "\\SUPPRIMÉE balise",
+		"ACL_W": "Autres balises",
+		"ACL_X": "Supprimer\/Renommer le dossier"
 	},
 	"MESSAGE_LIST": {
 		"BUTTON_RELOAD": "Recharger la liste des messages",
