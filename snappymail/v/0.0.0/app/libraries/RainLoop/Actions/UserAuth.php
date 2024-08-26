@@ -176,6 +176,7 @@ trait UserAuth
 			$this->Plugins()->RunHook('login.success', array($oAccount));
 
 			$this->SetAuthToken($oAccount);
+			$this->SetAdditionalAuthToken(null);
 		}
 
 		return $oAccount;
