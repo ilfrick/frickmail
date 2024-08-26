@@ -469,6 +469,7 @@ export const
 					else if (detectHiddenImages
 						&& ((oStyle.maxHeight && 3 > pInt(oStyle.maxHeight)) // TODO: issue with 'in'
 							|| (oStyle.maxWidth && 3 > pInt(oStyle.maxWidth)) // TODO: issue with 'in'
+							|| (oStyle.width && 2 > pInt(oStyle.width))
 							|| [
 								'email.microsoftemail.com/open',
 								'github.com/notifications/beacon/',
