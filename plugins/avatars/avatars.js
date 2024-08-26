@@ -186,6 +186,10 @@
 				if (msg?.from?.[0]) {
 					let url = getAvatar(msg),
 						fn = url=>{element.src = url};
+					element.onerror = ()=>{
+						element.onerror = null;
+						setIdenticon(msg.from[0], fn);
+					};
 					if (url) {
 						fn(url);
 					} else if (msg.avatar?.startsWith('data:')) {
