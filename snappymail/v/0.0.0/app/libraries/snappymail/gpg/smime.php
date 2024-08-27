@@ -58,20 +58,6 @@ class SMIME extends Base
 		}
 	}
 
-	function __destruct()
-	{
-		$this->proc_close();
-
-		$gpgconf = static::findBinary('gpgconf');
-		if ($gpgconf) {
-			$env = ['GNUPGHOME' => $this->options['homedir']];
-			$pipes = [];
-			if ($process = \proc_open($gpgconf . ' --kill gpg-agent --homedir ' . \escapeshellarg($this->options['homedir']), [], $pipes, null, $env)) {
-				\proc_close($process);
-			}
-		}
-	}
-
 	public static function isSupported() : bool
 	{
 		return parent::isSupported() && static::findBinary('gpgsm');

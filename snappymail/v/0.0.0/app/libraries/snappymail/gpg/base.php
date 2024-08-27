@@ -76,12 +76,16 @@ abstract class Base
 	function __destruct()
 	{
 		$this->proc_close();
-
 		$gpgconf = static::findBinary('gpgconf');
 		if ($gpgconf) {
+			$cmd = $gpgconf . ' --kill gpg-agent';
+			// https://github.com/the-djmaze/snappymail/issues/1560#issuecomment-2144817883
+//			if (\version_compare($this->version, '2.4.0', '<')) {
+				$cmd .= ' ' . \escapeshellarg($this->options['homedir']);
+//			}
 			$env = ['GNUPGHOME' => $this->options['homedir']];
 			$pipes = [];
-			if ($process = \proc_open($gpgconf . ' --kill gpg-agent --homedir ' . \escapeshellarg($this->options['homedir']), [], $pipes, null, $env)) {
+			if ($process = \proc_open($cmd, [], $pipes, null, $env)) {
 				\proc_close($process);
 			}
 		}

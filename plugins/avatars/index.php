@@ -116,12 +116,16 @@ class AvatarsPlugin extends \RainLoop\Plugins\AbstractPlugin
 	 * Nextcloud Mail uses insecure unencrypted 'index.php/apps/mail/api/avatars/url/local%40example.com'
 	 */
 //	public function ServiceAvatar(...$aParts)
-	public function ServiceAvatar(string $sServiceName, string $sBimi, string $sEmail)
+	public function ServiceAvatar(string $sServiceName, string $sBimi, string $sEncryptedEmail)
 	{
-		$sEmail = \SnappyMail\Crypt::DecryptUrlSafe($sEmail);
+		$maxAge = 86400;
+		$sEmail = \SnappyMail\Crypt::DecryptUrlSafe($sEncryptedEmail);
 		$aBimi = \explode('-', $sBimi, 2);
 		$sBimiSelector = isset($aBimi[1]) ? $aBimi[1] : 'default';
+//		$sEmail && \MailSo\Base\Http::setETag("{$sBimiSelector}-{$sEncryptedEmail}");
 		if ($sEmail && ($aResult = $this->getAvatar($sEmail, !empty($aBimi[0]), $sBimiSelector))) {
+			\header("Cache-Control: max-age={$maxAge}, private");
+			\header('Expires: '.\gmdate('D, j M Y H:i:s', $maxAge + \time()).' UTC');
 			\header('Content-Type: '.$aResult[0]);
 			echo $aResult[1];
 		} else {

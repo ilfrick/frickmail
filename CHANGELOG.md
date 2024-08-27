@@ -1,8 +1,14 @@
-## 2.37.3 – 2024-08-13
+## 2.37.3 – 2024-08-27
 
 ### Added
+- Mark images with width=1 as tracking pixel
+- Show warning in Admin -> About when PHP runs in 32bit
 - Edit ACL rules
   [#157](https://github.com/the-djmaze/snappymail/issues/157)
+- Show GnuPG version for
+  [#1560](https://github.com/the-djmaze/snappymail/issues/1560)
+- Make sure only scalar values are allowed in $_ENV for
+  [#1560](https://github.com/the-djmaze/snappymail/issues/1560)
 - Change minimum new mail check interval
   [#1678](https://github.com/the-djmaze/snappymail/issues/1678)
 - Sieve editor does not support "index" extension
@@ -10,17 +16,26 @@
 
 ### Changed
 - Improved domain autoconfig interaction
+- MS autodiscover priorities DNS over subdomain
 - Simplify sieve scripts list
   [#1675](https://github.com/the-djmaze/snappymail/issues/1675)
 - Handling of (token) errors due to
   [#1706](https://github.com/the-djmaze/snappymail/issues/1706)
+- Sabre/Xml to v4.0.5
 - Update Chinese by @Artoria2e5
+- Update French by @hguilbert
 
 ### Fixed
 - Thread sorting visible after disabling the imap capability
   [#1574](https://github.com/the-djmaze/snappymail/issues/1574)
 - Creating new message impossible as long as a draft exists?
   [#1710](https://github.com/the-djmaze/snappymail/issues/1710)
+- InvalidToken error at login
+  [#1706](https://github.com/the-djmaze/snappymail/issues/1706)
+
+### Nextcloud
+- Force Nextcloud personal language by default
+  [#1428](https://github.com/the-djmaze/snappymail/issues/1428)
 
 
 ## 2.37.2 – 2024-08-13

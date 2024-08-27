@@ -25,6 +25,7 @@ ko.utils = {
             : node => node.cloneNode(true)),
 
     setDomNodeChildren: (domNode, childNodes) => {
+//        domNode.replaceChildren(...childNodes);
         ko.utils.emptyDomNode(domNode);
         childNodes && domNode.append(...childNodes);
     },
