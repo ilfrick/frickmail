@@ -456,6 +456,9 @@ class ActionsAdmin extends Actions
 			$aResult['Admin']['language'] = $oActions->ValidateLanguage($oConfig->Get('admin_panel', 'language', 'en'), '', true);
 			$aResult['Admin']['languages'] = \SnappyMail\L10n::getLanguages(true);
 			$aResult['Admin']['clientLanguage'] = $oActions->ValidateLanguage($oActions->detectClientLanguage(true), '', true, true);
+
+			$gnupg = \SnappyMail\PGP\GnuPG::getInstance('');
+			$aResult['gnupg'] = $gnupg ? $gnupg->getEngineInfo()['version'] : null;
 		} else {
 			$passfile = APP_PRIVATE_DATA.'admin_password.txt';
 			$sPassword = $oConfig->Get('security', 'admin_password', '');

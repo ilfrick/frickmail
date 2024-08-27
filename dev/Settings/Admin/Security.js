@@ -32,6 +32,8 @@ export class AdminSettingsSecurity extends AbstractViewSettings {
 			capaOpenPGP: SettingsCapa('OpenPGP')
 		});
 
+		this.gnuPGversion = 'GnuPG v' + SettingsGet('gnupg');
+
 		const reset = () => {
 			this.saveError(false);
 			this.saveSuccess(false);
