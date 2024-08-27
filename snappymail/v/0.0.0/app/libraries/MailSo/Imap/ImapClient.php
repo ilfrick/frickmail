@@ -299,6 +299,7 @@ class ImapClient extends \MailSo\Net\NetClient
 	private function setCapabilities(ResponseCollection $oResponseCollection) : void
 	{
 		$aList = $oResponseCollection->getCapabilityResult();
+		$this->aCapaRaw = $aList;
 		if ($aList) {
 			// Strip unused capabilities
 			$aList = \array_diff($aList, ['PREVIEW=FUZZY', 'SNIPPET=FUZZY', 'SORT=DISPLAY']);
