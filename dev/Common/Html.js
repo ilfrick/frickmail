@@ -676,7 +676,9 @@ export const
 		forEach('a', a => {
 			let txt = a.textContent, href = a.href;
 			return a.replaceWith(
-				txt.trim() == href || href.includes('mailto:') ? txt : txt + ' ' + href + ' '
+				txt.replace(/[\s()-]+/g, '').includes(href.replace(/^[a-z]:/, '').replace(/[\s()-]+/g, ''))
+				? txt
+				: txt + ' ' + href + ' '
 			);
 		});
 
