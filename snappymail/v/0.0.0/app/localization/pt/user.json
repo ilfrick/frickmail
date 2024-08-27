@@ -499,7 +499,7 @@
 		"IMAGES_OPTION_ALWAYS": "Mostrar sempre",
 		"IMAGES_WHITELIST": "Lista Branca de imagens",
 		"MESSAGE_POPUP_WINDOW": "Abrir em nova janela em vez de um separador",
-		"MAILTO": "Register as 'mailto:' links handler"
+		"MAILTO": "Registar como manipulador de ligações 'mailto:'"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Adicionar destinatários automaticamente à sua lista de endereços",
