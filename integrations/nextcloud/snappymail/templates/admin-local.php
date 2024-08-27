@@ -72,6 +72,13 @@
 			<?php } ?>
 
 			<p>
+				<input id="snappymail-nc-lang" name="snappymail-nc-lang" type="checkbox" class="checkbox" <?php if ($_['snappymail-nc-lang']) echo 'checked="checked"'; ?>>
+				<label for="snappymail-nc-lang">
+					<?php echo($l->t('Force Nextcloud personal language')); ?>
+				</label>
+			</p>
+			<br />
+			<p>
 				<label for="snappymail-app_path">
 					<?php echo($l->t('app_path')); ?>
 				</label>

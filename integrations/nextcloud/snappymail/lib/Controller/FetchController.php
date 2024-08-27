@@ -61,11 +61,15 @@ class FetchController extends Controller {
 				]);
 			}
 
+			SnappyMailHelper::loadApp();
+
+			$oConfig = \RainLoop\Api::Config();
 			if (!empty($_POST['snappymail-app_path'])) {
-				$oConfig = \RainLoop\Api::Config();
 				$oConfig->Set('webmail', 'app_path', $_POST['snappymail-app_path']);
-				$oConfig->Save();
 			}
+			$oConfig->Set('webmail', 'allow_languages_on_settings', empty($_POST['snappymail-nc-lang']));
+			$oConfig->Set('login', 'allow_languages_on_login', empty($_POST['snappymail-nc-lang']));
+			$oConfig->Save();
 
 			if (!empty($_POST['import-rainloop'])) {
 				return new JSONResponse([
@@ -74,7 +78,6 @@ class FetchController extends Controller {
 				]);
 			}
 
-			SnappyMailHelper::loadApp();
 			$debug = !empty($_POST['snappymail-debug']);
 			$oConfig = \RainLoop\Api::Config();
 			if ($debug != $oConfig->Get('debug', 'enable', false)) {
@@ -133,7 +136,7 @@ class FetchController extends Controller {
 			// TODO: Handle both exceptions separately?
 			SnappyMailHelper::loadApp();
 			\RainLoop\Api::Actions()->DoLogout();
-			
+
 			return new JSONResponse([
 				'status' => 'error',
 				'Message' => $e->getMessage()

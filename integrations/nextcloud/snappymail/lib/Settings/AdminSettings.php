@@ -71,6 +71,7 @@ class AdminSettings implements ISettings
 			$oConfig->Save();
 		}
 		$parameters['snappymail-app_path'] = $oConfig->Get('webmail', 'app_path', false);
+		$parameters['snappymail-nc-lang'] = !$oConfig->Get('webmail', 'allow_languages_on_settings', true);
 
 		\OCP\Util::addScript('snappymail', 'snappymail');
 		return new TemplateResponse('snappymail', 'admin-local', $parameters);
