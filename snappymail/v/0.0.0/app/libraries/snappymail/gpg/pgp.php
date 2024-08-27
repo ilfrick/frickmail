@@ -867,6 +867,7 @@ class PGP extends Base implements \SnappyMail\PGP\PGPInterface
 		// Don't localize GnuPG results.
 		$env = $_ENV;
 		$env['LC_ALL'] = 'C';
+		$env = \array_filter($env, fn($var) => \is_scalar($var));
 
 		$proc_pipes = [];
 
