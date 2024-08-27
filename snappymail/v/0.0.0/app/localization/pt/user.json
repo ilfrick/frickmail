@@ -11,7 +11,7 @@
 		"CLOSE": "Fechar",
 		"CONTACTS": "Contactos",
 		"DELETE": "Eliminar",
-		"UNDELETE": "Undelete",
+		"UNDELETE": "Restaurar",
 		"DONE": "Terminado",
 		"EMAIL": "Email",
 		"FROM": "De",
@@ -77,7 +77,7 @@
 		"SUBFOLDERS_SUBTREE": "Todas",
 		"SUBFOLDERS_SUBTREE_ONE": "Um nível",
 		"REPLIED": "Respondidas",
-		"KEYWORD": "Etiqueta"
+		"KEYWORD": "Marcador"
 	},
 	"FOLDER_LIST": {
 		"BUTTON_COMPOSE": "Escrever",
@@ -89,18 +89,18 @@
 		"ARCHIVE_NAME": "Arquivo"
 	},
 	"IMAP": {
-		"ACL_RIGHTS": "Rights",
-		"ACL_A": "Administer",
-		"ACL_E": "Expunge",
-		"ACL_I": "Insert messages",
-		"ACL_K": "Create sub-folders",
-		"ACL_L": "Show messages",
-		"ACL_P": "Send mail",
-		"ACL_R": "Select folder",
-		"ACL_S": "\\SEEN tag",
-		"ACL_T": "\\DELETED tag",
-		"ACL_W": "Other tags",
-		"ACL_X": "Delete\/Rename folder"
+		"ACL_RIGHTS": "Permissões",
+		"ACL_A": "Administrar",
+		"ACL_E": "Purgar",
+		"ACL_I": "Inserir mensagens",
+		"ACL_K": "Criar sub-pastas",
+		"ACL_L": "Mostrar mensagens",
+		"ACL_P": "Enviar correio",
+		"ACL_R": "Escolher pasta",
+		"ACL_S": "Marcador \\SEEN (lida)",
+		"ACL_T": "Marcador \\DELETED (eliminada)",
+		"ACL_W": "Outros marcadores",
+		"ACL_X": "Eliminar\/Renomear pasta"
 	},
 	"MESSAGE_LIST": {
 		"BUTTON_RELOAD": "Atualizar lista de mensagens",
@@ -172,8 +172,8 @@
 		"LINK_DOWNLOAD_AS_ZIP": "Transferir em arquivo zip",
 		"SPAM_SCORE": "Pontuação de Spam",
 		"HAS_VIRUS_WARNING": "AVISO: vírus detetado",
-		"TAGS": "Etiquetas",
-		"NEW_TAG": "Nova etiqueta",
+		"TAGS": "Marcadores",
+		"NEW_TAG": "Novo marcador",
 		"ENABLE_TRACKING_LINKS": "Ativar ligações de rastreamento",
 		"TRACKING_ENABLED": "As ligações irão ser rastreadas quando clicadas!"
 	},
@@ -228,7 +228,7 @@
 		"ADD_MENU_URL": "Website",
 		"ADD_MENU_ADDRESS": "Morada",
 		"ADD_MENU_BIRTHDAY": "Aniversário",
-		"ADD_MENU_TAGS": "Etiquetas",
+		"ADD_MENU_TAGS": "Marcadores",
 		"BUTTON_SHARE_ALL": "Todos",
 		"BUTTON_SYNC": "Sincronização (CardDAV)",
 		"SEND_TO_ALL_CONTACT_EMAILS": "Enviar para todos os contactos"
@@ -499,7 +499,7 @@
 		"IMAGES_OPTION_ALWAYS": "Mostrar sempre",
 		"IMAGES_WHITELIST": "Lista Branca de imagens",
 		"MESSAGE_POPUP_WINDOW": "Abrir em nova janela em vez de um separador",
-		"MAILTO": "Register as 'mailto:' links handler"
+		"MAILTO": "Registar como manipulador de ligações 'mailto:'"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Adicionar destinatários automaticamente à sua lista de endereços",
@@ -621,7 +621,7 @@
 		"CantSaveFilters": "Não é possível guardar os filtros",
 		"CantGetFilters": "Não é possível obter os filtros",
 		"CantActivateFiltersScript": "Não é possível ativar o script de filtração",
-		"CantDeleteFiltersScript": "Não é possível apagar o script de filtração",
+		"CantDeleteFiltersScript": "Não é possível eliminar o script de filtração",
 		"FiltersAreNotCorrect": "Os filtros não estão corretos",
 		"CantCreateFolder": "Não é possível criar a pasta",
 		"CantRenameFolder": "Não é possível renomear a pasta",
