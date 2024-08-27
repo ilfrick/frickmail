@@ -168,16 +168,6 @@ abstract class Autoconfig
 	 */
 	private static function autodiscover(string $domain) : ?array
 	{
-		foreach ([
-			"https://{$domain}",
-			"https://autodiscover.{$domain}",
-			"http://autodiscover.{$domain}"
-		] as $host) {
-			$result = static::autodiscover_resolve($host, $domain);
-			if ($result) {
-				return $result;
-			}
-		}
 		foreach (\SnappyMail\DNS::SRV("_autodiscover._tcp.{$domain}") as $record) {
 			if (443 == $record['port']) {
 				$result = static::autodiscover_resolve("https://{$record['target']}", $domain);
@@ -186,6 +176,16 @@ abstract class Autoconfig
 			} else {
 				$result = static::autodiscover_resolve("https://{$record['target']}:{$record['port']}", $domain);
 			}
+			if ($result) {
+				return $result;
+			}
+		}
+		foreach ([
+			"https://{$domain}",
+			"https://autodiscover.{$domain}",
+			"http://autodiscover.{$domain}"
+		] as $host) {
+			$result = static::autodiscover_resolve($host, $domain);
 			if ($result) {
 				return $result;
 			}
