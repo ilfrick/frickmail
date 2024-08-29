@@ -43,7 +43,7 @@ abstract class Api
 		$CSP->report_only = $oConfig->Get('debug', 'enable', false); // || SNAPPYMAIL_DEV
 
 		// Allow https: due to remote images in e-mails or use proxy
-		if (!$oConfig->Get('security', 'use_local_proxy_for_external_images', '')) {
+		if (!$oConfig->Get('labs', 'use_local_proxy_for_external_images', '')) {
 			$CSP->add('img-src', 'https:');
 			$CSP->add('img-src', 'http:');
 		}
