@@ -499,7 +499,8 @@
 		"IMAGES_OPTION_ALWAYS": "永遠顯示",
 		"IMAGES_WHITELIST": "圖片白名單",
 		"MESSAGE_POPUP_WINDOW": "在新彈出窗口而非分頁中打開",
-		"MAILTO": "注冊成 mailto: 連結處理器"
+		"MAILTO": "注冊成 mailto: 連結處理器",
+		"HTML_TO_MD": "Convert HTML to Markdown instead of plain text"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "自動新增收件者至通訊錄",

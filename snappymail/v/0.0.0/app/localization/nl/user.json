@@ -499,7 +499,8 @@
 		"IMAGES_OPTION_ALWAYS": "Altijd tonen",
 		"IMAGES_WHITELIST": "Afbeeldingen whitelist",
 		"MESSAGE_POPUP_WINDOW": "Openen in een nieuw venster i.p.v. tab",
-		"MAILTO": "Registreer als 'mailto:'-linkhandler"
+		"MAILTO": "Registreer als 'mailto:'-linkhandler",
+		"HTML_TO_MD": "Converteer HTML naar Markdown i.p.v. platte tekst"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Automatisch ontvangers toevoegen aan uw adresboek",

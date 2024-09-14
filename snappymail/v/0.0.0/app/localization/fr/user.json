@@ -499,7 +499,8 @@
 		"IMAGES_OPTION_ALWAYS": "Toujours afficher",
 		"IMAGES_WHITELIST": "Liste blanche Images",
 		"MESSAGE_POPUP_WINDOW": "Popup dans une nouvelle fenêtre au lieu d'un onglet",
-		"MAILTO": "Inscrivez-vous en tant que gestionnaire de liens 'mailto:'"
+		"MAILTO": "Inscrivez-vous en tant que gestionnaire de liens 'mailto:'",
+		"HTML_TO_MD": "Convert HTML to Markdown instead of plain text"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Ajouter automatiquement les destinataires à votre carnet d'adresses",

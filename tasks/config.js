@@ -65,6 +65,7 @@ config.paths.js = {
 //			'vendors/knockout/build/output/knockout-latest.debug.js',
 			'vendors/squire/build/squire-raw.js',
 			'vendors/mathiasbynens/punycode.js',
+			'vendors/turndown/turndown.js',
 			'dev/External/SquireUI.js'
 		]
 	},

@@ -4,6 +4,9 @@ import { SettingsUserStore } from 'Stores/User/Settings';
 
 const
 	tmpl = createElement('template'),
+
+	turndown = new TurndownService(),
+
 	htmlre = /[&<>"']/g,
 	httpre = /^(https?:)?\/\//i,
 	htmlmap = {
@@ -604,6 +607,9 @@ export const
 	 * @returns {string}
 	 */
 	htmlToPlain = html => {
+		if (SettingsUserStore.markdown()) {
+			return htmlToMarkdown(html);
+		}
 		const
 			hr = '⎯'.repeat(64),
 			forEach = (selector, fn) => tmpl.content.querySelectorAll(selector).forEach(fn),
@@ -639,6 +645,8 @@ export const
 		tmpl.innerHTML = html
 			.replace(/<t[dh](\s[\s\S]*?)?>/gi, '\t')
 			.replace(/<\/tr(\s[\s\S]*?)?>/gi, '\n');
+
+		forEach('style', node => node.remove());
 
 		// lines
 		forEach('hr', node => node.replaceWith(`\n\n${hr}\n\n`));
@@ -698,6 +706,11 @@ export const
 		blockquotes(tmpl.content);
 
 		return (tmpl.content.textContent || '').trim();
+	},
+
+	htmlToMarkdown = html => {
+		tmpl.innerHTML = html;
+		return turndown.turndown(tmpl.content);
 	},
 
 	/**
@@ -771,5 +784,7 @@ export const
 
 rl.Utils = {
 	htmlToPlain: htmlToPlain,
-	plainToHtml: plainToHtml
+	plainToHtml: plainToHtml,
+	htmlToMarkdown: htmlToMarkdown
+//	markdownToHtml: md => marked.parse(md)
 };
