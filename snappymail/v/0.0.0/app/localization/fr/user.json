@@ -500,7 +500,7 @@
 		"IMAGES_WHITELIST": "Liste blanche Images",
 		"MESSAGE_POPUP_WINDOW": "Popup dans une nouvelle fenêtre au lieu d'un onglet",
 		"MAILTO": "Inscrivez-vous en tant que gestionnaire de liens 'mailto:'",
-		"HTML_TO_MD": "Convert HTML to Markdown instead of plain text"
+		"HTML_TO_MD": "Convertir HTML en Markdown au lieu du texte brut"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Ajouter automatiquement les destinataires à votre carnet d'adresses",
