@@ -735,7 +735,7 @@
     }
   };
   var allowedBlock = /^(?:A(?:DDRESS|RTICLE|SIDE|UDIO)|BLOCKQUOTE|CAPTION|D(?:[DLT]|IV)|F(?:IGURE|IGCAPTION|OOTER)|H[1-6]|HEADER|L(?:ABEL|EGEND|I)|O(?:L|UTPUT)|P(?:RE)?|SECTION|T(?:ABLE|BODY|D|FOOT|H|HEAD|R)|COL(?:GROUP)?|UL)$/;
-  var blacklist = /^(?:HEAD|META|STYLE)/;
+  var blacklist = /* @__PURE__ */ new Set(["HEAD", "META", "STYLE"]);
   var cleanTree = (node, config, preserveWS) => {
     const children = node.childNodes;
     let nonInlineParent = node;
@@ -746,72 +746,25 @@
       nonInlineParent,
       SHOW_ELEMENT_OR_TEXT
     );
-    for (let i = 0, l = children.length; i < l; i += 1) {
+    let i = children.length;
+    while (i--) {
       let child = children[i];
       const nodeName = child.nodeName;
-      const rewriter = stylesRewriters[nodeName];
       if (child instanceof HTMLElement) {
         const childLength = child.childNodes.length;
-        if (rewriter) {
-          child = rewriter(child, node, config);
-        } else if (blacklist.test(nodeName)) {
-          node.removeChild(child);
-          i -= 1;
-          l -= 1;
+        if (stylesRewriters[nodeName]) {
+          child = stylesRewriters[nodeName](child, node, config);
+        } else if (blacklist.has(nodeName)) {
+          child.remove();
           continue;
         } else if (!allowedBlock.test(nodeName) && !isInline(child)) {
-          i -= 1;
-          l += childLength - 1;
-          node.replaceChild(empty(child), child);
+          i += childLength;
+          replaceWith(child, empty(child));
           continue;
         }
         if (childLength) {
           cleanTree(child, config, preserveWS || nodeName === "PRE");
         }
-      } else {
-        if (child instanceof Text) {
-          let data = child.data;
-          const startsWithWS = !notWS.test(data.charAt(0));
-          const endsWithWS = !notWS.test(data.charAt(data.length - 1));
-          if (preserveWS || !startsWithWS && !endsWithWS) {
-            continue;
-          }
-          if (startsWithWS) {
-            walker.currentNode = child;
-            let sibling;
-            while (sibling = walker.previousPONode()) {
-              if (sibling.nodeName === "IMG" || sibling instanceof Text && notWS.test(sibling.data)) {
-                break;
-              }
-              if (!isInline(sibling)) {
-                sibling = null;
-                break;
-              }
-            }
-            data = data.replace(/^[ \t\r\n]+/g, sibling ? " " : "");
-          }
-          if (endsWithWS) {
-            walker.currentNode = child;
-            let sibling;
-            while (sibling = walker.nextNode()) {
-              if (sibling.nodeName === "IMG" || sibling instanceof Text && notWS.test(sibling.data)) {
-                break;
-              }
-              if (!isInline(sibling)) {
-                sibling = null;
-                break;
-              }
-            }
-            data = data.replace(/[ \t\r\n]+$/g, sibling ? " " : "");
-          }
-          if (data) {
-            child.data = data;
-            continue;
-          }
-        }
-        node.removeChild(child);
-        i -= 1;
-        l -= 1;
       }
     }
     return node;
