@@ -99,12 +99,8 @@
       children = props;
       props = null;
     }
-    if (props) {
-      setAttributes(el, props);
-    }
-    if (children) {
-      children.forEach((node) => el.append(node));
-    }
+    setAttributes(el, props);
+    children && el.append(...children);
     return el;
   };
   var areAlike = (node, node2) => {
@@ -191,8 +187,7 @@
     }
   };
   var getClosest = (node, root, selector) => {
-    var _a;
-    node = (_a = node && !node.closest ? node.parentElement : node) == null ? void 0 : _a.closest(selector);
+    node = (node && !node.closest ? node.parentElement : node)?.closest(selector);
     return node && root.contains(node) ? node : null;
   };
   var setAttributes = (node, props) => {
@@ -256,17 +251,13 @@
 
   // source/range/Boundaries.ts
   var START_TO_START = 0;
-  var START_TO_END = 1;
   var END_TO_END = 2;
-  var END_TO_START = 3;
   var isNodeContainedInRange = (range, node, partial) => {
-    const nodeRange = document.createRange();
-    nodeRange.selectNode(node);
     if (partial) {
-      const nodeEndBeforeStart = range.compareBoundaryPoints(END_TO_START, nodeRange) > -1;
-      const nodeStartAfterEnd = range.compareBoundaryPoints(START_TO_END, nodeRange) < 1;
-      return !nodeEndBeforeStart && !nodeStartAfterEnd;
+      return range.intersectsNode(node);
     } else {
+      const nodeRange = document.createRange();
+      nodeRange.selectNode(node);
       const nodeStartAfterStart = range.compareBoundaryPoints(START_TO_START, nodeRange) < 1;
       const nodeEndBeforeEnd = range.compareBoundaryPoints(END_TO_END, nodeRange) > -1;
       return nodeStartAfterStart && nodeEndBeforeEnd;
@@ -1316,7 +1307,7 @@
     const startBlock = getStartBlockOfRange(range, root);
     const endBlock = getEndBlockOfRange(range, root);
     let copyRoot = root;
-    if (startBlock === endBlock && (startBlock == null ? void 0 : startBlock.contains(range.commonAncestorContainer))) {
+    if (startBlock === endBlock && startBlock?.contains(range.commonAncestorContainer)) {
       copyRoot = startBlock;
     }
     let contents;
@@ -1714,7 +1705,6 @@
 
   // source/keyboard/Space.ts
   var Space = (self, event, range) => {
-    var _a;
     let node;
     const root = self._root;
     self._recordUndoState(range);
@@ -1727,7 +1717,7 @@
     } else if (rangeDoesEndAtBlockBoundary(range, root)) {
       const block = getStartBlockOfRange(range, root);
       if (block && block.nodeName !== "PRE") {
-        const text = (_a = block.textContent) == null ? void 0 : _a.trimEnd().replace(ZWS, "");
+        const text = block.textContent?.trimEnd().replace(ZWS, "");
         if (text === "*" || text === "1.") {
           event.preventDefault();
           self.insertPlainText(" ", false);
@@ -2380,10 +2370,7 @@
           range = null;
         }
       }
-      if (!range) {
-        range = createRange(root.firstElementChild || root, 0);
-      }
-      return range;
+      return range || createRange(root.firstElementChild || root, 0);
     }
     setSelection(range) {
       this._lastSelection = range;
@@ -3823,8 +3810,8 @@
     }
     setAttribute(name, value) {
       let range = this.getSelection();
-      let start = (range == null ? void 0 : range.startContainer) || {};
-      let end = (range == null ? void 0 : range.endContainer) || {};
+      let start = range?.startContainer || {};
+      let end = range?.endContainer || {};
       if ("dir" == name || start instanceof Text && 0 === range.startOffset && start === end && end.length === range.endOffset) {
         this._recordUndoState(range);
         setAttributes(start.parentNode, { [name]: value });

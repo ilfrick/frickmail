@@ -155,7 +155,7 @@ class SquireUI
 						html: 'B',
 						cmd: () => this.doAction('bold'),
 						key: 'B',
-						matches: 'B,STRONT'
+						matches: 'B,STRONG'
 					},
 					italic: {
 						html: 'I',
@@ -477,15 +477,22 @@ class SquireUI
 
 		// -----
 
-		squire.addEventListener('pathChange', e => {
+		squire.addEventListener('pathChange', () => {
 
 			const squireRoot = squire.getRoot();
-			let elm = e.detail.element;
-
+			let range = squire.getSelection(),
+				collapsed = range.collapsed,
+				elm = collapsed ? range.endContainer : range?.commonAncestorContainer;
+			if (elm && !(elm instanceof Element)) {
+				elm = elm.parentElement;
+			}
 			forEachObjectValue(actions, entries => {
 				forEachObjectValue(entries, cfg => {
-//					cfg.matches && cfg.input.classList.toggle('active', elm && elm.matches(cfg.matches));
-					cfg.matches && cfg.input.classList.toggle('active', elm && elm.closestWithin(cfg.matches, squireRoot));
+					// Check if selection has a matching parent or contains a matching element
+					cfg.matches && cfg.input.classList.toggle('active', !!(elm && (
+						(!collapsed && [...elm.querySelectorAll(cfg.matches)].some(node => range.intersectsNode(node)))
+						 || elm.closestWithin(cfg.matches, squireRoot)
+					)));
 				});
 			});
 
