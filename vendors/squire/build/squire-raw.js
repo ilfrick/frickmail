@@ -24,9 +24,9 @@
   var createTreeWalker = (root, whatToShow, filter) => document.createTreeWalker(
     root,
     whatToShow,
-    filter ? {
-      acceptNode: (node) => filter(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
-    } : null
+    {
+      acceptNode: (node) => !filter || filter(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
+    }
   );
 
   // source/Constants.ts
@@ -100,12 +100,7 @@
       props = null;
     }
     if (props) {
-      for (const attr in props) {
-        const value = props[attr];
-        if (value !== void 0) {
-          el.setAttribute(attr, value);
-        }
-      }
+      setAttributes(el, props);
     }
     if (children) {
       children.forEach((node) => el.append(node));
@@ -199,6 +194,17 @@
     var _a;
     node = (_a = node && !node.closest ? node.parentElement : node) == null ? void 0 : _a.closest(selector);
     return node && root.contains(node) ? node : null;
+  };
+  var setAttributes = (node, props) => {
+    props && Object.entries(props).forEach(([k, v]) => {
+      if (null == v) {
+        node.removeAttribute(k);
+      } else if ("style" === k && typeof v === "object") {
+        Object.entries(v).forEach(([k2, v2]) => node.style[k2] = v2);
+      } else {
+        node.setAttribute(k, v);
+      }
+    });
   };
 
   // source/node/Whitespace.ts
@@ -1273,7 +1279,7 @@
     let textContent = "";
     let addedTextInBlock = false;
     let value;
-    if (!(node instanceof Element) && !(node instanceof Text) || !walker.filter(node)) {
+    if (!(node instanceof Element) && !(node instanceof Text) || NodeFilter.FILTER_ACCEPT !== walker.filter.acceptNode(node)) {
       node = walker.nextNode();
     }
     while (node) {
@@ -3003,7 +3009,7 @@
         );
         let { startContainer, startOffset, endContainer, endOffset } = range;
         walker.currentNode = startContainer;
-        if (!(startContainer instanceof Element) && !(startContainer instanceof Text) || !walker.filter(startContainer)) {
+        if (!(startContainer instanceof Element) && !(startContainer instanceof Text) || NodeFilter.FILTER_ACCEPT !== walker.filter.acceptNode(startContainer)) {
           const next = walker.nextNode();
           if (!next) {
             return range;
@@ -3819,7 +3825,7 @@
       let range = this.getSelection();
       let start = (range == null ? void 0 : range.startContainer) || {};
       let end = (range == null ? void 0 : range.endContainer) || {};
-      if ("dir" == name || isTextNode(start) && 0 === range.startOffset && start === end && end.length === range.endOffset) {
+      if ("dir" == name || start instanceof Text && 0 === range.startOffset && start === end && end.length === range.endOffset) {
         this._recordUndoState(range);
         setAttributes(start.parentNode, { [name]: value });
         this._docWasChanged();
