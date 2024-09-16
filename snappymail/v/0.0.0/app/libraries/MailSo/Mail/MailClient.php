@@ -749,8 +749,13 @@ class MailClient
 	 */
 	public function MessageList(MessageListParams $oParams) : MessageCollection
 	{
-		if (0 > $oParams->iOffset || 0 > $oParams->iLimit || 999 < $oParams->iLimit) {
+		if (0 > $oParams->iOffset || 0 > $oParams->iLimit) {
 			throw new \ValueError;
+		}
+		if (10 > $oParams->iLimit) {
+			$oParams->iLimit = 10;
+		} else if (999 < $oParams->iLimit) {
+			$oParams->iLimit = 50;
 		}
 
 		$sSearch = \trim($oParams->sSearch);
