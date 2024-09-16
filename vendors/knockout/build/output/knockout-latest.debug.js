@@ -51,6 +51,7 @@ ko.utils = {
             : node => node.cloneNode(true)),
 
     setDomNodeChildren: (domNode, childNodes) => {
+//        domNode.replaceChildren(...childNodes);
         ko.utils.emptyDomNode(domNode);
         childNodes && domNode.append(...childNodes);
     },
@@ -2821,7 +2822,7 @@ ko.bindingHandlers['textInput'] = {
             elementValueBeforeEvent = timeoutHandle = undefined;
 
             var elementValue = element.value;
-            if (previousElementValue !== elementValue) {
+            if (element.checkValidity() && previousElementValue !== elementValue) {
                 // Provide a way for tests to know exactly which event was processed
                 previousElementValue = elementValue;
                 ko.expressionRewriting.writeValueToProperty(valueAccessor(), allBindings, 'textInput', elementValue);
