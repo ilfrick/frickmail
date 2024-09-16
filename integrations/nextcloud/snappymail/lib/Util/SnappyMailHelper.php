@@ -92,7 +92,8 @@ class SnappyMailHelper
 				if ($doLogin && $aCredentials[1] && $aCredentials[2]) {
 					try {
 						$ocSession = \OC::$server->getSession();
-						if ($ocSession->get('is_oidc')) {
+						if (true === $aCredentials[2]) {
+							// OIDC
 							$pwd = new \SnappyMail\SensitiveString($aCredentials[1]);
 							$oAccount = $oActions->LoginProcess($aCredentials[1], $pwd);
 							if ($oAccount) {
@@ -102,7 +103,7 @@ class SnappyMailHelper
 							$oAccount = $oActions->LoginProcess($aCredentials[1], $aCredentials[2]);
 							if ($oAccount && $oConfig->Get('login', 'sign_me_auto', \RainLoop\Enumerations\SignMeType::DefaultOff) === \RainLoop\Enumerations\SignMeType::DefaultOn) {
 								$oActions->SetSignMeToken($oAccount);
-							}	
+							}
 						}
 					} catch (\Throwable $e) {
 						// Login failure, reset password to prevent more attempts
@@ -155,9 +156,9 @@ class SnappyMailHelper
 			if ($config->getAppValue('snappymail', 'snappymail-autologin-oidc', false)) {
 				if ($ocSession->get('is_oidc')) {
 					// IToken->getPassword() ???
-					if ($sAccessToken = $ocSession->get('oidc_access_token')) {
+					if ($ocSession->get('oidc_access_token')) {
 						$sEmail = $config->getUserValue($sUID, 'settings', 'email');
-						return [$sUID, $sEmail, $sAccessToken];
+						return [$sUID, $sEmail, true];
 					}
 					\SnappyMail\Log::debug('Nextcloud', 'OIDC access_token missing');
 				} else {

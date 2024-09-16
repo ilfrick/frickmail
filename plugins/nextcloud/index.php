@@ -109,6 +109,7 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 		 && \OC::$server->getSession()->get('is_oidc')
 		 && $sNcEmail === $oSettings->username
 		 && !$bAccountDefinedExplicitly
+		 && $oAccount instanceof \RainLoop\Model\MainAccount
 //		 && $oClient->supportsAuthType('OAUTHBEARER') // v2.28
 		) {
 			$sAccessToken = \OC::$server->getSession()->get('oidc_access_token');
