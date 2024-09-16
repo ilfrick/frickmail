@@ -6,26 +6,39 @@
   var SHOW_ELEMENT_OR_TEXT = 5;
 
   // source/node/TreeWalker.ts
+  var FILTER_ACCEPT = NodeFilter.FILTER_ACCEPT;
   TreeWalker.prototype.previousPONode = function() {
+    const root = this.root;
     let current = this.currentNode;
-    let node = current.lastChild;
-    while (!node && current) {
-      if (current === this.root) {
-        break;
+    let node;
+    while (true) {
+      node = current.lastChild;
+      while (!node && current) {
+        if (current === root) {
+          break;
+        }
+        node = current.previousSibling;
+        if (!node) {
+          current = current.parentNode;
+        }
       }
-      node = this.previousSibling();
       if (!node) {
-        current = this.parentNode();
+        return null;
       }
+      const nodeType = node.nodeType;
+      const nodeFilterType = nodeType === Node.ELEMENT_NODE ? NodeFilter.SHOW_ELEMENT : nodeType === Node.TEXT_NODE ? NodeFilter.SHOW_TEXT : 0;
+      if (!!(nodeFilterType & this.whatToShow) && FILTER_ACCEPT === this.filter.acceptNode(node)) {
+        this.currentNode = node;
+        return node;
+      }
+      current = node;
     }
-    node && (this.currentNode = node);
-    return node;
   };
   var createTreeWalker = (root, whatToShow, filter) => document.createTreeWalker(
     root,
     whatToShow,
     {
-      acceptNode: (node) => !filter || filter(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
+      acceptNode: (node) => !filter || filter(node) ? FILTER_ACCEPT : NodeFilter.FILTER_SKIP
     }
   );
 
@@ -46,7 +59,7 @@
 
   // source/node/Category.ts
   var inlineNodeNames = /^(?:#text|A(?:BBR|CRONYM)?|B(?:R|D[IO])?|C(?:ITE|ODE)|D(?:ATA|EL|FN)|EM|FONT|HR|I(?:FRAME|MG|NPUT|NS)?|KBD|Q|R(?:P|T|UBY)|S(?:AMP|MALL|PAN|TR(?:IKE|ONG)|U[BP])?|TIME|U|VAR|WBR)$/;
-  var leafNodeNames = /* @__PURE__ */ new Set(["BR", "HR", "IFRAME", "IMG", "INPUT"]);
+  var leafNodeNames = /* @__PURE__ */ new Set(["BR", "HR", "IMG"]);
   var UNKNOWN = 0;
   var INLINE = 1;
   var BLOCK = 2;
@@ -55,9 +68,7 @@
   var resetNodeCategoryCache = () => {
     cache = /* @__PURE__ */ new WeakMap();
   };
-  var isLeaf = (node) => {
-    return leafNodeNames.has(node.nodeName);
-  };
+  var isLeaf = (node) => leafNodeNames.has(node.nodeName);
   var getNodeCategory = (node) => {
     switch (node.nodeType) {
       case TEXT_NODE:
@@ -82,15 +93,9 @@
     cache.set(node, nodeCategory);
     return nodeCategory;
   };
-  var isInline = (node) => {
-    return getNodeCategory(node) === INLINE;
-  };
-  var isBlock = (node) => {
-    return getNodeCategory(node) === BLOCK;
-  };
-  var isContainer = (node) => {
-    return getNodeCategory(node) === CONTAINER;
-  };
+  var isInline = (node) => getNodeCategory(node) === INLINE;
+  var isBlock = (node) => getNodeCategory(node) === BLOCK;
+  var isContainer = (node) => getNodeCategory(node) === CONTAINER;
 
   // source/node/Node.ts
   var createElement = (tag, props, children) => {
@@ -161,31 +166,17 @@
     }
     return returnNode;
   };
-  var getLength = (node) => {
-    return node instanceof Element || node instanceof DocumentFragment ? node.childNodes.length : node instanceof CharacterData ? node.length : 0;
-  };
+  var getLength = (node) => node instanceof Element || node instanceof DocumentFragment ? node.childNodes.length : node instanceof CharacterData ? node.length : 0;
   var empty = (node) => {
     const frag = document.createDocumentFragment();
-    let child = node.firstChild;
-    while (child) {
-      frag.append(child);
-      child = node.firstChild;
-    }
+    frag.append(...node.childNodes);
     return frag;
   };
   var detach = (node) => {
-    const parent = node.parentNode;
-    if (parent) {
-      parent.removeChild(node);
-    }
+    node.parentNode?.removeChild(node);
     return node;
   };
-  var replaceWith = (node, node2) => {
-    const parent = node.parentNode;
-    if (parent) {
-      parent.replaceChild(node2, node);
-    }
-  };
+  var replaceWith = (node, node2) => node.parentNode?.replaceChild(node2, node);
   var getClosest = (node, root, selector) => {
     node = (node && !node.closest ? node.parentElement : node)?.closest(selector);
     return node && root.contains(node) ? node : null;
@@ -203,12 +194,10 @@
   };
 
   // source/node/Whitespace.ts
-  var notWSTextNode = (node) => {
-    return node instanceof Element ? node.nodeName === "BR" : (
-      // okay if data is 'undefined' here.
-      notWS.test(node.data)
-    );
-  };
+  var notWSTextNode = (node) => node instanceof Element ? node.nodeName === "BR" : (
+    // okay if data is 'undefined' here.
+    notWS.test(node.data)
+  );
   var isLineBreak = (br, isLBIfEmptyBlock) => {
     let block = br.parentNode;
     while (isInline(block)) {
@@ -291,7 +280,7 @@
         const child = endContainer.childNodes[endOffset - 1];
         if (!child || isLeaf(child)) {
           if (child && child.nodeName === "BR" && !isLineBreak(child, false)) {
-            endOffset -= 1;
+            --endOffset;
             continue;
           }
           break;
@@ -335,7 +324,7 @@
         break;
       }
       if (endContainer.nodeType !== TEXT_NODE && endContainer.childNodes[endOffset] && endContainer.childNodes[endOffset].nodeName === "BR" && !isLineBreak(endContainer.childNodes[endOffset], false)) {
-        endOffset += 1;
+        ++endOffset;
       }
       if (endOffset !== getLength(endContainer)) {
         break;
@@ -400,32 +389,24 @@
   };
   var fixContainer = (container, root) => {
     let wrapper = null;
-    Array.from(container.childNodes).forEach((child) => {
+    [...container.childNodes].forEach((child) => {
       const isBR = child.nodeName === "BR";
-      if (!isBR && isInline(child)) {
-        if (!wrapper) {
-          wrapper = createElement("DIV");
-        }
+      if (!isBR && child.parentNode == root && isInline(child)) {
+        wrapper || (wrapper = createElement("DIV"));
         wrapper.append(child);
       } else if (isBR || wrapper) {
-        if (!wrapper) {
-          wrapper = createElement("DIV");
-        }
+        wrapper || (wrapper = createElement("DIV"));
         fixCursor(wrapper);
         if (isBR) {
-          container.replaceChild(wrapper, child);
+          child.replaceWith(wrapper);
         } else {
           container.insertBefore(wrapper, child);
         }
         wrapper = null;
       }
-      if (isContainer(child)) {
-        fixContainer(child, root);
-      }
+      isContainer(child) && fixContainer(child, root);
     });
-    if (wrapper) {
-      container.append(fixCursor(wrapper));
-    }
+    wrapper && container.append(fixCursor(wrapper));
     return container;
   };
   var split = (node, offset, stopNode, root) => {
@@ -454,7 +435,7 @@
     }
     fixCursor(node);
     fixCursor(clone);
-    parent.insertBefore(clone, node.nextSibling);
+    node.after(clone);
     return split(parent, clone, stopNode, root);
   };
   var _mergeInlines = (node, fakeRange) => {
@@ -475,7 +456,7 @@
         }
         if (fakeRange.startContainer === node) {
           if (fakeRange.startOffset > l) {
-            fakeRange.startOffset -= 1;
+            --fakeRange.startOffset;
           } else if (fakeRange.startOffset === l) {
             fakeRange.startContainer = prev;
             fakeRange.startOffset = getLength(prev);
@@ -483,7 +464,7 @@
         }
         if (fakeRange.endContainer === node) {
           if (fakeRange.endOffset > l) {
-            fakeRange.endOffset -= 1;
+            --fakeRange.endOffset;
           } else if (fakeRange.endOffset === l) {
             fakeRange.endContainer = prev;
             fakeRange.endOffset = getLength(prev);
@@ -529,8 +510,8 @@
     offset = block.childNodes.length;
     const last = block.lastChild;
     if (last && last.nodeName === "BR") {
-      block.removeChild(last);
-      offset -= 1;
+      last.remove();
+      --offset;
     }
     block.append(empty(next));
     range.setStart(block, offset);
@@ -546,23 +527,18 @@
     }
     if (prev && areAlike(prev, node)) {
       if (!isContainer(prev)) {
-        if (isListItem) {
-          const block = createElement("DIV");
-          block.append(empty(prev));
-          prev.append(block);
-        } else {
+        if (!isListItem) {
           return;
         }
+        const block = createElement("DIV");
+        block.append(empty(prev));
+        prev.append(block);
       }
       detach(node);
       const needsFix = !isContainer(node);
       prev.append(empty(node));
-      if (needsFix) {
-        fixContainer(prev, root);
-      }
-      if (first) {
-        mergeContainers(first, root);
-      }
+      needsFix && fixContainer(prev, root);
+      first && mergeContainers(first, root);
     } else if (isListItem) {
       const block = createElement("DIV");
       node.insertBefore(block, first);
@@ -645,7 +621,7 @@
     return (node, parent) => {
       const el = createElement(tag);
       const attributes = node.attributes;
-      for (let i = 0, l = attributes.length; i < l; i += 1) {
+      for (let i = 0, l = attributes.length; i < l; ++i) {
         const attribute = attributes[i];
         el.setAttribute(attribute.name, attribute.value);
       }
@@ -655,13 +631,15 @@
     };
   };
   var fontSizes = {
-    "1": "10",
-    "2": "13",
-    "3": "16",
-    "4": "18",
-    "5": "24",
-    "6": "32",
-    "7": "48"
+    "1": "x-small",
+    "2": "small",
+    "3": "medium",
+    "4": "large",
+    "5": "x-large",
+    "6": "xx-large",
+    "7": "xxx-large",
+    "-1": "smaller",
+    "+1": "larger"
   };
   var stylesRewriters = {
     STRONG: replaceWithTag("B"),
@@ -674,62 +652,31 @@
       const face = font.face;
       const size = font.size;
       let color = font.color;
-      const classNames = config.classNames;
-      let fontSpan;
-      let sizeSpan;
-      let colorSpan;
-      let newTreeBottom;
-      let newTreeTop;
+      let newTag = createElement("SPAN");
+      let css = newTag.style;
+      newTag.style.cssText = node.style.cssText;
       if (face) {
-        fontSpan = createElement("SPAN", {
-          class: classNames.fontFamily,
-          style: "font-family:" + face
-        });
-        newTreeTop = fontSpan;
-        newTreeBottom = fontSpan;
+        css.fontFamily = face;
       }
       if (size) {
-        sizeSpan = createElement("SPAN", {
-          class: classNames.fontSize,
-          style: "font-size:" + fontSizes[size] + "px"
-        });
-        if (!newTreeTop) {
-          newTreeTop = sizeSpan;
-        }
-        if (newTreeBottom) {
-          newTreeBottom.append(sizeSpan);
-        }
-        newTreeBottom = sizeSpan;
+        css.fontSize = fontSizes[size];
       }
       if (color && /^#?([\dA-F]{3}){1,2}$/i.test(color)) {
         if (color.charAt(0) !== "#") {
           color = "#" + color;
         }
-        colorSpan = createElement("SPAN", {
-          class: classNames.color,
-          style: "color:" + color
-        });
-        if (!newTreeTop) {
-          newTreeTop = colorSpan;
-        }
-        if (newTreeBottom) {
-          newTreeBottom.append(colorSpan);
-        }
-        newTreeBottom = colorSpan;
+        css.color = color;
       }
-      if (!newTreeTop || !newTreeBottom) {
-        newTreeTop = newTreeBottom = createElement("SPAN");
-      }
-      parent.replaceChild(newTreeTop, font);
-      newTreeBottom.append(empty(font));
-      return newTreeBottom;
+      replaceWith(node, newTag);
+      newTag.append(empty(node));
+      return newTag;
     },
     TT: (node, parent, config) => {
       const el = createElement("SPAN", {
         class: config.classNames.fontFamily,
         style: 'font-family:menlo,consolas,"courier new",monospace'
       });
-      parent.replaceChild(el, node);
+      replaceWith(node, el);
       el.append(empty(node));
       return el;
     }
@@ -788,7 +735,7 @@
     const brs = node.querySelectorAll("BR");
     const brBreaksLine = [];
     let l = brs.length;
-    for (let i = 0; i < l; i += 1) {
+    for (let i = 0; i < l; ++i) {
       brBreaksLine[i] = isLineBreak(brs[i], keepForBlankLine);
     }
     while (l--) {
@@ -869,7 +816,7 @@
     let nodeAfterCursor;
     if (startContainer instanceof Text) {
       const text = startContainer.data;
-      for (let i = startOffset; i > 0; i -= 1) {
+      for (let i = startOffset; i > 0; --i) {
         if (text.charAt(i - 1) !== ZWS) {
           return false;
         }
@@ -906,7 +853,7 @@
     if (endContainer instanceof Text) {
       const text = endContainer.data;
       const length = text.length;
-      for (let i = endOffset; i < length; i += 1) {
+      for (let i = endOffset; i < length; ++i) {
         if (text.charAt(i) !== ZWS) {
           return false;
         }
@@ -969,7 +916,7 @@
             endOffset -= startOffset;
             endContainer = afterSplit;
           } else if (endContainer === parent) {
-            endOffset += 1;
+            ++endOffset;
           }
           startContainer = afterSplit;
         }
@@ -1223,7 +1170,7 @@
     let textContent = "";
     let addedTextInBlock = false;
     let value;
-    if (!(node instanceof Element) && !(node instanceof Text) || NodeFilter.FILTER_ACCEPT !== walker.filter.acceptNode(node)) {
+    if (!(node instanceof Element) && !(node instanceof Text) || FILTER_ACCEPT !== walker.filter.acceptNode(node)) {
       node = walker.nextNode();
     }
     while (node) {
@@ -2271,7 +2218,7 @@
         );
         let endOffset = Array.from(endContainer.childNodes).indexOf(end);
         if (startContainer === endContainer) {
-          endOffset -= 1;
+          --endOffset;
         }
         start.remove();
         end.remove();
@@ -2509,7 +2456,7 @@
         }
         const html = this._getRawHTML();
         if (replace) {
-          undoIndex -= 1;
+          --undoIndex;
         }
         if (undoThreshold > -1 && html.length * 2 > undoThreshold) {
           if (undoLimit > -1 && undoIndex > undoLimit) {
@@ -2520,15 +2467,13 @@
         }
         undoStack[undoIndex] = html;
         this._undoIndex = undoIndex;
-        this._undoStackLength += 1;
+        ++this._undoStackLength;
         this._isInUndoState = true;
       }
       return this;
     }
     saveUndoState(range) {
-      if (!range) {
-        range = this.getSelection();
-      }
+      range || (range = this.getSelection());
       this._recordUndoState(range, this._isInUndoState);
       this._getRangeAndRemoveBookmark(range);
       return this;
@@ -2536,7 +2481,7 @@
     undo() {
       if (this._undoIndex !== 0 || !this._isInUndoState) {
         this._recordUndoState(this.getSelection(), false);
-        this._undoIndex -= 1;
+        --this._undoIndex;
         this._setRawHTML(this._undoStack[this._undoIndex]);
         const range = this._getRangeAndRemoveBookmark();
         if (range) {
@@ -2555,7 +2500,7 @@
       const undoIndex = this._undoIndex;
       const undoStackLength = this._undoStackLength;
       if (undoIndex + 1 < undoStackLength && this._isInUndoState) {
-        this._undoIndex += 1;
+        ++this._undoIndex;
         this._setRawHTML(this._undoStack[this._undoIndex]);
         const range = this._getRangeAndRemoveBookmark();
         if (range) {
@@ -2577,23 +2522,15 @@
       return this._root.innerHTML;
     }
     _setRawHTML(html) {
-      const root = this._root;
-      root.innerHTML = html;
-      let node = root;
-      const child = node.firstChild;
-      if (!child || child.nodeName === "BR") {
-        const block = this.createDefaultBlock();
-        if (child) {
-          node.replaceChild(block, child);
-        } else {
-          node.append(block);
-        }
-      } else {
-        while (node = getNextBlock(node, root)) {
+      if (html !== void 0) {
+        const root = this._root;
+        let node = root;
+        root.innerHTML = html;
+        do {
           fixCursor(node);
-        }
+        } while (node = getNextBlock(node, root));
+        this._ignoreChange = true;
       }
-      this._ignoreChange = true;
       return this;
     }
     getHTML(withBookmark) {
@@ -2798,7 +2735,7 @@
         openBlock += " " + attr + '="' + escapeHTML(attributes[attr]) + '"';
       }
       openBlock += ">";
-      for (let i = 0, l = lines.length; i < l; i += 1) {
+      for (let i = 0, l = lines.length; i < l; ++i) {
         let line = lines[i];
         line = escapeHTML(line).replace(/ (?=(?: |$))/g, "&nbsp;");
         if (i) {
@@ -2839,22 +2776,22 @@
             const color = style.color;
             if (!fontInfo.color && color) {
               fontInfo.color = color;
-              seenAttributes += 1;
+              ++seenAttributes;
             }
             const backgroundColor = style.backgroundColor;
             if (!fontInfo.backgroundColor && backgroundColor) {
               fontInfo.backgroundColor = backgroundColor;
-              seenAttributes += 1;
+              ++seenAttributes;
             }
             const fontFamily = style.fontFamily;
             if (!fontInfo.fontFamily && fontFamily) {
               fontInfo.fontFamily = fontFamily;
-              seenAttributes += 1;
+              ++seenAttributes;
             }
             const fontSize = style.fontSize;
             if (!fontInfo.fontSize && fontSize) {
               fontInfo.fontSize = fontSize;
-              seenAttributes += 1;
+              ++seenAttributes;
             }
           }
           element = element.parentNode;
@@ -2868,12 +2805,8 @@
      */
     hasFormat(tag, attributes, range) {
       tag = tag.toUpperCase();
-      if (!attributes) {
-        attributes = {};
-      }
-      if (!range) {
-        range = this.getSelection();
-      }
+      attributes || (attributes = {});
+      range || (range = this.getSelection());
       if (!range.collapsed && range.startContainer instanceof Text && range.startOffset === range.startContainer.length && range.startContainer.nextSibling) {
         range.setStartBefore(range.startContainer.nextSibling);
       }
@@ -2888,9 +2821,11 @@
       if (common instanceof Text) {
         return false;
       }
-      const walker = createTreeWalker(common, SHOW_TEXT, (node2) => {
-        return isNodeContainedInRange(range, node2, true);
-      });
+      const walker = createTreeWalker(
+        common,
+        SHOW_TEXT,
+        (node2) => isNodeContainedInRange(range, node2, true)
+      );
       let seenNode = false;
       let node;
       while (node = walker.nextNode()) {
@@ -2949,7 +2884,7 @@
         );
         let { startContainer, startOffset, endContainer, endOffset } = range;
         walker.currentNode = startContainer;
-        if (!(startContainer instanceof Element) && !(startContainer instanceof Text) || NodeFilter.FILTER_ACCEPT !== walker.filter.acceptNode(startContainer)) {
+        if (!(startContainer instanceof Element) && !(startContainer instanceof Text) || FILTER_ACCEPT !== walker.filter.acceptNode(startContainer)) {
           const next = walker.nextNode();
           if (!next) {
             return range;
@@ -2970,7 +2905,7 @@
                 endContainer = node;
                 endOffset -= startOffset;
               } else if (endContainer === startContainer.parentNode) {
-                endOffset += 1;
+                ++endOffset;
               }
               startContainer = node;
               startOffset = 0;
@@ -3041,33 +2976,23 @@
       ).filter((el) => {
         return isNodeContainedInRange(range, el, true) && hasTagAttributes(el, tag, attributes);
       });
-      if (!partial) {
-        formatTags.forEach((node) => {
-          examineNode(node, node);
-        });
-      }
+      partial || formatTags.forEach((node) => examineNode(node, node));
       toWrap.forEach(([el, node]) => {
         el = el.cloneNode(false);
         replaceWith(node, el);
         el.append(node);
       });
-      formatTags.forEach((el) => {
-        replaceWith(el, empty(el));
-      });
+      formatTags.forEach((el) => replaceWith(el, empty(el)));
       if (cantFocusEmptyTextNodes && fixer) {
         fixer = fixer.parentNode;
         let block = fixer;
         while (block && isInline(block)) {
           block = block.parentNode;
         }
-        if (block) {
-          removeZWS(block, fixer);
-        }
+        block && removeZWS(block, fixer);
       }
       this._getRangeAndRemoveBookmark(range);
-      if (fixer) {
-        range.collapse(false);
-      }
+      fixer && range.collapse(false);
       mergeInlines(root, range);
       return range;
     }
@@ -3097,7 +3022,7 @@
         let protocolEnd = url.indexOf(":") + 1;
         if (protocolEnd) {
           while (url[protocolEnd] === "/") {
-            protocolEnd += 1;
+            ++protocolEnd;
           }
         }
         insertNodeInRange(
@@ -3574,13 +3499,13 @@
         const lists = frag.querySelectorAll("UL, OL");
         const items = frag.querySelectorAll("LI");
         const root = this._root;
-        for (let i = 0, l = lists.length; i < l; i += 1) {
+        for (let i = 0, l = lists.length; i < l; ++i) {
           const list = lists[i];
           const listFrag = empty(list);
           fixContainer(listFrag, root);
           replaceWith(list, listFrag);
         }
-        for (let i = 0, l = items.length; i < l; i += 1) {
+        for (let i = 0, l = items.length; i < l; ++i) {
           const item = items[i];
           if (isBlock(item)) {
             replaceWith(item, this.createDefaultBlock([empty(item)]));
@@ -3656,7 +3581,7 @@
             let nodes = node.querySelectorAll("BR");
             const brBreaksLine = [];
             let l = nodes.length;
-            for (let i = 0; i < l; i += 1) {
+            for (let i = 0; i < l; ++i) {
               brBreaksLine[i] = isLineBreak(nodes[i], false);
             }
             while (l--) {
