@@ -279,7 +279,7 @@ class MailClient
 		return ($aFetchResponse && 1 === \count($aFetchResponse));
 	}
 
-	public function MessageAppendFile(string $sMessageFileName, string $sFolderToSave, array $aAppendFlags = null) : int
+	public function MessageAppendFile(string $sMessageFileName, string $sFolderToSave, ?array $aAppendFlags = null) : int
 	{
 		if (!\is_file($sMessageFileName) || !\is_readable($sMessageFileName)) {
 			throw new \ValueError;
@@ -349,7 +349,7 @@ class MailClient
 	 * @throws \MailSo\Net\Exceptions\*
 	 * @throws \MailSo\Imap\Exceptions\*
 	 */
-	public function FolderInformation(string $sFolderName, int $iPrevUidNext = 0, SequenceSet $oRange = null) : array
+	public function FolderInformation(string $sFolderName, int $iPrevUidNext = 0, ?SequenceSet $oRange = null) : array
 	{
 		if ($oRange) {
 //			$aInfo = $this->oImapClient->FolderExamine($sFolderName)->jsonSerialize();

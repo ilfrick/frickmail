@@ -55,7 +55,7 @@ class Domain extends AbstractProvider
 		return $this->oDriver->GetList($bIncludeAliases);
 	}
 
-	public function LoadOrCreateNewFromAction(\RainLoop\Actions $oActions, string $sNameForTest = null) : ?\RainLoop\Model\Domain
+	public function LoadOrCreateNewFromAction(\RainLoop\Actions $oActions, ?string $sNameForTest = null) : ?\RainLoop\Model\Domain
 	{
 		$sName = \mb_strtolower((string) $oActions->GetActionParam('name', ''));
 		if (\strlen($sName) && $sNameForTest && !\str_contains($sName, '*')) {
