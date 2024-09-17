@@ -99,22 +99,22 @@
 							let jcalData = ICAL.parse(text)
 							var comp = new ICAL.Component(jcalData);
 							var vevent = comp.getFirstSubcomponent("vevent");
-							var event = new ICAL.Event(vevent);							
+							var event = new ICAL.Event(vevent);
 							let VEVENT = {};
-							if(event.organizer.startsWith("mailto:")){
-								VEVENT.ORGANIZER_TXT=event.organizer.substr(7)
+							if (event.organizer && event.organizer.startsWith("mailto:")) {
+								VEVENT.ORGANIZER_TXT = event.organizer.substr(7)
 								VEVENT.ORGANIZER_MAIL = event.organizer
 							} else
-								VEVENT.ORGANIZER_TXT=event.organizer
+								VEVENT.ORGANIZER_TXT = event.organizer
 							VEVENT.SUMMARY = event.summary;
 							VEVENT.DTSTART = parseDate(vevent.getFirstPropertyValue("dtstart"));
 							VEVENT.DTEND = parseDate(vevent.getFirstPropertyValue("dtend"));
 							VEVENT.LOCATION = event.location;
 							VEVENT.ATTENDEE = []
-							for(let attendee of event.attendees){
+							for (let attendee of event.attendees) {
 								VEVENT.ATTENDEE.push(attendee.getFirstParameter("cn"));
 							}
-							
+
 							if (VEVENT) {
 								VEVENT.rawText = text;
 								VEVENT.isCancelled = () => VEVENT.STATUS?.includes('CANCELLED');
