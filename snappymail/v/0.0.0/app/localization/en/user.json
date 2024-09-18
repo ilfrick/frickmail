@@ -122,7 +122,7 @@
 		"EMPTY_LIST": "Empty list.",
 		"EMPTY_SEARCH_LIST": "No messages matched your search.",
 		"SEARCH_RESULT_FOR": "Search results for \"%SEARCH%\"",
-		"BACK_TO_MESSAGE_LIST": "back to message list",
+		"BACK_TO_MESSAGE_LIST": "Back to message list",
 		"PUT_MESSAGE_HERE": "Drop message here to view it in the list",
 		"TODAY_AT": "today at %TIME%",
 		"YESTERDAY_AT": "yesterday at %TIME%",
