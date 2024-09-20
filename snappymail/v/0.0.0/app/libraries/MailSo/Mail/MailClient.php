@@ -553,11 +553,13 @@ class MailClient
 			$aSortUids = \array_reduce($aAllThreads, 'array_merge', []);
 			$oParams->oSequenceSet = new \MailSo\Imap\SequenceSet($aSortUids);
 			$aSortUids = $this->GetUids($oParams, $oFolderInfo);
-			foreach ($aAllThreads as $aThreadUIDs) {
-				$aThreadUIDs = \array_intersect($aSortUids, $aThreadUIDs);
-				// Remove the most recent UID
-				\array_pop($aThreadUIDs);
-				$aUids = \array_merge($aUids, $aThreadUIDs);
+			if ($aSortUids) {
+				foreach ($aAllThreads as $aThreadUIDs) {
+					$aThreadUIDs = \array_intersect($aSortUids, $aThreadUIDs);
+					// Remove the most recent UID
+					\array_pop($aThreadUIDs);
+					$aUids = \array_merge($aUids, $aThreadUIDs);
+				}
 			}
 */
 		} else {
@@ -631,7 +633,7 @@ class MailClient
 	 * @throws \MailSo\Net\Exceptions\*
 	 * @throws \MailSo\Imap\Exceptions\*
 	 */
-	private function GetUids(MessageListParams $oParams, FolderInformation $oInfo, bool $onlyCache = false) : array
+	private function GetUids(MessageListParams $oParams, FolderInformation $oInfo, bool $onlyCache = false) : ?array
 	{
 		$oCacher = $oParams->oCacher;
 		$sFolderName = $oParams->sFolderName;
@@ -691,7 +693,7 @@ class MailClient
 			}
 		}
 		if ($onlyCache) {
-			return [];
+			return null;
 		}
 
 		$this->oImapClient->FolderExamine($sFolderName);
@@ -794,7 +796,7 @@ class MailClient
 
 		$aAllThreads = [];
 		$aUnseenUIDs = [];
-		$aUids = [];
+		$aUids = null;
 
 		$message_list_limit = $this->oImapClient->Settings->message_list_limit;
 		if (100 > $message_list_limit || $message_list_limit > $oInfo->MESSAGES) {
@@ -807,7 +809,7 @@ class MailClient
 		$oAllParams->oSequenceSet = null;
 		if ($message_list_limit && !$oParams->iThreadUid && $oParams->oCacher && $oParams->oCacher->IsInited()) {
 			$aUids = $this->GetUids($oAllParams, $oInfo, true);
-			if ($aUids) {
+			if (null !== $aUids) {
 				$message_list_limit = 0;
 				$oMessageCollection->Sort = $oAllParams->sSort;
 			} else {
@@ -898,10 +900,12 @@ class MailClient
 			}
 		}
 
-		$oMessageCollection->totalEmails = \count($aUids);
-		if ($oMessageCollection->totalEmails) {
-			$aUids = \array_slice($aUids, $oParams->iOffset, $oParams->iLimit);
-			$this->MessageListByRequestIndexOrUids($oMessageCollection, new SequenceSet($aUids), $aAllThreads, $aUnseenUIDs);
+		if (\is_array($aUids)) {
+			$oMessageCollection->totalEmails = \count($aUids);
+			if ($oMessageCollection->totalEmails) {
+				$aUids = \array_slice($aUids, $oParams->iOffset, $oParams->iLimit);
+				$this->MessageListByRequestIndexOrUids($oMessageCollection, new SequenceSet($aUids), $aAllThreads, $aUnseenUIDs);
+			}
 		}
 
 		return $oMessageCollection;
