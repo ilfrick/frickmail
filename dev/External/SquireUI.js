@@ -109,13 +109,13 @@ class SquireUI
 						cmd: s => squire.setStyle({ fontFamily: s.value })
 					},
 					fontSize: {
-						select: ['11px','13px','16px','20px','24px','30px'],
-						defaultValueIndex: 2,
+						select: [[i18n('GLOBAL/DEFAULT'),''],'11px','13px','16px','20px','24px','30px'],
+						defaultValueIndex: 0,
 						cmd: s => squire.setStyle({ fontSize: s.value })
 						// TODO: maybe consider using https://developer.mozilla.org/en-US/docs/Web/CSS/font-size#values
 						// example:
-						// select: ['xx-small', 'x-small',' small',' medium', 'large', 'x-large', 'xx-large', 'xxx-large'],
-						// defaultValueIndex: 3,
+						// select: ['','xx-small', 'x-small',' small',' medium', 'large', 'x-large', 'xx-large', 'xxx-large'],
+						// defaultValueIndex: 0,
 					},
 // 					dir: {
 // 						select: [
@@ -355,6 +355,7 @@ class SquireUI
 							input.append(option);
 						});
 					} else {
+						input.add(new Option(i18n('GLOBAL/DEFAULT'), ''));
 						Object.entries(cfg.select).forEach(([label, options]) => {
 							let group = createElement('optgroup');
 							group.label = label;
@@ -363,7 +364,7 @@ class SquireUI
 								option.style[action] = value;
 								group.append(option);
 							});
-							input.append(group);
+							input.add(group);
 						});
 					}
 					ev = 'input';
