@@ -4,8 +4,8 @@ class CustomLoginMappingPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME = 'Custom Login Mapping',
-		VERSION = '2.2',
-		RELEASE = '2024-09-20',
+		VERSION = '2.3',
+		RELEASE = '2024-09-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'Enables custom usernames by email address.';
@@ -30,7 +30,7 @@ class CustomLoginMappingPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$aLines = \explode("\n", \preg_replace('/[\r\n\t\s]+/', "\n", $sMapping));
 			foreach ($aLines as $sLine) {
 				if (false !== \strpos($sLine, ':')) {
-					$aData = \explode(':', $sLine, 2);
+					$aData = \explode(':', $sLine, 3);
 					if (\is_array($aData) && !empty($aData[0]) && isset($aData[1])) {
 						$aData = \array_map('trim', $aData);
 						if ($sEmail === $aData[0]) {
