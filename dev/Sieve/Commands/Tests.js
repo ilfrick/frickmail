@@ -40,7 +40,7 @@ export class AddressTest extends TestCommand
 		this.header_list  = new GrammarStringList;
 		this.key_list     = new GrammarStringList;
 		// rfc5260#section-6
-		this.index        = new GrammarNumber;
+		this.index        = new GrammarNumber('');
 		this.last         = false;
 		// rfc5703#section-6
 //		this.mime
@@ -234,7 +234,7 @@ export class HeaderTest extends TestCommand
 		this.header_names = new GrammarStringList;
 		this.key_list     = new GrammarStringList;
 		// rfc5260#section-6
-		this.index        = new GrammarNumber;
+		this.index        = new GrammarNumber('');
 		this.last         = false;
 		// rfc5703#section-6
 		this.mime         = false;
