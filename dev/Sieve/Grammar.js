@@ -45,8 +45,16 @@ export class GrammarString /*extends String*/
 /**
  * abstract
  */
-export class GrammarComment extends GrammarString
+export /*abstract*/ class GrammarComment extends GrammarString
 {
+/*
+	constructor()
+	{
+		if (this.constructor == GrammarComment) {
+			throw Error("Abstract class can't be instantiated.");
+		}
+	}
+*/
 }
 
 /**

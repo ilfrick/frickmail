@@ -18,6 +18,7 @@ import {
 import {
 	GrammarBracketComment,
 	GrammarCommand,
+	GrammarComment,
 	GrammarHashComment,
 	GrammarMultiLine,
 	GrammarNumber,
@@ -28,7 +29,7 @@ import {
 } from 'Sieve/Grammar';
 
 import { availableCommands } from 'Sieve/Commands';
-import { ConditionalCommand, RequireCommand } from 'Sieve/Commands/Controls';
+import { ConditionalCommand, IfCommand, RequireCommand } from 'Sieve/Commands/Controls';
 import { NotTest } from 'Sieve/Commands/Tests';
 
 const
@@ -156,10 +157,17 @@ export const parseScript = (script, name = 'script.sieve') => {
 			let new_command;
 			if (Commands[value]) {
 				if ('elsif' === value || 'else' === value) {
-//					(prev_command instanceof ConditionalCommand) || error('Not after IF condition');
-				}
-				if ('allof' === value || 'anyof' === value) {
-//					(command instanceof ConditionalCommand || command instanceof NotTest) || error('Test-list not in conditional');
+					let valid = false, cmd = (command ? command?.commands : tree), i = cmd?.length;
+					while (i) {
+						cmd[--i];
+						if (cmd[i] instanceof IfCommand) {
+							valid = true;
+							break;
+						} else if (typeof cmd[i] !== 'string' && !(cmd[i] instanceof GrammarComment)) {
+							break;
+						}
+					}
+					valid || error('Not after IF/ELSIF condition');
 				}
 				new_command = new Commands[value]();
 			} else {
@@ -266,7 +274,6 @@ export const parseScript = (script, name = 'script.sieve') => {
 			break;
 		case T_BLOCK_END:
 			(command instanceof ConditionalCommand) || error(TokenError[type]);
-//			prev_command = command;
 			command = levels.up();
 			break;
 
