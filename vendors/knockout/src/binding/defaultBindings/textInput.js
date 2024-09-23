@@ -13,7 +13,7 @@ ko.bindingHandlers['textInput'] = {
             if (element.checkValidity() && previousElementValue !== elementValue) {
                 // Provide a way for tests to know exactly which event was processed
                 previousElementValue = elementValue;
-                ko.expressionRewriting.writeValueToProperty(valueAccessor(), allBindings, 'textInput', elementValue);
+                ko.expressionRewriting.writeValueToProperty(element, valueAccessor(), allBindings, 'textInput', elementValue);
             }
         };
 

@@ -1460,6 +1460,7 @@ ko.expressionRewriting = (() => {
             -1 < keyValueArray.findIndex(v => v['key'] == key),
 
         // Internal, private KO utility for updating model properties from within bindings
+        // element:             the HTML element it belongs to
         // property:            If the property being updated is (or might be) an observable, pass it here
         //                      If it turns out to be a writable observable, it will be written to directly
         // allBindings:         An object with a get method to retrieve bindings in the current execution context.
@@ -1468,9 +1469,9 @@ ko.expressionRewriting = (() => {
         // value:               The value to be written
         // checkIfDifferent:    If true, and if the property being written is a writable observable, the value will only be written if
         //                      it is !== existing value on that writable observable
-        writeValueToProperty: (property, allBindings, key, value, checkIfDifferent) => {
+        writeValueToProperty: (element, property, allBindings, key, value, checkIfDifferent) => {
             if (!property || !ko.isObservable(property)) {
-                throw Error(`${key} , must be observable`);
+                throw Error(`"${key}" must be observable for ${element.outerHTML.replace(/>.+/,'>')}`);
 //                allBindings.get('_ko_property_writers')?.[key]?.(value);
             } else if (ko.isWriteableObservable(property) && (!checkIfDifferent || property.peek() !== value)) {
                 property(value);
@@ -2353,7 +2354,7 @@ ko.bindingHandlers['checked'] = {
                             elemValue = undefined;
                         }
                     }
-                    ko.expressionRewriting.writeValueToProperty(modelValue, allBindings, 'checked', elemValue, true);
+                    ko.expressionRewriting.writeValueToProperty(element, modelValue, allBindings, 'checked', elemValue, true);
                 }
             }
 
@@ -2514,7 +2515,7 @@ ko.bindingHandlers['hasfocus'] = {
             // Discussion at https://github.com/SteveSanderson/knockout/pull/352
             element[hasfocusUpdatingProperty] = true;
             isFocused = (element.ownerDocument.activeElement === element);
-            ko.expressionRewriting.writeValueToProperty(valueAccessor(), allBindings, 'hasfocus', isFocused, true);
+            ko.expressionRewriting.writeValueToProperty(element, valueAccessor(), allBindings, 'hasfocus', isFocused, true);
 
             //cache the latest value, so we can avoid unnecessarily calling focus/blur in the update function
             element[hasfocusLastValue] = isFocused;
@@ -2825,7 +2826,7 @@ ko.bindingHandlers['textInput'] = {
             if (element.checkValidity() && previousElementValue !== elementValue) {
                 // Provide a way for tests to know exactly which event was processed
                 previousElementValue = elementValue;
-                ko.expressionRewriting.writeValueToProperty(valueAccessor(), allBindings, 'textInput', elementValue);
+                ko.expressionRewriting.writeValueToProperty(element, valueAccessor(), allBindings, 'textInput', elementValue);
             }
         };
 
@@ -2878,7 +2879,7 @@ ko.bindingHandlers['value'] = {
                 elementValueBeforeEvent = null;
                 var modelValue = valueAccessor();
                 var elementValue = ko.selectExtensions.readValue(element);
-                ko.expressionRewriting.writeValueToProperty(modelValue, allBindings, 'value', elementValue);
+                ko.expressionRewriting.writeValueToProperty(element, modelValue, allBindings, 'value', elementValue);
             };
 
         if (requestedEventsToCatch) {

@@ -143,6 +143,7 @@ ko.expressionRewriting = (() => {
             -1 < keyValueArray.findIndex(v => v['key'] == key),
 
         // Internal, private KO utility for updating model properties from within bindings
+        // element:             the HTML element it belongs to
         // property:            If the property being updated is (or might be) an observable, pass it here
         //                      If it turns out to be a writable observable, it will be written to directly
         // allBindings:         An object with a get method to retrieve bindings in the current execution context.
@@ -151,9 +152,9 @@ ko.expressionRewriting = (() => {
         // value:               The value to be written
         // checkIfDifferent:    If true, and if the property being written is a writable observable, the value will only be written if
         //                      it is !== existing value on that writable observable
-        writeValueToProperty: (property, allBindings, key, value, checkIfDifferent) => {
+        writeValueToProperty: (element, property, allBindings, key, value, checkIfDifferent) => {
             if (!property || !ko.isObservable(property)) {
-                throw Error(`${key} , must be observable`);
+                throw Error(`"${key}" must be observable for ${element.outerHTML.replace(/>.+/,'>')}`);
 //                allBindings.get('_ko_property_writers')?.[key]?.(value);
             } else if (ko.isWriteableObservable(property) && (!checkIfDifferent || property.peek() !== value)) {
                 property(value);
