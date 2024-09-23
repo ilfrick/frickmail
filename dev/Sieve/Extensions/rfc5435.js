@@ -65,7 +65,8 @@ export class NotifyCommand extends ActionCommand
 				this.options = arg; // GrammarStringList
 			} else if (i && ':' === args[i-1][0]) {
 				// :from, :importance, :message
-				this[args[i-1].replace(':','_')].value = arg.value;
+				let p = args[i-1].replace(':','_');
+				this[p] ? (this[p].value = arg.value) : console.log('Unknown VacationCommand :' + p);
 			}
 		});
 	}

@@ -80,7 +80,8 @@ export class VacationCommand extends ActionCommand
 				this.addresses = arg; // GrammarStringList
 			} else if (i && ':' === args[i-1][0]) {
 				// :days, :seconds, :subject, :from, :handle
-				this[args[i-1].replace(':','_')].value = arg.value;
+				let p = args[i-1].replace(':','_');
+				this[p] ? (this[p].value = arg.value) : console.log('Unknown VacationCommand :' + p);
 			}
 		});
 	}

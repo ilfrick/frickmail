@@ -108,7 +108,8 @@ export class ReplaceCommand extends ActionCommand
 				this.mime = true;
 			} else if (i && ':' === args[i-1][0]) {
 				// :subject, :from
-				this[args[i-1].replace(':','_')].value = arg.value;
+				let p = args[i-1].replace(':','_');
+				this[p] ? (this[p].value = arg.value) : console.log('Unknown VacationCommand :' + p);
 			}
 		});
 	}
@@ -148,7 +149,8 @@ export class EncloseCommand extends ActionCommand
 		args.forEach((arg, i) => {
 			if (i && ':' === args[i-1][0]) {
 				// :subject, :headers
-				this[args[i-1].replace(':','_')].value = arg.value;
+				let p = args[i-1].replace(':','_');
+				this[p] ? (this[p].value = arg.value) : console.log('Unknown VacationCommand :' + p);
 			}
 		});
 	}

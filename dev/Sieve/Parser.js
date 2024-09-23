@@ -28,7 +28,7 @@ import {
 	GrammarTestList
 } from 'Sieve/Grammar';
 
-import { availableCommands } from 'Sieve/Commands';
+import { availableCommands, unavailableCommands } from 'Sieve/Commands';
 import { ConditionalCommand, IfCommand, RequireCommand } from 'Sieve/Commands/Controls';
 import { NotTest } from 'Sieve/Commands/Tests';
 
@@ -93,6 +93,7 @@ export const parseScript = (script, name = 'script.sieve') => {
 
 	// Only activate available commands
 	const Commands = availableCommands();
+	const disabledCommands = unavailableCommands();
 
 	let match,
 		line = 1,
@@ -173,17 +174,12 @@ export const parseScript = (script, name = 'script.sieve') => {
 //					(command instanceof ConditionalCommand || command instanceof NotTest) || error('Test-list not in conditional');
 				}
 				new_command = new Commands[value]();
+			} else if (disabledCommands[value]) {
+				console.error('Unsupported command: ' + value);
+				new_command = new disabledCommands[value]();
 			} else {
-				if (command && (
-				    command instanceof ConditionalCommand
-				 || command instanceof NotTest
-				 || command.tests instanceof GrammarTestList)) {
-					console.error('Unknown test: ' + value);
-					new_command = new TestCommand(value);
-				} else {
-					console.error('Unknown command: ' + value);
-					new_command = new GrammarCommand(value);
-				}
+				console.error('Unknown command: ' + value);
+				new_command = new GrammarCommand(value);
 			}
 
 			if (new_command instanceof TestCommand) {
@@ -201,7 +197,7 @@ export const parseScript = (script, name = 'script.sieve') => {
 				if (command.commands) {
 					command.commands.push(new_command);
 				} else {
-					error('commands not allowed in "' + command.identifier + '" command');
+					error('command "' + new_command.identifier + '" not allowed in "' + command.identifier + '" command');
 				}
 			} else {
 				tree.push(new_command);

@@ -51,7 +51,7 @@ export class VirusTestTest extends TestCommand
 		this._value = new GrammarQuotedString; // 1 - 5
 	}
 
-	get require() { return /:value|:count/.test(this.match_type) ? ['virustest','relational'] : 'virustest'; }
+	get require() { return /:value/.test(this.match_type) ? ['virustest','relational'] : 'virustest'; }
 
 	get value() { return this._value.value; }
 	set value(v) { this._value.value = v; }
