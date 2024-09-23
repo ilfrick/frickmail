@@ -154,12 +154,10 @@ export const parseScript = (script, name = 'script.sieve') => {
 			pushArgs();
 			value = value.toLowerCase();
 			let new_command;
-			if ('if' === value) {
-				new_command = new ConditionalCommand(value);
-			} else if ('elsif' === value || 'else' === value) {
-//				(prev_command instanceof ConditionalCommand) || error('Not after IF condition');
-				new_command = new ConditionalCommand(value);
-			} else if (Commands[value]) {
+			if (Commands[value]) {
+				if ('elsif' === value || 'else' === value) {
+//					(prev_command instanceof ConditionalCommand) || error('Not after IF condition');
+				}
 				if ('allof' === value || 'anyof' === value) {
 //					(command instanceof ConditionalCommand || command instanceof NotTest) || error('Test-list not in conditional');
 				}
@@ -293,5 +291,6 @@ export const parseScript = (script, name = 'script.sieve') => {
 	}
 
 	tree.requires = requires;
+	tree.toString = () => tree.join('\r\n');
 	return tree;
 };

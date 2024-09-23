@@ -15,7 +15,6 @@ import {
 } from 'Sieve/Commands/Actions';
 
 import {
-	ConditionalCommand,
 	ElsIfCommand,
 	ElseCommand,
 	IfCommand,
@@ -67,7 +66,6 @@ export const
 		IfCommand,
 		ElsIfCommand,
 		ElseCommand,
-		ConditionalCommand,
 		RequireCommand,
 		StopCommand,
 		// Action commands

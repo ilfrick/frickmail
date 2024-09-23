@@ -18,7 +18,7 @@ export class GrammarString /*extends String*/
 {
 	constructor(value = '')
 	{
-		this._value = value;
+		this._value = value.toString ? value.toString() : value;
 	}
 
 	toString()
@@ -52,34 +52,26 @@ export class GrammarComment extends GrammarString
 /**
  * https://tools.ietf.org/html/rfc5228#section-2.9
  */
-export class GrammarCommand
+const cmdNameSuffix = /(test|command|action)$/;
+export /*abstract*/ class GrammarCommand
 {
 	constructor(identifier)
 	{
-		this.identifier = identifier || this.constructor.name.toLowerCase().replace(/(test|command|action)$/, '');
-		this.arguments = [];
-		this.commands = new GrammarCommands;
+/*
+		if (this.constructor == GrammarCommand) {
+			throw Error("Abstract class can't be instantiated.");
+		}
+*/
+		this.identifier = identifier || this.constructor.name.toLowerCase().replace(cmdNameSuffix, '');
 	}
 
 	toString()
 	{
 		let result = this.identifier;
-		if (this.arguments.length) {
+		if (this.arguments?.length) {
 			result += ' ' + arrayToString(this.arguments, ' ');
 		}
-		return result + (
-			this.commands.length ? ' ' + this.commands : ';'
-		);
-	}
-
-	getComparators()
-	{
-		return ['i;ascii-casemap'];
-	}
-
-	getMatchTypes()
-	{
-		return [':is', ':contains', ':matches'];
+		return result + ';';
 	}
 
 	pushArguments(args)
@@ -108,63 +100,47 @@ export class GrammarCommands extends Array
 /**
  * https://tools.ietf.org/html/rfc5228#section-3
  */
-export class ControlCommand extends GrammarCommand
+export /*abstract*/ class ControlCommand extends GrammarCommand
 {
+/*
 	constructor(identifier)
 	{
-		super(identifier);
-		this.commands = new GrammarCommands;
-	}
-
-	toString()
-	{
-		let result = this.identifier;
-		if (this.arguments.length) {
-			result += ' ' + arrayToString(this.arguments, ' ');
+		if (this.constructor == ControlCommand) {
+			throw Error("Abstract class can't be instantiated.");
 		}
-		return result + (
-			this.commands.length ? ' ' + this.commands : ';'
-		);
+		super(identifier);
 	}
-
-	getComparators()
-	{
-		return ['i;ascii-casemap'];
-	}
-
-	getMatchTypes()
-	{
-		return [':is', ':contains', ':matches'];
-	}
+*/
 }
 
 /**
  * https://tools.ietf.org/html/rfc5228#section-4
  */
-export class ActionCommand extends GrammarCommand
+export /*abstract*/ class ActionCommand extends GrammarCommand
 {
+/*
 	constructor(identifier)
 	{
+		if (this.constructor == ActionCommand) {
+			throw Error("Abstract class can't be instantiated.");
+		}
 		super(identifier);
 	}
-
-	toString()
-	{
-		let result = this.identifier;
-		if (this.arguments.length) {
-			result += ' ' + arrayToString(this.arguments, ' ');
-		}
-		return result + ';'
-	}
+*/
 }
 
 /**
  * https://tools.ietf.org/html/rfc5228#section-5
  */
-export class TestCommand extends GrammarCommand
+export /*abstract*/ class TestCommand extends GrammarCommand
 {
 	constructor(identifier)
 	{
+/*
+		if (this.constructor == TestCommand) {
+			throw Error("Abstract class can't be instantiated.");
+		}
+*/
 		super(identifier);
 		// Almost every test has a comparator and match_type, so define them here
 		this.comparator = '';
@@ -251,6 +227,7 @@ export class GrammarStringList extends Array
 {
 	toString()
 	{
+		// if there is only a single string, the brackets are optional
 		if (1 < this.length) {
 			return '[' + this.join(',') + ']';
 		}
@@ -259,7 +236,7 @@ export class GrammarStringList extends Array
 
 	push(value)
 	{
-		if (!(value instanceof GrammarString)) {
+		if (!(value instanceof GrammarQuotedString)) {
 			value = new GrammarQuotedString(value);
 		}
 		super.push(value);
@@ -323,4 +300,24 @@ GrammarMultiLine.fromString = string => {
 		return new GrammarMultiLine(string[2].replace(/\r\n$/, ''), string[1]);
 	}
 	return new GrammarMultiLine();
+}
+
+export class UnknownCommand extends GrammarCommand
+{
+	constructor(identifier)
+	{
+		super(identifier);
+		this.commands = new GrammarCommands;
+	}
+
+	toString()
+	{
+		let result = this.identifier;
+		if (this.arguments?.length) {
+			result += ' ' + arrayToString(this.arguments, ' ');
+		}
+		return result + (
+			this.commands?.length ? ' ' + this.commands : ';'
+		);
+	}
 }

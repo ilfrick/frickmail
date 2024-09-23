@@ -22,7 +22,7 @@ export const
 	koComputable = fn => ko.computed(fn, {'pure':true}),
 
 	arrayToString = (arr, separator) =>
-		arr.map(item => item.toString?.() || item).join(separator),
+		(arr || []).map(item => item.toString?.() || item).join(separator),
 /*
 	getNotificationMessage = code => {
 		let key = getKeyByValue(Notifications, code);
@@ -57,6 +57,8 @@ export const
 		serverError(true);
 		serverErrorDesc(text);
 	},
+
+	getComparators = () => ['i;ascii-casemap'],
 
 	getMatchTypes = (validOnly = 1) => {
 		let result = [':is',':contains',':matches'];

@@ -5,6 +5,7 @@
 import {
 	ActionCommand,
 	ControlCommand,
+	GrammarCommands,
 	GrammarNumber,
 	GrammarQuotedString,
 	GrammarString,
@@ -20,6 +21,7 @@ export class ForEveryPartCommand extends ControlCommand
 	{
 		super();
 		this._name = new GrammarString;
+		this.commands = new GrammarCommands;
 	}
 
 	get require() { return 'foreverypart'; }
@@ -27,7 +29,7 @@ export class ForEveryPartCommand extends ControlCommand
 	toString()
 	{
 		let result = 'foreverypart';
-		if (this._subject.length) {
+		if (this._name.length) {
 			result += ' :name ' + this._name;
 		}
 		return result + ' ' + this.commands;
@@ -43,12 +45,15 @@ export class ForEveryPartCommand extends ControlCommand
 	}
 }
 
+/**
+ * Must be inside foreverypart
+ */
 export class BreakCommand extends ForEveryPartCommand
 {
 	toString()
 	{
 		let result = 'break';
-		if (this._subject.length) {
+		if (this._name.length) {
 			result += ' :name ' + this._name;
 		}
 		return result + ';';
@@ -82,7 +87,6 @@ export class ReplaceCommand extends ActionCommand
 		}
 		if (this._from.length) {
 			result += ' :from ' + this._from;
-//			result += ' :from ' + this.arguments[':from'];
 		}
 		return result + this.replacement + ';';
 	}
@@ -140,6 +144,7 @@ export class EncloseCommand extends ActionCommand
 
 /**
  * https://datatracker.ietf.org/doc/html/rfc5703#section-7
+ * Should be inside foreverypart, else empty and flagged as a compilation error
  */
 export class ExtractTextCommand extends ActionCommand
 {

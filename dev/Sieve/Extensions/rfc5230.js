@@ -43,7 +43,6 @@ export class VacationCommand extends ActionCommand
 		}
 		if (this._from.length) {
 			result += ' :from ' + this._from;
-//			result += ' :from ' + this.arguments[':from'];
 		}
 		if (this.addresses.length) {
 			result += ' :addresses ' + this.addresses;
