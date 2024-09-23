@@ -502,8 +502,8 @@
 		"IMAGES_OPTION_ALWAYS": "Zawsze pokazuj",
 		"IMAGES_WHITELIST": "Biała lista obrazów",
 		"MESSAGE_POPUP_WINDOW": "Pokaż w nowym oknie zamiast w nowej karcie",
-		"MAILTO": "Register as 'mailto:' links handler",
-		"HTML_TO_MD": "Convert HTML to Markdown instead of plain text"
+		"MAILTO": "Zarejestruj obsługę linków 'mailto:' jako domyślnego klienta poczty",
+		"HTML_TO_MD": "Konwertuj HTML na Markdown zamiast zwykłego tekstu"
 	},
 	"SETTINGS_CONTACTS": {
 		"LABEL_CONTACTS_AUTOSAVE": "Automatycznie dodawaj odbiorców do książki adresowej",
