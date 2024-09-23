@@ -20,7 +20,7 @@ export class ForEveryPartCommand extends ControlCommand
 	constructor()
 	{
 		super();
-		this._name = new GrammarString;
+		this.name = new GrammarString;
 		this.commands = new GrammarCommands;
 	}
 
@@ -29,8 +29,8 @@ export class ForEveryPartCommand extends ControlCommand
 	toString()
 	{
 		let result = 'foreverypart';
-		if (this._name.length) {
-			result += ' :name ' + this._name;
+		if (this.name.length) {
+			result += ' :name ' + this.name;
 		}
 		return result + ' ' + this.commands;
 	}
@@ -39,7 +39,7 @@ export class ForEveryPartCommand extends ControlCommand
 	{
 		args.forEach((arg, i) => {
 			if (':name' === arg) {
-				this._name.value = args[i+1].value;
+				this.name.value = args[i+1].value;
 			}
 		});
 	}
@@ -53,8 +53,8 @@ export class BreakCommand extends ForEveryPartCommand
 	toString()
 	{
 		let result = 'break';
-		if (this._name.length) {
-			result += ' :name ' + this._name;
+		if (this.name.length) {
+			result += ' :name ' + this.name;
 		}
 		return result + ';';
 	}
@@ -68,13 +68,22 @@ export class ReplaceCommand extends ActionCommand
 	constructor()
 	{
 		super();
-		this.mime        = false;
-		this._subject    = new GrammarQuotedString;
-		this._from       = new GrammarQuotedString;
-		this.replacement = new GrammarQuotedString;
+		this.mime         = false;
+		this._subject     = new GrammarQuotedString;
+		this._from        = new GrammarQuotedString;
+		this._replacement = new GrammarQuotedString;
 	}
 
 	get require() { return 'replace'; }
+
+	get subject()     { return this._subject.value; }
+	set subject(str)  { this._subject.value = str; }
+
+	get from()        { return this._from.value; }
+	set from(str)     { this._from.value = str; }
+
+	get replacement()    { return this._replacement.value; }
+	set replacement(str) { this._replacement.value = str; }
 
 	toString()
 	{
@@ -88,12 +97,12 @@ export class ReplaceCommand extends ActionCommand
 		if (this._from.length) {
 			result += ' :from ' + this._from;
 		}
-		return result + this.replacement + ';';
+		return result + this._replacement + ';';
 	}
 
 	pushArguments(args)
 	{
-		this.replacement = args.pop();
+		this._replacement = args.pop();
 		args.forEach((arg, i) => {
 			if (':mime' === arg) {
 				this.mime = true;
@@ -118,6 +127,9 @@ export class EncloseCommand extends ActionCommand
 	}
 
 	get require() { return 'enclose'; }
+
+	get subject()  { return this._subject.value; }
+	set subject(v) { this._subject.value = v; }
 
 	toString()
 	{
@@ -153,8 +165,11 @@ export class ExtractTextCommand extends ActionCommand
 		super();
 		this.modifiers = [];
 		this._first    = new GrammarNumber;
-		this.varname   = new GrammarQuotedString;
+		this._varname  = new GrammarQuotedString;
 	}
+
+	get varname()  { return this._varname.value; }
+	set varname(v) { this._varname.value = v; }
 
 	get require() { return 'extracttext'; }
 
@@ -165,12 +180,12 @@ export class ExtractTextCommand extends ActionCommand
 		if (0 < this._first.value) {
 			result += ' :first ' + this._first;
 		}
-		return result + ' ' + this.varname + ';';
+		return result + ' ' + this._varname + ';';
 	}
 
 	pushArguments(args)
 	{
-		this.varname = args.pop();
+		this._varname = args.pop();
 		[':lower', ':upper', ':lowerfirst', ':upperfirst', ':quotewildcard', ':length'].forEach(modifier => {
 			args.includes(modifier) && this.modifiers.push(modifier);
 		});

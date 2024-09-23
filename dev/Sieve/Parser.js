@@ -169,6 +169,9 @@ export const parseScript = (script, name = 'script.sieve') => {
 					}
 					valid || error('Not after IF/ELSIF condition');
 				}
+				if ('allof' === value || 'anyof' === value) {
+//					(command instanceof ConditionalCommand || command instanceof NotTest) || error('Test-list not in conditional');
+				}
 				new_command = new Commands[value]();
 			} else {
 				if (command && (
@@ -225,7 +228,8 @@ export const parseScript = (script, name = 'script.sieve') => {
 			pushArg(GrammarMultiLine.fromString(value));
 			break;
 		case T_QUOTED_STRING:
-			pushArg(new GrammarQuotedString(value.slice(1,-1)));
+			try { value = JSON.parse(value); } catch(e) { console.error(e, value); }
+			pushArg(new GrammarQuotedString(value));
 			break;
 		case T_NUMBER:
 			pushArg(new GrammarNumber(value));

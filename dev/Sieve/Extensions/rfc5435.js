@@ -26,14 +26,16 @@ export class NotifyCommand extends ActionCommand
 	}
 
 	get method()     { return this._method.value; }
-	get from()       { return this._from.value; }
-	get importance() { return this._importance.value; }
-	get message()    { return this._message.value; }
+	set method(str)  { this._method.value = str; }
 
-	set method(str)     { this._method.value = str; }
-	set from(str)       { this._from.value = str; }
+	get from()       { return this._from.value; }
+	set from(str)    { this._from.value = str; }
+
+	get importance() { return this._importance.value; }
 	set importance(int) { this._importance.value = int; }
-	set message(str)    { this._message.value = str; }
+
+	get message()    { return this._message.value; }
+	set message(str) { this._message.value = str; }
 
 	get require() { return 'enotify'; }
 
@@ -99,25 +101,31 @@ export class NotifyMethodCapabilityTest extends TestCommand
 	constructor()
 	{
 		super();
-		this.notification_uri = new GrammarQuotedString;
-		this.notification_capability = new GrammarQuotedString;
+		this._notification_uri = new GrammarQuotedString;
+		this._notification_capability = new GrammarQuotedString;
 		this.key_list = new GrammarStringList;
 	}
+
+	get notification_uri() { return this._notification_uri.value; }
+	set notification_uri(v) { this._notification_uri.value = v; }
+
+	get notification_capability() { return this._notification_capability.value; }
+	set notification_capability(v) { this._notification_capability.value = v; }
 
 	toString()
 	{
 		return 'valid_notify_method '
 			+ (this.comparator ? ' :comparator ' + this.comparator : '')
 			+ (this.match_type ? ' ' + this.match_type : '')
-			+ this.notification_uri
-			+ this.notification_capability
+			+ this._notification_uri
+			+ this._notification_capability
 			+ this.key_list;
 	}
 
 	pushArguments(args)
 	{
 		this.key_list = args.pop();
-		this.notification_capability = args.pop();
-		this.notification_uri = args.pop();
+		this._notification_capability = args.pop();
+		this._notification_uri = args.pop();
 	}
 }

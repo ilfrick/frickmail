@@ -21,6 +21,12 @@ export class SetCommand extends ActionCommand
 
 	get require() { return 'variables'; }
 
+	get name()     { return this._name.value; }
+	set name(str)  { this._name.value = str; }
+
+	get value()    { return this._value.value; }
+	set value(str) { this._value.value = str; }
+
 	toString()
 	{
 		return 'set'
@@ -28,12 +34,6 @@ export class SetCommand extends ActionCommand
 			+ ' ' + this._name
 			+ ' ' + this._value;
 	}
-
-	get name()     { return this._name.value; }
-	set name(str)  { this._name.value = str; }
-
-	get value()    { return this._value.value; }
-	set value(str) { this._value.value = str; }
 
 	pushArguments(args)
 	{

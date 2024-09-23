@@ -271,10 +271,14 @@ GrammarStringList.fromString = list => {
 
 export class GrammarQuotedString extends GrammarString
 {
+	constructor(value = '')
+	{
+		super(value instanceof GrammarQuotedString ? value.value : value);
+	}
+
 	toString()
 	{
 		return '"' + this._value.replace(/[\\"]/g, '\\$&') + '"';
-//		return '"' + super.toString().replace(/[\\"]/g, '\\$&') + '"';
 	}
 }
 

@@ -30,6 +30,20 @@ export class VacationCommand extends ActionCommand
 //	get require() { return ['vacation','vacation-seconds']; }
 	get require() { return 'vacation'; }
 
+	get days()      { return this._days.value; }
+	get seconds()   { return this._seconds.value; }
+	get subject()   { return this._subject.value; }
+	get from()      { return this._from.value; }
+	get handle()    { return this._handle.value; }
+	get reason()    { return this._reason.value; }
+
+	set days(int)    { this._days.value = int; }
+	set seconds(int) { this._seconds.value = int; }
+	set subject(str) { this._subject.value = str; }
+	set from(str)    { this._from.value = str; }
+	set handle(str)  { this._handle.value = str; }
+	set reason(str)  { this._reason.value = str; }
+
 	toString()
 	{
 		let result = 'vacation';
@@ -55,20 +69,6 @@ export class VacationCommand extends ActionCommand
 		}
 		return result + ' ' + this._reason;
 	}
-
-	get days()      { return this._days.value; }
-	get seconds()   { return this._seconds.value; }
-	get subject()   { return this._subject.value; }
-	get from()      { return this._from.value; }
-	get handle()    { return this._handle.value; }
-	get reason()    { return this._reason.value; }
-
-	set days(int)    { this._days.value = int; }
-	set seconds(int) { this._seconds.value = int; }
-	set subject(str) { this._subject.value = str; }
-	set from(str)    { this._from.value = str; }
-	set handle(str)  { this._handle.value = str; }
-	set reason(str)  { this._reason.value = str; }
 
 	pushArguments(args)
 	{
