@@ -1,0 +1,24 @@
+services:
+  frickmail:
+    build:
+      dockerfile: ./.docker/release/Dockerfile
+      context: .
+    image: frickmail:latest
+    container_name: frickmail
+    restart: unless-stopped
+    environment:
+      # Set DEBUG=true to enable verbose PHP logging
+      - DEBUG=false
+    ports:
+      - "8888:8888"
+    volumes:
+      - frickmail-data:/var/lib/snappymail
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8888/?/Css/0/Admin/-/&"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  frickmail-data:

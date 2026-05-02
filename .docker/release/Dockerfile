@@ -25,7 +25,10 @@ RUN set -eux; \
 # Inspired by the original Rainloop dockerfile from youtous on GitLab
 FROM php:8.2-fpm-alpine AS final
 
-LABEL org.label-schema.description="SnappyMail webmail client image using nginx, php-fpm on Alpine"
+LABEL org.label-schema.description="Frickmail webmail (SnappyMail fork with Gmail/O365 OAuth2) using nginx, php-fpm on Alpine"
+LABEL org.opencontainers.image.title="frickmail"
+LABEL org.opencontainers.image.source="https://github.com/ilfrick/frickmail"
+LABEL org.opencontainers.image.description="Frickmail — SnappyMail fork with Thunderbird-style OAuth2 for Gmail and Office365"
 
 # Install dependencies such as nginx
 RUN apk add --no-cache ca-certificates nginx supervisor bash

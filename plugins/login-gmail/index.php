@@ -13,11 +13,11 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Login GMail OAuth2',
-		VERSION  = '2.37',
-		RELEASE  = '2024-07-15',
+		VERSION  = '2.38',
+		RELEASE  = '2026-05-02',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
-		DESCRIPTION = 'GMail IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
+		DESCRIPTION = 'GMail IMAP, Sieve & SMTP login using RFC 7628 OAuth2 (Frickmail: Workspace domains + refresh fix)';
 
 	const
 		LOGIN_URI = 'https://accounts.google.com/o/oauth2/auth',
@@ -152,13 +152,36 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			\RainLoop\Plugins\Property::NewInstance('client_secret')
 				->SetLabel('Client Secret')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING)
-				->SetEncrypted()
+				->SetEncrypted(),
+			\RainLoop\Plugins\Property::NewInstance('domains')
+				->SetLabel('Domains')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING_TEXT)
+				->SetAllowedInJs()
+				->SetDefaultValue('gmail.com googlemail.com')
+				->SetDescription('Whitespace-separated list of domains that should be authenticated through Google OAuth2 (e.g. add your Google Workspace domains here)')
 		];
+	}
+
+	private function matchesDomain(string $sEmail) : bool
+	{
+		$sDomains = \trim((string) $this->Config()->Get('plugin', 'domains', 'gmail.com googlemail.com'));
+		if ('' === $sDomains) {
+			return false;
+		}
+		$aDomains = \preg_split('/\s+/', \strtolower($sDomains)) ?: [];
+		$sEmail = \strtolower($sEmail);
+		foreach ($aDomains as $sDomain) {
+			$sDomain = \trim($sDomain);
+			if ('' !== $sDomain && \str_ends_with($sEmail, '@' . $sDomain)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public function clientLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
 	{
-		if ($oAccount instanceof MainAccount && \str_ends_with($oAccount->Email(), '@gmail.com')) {
+		if ($oAccount instanceof MainAccount && $this->matchesDomain($oAccount->Email())) {
 			$oActions = \RainLoop\Api::Actions();
 			try {
 				$aData = static::$auth ?: \SnappyMail\Crypt::DecryptFromJSON(
@@ -181,7 +204,11 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 						);
 						if (!empty($aRefreshTokenResponse['result']['access_token'])) {
 							$aData['access_token'] = $aRefreshTokenResponse['result']['access_token'];
-							$aResponse['expires'] = $iExpires + $aResponse['expires_in'];
+							$aData['expires_in'] = (int) ($aRefreshTokenResponse['result']['expires_in'] ?? $aData['expires_in'] ?? 3600);
+							$aData['expires'] = $iExpires + $aData['expires_in'];
+							if (!empty($aRefreshTokenResponse['result']['refresh_token'])) {
+								$aData['refresh_token'] = $aRefreshTokenResponse['result']['refresh_token'];
+							}
 							$oActions->StorageProvider()->Put($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken(),
 								\SnappyMail\Crypt::EncryptToJSON($aData, $oAccount->CryptKey())
 							);

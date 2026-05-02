@@ -19,11 +19,11 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Office365/Outlook OAuth2',
-		VERSION  = '0.3',
-		RELEASE  = '2024-09-29',
+		VERSION  = '0.4',
+		RELEASE  = '2026-05-02',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
-		DESCRIPTION = 'Office365/Outlook IMAP, Sieve & SMTP login using RFC 7628 OAuth2';
+		DESCRIPTION = 'Office365/Outlook IMAP, Sieve & SMTP login using RFC 7628 OAuth2 (Frickmail: configurable domains + refresh fix)';
 
 	// https://login.microsoftonline.com/{{tenant}}/v2.0/.well-known/openid-configuration
 	const
@@ -177,13 +177,36 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 			\RainLoop\Plugins\Property::NewInstance('tenant')->SetLabel('Tenant')
 				->SetType(\RainLoop\Enumerations\PluginPropertyType::SELECTION)
 				->SetDefaultValue(['common','consumers','organizations'])
+				->SetAllowedInJs(),
+			\RainLoop\Plugins\Property::NewInstance('domains')
+				->SetLabel('Domains')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::STRING_TEXT)
 				->SetAllowedInJs()
+				->SetDefaultValue('outlook.com hotmail.com live.com msn.com hotmail.it outlook.it live.it')
+				->SetDescription('Whitespace-separated list of domains that should be authenticated through Microsoft OAuth2 (add your O365 tenant domains here)')
 		];
+	}
+
+	private function matchesDomain(string $sEmail) : bool
+	{
+		$sDomains = \trim((string) $this->Config()->Get('plugin', 'domains', 'outlook.com hotmail.com live.com msn.com hotmail.it outlook.it live.it'));
+		if ('' === $sDomains) {
+			return false;
+		}
+		$aDomains = \preg_split('/\s+/', \strtolower($sDomains)) ?: [];
+		$sEmail = \strtolower($sEmail);
+		foreach ($aDomains as $sDomain) {
+			$sDomain = \trim($sDomain);
+			if ('' !== $sDomain && \str_ends_with($sEmail, '@' . $sDomain)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public function clientLogin(\RainLoop\Model\Account $oAccount, \MailSo\Net\NetClient $oClient, \MailSo\Net\ConnectSettings $oSettings) : void
 	{
-		if ($oAccount instanceof MainAccount && \str_ends_with($oAccount->Email(), '@hotmail.com')) {
+		if ($oAccount instanceof MainAccount && $this->matchesDomain($oAccount->Email())) {
 			$oActions = \RainLoop\Api::Actions();
 			try {
 				$aData = static::$auth ?: \SnappyMail\Crypt::DecryptFromJSON(
@@ -206,7 +229,11 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 						);
 						if (!empty($aRefreshTokenResponse['result']['access_token'])) {
 							$aData['access_token'] = $aRefreshTokenResponse['result']['access_token'];
-							$aResponse['expires'] = $iExpires + $aResponse['expires_in'];
+							$aData['expires_in'] = (int) ($aRefreshTokenResponse['result']['expires_in'] ?? $aData['expires_in'] ?? 3600);
+							$aData['expires'] = $iExpires + $aData['expires_in'];
+							if (!empty($aRefreshTokenResponse['result']['refresh_token'])) {
+								$aData['refresh_token'] = $aRefreshTokenResponse['result']['refresh_token'];
+							}
 							$oActions->StorageProvider()->Put($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken(),
 								\SnappyMail\Crypt::EncryptToJSON($aData, $oAccount->CryptKey())
 							);
