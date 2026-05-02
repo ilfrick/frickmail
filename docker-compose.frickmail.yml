@@ -9,6 +9,13 @@ services:
     environment:
       # Set DEBUG=true to enable verbose PHP logging
       - DEBUG=false
+      # Gmail OAuth2 — see docs/OAUTH2.md. Leave secret empty for PKCE.
+      - FRICKMAIL_GMAIL_CLIENT_ID=
+      - FRICKMAIL_GMAIL_CLIENT_SECRET=
+      # Office365/Outlook OAuth2 — tenant: common | consumers | organizations | <GUID>
+      - FRICKMAIL_O365_CLIENT_ID=
+      - FRICKMAIL_O365_CLIENT_SECRET=
+      - FRICKMAIL_O365_TENANT=common
     ports:
       - "8888:8888"
     volumes:

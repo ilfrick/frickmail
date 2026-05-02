@@ -229,11 +229,16 @@ class Client
             case self::AUTH_TYPE_URI:
             case self::AUTH_TYPE_FORM:
                 $parameters['client_id'] = $this->client_id;
-                $parameters['client_secret'] = $this->client_secret;
+                // Frickmail: omit client_secret entirely for public/PKCE clients
+                if (null !== $this->client_secret && '' !== $this->client_secret) {
+                    $parameters['client_secret'] = $this->client_secret;
+                }
                 break;
             case self::AUTH_TYPE_AUTHORIZATION_BASIC:
                 $parameters['client_id'] = $this->client_id;
-                $http_headers['Authorization'] = 'Basic ' . base64_encode($this->client_id .  ':' . $this->client_secret);
+                if (null !== $this->client_secret && '' !== $this->client_secret) {
+                    $http_headers['Authorization'] = 'Basic ' . base64_encode($this->client_id .  ':' . $this->client_secret);
+                }
                 break;
             default:
                 throw new Exception('Unknown client auth type.', Exception::INVALID_CLIENT_AUTHENTICATION_TYPE);

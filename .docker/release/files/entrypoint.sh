@@ -45,6 +45,26 @@ if [ ! -f "$SNAPPYMAIL_CONFIG_FILE" ]; then
     fi
 fi
 
+# Frickmail: seed bundled OAuth2 plugins on first boot
+SNAPPYMAIL_PLUGINS_DIR=/var/lib/snappymail/_data_/_default_/plugins
+if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_default_ ]; then
+    mkdir -p "$SNAPPYMAIL_PLUGINS_DIR"
+    for plugin in login-oauth2 login-gmail login-o365; do
+        if [ ! -d "$SNAPPYMAIL_PLUGINS_DIR/$plugin" ] && [ -d "/snappymail/plugins-bundled/$plugin" ]; then
+            echo "[INFO] Seeding Frickmail plugin: $plugin"
+            cp -r "/snappymail/plugins-bundled/$plugin" "$SNAPPYMAIL_PLUGINS_DIR/$plugin"
+        fi
+    done
+    chown -R www-data:www-data "$SNAPPYMAIL_PLUGINS_DIR"
+    # Enable plugins in application.ini if currently disabled / unset
+    if grep -q '^enable = Off' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
+        sed -i '/^\[plugins\]/,/^\[/{s/^enable = Off/enable = On/}' "$SNAPPYMAIL_CONFIG_FILE"
+    fi
+    if ! grep -qE '^enabled_list = .*login-(gmail|o365)' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
+        sed -i '/^\[plugins\]/,/^\[/{s/^enabled_list = ""$/enabled_list = "login-oauth2,login-gmail,login-o365"/}' "$SNAPPYMAIL_CONFIG_FILE"
+    fi
+fi
+
 echo "[INFO] Overriding values in snappymail configuration: $SNAPPYMAIL_CONFIG_FILE"
 # Enable output of snappymail logs
 sed '/^\; Enable logging/{
