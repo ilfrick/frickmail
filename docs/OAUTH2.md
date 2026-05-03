@@ -51,6 +51,12 @@ Microsoft side.
      - `https://www.googleapis.com/auth/userinfo.email`
      - `https://www.googleapis.com/auth/userinfo.profile`
      - `https://mail.google.com/`
+     - `https://www.googleapis.com/auth/contacts.readonly` *(for the
+       contacts-sync plugin)*
+     - `https://www.googleapis.com/auth/calendar` *(for the calendar
+       plugin)*
+   Also under *APIs & Services → Library*, enable **People API** and
+   **Google Calendar API**.
    - Add yourself as a **test user** while the consent screen is in
      *Testing* state. Submit it for verification only when you are ready
      for the public.
@@ -91,6 +97,8 @@ Microsoft side.
    - `profile`
    - `offline_access`
    - `User.Read`
+   - `Contacts.Read` *(for the contacts-sync plugin)*
+   - `Calendars.ReadWrite` *(for the calendar plugin)*
    Click **Grant admin consent** if your tenant requires it.
 4. *Authentication → Advanced settings*:
    - **Allow public client flows: Yes** (this is what enables PKCE).
@@ -215,7 +223,38 @@ can self-consent in the popup. No admin involvement at all.
 
 ---
 
-## 7. Troubleshooting
+## 7. Bundled add-on plugins
+
+Frickmail ships two extra plugins that piggyback on the OAuth2 tokens
+already stored at sign-in:
+
+### contacts-sync
+
+Pulls contacts from the linked provider into SnappyMail's local PAB.
+
+- *Settings → Calendar/Contacts → Contacts Sync → Sync now*
+- Backed by Google **People API** (`contacts.readonly`) and Microsoft
+  **Graph** (`Contacts.Read`)
+- Re-import is idempotent (UID-keyed); rerunning just refreshes records.
+
+### calendar
+
+Embedded month-view calendar reading and writing the linked account's
+primary calendar.
+
+- *Settings → Calendar* (added via plugin sub-view)
+- Read+create+edit+delete via Google Calendar API and Microsoft Graph
+  `/me/events`
+- Click a day to add an event, click an event to edit/delete.
+
+Both plugins require the additional scopes listed in §2 / §3 above to be
+present on the OAuth client. If you registered the app before adding
+those scopes, the user will need to sign out and sign in again so a new
+consent screen captures the additional scopes.
+
+---
+
+## 8. Troubleshooting
 
 | Symptom                                  | Likely cause                                                                |
 | ---------------------------------------- | --------------------------------------------------------------------------- |

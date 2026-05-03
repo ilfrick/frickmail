@@ -171,10 +171,12 @@ RUN set -eux; \
 COPY --chown=www-data:www-data --from=builder /snappymail /snappymail
 # Use a custom snappymail data folder
 RUN mv -v /snappymail/data /var/lib/snappymail;
-# Frickmail: bundle our OAuth2 plugins inside the image so the entrypoint can seed them on first boot
-COPY --chown=www-data:www-data plugins/login-oauth2 /snappymail/plugins-bundled/login-oauth2
+# Frickmail: bundle our plugins inside the image so the entrypoint can seed them on first boot
+COPY --chown=www-data:www-data plugins/login-oauth2  /snappymail/plugins-bundled/login-oauth2
 COPY --chown=www-data:www-data plugins/login-gmail   /snappymail/plugins-bundled/login-gmail
 COPY --chown=www-data:www-data plugins/login-o365    /snappymail/plugins-bundled/login-o365
+COPY --chown=www-data:www-data plugins/contacts-sync /snappymail/plugins-bundled/contacts-sync
+COPY --chown=www-data:www-data plugins/calendar      /snappymail/plugins-bundled/calendar
 # Setup configs
 COPY --chown=root:root .docker/release/files /
 RUN set -eux; \

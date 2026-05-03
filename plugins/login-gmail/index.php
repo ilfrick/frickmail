@@ -92,7 +92,10 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 				'https://www.googleapis.com/auth/userinfo.email',
 				'https://www.googleapis.com/auth/userinfo.profile',
 				'openid',
-				'https://mail.google.com/'
+				'https://mail.google.com/',
+				// Frickmail extras for contacts-sync + calendar plugins
+				'https://www.googleapis.com/auth/contacts.readonly',
+				'https://www.googleapis.com/auth/calendar'
 			]),
 			'state' => $sState,
 			'access_type' => 'offline',

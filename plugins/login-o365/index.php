@@ -103,7 +103,10 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 				'email',
 				'profile',
 				'https://outlook.office.com/IMAP.AccessAsUser.All',
-				'https://outlook.office.com/SMTP.Send'
+				'https://outlook.office.com/SMTP.Send',
+				// Frickmail extras for contacts-sync + calendar plugins (Microsoft Graph audience)
+				'https://graph.microsoft.com/Contacts.Read',
+				'https://graph.microsoft.com/Calendars.ReadWrite'
 			]),
 			'state' => $sState,
 			'prompt' => 'select_account',

@@ -1,0 +1,20 @@
+<div>
+	<div class="form-horizontal">
+		<div class="legend">Frickmail Contacts Sync</div>
+		<p>Pull contacts from your linked Gmail or Office 365 account into the local address book.</p>
+		<div class="control-group">
+			<div class="controls">
+				<button class="btn" data-bind="click: runSync, enable: !syncing()">
+					<i data-bind="css: { 'icon-spinner animated': syncing(), 'icon-cloud-download': !syncing() }"></i>
+					&nbsp; Sync now
+				</button>
+			</div>
+		</div>
+		<div class="control-group" data-bind="visible: lastResult().length">
+			<div class="controls">
+				<span data-bind="text: lastResult"></span>
+			</div>
+		</div>
+		<p style="margin-top:1em;color:#888;font-size:90%">Requires a prior OAuth2 sign-in via the Gmail or Office 365 button. The refresh token stored at login is used to fetch contacts from Google People API or Microsoft Graph.</p>
+	</div>
+</div>
