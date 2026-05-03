@@ -57,6 +57,8 @@ class LoginOAuth2Plugin extends \RainLoop\Plugins\AbstractPlugin
 	{
 		$sPassword = $oSettings->passphrase;
 		$iGatLen = \strlen(static::GMAIL_TOKENS_PREFIX);
+		$sAccessToken = '';
+		$sRefreshToken = '';
 		if ($sPassword && static::GMAIL_TOKENS_PREFIX === \substr($sPassword, 0, $iGatLen)) {
 			$aTokens = \json_decode(\substr($sPassword, $iGatLen));
 			$sAccessToken = !empty($aTokens[0]) ? $aTokens[0] : '';

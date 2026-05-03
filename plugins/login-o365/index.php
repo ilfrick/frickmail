@@ -71,7 +71,7 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 
 		$sClientId = $this->resolveClientId();
 		if (!$sClientId) {
-			$oActions->Location(\RainLoop\Utils::WebPath());
+			$this->renderPopupCallback(false, '', 'Office365 OAuth2 client_id is not configured. Set it in the plugin settings or via FRICKMAIL_O365_CLIENT_ID env-var.', \RainLoop\Utils::WebPath() ?: '/');
 			exit;
 		}
 

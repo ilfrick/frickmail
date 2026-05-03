@@ -68,7 +68,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 		$sClientId = $this->resolveClientId();
 		if (!$sClientId) {
-			$oActions->Location(\RainLoop\Utils::WebPath());
+			$this->renderPopupCallback(false, '', 'Gmail OAuth2 client_id is not configured. Set it in the plugin settings or via FRICKMAIL_GMAIL_CLIENT_ID env-var.', \RainLoop\Utils::WebPath() ?: '/');
 			exit;
 		}
 
