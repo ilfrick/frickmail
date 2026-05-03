@@ -63,7 +63,16 @@
 		}
 	};
 
+	const SKIP_KEY = 'frickmail-oauth2-skip-' + PROVIDER;
+	const skipOnce = () => sessionStorage.setItem(SKIP_KEY, '1');
+	const consumeSkip = () => {
+		const v = sessionStorage.getItem(SKIP_KEY);
+		sessionStorage.removeItem(SKIP_KEY);
+		return v === '1';
+	};
+
 	addEventListener('sm-user-login', e => {
+		if (consumeSkip()) return;
 		if (matches(e.detail.get('Email'))) {
 			e.preventDefault();
 			launch();
@@ -74,10 +83,16 @@
 		if ('Login' === e.detail.viewModelTemplateID) {
 			const
 				container = e.detail.viewModelDom.querySelector('#plugin-Login-BottomControlGroup'),
-				btn = Element.fromHTML('<button type="button">Sign in with Microsoft</button>'),
+				oauthBtn = Element.fromHTML('<button type="button">Sign in with Microsoft</button>'),
+				pwdBtn = Element.fromHTML('<button type="button" title="Skip OAuth for this attempt — use an IMAP app-password instead">Use password instead</button>'),
 				div = Element.fromHTML('<div class="controls"></div>');
-			btn.onclick = launch;
-			div.append(btn);
+			oauthBtn.onclick = launch;
+			pwdBtn.onclick = () => {
+				skipOnce();
+				const form = e.detail.viewModelDom.querySelector('form');
+				form && form.requestSubmit && form.requestSubmit();
+			};
+			div.append(oauthBtn, pwdBtn);
 			container && container.append(div);
 		}
 	});

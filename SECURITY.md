@@ -1,5 +1,42 @@
 # Security Policy
 
+## Frickmail-specific notes
+
+Frickmail is a fork of upstream [SnappyMail](https://github.com/the-djmaze/snappymail).
+Most of the surface area is upstream code, so most security disclosures
+should go upstream first using the email/PGP key below.
+
+For issues in **Frickmail-only code** — `plugins/login-gmail`,
+`plugins/login-o365`, `plugins/login-oauth2`, the Docker image, the
+contacts/calendar plugins, or anything under `docs/` — open a private
+security advisory at
+<https://github.com/ilfrick/frickmail/security/advisories/new>.
+
+### Currently tracked upstream advisories
+
+| ID                  | Affected versions | Status in Frickmail |
+| ------------------- | ----------------- | ------------------- |
+| GHSA-2rq7-79vp-ffxm / CVE-2024-45800 (mXSS in HTML sanitizer) | < 2.38.0 | Patched (Frickmail ships SnappyMail 2.38.2 which includes the fix) |
+
+Frickmail tracks upstream master. Our last sync point is upstream commit
+`c154d23` (2026-03-11). Run `git log --grep=security` and
+`git log --grep=CVE` on this repository for the audit trail of patches
+we've integrated.
+
+### Frickmail-specific hardening guidance
+
+- Prefer the public PKCE flow shipped by the OAuth2 plugins (no
+  `client_secret`). If you do set a secret, store it in
+  `FRICKMAIL_*_CLIENT_SECRET` env vars rather than the admin UI.
+- HTTPS is mandatory for OAuth2 redirect URIs. Google and Microsoft will
+  refuse to complete consent over plain HTTP.
+- The Docker volume `/var/lib/snappymail` contains mailboxes, cached
+  refresh tokens and the admin password — back it up encrypted.
+
+---
+
+## Upstream SnappyMail policy
+
 ## Supported Versions
 
 Currently due to the fast development only the latest version receives security updates.

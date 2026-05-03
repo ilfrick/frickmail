@@ -163,7 +163,59 @@ redirect to the provider's consent screen.
 
 ---
 
-## 6. Troubleshooting
+## 6. What if you can't get tenant admin consent?
+
+For corporate Microsoft 365 tenants, the IMAP/SMTP scopes
+(`IMAP.AccessAsUser.All`, `SMTP.Send`) require **tenant admin consent** — a
+user cannot self-grant them. If you're trying to log into an account in a
+tenant where you are not the admin (and the admin won't grant consent for
+your Frickmail app registration), OAuth2 cannot be made to work for that
+account. Microsoft has no per-user override for these scopes.
+
+You still have three working alternatives:
+
+### 6.1 IMAP with an app-password (recommended)
+
+If the user has multi-factor authentication enabled and the tenant still
+allows app passwords (this is common — it's a separate setting from
+"Allow OAuth app consent"), the user can:
+
+1. Generate an app password at
+   <https://account.microsoft.com/security> (personal) or
+   <https://mysignins.microsoft.com/security-info> (work / school) →
+   *Add sign-in method → App password*.
+2. On the Frickmail login screen, type the email address and click the
+   **Use password instead** button (added by the OAuth2 plugin) — this
+   skips OAuth for one submission. Paste the app password as the password.
+3. SnappyMail will fall back to its standard IMAP login flow, which
+   contacts `outlook.office365.com:993` directly with basic auth +
+   the app password.
+
+> Tip: if you want this domain to *always* use password auth rather than
+> OAuth, just remove the domain from the plugin's *Domains* setting.
+> Frickmail will then leave that domain alone and let SnappyMail
+> authenticate it the normal way.
+
+### 6.2 Use a multi-tenant app registration
+
+If you can't register an app in the user's tenant but you *can* register
+one in any other Entra tenant (your own, for example), set the supported
+account types to **multi-tenant + personal Microsoft accounts** when you
+register Frickmail. Then set `FRICKMAIL_O365_TENANT=common`. Each user
+who logs in is asked to consent in their own tenant — but their tenant
+admin will still need to approve before consent can complete, so this
+helps only when the target tenant allows user consent for non-Tier-2
+scopes.
+
+### 6.3 Personal Microsoft accounts (Outlook.com / Hotmail)
+
+Personal accounts (`@outlook.com`, `@hotmail.com`, `@live.com`, …) never
+need admin consent. Set `FRICKMAIL_O365_TENANT=consumers` and the user
+can self-consent in the popup. No admin involvement at all.
+
+---
+
+## 7. Troubleshooting
 
 | Symptom                                  | Likely cause                                                                |
 | ---------------------------------------- | --------------------------------------------------------------------------- |
