@@ -66,6 +66,10 @@ if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_defaul
 fi
 
 echo "[INFO] Overriding values in snappymail configuration: $SNAPPYMAIL_CONFIG_FILE"
+# Frickmail: rebrand title/loading_description if still using the upstream defaults
+sed -i 's/^title = "SnappyMail Webmail"/title = "Frickmail"/' "$SNAPPYMAIL_CONFIG_FILE"
+sed -i 's/^title = "SnappyMail"/title = "Frickmail"/' "$SNAPPYMAIL_CONFIG_FILE"
+sed -i 's/^loading_description = "SnappyMail"/loading_description = "Frickmail"/' "$SNAPPYMAIL_CONFIG_FILE"
 # Enable output of snappymail logs
 sed '/^\; Enable logging/{
 N

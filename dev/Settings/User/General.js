@@ -217,7 +217,7 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 	}
 
 	testSystemNotification() {
-		NotificationUserStore.display('SnappyMail', 'Test notification');
+		NotificationUserStore.display('Frickmail', 'Test notification');
 	}
 
 	selectLanguage() {
@@ -229,7 +229,7 @@ export class UserSettingsGeneral extends AbstractViewSettings {
 		navigator.registerProtocolHandler(
 			'mailto',
 			`${location.protocol}//${location.host}${location.pathname}?mailto&to=%s`,
-			(SettingsGet('title') || 'SnappyMail')
+			(SettingsGet('title') || 'Frickmail')
 		);
 		alert(i18n('GLOBAL/DONE'));
 		this.mailto(0);
