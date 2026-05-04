@@ -93,6 +93,42 @@
 				this.refresh();
 			}, 'FrickmailSetPrimary', { id: account.id }, 30);
 		}
+
+		switchTo(account) {
+			this.status('Switching to ' + account.email + '…');
+			rl.pluginRemoteRequest((iError, oData) => {
+				const r = oData?.Result;
+				if (!r?.ok) { this.status('Switch failed: ' + (r?.error || 'request error')); return; }
+				document.location.reload();
+			}, 'FrickmailSwitchAccount', { id: account.id }, 30);
+		}
+
+		launchOAuth(provider) {
+			const path = 'gmail' === provider ? 'StartLoginGMail' : 'StartLoginO365';
+			const base = document.location.href.replace(/[#?].*$/, '').replace(/\/+$/, '');
+			const w = 520, h = 640,
+				y = (screen.availHeight - h) / 2,
+				x = (screen.availWidth - w) / 2;
+			const popup = window.open(base + '/?' + path, 'frickmail-oauth-' + provider,
+				`popup=yes,width=${w},height=${h},left=${x},top=${y}`);
+			if (!popup) { this.status('Popup blocked — allow popups and retry'); return; }
+			this.status('Waiting for ' + provider + ' consent…');
+
+			const onMsg = e => {
+				if (e.origin !== window.location.origin) return;
+				const d = e.data;
+				if (!d || d.type !== 'frickmail-oauth2') return;
+				removeEventListener('message', onMsg);
+				if (d.status === 'ok') {
+					this.status('Linked ' + (d.email || provider) + '. Refreshing…');
+					this.refresh();
+					this.cancelAdd();
+				} else {
+					this.status('OAuth failed: ' + (d.error || 'unknown'));
+				}
+			};
+			addEventListener('message', onMsg);
+		}
 	}
 
 	rl.addSettingsViewModel(FrickmailMailAccountsSettings, 'FrickmailMailAccountsSettings',

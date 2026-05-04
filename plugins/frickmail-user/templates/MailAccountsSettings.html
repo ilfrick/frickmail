@@ -11,6 +11,7 @@
 					<span data-bind="visible: is_primary" style="margin-left:.4em; padding:1px 6px; background:#4a90e2; color:white; border-radius:3px; font-size:80%">primary</span>
 					<div style="font-size:85%; color:#888" data-bind="text: type.toUpperCase() + (imap_host ? ' · ' + imap_host + ':' + imap_port : '')"></div>
 				</div>
+				<button class="btn" data-bind="click: $parent.switchTo.bind($parent)">Open mailbox</button>
 				<button class="btn" data-bind="click: $parent.setPrimary.bind($parent), visible: !is_primary">Set primary</button>
 				<button class="btn" data-bind="click: $parent.deleteAccount.bind($parent)" style="background:#c33; color:white">Delete</button>
 			</div>
@@ -65,8 +66,13 @@
 				</div>
 			</div>
 
-			<div data-bind="visible: draft.type() !== 'imap'" style="margin: .8em 0; color:#888">
-				After saving, click "Sign in with Google/Microsoft" from the sign-out screen to grant Frickmail access. The OAuth refresh token will be linked to this entry.
+			<div data-bind="visible: draft.type() === 'gmail'" style="margin: .8em 0">
+				<button class="btn" style="background:#d44638; color:white" data-bind="click: launchOAuth.bind($data, 'gmail')">Sign in with Google</button>
+				<p style="color:#888; margin-top:.4em">A popup opens with Google's consent screen. The refresh token is linked to your Frickmail account.</p>
+			</div>
+			<div data-bind="visible: draft.type() === 'o365'" style="margin: .8em 0">
+				<button class="btn" style="background:#2b7de9; color:white" data-bind="click: launchOAuth.bind($data, 'o365')">Sign in with Microsoft</button>
+				<p style="color:#888; margin-top:.4em">A popup opens with Microsoft's consent screen.</p>
 			</div>
 
 			<label><input type="checkbox" data-bind="checked: draft.is_primary" /> Use as primary</label>

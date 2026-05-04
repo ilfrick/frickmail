@@ -45,6 +45,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailAddAccount', 'JsonAddAccount');
 		$this->addJsonHook('FrickmailDeleteAccount', 'JsonDeleteAccount');
 		$this->addJsonHook('FrickmailSetPrimary', 'JsonSetPrimary');
+		$this->addJsonHook('FrickmailSwitchAccount', 'JsonSwitchAccount');
 		$this->addJsonHook('FrickmailMe', 'JsonMe');
 	}
 
@@ -272,6 +273,28 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		}
 	}
 
+	public function JsonSwitchAccount() : array
+	{
+		try {
+			[$uid, $cryptKey] = $this->requireSession();
+			$id = (int) $this->jsonParam('id');
+			$db = $this->db();
+			$row = $db->getMailAccount($uid, $id);
+			if (!$row) throw new \RuntimeException('Account not found');
+
+			// Logout the current SnappyMail session if any, so the bridge starts clean.
+			$oActions = \RainLoop\Api::Actions();
+			try { $oActions->Logout(true); } catch (\Throwable $e) {}
+
+			$account = $db->decryptedAccount($row, $cryptKey);
+			$this->bridgeToSnappyMail($account);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'email' => $account['email']]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
 	private function requireSession() : array
 	{
 		$this->startPhpSession();
@@ -290,15 +313,84 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		if ('imap' === $account['type']) {
 			if (empty($account['password'])) throw new \RuntimeException('Missing IMAP password');
 			$oPassword = new \SnappyMail\SensitiveString($account['password']);
-			// SnappyMail picks IMAP host from domain config, so ensure it's defined first.
 			$this->ensureSnappyMailDomain($account);
 			$oActions->LoginProcess($account['email'], $oPassword);
 			return;
 		}
 
-		// Gmail / O365 — reuse the access_token cached by the OAuth plugins.
-		// If not yet cached for this session, exchange the stored refresh_token.
-		throw new \RuntimeException('Bridging OAuth accounts is not yet wired — log in via the provider button first.');
+		// OAuth bridge: exchange refresh_token for an access_token, then call
+		// LoginProcess. The login-gmail / login-o365 plugins are still hooked to
+		// imap.before-login and will replace the IMAP password with the
+		// access_token via XOAUTH2 / OAUTHBEARER.
+		if (empty($account['oauth_refresh_token'])) {
+			throw new \RuntimeException('Missing OAuth refresh token — re-authorize this account.');
+		}
+
+		[$tokenUri, $clientId, $clientSecret, $scope] = $this->oauthEndpoint($account);
+		$oClient = new \OAuth2\Client($clientId, $clientSecret);
+		$aResp = $oClient->getAccessToken($tokenUri, 'refresh_token', [
+			'refresh_token' => $account['oauth_refresh_token'],
+			'scope' => $scope,
+		]);
+		if (200 != $aResp['code'] || empty($aResp['result']['access_token'])) {
+			$err = $aResp['result']['error_description'] ?? $aResp['result']['error'] ?? 'token exchange failed';
+			throw new \RuntimeException("OAuth refresh failed: {$err}");
+		}
+		$sAccessToken = (string) $aResp['result']['access_token'];
+		$iExpiresIn = (int) ($aResp['result']['expires_in'] ?? 3600);
+		$sNewRefresh = (string) ($aResp['result']['refresh_token'] ?? $account['oauth_refresh_token']);
+
+		// Use the email as a SensitiveString password for LoginProcess; the OAuth
+		// plugin's clientLogin hook will pull the real access_token from session.
+		$oPassword = new \SnappyMail\SensitiveString($account['email']);
+		$oAccount = $oActions->LoginProcess($account['email'], $oPassword);
+		if ($oAccount) {
+			$oActions->StorageProvider()->Put($oAccount, \RainLoop\Providers\Storage\Enumerations\StorageType::SESSION,
+				\RainLoop\Utils::GetSessionToken(),
+				\SnappyMail\Crypt::EncryptToJSON([
+					'access_token' => $sAccessToken,
+					'refresh_token' => $sNewRefresh,
+					'expires_in' => $iExpiresIn,
+					'expires' => \time() + $iExpiresIn,
+				], $oAccount->CryptKey())
+			);
+		}
+	}
+
+	private function oauthEndpoint(array $account) : array
+	{
+		if ('gmail' === $account['type']) {
+			return [
+				'https://accounts.google.com/o/oauth2/token',
+				$this->resolveOauthEnv('FRICKMAIL_GMAIL_CLIENT_ID', 'login-gmail', 'client_id'),
+				$this->resolveOauthEnv('FRICKMAIL_GMAIL_CLIENT_SECRET', null, null),
+				'https://mail.google.com/'
+			];
+		}
+		if ('o365' === $account['type']) {
+			$tenant = $account['oauth_tenant'] ?: 'common';
+			return [
+				"https://login.microsoftonline.com/{$tenant}/oauth2/v2.0/token",
+				$this->resolveOauthEnv('FRICKMAIL_O365_CLIENT_ID', 'login-o365', 'client_id'),
+				$this->resolveOauthEnv('FRICKMAIL_O365_CLIENT_SECRET', null, null),
+				'https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access'
+			];
+		}
+		throw new \RuntimeException('Unknown OAuth provider');
+	}
+
+	private function resolveOauthEnv(string $envKey, ?string $pluginName, ?string $configKey) : string
+	{
+		$v = (string) (\getenv($envKey) ?: '');
+		if ('' !== $v) return \trim($v);
+		if ($pluginName && $configKey) {
+			try {
+				$cfg = new \RainLoop\Config\Plugin($pluginName);
+				$cfg->Load();
+				return \trim((string) $cfg->Get('plugin', $configKey, ''));
+			} catch (\Throwable $e) {}
+		}
+		return '';
 	}
 
 	private function ensureSnappyMailDomain(array $account) : void

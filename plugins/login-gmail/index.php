@@ -193,6 +193,20 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 				'expires' => $iExpires
 			];
 
+			// Frickmail mode: if a Frickmail user session exists, save the account
+			// to the DB and skip the legacy IMAP-as-identity bridge.
+			$sFrickmailBridge = \APP_PLUGINS_PATH . 'frickmail-user/lib/Bridge.php';
+			if (\is_file($sFrickmailBridge)) {
+				require_once $sFrickmailBridge;
+				if (\Frickmail\User\Bridge::currentUserId()) {
+					\Frickmail\User\Bridge::upsertOAuthAccount('gmail', (string) $aUserInfo['email'], (string) $aResponse['refresh_token']);
+					$bPopupOk = true;
+					$sPopupEmail = (string) $aUserInfo['email'];
+					$this->renderPopupCallback($bPopupOk, $sPopupEmail, '', $uri);
+					exit;
+				}
+			}
+
 			$oPassword = new \SnappyMail\SensitiveString($aUserInfo['id']);
 			$oAccount = $oActions->LoginProcess($aUserInfo['email'], $oPassword);
 			if ($oAccount) {

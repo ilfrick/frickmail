@@ -210,6 +210,19 @@ class LoginO365Plugin extends \RainLoop\Plugins\AbstractPlugin
 				'expires' => $iExpires
 			];
 
+			// Frickmail mode
+			$sFrickmailBridge = \APP_PLUGINS_PATH . 'frickmail-user/lib/Bridge.php';
+			if (\is_file($sFrickmailBridge)) {
+				require_once $sFrickmailBridge;
+				if (\Frickmail\User\Bridge::currentUserId()) {
+					\Frickmail\User\Bridge::upsertOAuthAccount('o365', $sEmail, (string) $aResponse['refresh_token'], $this->resolveTenant());
+					$bPopupOk = true;
+					$sPopupEmail = $sEmail;
+					$this->renderPopupCallback($bPopupOk, $sPopupEmail, '', $sFallback);
+					exit;
+				}
+			}
+
 			$oPassword = new \SnappyMail\SensitiveString($sId);
 			$oAccount = $oActions->LoginProcess($sEmail, $oPassword);
 			if ($oAccount) {
