@@ -58,18 +58,20 @@ class Bridge
 		$cipher = Crypto::encrypt($sRefreshToken, $key);
 		if ($existing) {
 			$st = $db->pdo()->prepare(
-				'UPDATE frickmail_mail_accounts SET
-					type = :type, encrypted_oauth_refresh_token = :tok,
+				"UPDATE frickmail_mail_accounts SET
+					type = :type,
+					encrypted_oauth_refresh_token = decode(:tok, 'hex'),
 					oauth_tenant = :tenant, login = :login, updated_at = NOW()
-				 WHERE id = :id AND user_id = :uid'
+				 WHERE id = :id AND user_id = :uid"
 			);
-			$st->bindValue(':id', (int) $existing['id'], \PDO::PARAM_INT);
-			$st->bindValue(':uid', $uid, \PDO::PARAM_INT);
-			$st->bindValue(':type', $sType);
-			$st->bindValue(':tok', $cipher, \PDO::PARAM_LOB);
-			$st->bindValue(':tenant', $sTenant);
-			$st->bindValue(':login', $sEmail);
-			$st->execute();
+			$st->execute([
+				':id' => (int) $existing['id'],
+				':uid' => $uid,
+				':type' => $sType,
+				':tok' => \bin2hex($cipher),
+				':tenant' => $sTenant,
+				':login' => $sEmail,
+			]);
 			return (int) $existing['id'];
 		}
 		$id = $db->insertMailAccount($uid, [

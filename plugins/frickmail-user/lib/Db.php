@@ -42,15 +42,17 @@ class Db
 
 	public function createUser(string $username, ?string $email, string $passwordHash, string $kdfSalt) : int
 	{
+		// Bind binary bytes as hex string + Postgres decode() because PDO/pgsql
+		// treats string params as UTF-8 and rejects raw sodium-salt bytes.
 		$st = $this->pdo->prepare(
-			'INSERT INTO frickmail_users (username, email, password_hash, kdf_salt)
-			 VALUES (:u, :e, :h, :s) RETURNING id'
+			"INSERT INTO frickmail_users (username, email, password_hash, kdf_salt)
+			 VALUES (:u, :e, :h, decode(:s, 'hex')) RETURNING id"
 		);
 		$st->execute([
 			':u' => \strtolower($username),
 			':e' => $email,
 			':h' => $passwordHash,
-			':s' => $kdfSalt,
+			':s' => \bin2hex($kdfSalt),
 		]);
 		return (int) $st->fetchColumn();
 	}
@@ -98,16 +100,20 @@ class Db
 
 	public function insertMailAccount(int $userId, array $data) : int
 	{
+		$encPwd = $data['encrypted_password'] ?? null;
+		$encTok = $data['encrypted_oauth_refresh_token'] ?? null;
 		$st = $this->pdo->prepare(
-			'INSERT INTO frickmail_mail_accounts
+			"INSERT INTO frickmail_mail_accounts
 				(user_id, label, email, type, imap_host, imap_port, imap_secure,
 				 smtp_host, smtp_port, smtp_secure, login,
 				 encrypted_password, encrypted_oauth_refresh_token, oauth_tenant, is_primary)
 			 VALUES
 				(:user_id, :label, :email, :type, :imap_host, :imap_port, :imap_secure,
 				 :smtp_host, :smtp_port, :smtp_secure, :login,
-				 :encrypted_password, :encrypted_oauth_refresh_token, :oauth_tenant, :is_primary)
-			 RETURNING id'
+				 CASE WHEN :enc_pwd_h = '' THEN NULL ELSE decode(:enc_pwd, 'hex') END,
+				 CASE WHEN :enc_tok_h = '' THEN NULL ELSE decode(:enc_tok, 'hex') END,
+				 :oauth_tenant, :is_primary)
+			 RETURNING id"
 		);
 		$st->bindValue(':user_id', $userId, \PDO::PARAM_INT);
 		$st->bindValue(':label', $data['label']);
@@ -120,8 +126,10 @@ class Db
 		$st->bindValue(':smtp_port', $data['smtp_port'] ?? null, \PDO::PARAM_INT);
 		$st->bindValue(':smtp_secure', $data['smtp_secure'] ?? null);
 		$st->bindValue(':login', $data['login'] ?? null);
-		$st->bindValue(':encrypted_password', $data['encrypted_password'] ?? null, \PDO::PARAM_LOB);
-		$st->bindValue(':encrypted_oauth_refresh_token', $data['encrypted_oauth_refresh_token'] ?? null, \PDO::PARAM_LOB);
+		$st->bindValue(':enc_pwd', null !== $encPwd ? \bin2hex($encPwd) : '');
+		$st->bindValue(':enc_pwd_h', null !== $encPwd ? \bin2hex($encPwd) : '');
+		$st->bindValue(':enc_tok', null !== $encTok ? \bin2hex($encTok) : '');
+		$st->bindValue(':enc_tok_h', null !== $encTok ? \bin2hex($encTok) : '');
 		$st->bindValue(':oauth_tenant', $data['oauth_tenant'] ?? null);
 		$st->bindValue(':is_primary', !empty($data['is_primary']), \PDO::PARAM_BOOL);
 		$st->execute();
