@@ -58,6 +58,8 @@ if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_defaul
         fi
     done
     chown -R www-data:www-data "$SNAPPYMAIL_PLUGINS_DIR"
+    # Bust SnappyMail's plugin-JS cache so new bundled JS is served immediately
+    rm -rf /var/lib/snappymail/_data_/_default_/cache/* 2>/dev/null || true
     # Enable plugins in application.ini if currently disabled / unset
     if grep -q '^enable = Off' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
         sed -i '/^\[plugins\]/,/^\[/{s/^enable = Off/enable = On/}' "$SNAPPYMAIL_CONFIG_FILE"
