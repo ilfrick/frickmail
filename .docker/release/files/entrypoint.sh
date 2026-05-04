@@ -45,13 +45,15 @@ if [ ! -f "$SNAPPYMAIL_CONFIG_FILE" ]; then
     fi
 fi
 
-# Frickmail: seed bundled OAuth2 plugins on first boot
+# Frickmail: sync bundled plugins on every boot. These are image-managed
+# (not user-installed) so we always overwrite to pick up upgrades.
 SNAPPYMAIL_PLUGINS_DIR=/var/lib/snappymail/_data_/_default_/plugins
 if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_default_ ]; then
     mkdir -p "$SNAPPYMAIL_PLUGINS_DIR"
     for plugin in login-oauth2 login-gmail login-o365 contacts-sync calendar frickmail-user; do
-        if [ ! -d "$SNAPPYMAIL_PLUGINS_DIR/$plugin" ] && [ -d "/snappymail/plugins-bundled/$plugin" ]; then
-            echo "[INFO] Seeding Frickmail plugin: $plugin"
+        if [ -d "/snappymail/plugins-bundled/$plugin" ]; then
+            echo "[INFO] Syncing Frickmail plugin: $plugin"
+            rm -rf "$SNAPPYMAIL_PLUGINS_DIR/$plugin"
             cp -r "/snappymail/plugins-bundled/$plugin" "$SNAPPYMAIL_PLUGINS_DIR/$plugin"
         fi
     done
