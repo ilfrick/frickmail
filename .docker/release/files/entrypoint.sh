@@ -49,7 +49,7 @@ fi
 SNAPPYMAIL_PLUGINS_DIR=/var/lib/snappymail/_data_/_default_/plugins
 if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_default_ ]; then
     mkdir -p "$SNAPPYMAIL_PLUGINS_DIR"
-    for plugin in login-oauth2 login-gmail login-o365 contacts-sync calendar; do
+    for plugin in login-oauth2 login-gmail login-o365 contacts-sync calendar frickmail-user; do
         if [ ! -d "$SNAPPYMAIL_PLUGINS_DIR/$plugin" ] && [ -d "/snappymail/plugins-bundled/$plugin" ]; then
             echo "[INFO] Seeding Frickmail plugin: $plugin"
             cp -r "/snappymail/plugins-bundled/$plugin" "$SNAPPYMAIL_PLUGINS_DIR/$plugin"
@@ -60,9 +60,72 @@ if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_defaul
     if grep -q '^enable = Off' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
         sed -i '/^\[plugins\]/,/^\[/{s/^enable = Off/enable = On/}' "$SNAPPYMAIL_CONFIG_FILE"
     fi
-    if ! grep -qE '^enabled_list = .*calendar' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
-        sed -i '/^\[plugins\]/,/^\[/{s/^enabled_list = .*$/enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar"/}' "$SNAPPYMAIL_CONFIG_FILE"
+    if ! grep -qE '^enabled_list = .*frickmail-user' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
+        sed -i '/^\[plugins\]/,/^\[/{s/^enabled_list = .*$/enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user"/}' "$SNAPPYMAIL_CONFIG_FILE"
     fi
+fi
+
+# Frickmail: provision Postgres schema for users + mail accounts (idempotent)
+FRICKMAIL_DB_HOST="${FRICKMAIL_DB_HOST:-db}"
+FRICKMAIL_DB_PORT="${FRICKMAIL_DB_PORT:-5432}"
+FRICKMAIL_DB_NAME="${FRICKMAIL_DB_NAME:-frickmail}"
+FRICKMAIL_DB_USER="${FRICKMAIL_DB_USER:-frickmail}"
+FRICKMAIL_DB_PASSWORD="${FRICKMAIL_DB_PASSWORD:-frickmail}"
+if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
+    echo "[INFO] Provisioning Frickmail user schema on ${FRICKMAIL_DB_HOST}:${FRICKMAIL_DB_PORT}/${FRICKMAIL_DB_NAME}"
+    PGPASSWORD="$FRICKMAIL_DB_PASSWORD" \
+    FRICKMAIL_DB_HOST="$FRICKMAIL_DB_HOST" FRICKMAIL_DB_PORT="$FRICKMAIL_DB_PORT" \
+    FRICKMAIL_DB_NAME="$FRICKMAIL_DB_NAME" FRICKMAIL_DB_USER="$FRICKMAIL_DB_USER" \
+    FRICKMAIL_DB_PASSWORD="$FRICKMAIL_DB_PASSWORD" \
+    php -r '
+        $tries = 30;
+        while ($tries-- > 0) {
+            try {
+                $pdo = new PDO(
+                    sprintf("pgsql:host=%s;port=%s;dbname=%s",
+                        getenv("FRICKMAIL_DB_HOST"),
+                        getenv("FRICKMAIL_DB_PORT"),
+                        getenv("FRICKMAIL_DB_NAME")),
+                    getenv("FRICKMAIL_DB_USER"),
+                    getenv("FRICKMAIL_DB_PASSWORD"),
+                    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 3]
+                );
+                break;
+            } catch (Throwable $e) {
+                if ($tries === 0) { fwrite(STDERR, "[ERR] Postgres unreachable: " . $e->getMessage() . PHP_EOL); exit(1); }
+                sleep(1);
+            }
+        }
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_users (
+            id BIGSERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT,
+            password_hash TEXT NOT NULL,
+            kdf_salt BYTEA NOT NULL,
+            settings JSONB NOT NULL DEFAULT '\''{}'\''::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_mail_accounts (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES frickmail_users(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            email TEXT NOT NULL,
+            type TEXT NOT NULL CHECK (type IN ('\''imap'\'','\''gmail'\'','\''o365'\'')),
+            imap_host TEXT, imap_port INT, imap_secure TEXT,
+            smtp_host TEXT, smtp_port INT, smtp_secure TEXT,
+            login TEXT,
+            encrypted_password BYTEA,
+            encrypted_oauth_refresh_token BYTEA,
+            oauth_tenant TEXT,
+            is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_mail_accounts_user ON frickmail_mail_accounts(user_id)");
+        $pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_fm_mail_accounts_primary ON frickmail_mail_accounts(user_id) WHERE is_primary");
+        echo "[OK] Frickmail schema ready" . PHP_EOL;
+    ' || echo "[WARN] Frickmail schema migration skipped (DB unreachable)"
 fi
 
 echo "[INFO] Overriding values in snappymail configuration: $SNAPPYMAIL_CONFIG_FILE"

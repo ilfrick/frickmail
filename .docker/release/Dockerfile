@@ -177,6 +177,7 @@ COPY --chown=www-data:www-data plugins/login-gmail   /snappymail/plugins-bundled
 COPY --chown=www-data:www-data plugins/login-o365    /snappymail/plugins-bundled/login-o365
 COPY --chown=www-data:www-data plugins/contacts-sync /snappymail/plugins-bundled/contacts-sync
 COPY --chown=www-data:www-data plugins/calendar      /snappymail/plugins-bundled/calendar
+COPY --chown=www-data:www-data plugins/frickmail-user /snappymail/plugins-bundled/frickmail-user
 # Setup configs
 COPY --chown=root:root .docker/release/files /
 RUN set -eux; \
