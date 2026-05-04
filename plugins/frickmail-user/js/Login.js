@@ -60,19 +60,24 @@
 
 		$f('switch').onclick = () => switchMode('login' === mode ? 'register' : 'login');
 
-		const ensureCsrfToken = async () => {
-			if (rl.settings?.app?.('token')) return;
-			// Force a boot-time AppData fetch so RL_APP_DATA.System.token is populated.
+		// Always fetch a fresh AppData to bind the CSRF token to the *current*
+		// CONNECTION_TOKEN cookie. A cached RL_APP_DATA.System.token can be stale
+		// (cookie rotated, container restart, …) → server reports XToken mismatch.
+		const refreshCsrfToken = async () => {
 			try {
-				const r = await fetch('?/AppData/0/' + Math.random().toString().slice(2) + '/', { credentials: 'same-origin', cache: 'no-cache' });
+				const r = await fetch('?/AppData/0/' + Math.random().toString().slice(2) + '/', {
+					credentials: 'same-origin', cache: 'no-cache',
+					headers: { 'Accept': 'application/json' }
+				});
 				const data = await r.json();
-				if (data && data.System) {
-					// Re-evaluate via rl.settings; if still empty, stash on rl directly so our request can read it.
-					if (!rl.settings.app('token') && data.System.token) {
-						rl.__frickmail_token = data.System.token;
-					}
+				if (data?.System?.token) {
+					rl.__frickmail_token = data.System.token;
+					// Best-effort: keep the standard slot in sync too so later code paths agree
+					try { rl.settings.set?.('System', data.System); } catch (e) {}
+					return data.System.token;
 				}
-			} catch (e) { /* ignored — request will fail with a clearer error below */ }
+			} catch (e) { /* fall through */ }
+			return null;
 		};
 
 		$f('form').onsubmit = async e => {
@@ -83,11 +88,11 @@
 			if (!username || !password) { setStatus('Username and password required', 'error'); return; }
 
 			setStatus('login' === mode ? 'Signing in…' : 'Creating account…');
-			await ensureCsrfToken();
+			const fresh = await refreshCsrfToken();
 			const action = 'login' === mode ? 'FrickmailLogin' : 'FrickmailRegister';
-			const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
+			const xtoken = fresh || rl.settings?.app?.('token') || rl.__frickmail_token;
 			const params = { username, password, email };
-			if (xtoken) params.XToken = xtoken;   // body fallback when no header is auto-attached
+			if (xtoken) params.XToken = xtoken;
 			rl.pluginRemoteRequest((iError, oData) => {
 				if (iError && !oData) { setStatus('Network error', 'error'); return; }
 				const r = oData?.Result;
