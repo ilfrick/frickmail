@@ -60,7 +60,22 @@
 
 		$f('switch').onclick = () => switchMode('login' === mode ? 'register' : 'login');
 
-		$f('form').onsubmit = e => {
+		const ensureCsrfToken = async () => {
+			if (rl.settings?.app?.('token')) return;
+			// Force a boot-time AppData fetch so RL_APP_DATA.System.token is populated.
+			try {
+				const r = await fetch('?/AppData/0/' + Math.random().toString().slice(2) + '/', { credentials: 'same-origin', cache: 'no-cache' });
+				const data = await r.json();
+				if (data && data.System) {
+					// Re-evaluate via rl.settings; if still empty, stash on rl directly so our request can read it.
+					if (!rl.settings.app('token') && data.System.token) {
+						rl.__frickmail_token = data.System.token;
+					}
+				}
+			} catch (e) { /* ignored — request will fail with a clearer error below */ }
+		};
+
+		$f('form').onsubmit = async e => {
 			e.preventDefault();
 			const username = $f('username').value.trim();
 			const password = $f('password').value;
@@ -68,10 +83,19 @@
 			if (!username || !password) { setStatus('Username and password required', 'error'); return; }
 
 			setStatus('login' === mode ? 'Signing in…' : 'Creating account…');
+			await ensureCsrfToken();
 			const action = 'login' === mode ? 'FrickmailLogin' : 'FrickmailRegister';
+			const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
+			const params = { username, password, email };
+			if (xtoken) params.XToken = xtoken;   // body fallback when no header is auto-attached
 			rl.pluginRemoteRequest((iError, oData) => {
+				if (iError && !oData) { setStatus('Network error', 'error'); return; }
 				const r = oData?.Result;
-				if (iError || !r) { setStatus('Network error', 'error'); return; }
+				if (false === r || null == r) {
+					const msg = oData?.messageAdditional || oData?.message || ('error code ' + (oData?.code ?? '?'));
+					setStatus('Server: ' + msg, 'error');
+					return;
+				}
 				if (!r.ok) { setStatus(r.error || 'Failed', 'error'); return; }
 				if ('FrickmailRegister' === action) {
 					setStatus(r.message || 'Account created — now sign in', 'ok');
@@ -85,7 +109,7 @@
 				}
 				setStatus('Welcome ' + (r.email || ''), 'ok');
 				setTimeout(() => document.location.reload(), 400);
-			}, action, { username, password, email }, 30);
+			}, action, params, 30);
 		};
 	};
 

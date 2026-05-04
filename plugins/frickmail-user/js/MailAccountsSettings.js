@@ -32,6 +32,7 @@
 			rl.pluginRemoteRequest((iError, oData) => {
 				this.loading(false);
 				const r = oData?.Result;
+				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Failed to load: ' + (r?.error || 'request error')); return; }
 				this.accounts(r.accounts || []);
 				this.status('');
@@ -71,6 +72,7 @@
 			this.status('Saving…');
 			rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
+				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Save failed: ' + (r?.error || 'request error')); return; }
 				this.cancelAdd();
 				this.refresh();
@@ -81,6 +83,7 @@
 			if (!confirm('Delete account ' + account.email + '?')) return;
 			rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
+				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Delete failed: ' + (r?.error || 'request error')); return; }
 				this.refresh();
 			}, 'FrickmailDeleteAccount', { id: account.id }, 30);
@@ -89,6 +92,7 @@
 		setPrimary(account) {
 			rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
+				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Set-primary failed: ' + (r?.error || 'request error')); return; }
 				this.refresh();
 			}, 'FrickmailSetPrimary', { id: account.id }, 30);
@@ -98,6 +102,7 @@
 			this.status('Switching to ' + account.email + '…');
 			rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
+				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Switch failed: ' + (r?.error || 'request error')); return; }
 				document.location.reload();
 			}, 'FrickmailSwitchAccount', { id: account.id }, 30);
