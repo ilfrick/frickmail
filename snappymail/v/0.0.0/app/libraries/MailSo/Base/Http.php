@@ -199,7 +199,7 @@ class Http
 			// blindly serving stale cached bundles for the full Expires window. The 304
 			// roundtrip is cheap, and shipping plugin-JS fixes is otherwise blocked by
 			// browsers that won't ask the server until the cached entry expires.
-			\header('Cache-Control: private, must-revalidate');
+			\header('Cache-Control: private, no-cache, must-revalidate, max-age=0');
 			$iExpires && \header('Expires: '.\gmdate('D, j M Y H:i:s', \time() + $iExpires).' UTC');
 			$sEtag && static::setETag($sEtag);
 			$iLastModified && static::setLastModified($iLastModified);

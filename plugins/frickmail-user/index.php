@@ -23,7 +23,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.1',
+		VERSION  = '0.2',
 		RELEASE  = '2026-05-04',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
