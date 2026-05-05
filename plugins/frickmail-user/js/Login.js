@@ -115,7 +115,7 @@
 				}
 				setStatus('Welcome ' + (r.email || ''), 'ok');
 				setTimeout(() => document.location.reload(), 400);
-			}, action, params, 30);
+			}, action, params, 30000);
 		};
 	};
 
