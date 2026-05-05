@@ -32,3 +32,4 @@
 /integrations/owncloud/rainloop
 docker-compose*yml
 docker-compose*yaml
+docker-compose.frickmail.yml
