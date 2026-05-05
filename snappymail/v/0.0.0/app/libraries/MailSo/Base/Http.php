@@ -195,7 +195,11 @@ class Http
 	{
 		if (!static::$bCache) {
 			static::$bCache = true;
-			\header('Cache-Control: private');
+			// Frickmail: require browsers to revalidate via ETag/Last-Modified rather than
+			// blindly serving stale cached bundles for the full Expires window. The 304
+			// roundtrip is cheap, and shipping plugin-JS fixes is otherwise blocked by
+			// browsers that won't ask the server until the cached entry expires.
+			\header('Cache-Control: private, must-revalidate');
 			$iExpires && \header('Expires: '.\gmdate('D, j M Y H:i:s', \time() + $iExpires).' UTC');
 			$sEtag && static::setETag($sEtag);
 			$iLastModified && static::setLastModified($iLastModified);
