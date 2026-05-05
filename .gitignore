@@ -30,3 +30,5 @@
 /vendors/vanillaqr.js/
 /integrations/nextcloud/rainloop
 /integrations/owncloud/rainloop
+docker-compose*yml
+docker-compose*yaml
