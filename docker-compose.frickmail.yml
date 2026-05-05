@@ -10,22 +10,63 @@ services:
       # Set DEBUG=true to enable verbose PHP logging
       - DEBUG=false
       # Gmail OAuth2 — see docs/OAUTH2.md. Leave secret empty for PKCE.
-      - FRICKMAIL_GMAIL_CLIENT_ID=
-      - FRICKMAIL_GMAIL_CLIENT_SECRET=
+      - FRICKMAIL_GMAIL_CLIENT_ID=***REDACTED-CLIENT-ID***
+      - FRICKMAIL_GMAIL_CLIENT_SECRET=***REDACTED-CLIENT-SECRET***
       # Office365/Outlook OAuth2 — tenant: common | consumers | organizations | <GUID>
       - FRICKMAIL_O365_CLIENT_ID=
       - FRICKMAIL_O365_CLIENT_SECRET=
       - FRICKMAIL_O365_TENANT=common
+    networks:
+      - default
+      - db-network
+      - redis-network
     ports:
       - "8888:8888"
     volumes:
-      - frickmail-data:/var/lib/snappymail
+      - ./frickmail-data:/var/lib/snappymail
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8888/?/Css/0/Admin/-/&"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
+  # This provides prometheus metrics for frickmail's php-fpm
+  php-fpm-exporter:
+    image: hipages/php-fpm_exporter:2.2.0
+    ports:
+      - 9253:9253
+    environment:
+      - PHP_FPM_SCRAPE_URI=tcp://frickmail:9000/status
+    networks:
+      - default
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      - POSTGRES_USER=frickmail
+      - POSTGRES_PASSWORD=frickmail
+      - POSTGRES_DB=frickmail
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+    networks:
+      - db-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:latest
+    networks:
+      - redis-network
+    restart: unless-stopped
+
+networks:
+  default:
+  db-network:
+    internal: true
+  redis-network:
+    internal: true
 
 volumes:
+  postgres:
+    driver: local
   frickmail-data:
+    driver: local

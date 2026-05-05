@@ -27,7 +27,7 @@
 				} else {
 					this.lastResult('Sync done.');
 				}
-			}, 'JsonContactsSync', {}, 60);
+			}, 'JsonContactsSync', {}, 60000);
 		}
 
 		onBuild() {}

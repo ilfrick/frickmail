@@ -61,7 +61,7 @@
 				this.events(r.events || []);
 				this.status((r.events?.length || 0) + ' events from ' + (r.provider || 'provider'));
 				this.render();
-			}, 'JsonCalendarEvents', { start, end }, 30);
+			}, 'JsonCalendarEvents', { start, end }, 30000);
 		}
 
 		groupByDay() {
@@ -178,7 +178,7 @@
 					}
 					close();
 					this.fetch();
-				}, 'JsonCalendarSave', data, 30);
+				}, 'JsonCalendarSave', data, 30000);
 			};
 			const del = popup.querySelector('[data-act="del"]');
 			if (del) del.onclick = () => {
@@ -191,7 +191,7 @@
 					}
 					close();
 					this.fetch();
-				}, 'JsonCalendarDelete', { id: ev.id }, 30);
+				}, 'JsonCalendarDelete', { id: ev.id }, 30000);
 			};
 			document.body.appendChild(backdrop);
 			document.body.appendChild(popup);

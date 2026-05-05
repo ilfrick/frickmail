@@ -94,11 +94,12 @@
 			const params = { username, password, email };
 			if (xtoken) params.XToken = xtoken;
 			rl.pluginRemoteRequest((iError, oData) => {
-				if (iError && !oData) { setStatus('Network error', 'error'); return; }
+				console.log('[frickmail-login] iError=', iError, 'oData=', oData);
+				if (iError && !oData) { setStatus('Network error (no response)', 'error'); return; }
 				const r = oData?.Result;
 				if (false === r || null == r) {
-					const msg = oData?.messageAdditional || oData?.message || ('error code ' + (oData?.code ?? '?'));
-					setStatus('Server: ' + msg, 'error');
+					const dump = JSON.stringify(oData).slice(0, 200);
+					setStatus('Server says: ' + dump, 'error');
 					return;
 				}
 				if (!r.ok) { setStatus(r.error || 'Failed', 'error'); return; }

@@ -36,7 +36,7 @@
 				if (!r?.ok) { this.status('Failed to load: ' + (r?.error || 'request error')); return; }
 				this.accounts(r.accounts || []);
 				this.status('');
-			}, 'FrickmailListAccounts', {}, 30);
+			}, 'FrickmailListAccounts', {}, 30000);
 		}
 
 		startAdd() {
@@ -76,7 +76,7 @@
 				if (!r?.ok) { this.status('Save failed: ' + (r?.error || 'request error')); return; }
 				this.cancelAdd();
 				this.refresh();
-			}, 'FrickmailAddAccount', payload, 30);
+			}, 'FrickmailAddAccount', payload, 30000);
 		}
 
 		deleteAccount(account) {
@@ -86,7 +86,7 @@
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Delete failed: ' + (r?.error || 'request error')); return; }
 				this.refresh();
-			}, 'FrickmailDeleteAccount', { id: account.id }, 30);
+			}, 'FrickmailDeleteAccount', { id: account.id }, 30000);
 		}
 
 		setPrimary(account) {
@@ -95,7 +95,7 @@
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Set-primary failed: ' + (r?.error || 'request error')); return; }
 				this.refresh();
-			}, 'FrickmailSetPrimary', { id: account.id }, 30);
+			}, 'FrickmailSetPrimary', { id: account.id }, 30000);
 		}
 
 		switchTo(account) {
@@ -105,7 +105,7 @@
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Switch failed: ' + (r?.error || 'request error')); return; }
 				document.location.reload();
-			}, 'FrickmailSwitchAccount', { id: account.id }, 30);
+			}, 'FrickmailSwitchAccount', { id: account.id }, 30000);
 		}
 
 		launchOAuth(provider) {
