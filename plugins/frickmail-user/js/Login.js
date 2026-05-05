@@ -36,7 +36,7 @@
 				<input data-fm="password" type="password" autocomplete="current-password" required minlength="8" />
 				<div class="actions">
 					<button class="btn btn-primary" type="submit" data-fm="submit">Sign in</button>
-					<button class="switch-mode" type="button" data-fm="switch" style="display:${openSignup ? '' : 'none'}">Create an account</button>
+					<button class="switch-mode" type="button" data-fm="switch">Create an account</button>
 				</div>
 				<div class="status" data-fm="status"></div>
 			</form>`;
