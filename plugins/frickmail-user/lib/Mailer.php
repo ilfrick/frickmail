@@ -51,15 +51,20 @@ class Mailer
 		$oSettings->passphrase = self::smtpPassword();
 
 		$oSmtp = new \MailSo\Smtp\SmtpClient();
-		$oSmtp->Connect($oSettings);
-		if ($oSettings->useAuth) {
-			$oSmtp->Login($oSettings);
+		try {
+			$oSmtp->Connect($oSettings);
+			if ($oSettings->useAuth) {
+				$oSmtp->Login($oSettings);
+			}
+			$oSmtp->MailFrom($sFrom);
+			$oSmtp->Rcpt($sTo);
+			$oSmtp->Data($sMessage);
+		} finally {
+			// Disconnect() internally issues QUIT then closes the socket. Some servers
+			// drop the connection right after DATA, so the QUIT read fails — at that
+			// point the message has already been accepted. Swallow teardown errors.
+			try { $oSmtp->Disconnect(); } catch (\Throwable $e) {}
 		}
-		$oSmtp->MailFrom($sFrom);
-		$oSmtp->Rcpt($sTo);
-		$oSmtp->Data($sMessage);
-		$oSmtp->Logout();
-		$oSmtp->Disconnect();
 	}
 
 	private static function buildRfc5322Message(string $sFrom, string $sTo, string $sSubject, string $sBody) : string
