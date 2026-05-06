@@ -39,6 +39,9 @@
 					<button class="btn btn-primary" type="submit" data-fm="submit">Sign in</button>
 					<button class="switch-mode" type="button" data-fm="switch">Create an account</button>
 				</div>
+				<div style="margin-top:.6em;font-size:90%">
+					<a href="#" data-fm="forgot" style="color:#4a90e2">Forgot password?</a>
+				</div>
 				<div class="status" data-fm="status"></div>
 			</form>`;
 		root.replaceChildren(wrap);
@@ -60,6 +63,11 @@
 		};
 
 		$f('switch').onclick = () => switchMode('login' === mode ? 'register' : 'login');
+
+		$f('forgot').onclick = e => {
+			e.preventDefault();
+			showForgotForm(wrap);
+		};
 
 		// Always fetch a fresh AppData to bind the CSRF token to the *current*
 		// CONNECTION_TOKEN cookie. A cached RL_APP_DATA.System.token can be stale
@@ -242,13 +250,108 @@
 		};
 	};
 
+	const showForgotForm = (wrap) => {
+		const setStatus = (msg, kind) => {
+			const el = wrap.querySelector('[data-fm="status"]');
+			if (el) { el.textContent = msg || ''; el.className = 'status' + (kind ? ' ' + kind : ''); }
+		};
+		const setup = document.createElement('div');
+		setup.innerHTML = `
+			<h2>Recupero password</h2>
+			<p style="color:#888">Inserisci il tuo username Frickmail. Se esiste e ha una recovery email, ti mandiamo un link per resettare la password.</p>
+			<label>Username</label>
+			<input data-ff="username" type="text" autocomplete="username" />
+			<div class="actions" style="margin-top:1em">
+				<button class="btn btn-primary" type="button" data-ff="send">Send reset link</button>
+				<button class="switch-mode" type="button" data-ff="back">Back to sign-in</button>
+			</div>
+			<div class="status" data-fm="status"></div>`;
+		wrap.querySelector('form').replaceWith(setup);
+
+		const $g = sel => setup.querySelector(`[data-ff="${sel}"]`);
+		$g('back').onclick = () => document.location.reload();
+		$g('send').onclick = async () => {
+			const username = $g('username').value.trim();
+			if (!username) { setStatus('Username required', 'error'); return; }
+			setStatus('Sending…');
+			const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
+			const params = { username };
+			if (xtoken) params.XToken = xtoken;
+			rl.pluginRemoteRequest((iError, oData) => {
+				const r = oData?.Result;
+				if (false === r || null == r) { setStatus('Server: ' + JSON.stringify(oData).slice(0, 200), 'error'); return; }
+				if (!r.ok) { setStatus(r.error || 'Failed', 'error'); return; }
+				setStatus(r.message || 'If the username exists, an email was sent.', 'ok');
+			}, 'FrickmailRequestPasswordReset', params, 30000);
+		};
+	};
+
+	const showResetForm = (host, token) => {
+		const wrap = document.createElement('div');
+		wrap.className = 'frickmail-login compact';
+		wrap.innerHTML = `
+			<style>
+				.frickmail-login { max-width: 720px; margin: 4em auto; padding: 1.6em 1.8em; border:1px solid var(--border-color, #ccc); border-radius: 6px; background: var(--main-background, #fff); }
+				.frickmail-login.compact { max-width: 380px; }
+				.frickmail-login h2 { margin: 0 0 0.6em; font-size: 1.4em; }
+				.frickmail-login label { display:block; margin-top: .8em; font-size: 90%; font-weight: 600; }
+				.frickmail-login input { width:100%; box-sizing:border-box; padding:.45em .6em; }
+				.frickmail-login .actions { margin-top: 1em; display:flex; gap:.6em; }
+				.frickmail-login .actions .btn-primary { background:#4a90e2; color:white; border:none; padding:.5em 1em; }
+				.frickmail-login .status { margin-top: .8em; min-height: 1em; color:#888; font-size:90%; }
+				.frickmail-login .status.error { color:#c33; }
+				.frickmail-login .status.ok { color:#2a8; }
+			</style>
+			<h2>Imposta una nuova password</h2>
+			<p style="color:#888">Le credenziali IMAP/OAuth dei tuoi account email collegati saranno reimpostate (devi reinserirle dal Setup).</p>
+			<label>Nuova password (min 8 caratteri)</label>
+			<input data-fr="password" type="password" autocomplete="new-password" minlength="8" />
+			<label>Conferma password</label>
+			<input data-fr="password2" type="password" autocomplete="new-password" />
+			<div class="actions">
+				<button class="btn btn-primary" type="button" data-fr="save">Reset password</button>
+			</div>
+			<div class="status" data-fr="status"></div>`;
+		host.replaceChildren(wrap);
+		const $r = sel => wrap.querySelector(`[data-fr="${sel}"]`);
+		const setStatus = (msg, kind) => {
+			$r('status').textContent = msg || '';
+			$r('status').className = 'status' + (kind ? ' ' + kind : '');
+		};
+		$r('save').onclick = () => {
+			const p1 = $r('password').value;
+			const p2 = $r('password2').value;
+			if (p1.length < 8) { setStatus('Password must be at least 8 characters', 'error'); return; }
+			if (p1 !== p2)    { setStatus('Passwords do not match', 'error'); return; }
+			setStatus('Resetting…');
+			const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
+			const params = { token, password: p1 };
+			if (xtoken) params.XToken = xtoken;
+			rl.pluginRemoteRequest((iError, oData) => {
+				const r = oData?.Result;
+				if (false === r || null == r) { setStatus('Server: ' + JSON.stringify(oData).slice(0, 200), 'error'); return; }
+				if (!r.ok) { setStatus(r.error || 'Failed', 'error'); return; }
+				setStatus(r.message || 'Password reset.', 'ok');
+				// Strip the token from the URL and reload into the normal login form.
+				const url = new URL(document.location.href);
+				url.searchParams.delete('reset_token');
+				setTimeout(() => { document.location.href = url.toString(); }, 1200);
+			}, 'FrickmailResetPassword', params, 30000);
+		};
+	};
+
 	addEventListener('rl-view-model', e => {
 		if ('Login' !== e.detail.viewModelTemplateID) return;
 		const dom = e.detail.viewModelDom;
 		// Defer one tick so SnappyMail's own bindings finish, then take over.
 		setTimeout(() => {
-			const openSignup = !!rl.pluginSettingsGet('frickmail-user', 'open_signup');
 			const host = dom.querySelector('.b-login-content') || dom;
+			const resetToken = new URLSearchParams(location.search).get('reset_token');
+			if (resetToken) {
+				showResetForm(host, resetToken);
+				return;
+			}
+			const openSignup = !!rl.pluginSettingsGet('frickmail-user', 'open_signup');
 			buildForm(host, openSignup);
 		}, 0);
 	});

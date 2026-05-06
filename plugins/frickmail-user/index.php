@@ -18,12 +18,13 @@
 
 require_once __DIR__ . '/lib/Crypto.php';
 require_once __DIR__ . '/lib/Db.php';
+require_once __DIR__ . '/lib/Mailer.php';
 
 class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.5',
+		VERSION  = '0.6',
 		RELEASE  = '2026-05-04',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -46,6 +47,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailDeleteAccount', 'JsonDeleteAccount');
 		$this->addJsonHook('FrickmailSetPrimary', 'JsonSetPrimary');
 		$this->addJsonHook('FrickmailSwitchAccount', 'JsonSwitchAccount');
+		$this->addJsonHook('FrickmailRequestPasswordReset', 'JsonRequestPasswordReset');
+		$this->addJsonHook('FrickmailResetPassword', 'JsonResetPassword');
 		$this->addJsonHook('FrickmailMe', 'JsonMe');
 	}
 
@@ -174,6 +177,77 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			'username' => $user['username'],
 			'email' => $user['email']
 		]);
+	}
+
+	public function JsonRequestPasswordReset() : array
+	{
+		// Always respond OK to avoid leaking which usernames exist.
+		try {
+			$db = $this->db();
+			$sUsername = \trim((string) $this->jsonParam('username'));
+			$user = '' !== $sUsername ? $db->findUserByUsername($sUsername) : null;
+			if ($user && !empty($user['email']) && \filter_var($user['email'], \FILTER_VALIDATE_EMAIL)) {
+				$sToken = \rtrim(\strtr(\base64_encode(\random_bytes(32)), '+/', '-_'), '=');
+				$sTokenHash = \hash('sha256', $sToken);
+				$db->createPasswordResetToken((int) $user['id'], $sTokenHash, 1800); // 30 min
+				$sLink = $this->resetUrl($sToken);
+				$sBody = "Ciao " . $user['username'] . ",\n\n"
+					. "Hai richiesto il reset della password Frickmail. Apri questo link entro 30 minuti:\n\n"
+					. $sLink . "\n\n"
+					. "Se non sei stato tu, ignora questa email.\n\n"
+					. "ATTENZIONE: dopo il reset le password IMAP / refresh-token OAuth salvati nel tuo "
+					. "account Frickmail vanno re-inseriti dal pannello Settings → Mail Accounts (sono "
+					. "cifrati con una chiave derivata dalla password e non sono recuperabili).\n\n"
+					. "— Frickmail";
+				try {
+					\Frickmail\User\Mailer::send((string) $user['email'], 'Frickmail — reset password', $sBody);
+				} catch (\Throwable $e) {
+					\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+					// We deliberately don't return the error to the client.
+				}
+			}
+			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'message' => 'If the username exists and has a recovery email, a reset link has been sent.']);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => 'Server error']);
+		}
+	}
+
+	public function JsonResetPassword() : array
+	{
+		try {
+			$sToken = (string) $this->jsonParam('token');
+			$sPassword = (string) $this->jsonParam('password');
+			if ('' === $sToken) throw new \RuntimeException('Token required');
+			if (\strlen($sPassword) < 8) throw new \RuntimeException('Password must be at least 8 chars');
+			$sTokenHash = \hash('sha256', $sToken);
+			$db = $this->db();
+			$row = $db->findActivePasswordReset($sTokenHash);
+			if (!$row) throw new \RuntimeException('Invalid or expired token');
+			$newHash = \Frickmail\User\Crypto::hashPassword($sPassword);
+			$newSalt = \Frickmail\User\Crypto::generateSalt();
+			$db->applyPasswordReset((int) $row['user_id'], $newHash, $newSalt);
+			$db->consumePasswordReset((int) $row['id']);
+			return $this->jsonResponse(__FUNCTION__, [
+				'ok' => true,
+				'username' => $row['username'],
+				'message' => 'Password reset. Sign in with your new password. Linked mail-account credentials must be re-entered.',
+			]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	private function resetUrl(string $sToken) : string
+	{
+		$sBase = \trim((string) (\getenv('FRICKMAIL_BASE_URL') ?: ''));
+		if ('' === $sBase) {
+			$proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+			$host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+			$sBase = $proto . '://' . $host;
+		}
+		return \rtrim($sBase, '/') . '/?reset_token=' . \urlencode($sToken);
 	}
 
 	public function JsonListAccounts() : array

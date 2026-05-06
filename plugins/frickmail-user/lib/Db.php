@@ -157,6 +157,65 @@ class Db
 		}
 	}
 
+	/* ---------- Password reset tokens ---------- */
+
+	public function createPasswordResetToken(int $userId, string $tokenHash, int $ttlSeconds = 1800) : int
+	{
+		$st = $this->pdo->prepare(
+			"INSERT INTO frickmail_password_resets (user_id, token_hash, expires_at)
+			 VALUES (:u, :t, NOW() + (:s || ' seconds')::interval) RETURNING id"
+		);
+		$st->execute([':u' => $userId, ':t' => $tokenHash, ':s' => (string) $ttlSeconds]);
+		return (int) $st->fetchColumn();
+	}
+
+	public function findActivePasswordReset(string $tokenHash) : ?array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT r.*, u.id AS uid, u.username
+			   FROM frickmail_password_resets r
+			   JOIN frickmail_users u ON u.id = r.user_id
+			  WHERE r.token_hash = :t
+			    AND r.used_at IS NULL
+			    AND r.expires_at > NOW()
+			  LIMIT 1'
+		);
+		$st->execute([':t' => $tokenHash]);
+		$row = $st->fetch();
+		return $row ?: null;
+	}
+
+	public function consumePasswordReset(int $resetId) : void
+	{
+		$st = $this->pdo->prepare('UPDATE frickmail_password_resets SET used_at = NOW() WHERE id = :i');
+		$st->execute([':i' => $resetId]);
+	}
+
+	public function applyPasswordReset(int $userId, string $passwordHash, string $kdfSalt) : void
+	{
+		$this->pdo->beginTransaction();
+		try {
+			$st = $this->pdo->prepare(
+				"UPDATE frickmail_users
+				    SET password_hash = :h, kdf_salt = decode(:s, 'hex'), updated_at = NOW()
+				  WHERE id = :i"
+			);
+			$st->execute([':h' => $passwordHash, ':s' => \bin2hex($kdfSalt), ':i' => $userId]);
+			$st = $this->pdo->prepare(
+				'UPDATE frickmail_mail_accounts
+				    SET encrypted_password = NULL,
+				        encrypted_oauth_refresh_token = NULL,
+				        updated_at = NOW()
+				  WHERE user_id = :u'
+			);
+			$st->execute([':u' => $userId]);
+			$this->pdo->commit();
+		} catch (\Throwable $e) {
+			$this->pdo->rollBack();
+			throw $e;
+		}
+	}
+
 	public function decryptedAccount(array $row, string $cryptKey) : array
 	{
 		$copy = $row;
