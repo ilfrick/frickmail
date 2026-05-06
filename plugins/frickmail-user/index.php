@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.6',
+		VERSION  = '0.7',
 		RELEASE  = '2026-05-04',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -50,6 +50,21 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailRequestPasswordReset', 'JsonRequestPasswordReset');
 		$this->addJsonHook('FrickmailResetPassword', 'JsonResetPassword');
 		$this->addJsonHook('FrickmailMe', 'JsonMe');
+
+		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
+		// so the link delivered by email opens correctly from external mail clients.
+		$this->addHook('filter.http-paths', 'httpPaths');
+	}
+
+	public function httpPaths(array $aPaths) : void
+	{
+		// Allow cross-site navigations whenever the URL is a reset-password landing.
+		if (isset($_GET['reset_token']) && '' !== \trim((string) $_GET['reset_token'])) {
+			$oConfig = \RainLoop\Api::Config();
+			$oConfig->Set('security', 'secfetch_allow',
+				\trim($oConfig->Get('security', 'secfetch_allow', '') . ';site=cross-site', ';')
+			);
+		}
 	}
 
 	public function configMapping() : array
