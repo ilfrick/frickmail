@@ -138,6 +138,7 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
         )");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_pwreset_user ON frickmail_password_resets(user_id)");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_pwreset_expires ON frickmail_password_resets(expires_at)");
+        $pdo->exec("ALTER TABLE frickmail_users ADD COLUMN IF NOT EXISTS totp_secret TEXT");
         echo "[OK] Frickmail schema ready" . PHP_EOL;
     ' || echo "[WARN] Frickmail schema migration skipped (DB unreachable)"
 fi

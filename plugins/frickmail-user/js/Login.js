@@ -35,6 +35,10 @@
 				</div>
 				<label>Password</label>
 				<input data-fm="password" type="password" autocomplete="current-password" required minlength="8" />
+				<div data-fm="totp-row" style="display:none">
+					<label>Two-factor code</label>
+					<input data-fm="totp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" />
+				</div>
 				<div class="actions">
 					<button class="btn btn-primary" type="submit" data-fm="submit">Sign in</button>
 					<button class="switch-mode" type="button" data-fm="switch">Create an account</button>
@@ -100,7 +104,9 @@
 			const fresh = await refreshCsrfToken();
 			const action = 'login' === mode ? 'FrickmailLogin' : 'FrickmailRegister';
 			const xtoken = fresh || rl.settings?.app?.('token') || rl.__frickmail_token;
+			const totpCode = ($f('totp')?.value || '').replace(/\s+/g, '');
 			const params = { username, password, email };
+			if (totpCode) params.totp_code = totpCode;
 			if (xtoken) params.XToken = xtoken;
 			rl.pluginRemoteRequest((iError, oData) => {
 				console.log('[frickmail-login] iError=', iError, 'oData=', oData);
@@ -111,7 +117,16 @@
 					setStatus('Server says: ' + dump, 'error');
 					return;
 				}
-				if (!r.ok) { setStatus(r.error || 'Failed', 'error'); return; }
+				if (!r.ok) {
+					if (r.requires_totp) {
+						$f('totp-row').style.display = '';
+						$f('totp').focus();
+						setStatus(r.error || 'Two-factor code required', 'error');
+						return;
+					}
+					setStatus(r.error || 'Failed', 'error');
+					return;
+				}
 				if ('FrickmailRegister' === action) {
 					setStatus(r.message || 'Account created — now sign in', 'ok');
 					switchMode('login');

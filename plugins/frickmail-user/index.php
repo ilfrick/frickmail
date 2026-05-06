@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.7',
+		VERSION  = '0.8',
 		RELEASE  = '2026-05-04',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -38,7 +38,9 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->UseLangs(false);
 		$this->addJs('js/Login.js');
 		$this->addJs('js/MailAccountsSettings.js');
+		$this->addJs('js/TwoFactorSettings.js');
 		$this->addTemplate('templates/MailAccountsSettings.html');
+		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
 
 		$this->addJsonHook('FrickmailLogin', 'JsonFrickmailLogin');
 		$this->addJsonHook('FrickmailRegister', 'JsonFrickmailRegister');
@@ -50,6 +52,10 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailRequestPasswordReset', 'JsonRequestPasswordReset');
 		$this->addJsonHook('FrickmailResetPassword', 'JsonResetPassword');
 		$this->addJsonHook('FrickmailMe', 'JsonMe');
+		$this->addJsonHook('FrickmailGetTotpStatus', 'JsonGetTotpStatus');
+		$this->addJsonHook('FrickmailEnableTotp', 'JsonEnableTotp');
+		$this->addJsonHook('FrickmailConfirmTotp', 'JsonConfirmTotp');
+		$this->addJsonHook('FrickmailDisableTotp', 'JsonDisableTotp');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -153,6 +159,25 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 				throw new \RuntimeException('Invalid username or password');
 			}
 
+			// Frickmail-user 2FA: if a TOTP secret is set on this user, require a valid code.
+			if (!empty($user['totp_secret'])) {
+				$sTotpCode = \preg_replace('/\s+/', '', (string) $this->jsonParam('totp_code'));
+				if ('' === $sTotpCode) {
+					return $this->jsonResponse(__FUNCTION__, [
+						'ok' => false,
+						'requires_totp' => true,
+						'error' => 'Two-factor code required'
+					]);
+				}
+				if (!\SnappyMail\TOTP::Verify($user['totp_secret'], $sTotpCode)) {
+					return $this->jsonResponse(__FUNCTION__, [
+						'ok' => false,
+						'requires_totp' => true,
+						'error' => 'Invalid two-factor code'
+					]);
+				}
+			}
+
 			$kdfSalt = \is_resource($user['kdf_salt']) ? \stream_get_contents($user['kdf_salt']) : $user['kdf_salt'];
 			$cryptKey = \Frickmail\User\Crypto::deriveKey($sPassword, $kdfSalt);
 
@@ -192,6 +217,96 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			'username' => $user['username'],
 			'email' => $user['email']
 		]);
+	}
+
+	const SESSION_KEY_TOTP_PENDING = 'frickmail_totp_pending_secret';
+
+	public function JsonGetTotpStatus() : array
+	{
+		try {
+			[$uid] = $this->requireSession();
+			$user = $this->db()->findUserById($uid);
+			return $this->jsonResponse(__FUNCTION__, [
+				'ok' => true,
+				'enabled' => !empty($user['totp_secret']),
+			]);
+		} catch (\Throwable $e) {
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	public function JsonEnableTotp() : array
+	{
+		try {
+			[$uid] = $this->requireSession();
+			$user = $this->db()->findUserById($uid);
+			if (!empty($user['totp_secret'])) {
+				return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => 'Two-factor authentication is already enabled. Disable it first.']);
+			}
+			$sSecret = \SnappyMail\TOTP::CreateSecret();
+			$this->startPhpSession();
+			$_SESSION[self::SESSION_KEY_TOTP_PENDING] = $sSecret;
+
+			$sIssuer = 'Frickmail';
+			$sLabel = $user['username'];
+			$sUri = \sprintf(
+				'otpauth://totp/%s:%s?secret=%s&issuer=%s',
+				\rawurlencode($sIssuer),
+				\rawurlencode($sLabel),
+				$sSecret,
+				\rawurlencode($sIssuer)
+			);
+			return $this->jsonResponse(__FUNCTION__, [
+				'ok' => true,
+				'secret' => $sSecret,
+				'otpauth_uri' => $sUri,
+				'message' => 'Scan the QR code (or paste the secret) into your authenticator app, then submit a code to confirm.',
+			]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	public function JsonConfirmTotp() : array
+	{
+		try {
+			[$uid] = $this->requireSession();
+			$sCode = \preg_replace('/\s+/', '', (string) $this->jsonParam('code'));
+			if ('' === $sCode) throw new \RuntimeException('Code required');
+			$this->startPhpSession();
+			$sPending = $_SESSION[self::SESSION_KEY_TOTP_PENDING] ?? null;
+			if (!$sPending) throw new \RuntimeException('No pending TOTP setup. Call EnableTotp first.');
+			if (!\SnappyMail\TOTP::Verify($sPending, $sCode)) {
+				return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => 'Invalid code']);
+			}
+			$this->db()->setUserTotpSecret($uid, $sPending);
+			unset($_SESSION[self::SESSION_KEY_TOTP_PENDING]);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'message' => 'Two-factor authentication enabled.']);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	public function JsonDisableTotp() : array
+	{
+		try {
+			[$uid] = $this->requireSession();
+			$sCode = \preg_replace('/\s+/', '', (string) $this->jsonParam('code'));
+			$user = $this->db()->findUserById($uid);
+			if (empty($user['totp_secret'])) {
+				return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'message' => 'Two-factor was not enabled.']);
+			}
+			if ('' === $sCode || !\SnappyMail\TOTP::Verify($user['totp_secret'], $sCode)) {
+				return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => 'A valid TOTP code is required to disable two-factor authentication.']);
+			}
+			$this->db()->setUserTotpSecret($uid, null);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'message' => 'Two-factor authentication disabled.']);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
 	}
 
 	public function JsonRequestPasswordReset() : array
@@ -236,6 +351,12 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			if ('' === $sToken) throw new \RuntimeException('Token required');
 			if (\strlen($sPassword) < 8) throw new \RuntimeException('Password must be at least 8 chars');
 			$sTokenHash = \hash('sha256', $sToken);
+			\RainLoop\Api::Actions()->Logger()->Write(
+				"[FrickmailReset] token len=" . \strlen($sToken)
+				. " head=" . \substr($sToken, 0, 6) . " tail=" . \substr($sToken, -6)
+				. " hashHead=" . \substr($sTokenHash, 0, 12),
+				\LOG_INFO
+			);
 			$db = $this->db();
 			$row = $db->findActivePasswordReset($sTokenHash);
 			if (!$row) throw new \RuntimeException('Invalid or expired token');

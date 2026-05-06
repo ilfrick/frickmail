@@ -157,6 +157,12 @@ class Db
 		}
 	}
 
+	public function setUserTotpSecret(int $userId, ?string $secret) : void
+	{
+		$st = $this->pdo->prepare('UPDATE frickmail_users SET totp_secret = :s, updated_at = NOW() WHERE id = :i');
+		$st->execute([':s' => $secret, ':i' => $userId]);
+	}
+
 	/* ---------- Password reset tokens ---------- */
 
 	public function createPasswordResetToken(int $userId, string $tokenHash, int $ttlSeconds = 1800) : int

@@ -1,0 +1,45 @@
+<div>
+	<div class="form-horizontal">
+		<div class="legend">Two-Factor Authentication (Frickmail user)</div>
+		<p>Protect the Frickmail sign-in (independent of any per-mailbox 2FA you might also configure).
+			Requires a TOTP authenticator app (Google Authenticator, Authy, 1Password, …).</p>
+
+		<!-- ENABLED state -->
+		<div data-bind="visible: enabled() && !pending()">
+			<div style="padding:.6em .8em; background:#e8f5e9; border:1px solid #4caf50; border-radius:4px; margin:1em 0">
+				<strong style="color:#2e7d32">✓ Two-factor authentication is ENABLED.</strong>
+				<p style="margin:.4em 0 0">A 6-digit code from your authenticator app is required at sign-in.</p>
+			</div>
+			<label>Enter a current 6-digit code to disable</label>
+			<input type="text" data-bind="value: disableCode" inputmode="numeric" maxlength="8" style="max-width:14em" />
+			<div class="control-group" style="margin-top:.6em">
+				<button class="btn" style="background:#c33; color:white" data-bind="click: disable">Disable two-factor</button>
+			</div>
+		</div>
+
+		<!-- DISABLED state, no setup in progress -->
+		<div data-bind="visible: !enabled() && !pending()">
+			<p>Two-factor is currently <strong>disabled</strong>.</p>
+			<button class="btn" style="background:#4a90e2; color:white" data-bind="click: startEnable">Enable two-factor authentication</button>
+		</div>
+
+		<!-- SETUP state -->
+		<div data-bind="visible: pending" style="border:1px solid #4a90e2; border-radius:4px; padding:1em; margin-top:1em">
+			<h4>Configure your authenticator</h4>
+			<p>Scan the QR code below, or paste the secret manually into your app:</p>
+			<div data-bind="visible: otpauthUri" style="text-align:center; margin:1em 0">
+				<img data-bind="attr:{ src: 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(otpauthUri()) }" alt="TOTP QR" />
+			</div>
+			<label>Manual entry secret</label>
+			<input type="text" data-bind="value: secret" readonly style="font-family:monospace" />
+			<label style="margin-top:1em">Confirm with a 6-digit code from your app</label>
+			<input type="text" data-bind="value: confirmCode" inputmode="numeric" maxlength="8" style="max-width:14em" />
+			<div class="control-group" style="margin-top:.6em; display:flex; gap:.5em">
+				<button class="btn" style="background:#4a90e2; color:white" data-bind="click: confirmEnable">Confirm and enable</button>
+				<button class="btn" data-bind="click: cancelEnable">Cancel</button>
+			</div>
+		</div>
+
+		<div data-bind="text: status, visible: status().length" style="margin-top:.8em; color:#888"></div>
+	</div>
+</div>
