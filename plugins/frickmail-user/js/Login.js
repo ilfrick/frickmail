@@ -9,10 +9,11 @@
 
 	const buildForm = (root, openSignup) => {
 		const wrap = document.createElement('div');
-		wrap.className = 'frickmail-login';
+		wrap.className = 'frickmail-login compact';
 		wrap.innerHTML = `
 			<style>
-				.frickmail-login { max-width: 360px; margin: 4em auto; padding: 1.6em 1.8em; border:1px solid var(--border-color, #ccc); border-radius: 6px; background: var(--main-background, #fff); }
+				.frickmail-login { max-width: 720px; margin: 4em auto; padding: 1.6em 1.8em; border:1px solid var(--border-color, #ccc); border-radius: 6px; background: var(--main-background, #fff); }
+				.frickmail-login.compact { max-width: 380px; }
 				.frickmail-login h2 { margin: 0 0 0.6em; font-size: 1.4em; }
 				.frickmail-login label { display:block; margin-top: .8em; font-size: 90%; font-weight: 600; }
 				.frickmail-login input { width:100%; box-sizing:border-box; padding:.45em .6em; }
@@ -126,6 +127,8 @@
 	};
 
 	const showFirstAccountForm = (wrap) => {
+		// Switch out of compact mode so the host/port/security row has room to breathe.
+		wrap.classList.remove('compact');
 		const setStatus = (msg, kind) => {
 			const el = wrap.querySelector('[data-fm="status"]');
 			if (el) { el.textContent = msg || ''; el.className = 'status' + (kind ? ' ' + kind : ''); }
