@@ -132,6 +132,11 @@
 					switchMode('login');
 					return;
 				}
+				if (r.reauth_required) {
+					setStatus(r.message || 'Re-enter the IMAP password.', 'ok');
+					showReauthForm(wrap, r.reauth_account_id, r.reauth_account_email, r.reauth_account_type);
+					return;
+				}
 				if (r.no_primary) {
 					setStatus('Logged in. Set up your first mail account below.', 'ok');
 					showFirstAccountForm(wrap);
@@ -147,6 +152,66 @@
 		const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
 		if (xtoken) params.XToken = xtoken;
 		rl.pluginRemoteRequest(cb, action, params, 30000);
+	};
+
+	const showReauthForm = (wrap, accountId, email, type) => {
+		wrap.classList.remove('compact');
+		const setStatus = (msg, kind) => {
+			const el = wrap.querySelector('[data-fm="status"]');
+			if (el) { el.textContent = msg || ''; el.className = 'status' + (kind ? ' ' + kind : ''); }
+		};
+		const setup = document.createElement('div');
+		setup.innerHTML = `
+			<h3 style="margin-top:1em">Re-authenticate ${email}</h3>
+			<p style="color:#888">After a password reset, the encrypted IMAP/OAuth credentials are unrecoverable. Re-enter them here to keep using this mailbox.</p>
+			${type === 'imap'
+				? `<label>IMAP password</label><input data-rf="password" type="password" autocomplete="new-password" />`
+				: `<p>Click below to re-link via OAuth (${type === 'gmail' ? 'Google' : 'Microsoft'}).</p>`}
+			<div style="margin-top:1em;display:flex;gap:.6em">
+				<button class="btn" type="button" data-rf="save" style="background:#4a90e2;color:white">Save and open mailbox</button>
+			</div>`;
+		wrap.querySelector('form').replaceWith(setup);
+
+		const switchToPrimary = () => {
+			callPlugin('FrickmailSwitchAccount', { id: accountId }, (iErr, oData) => {
+				const r = oData?.Result;
+				if (!r?.ok) { setStatus('Switch failed: ' + (r?.error || 'unknown'), 'error'); return; }
+				setTimeout(() => document.location.reload(), 400);
+			});
+		};
+
+		setup.querySelector('[data-rf="save"]').onclick = () => {
+			if ('imap' === type) {
+				const pwd = setup.querySelector('[data-rf="password"]').value;
+				if (!pwd) { setStatus('Password required', 'error'); return; }
+				setStatus('Saving…', 'ok');
+				callPlugin('FrickmailSetAccountPassword', { id: accountId, password: pwd }, (iErr, oData) => {
+					const r = oData?.Result;
+					if (!r?.ok) { setStatus('Save failed: ' + (r?.error || 'unknown'), 'error'); return; }
+					switchToPrimary();
+				});
+				return;
+			}
+			// OAuth — open popup, on success the bridge will pick up the new refresh_token
+			const path = type === 'gmail' ? 'StartLoginGMail' : 'StartLoginO365';
+			const base = document.location.href.replace(/[#?].*$/, '').replace(/\/+$/, '');
+			const w = 520, h = 640,
+				y = (screen.availHeight - h) / 2,
+				x = (screen.availWidth - w) / 2;
+			const popup = window.open(base + '/?' + path, 'frickmail-oauth-' + type,
+				`popup=yes,width=${w},height=${h},left=${x},top=${y}`);
+			if (!popup) { setStatus('Popup blocked — allow popups and retry', 'error'); return; }
+			setStatus('Waiting for ' + type + ' consent…', 'ok');
+			const onMsg = e => {
+				if (e.origin !== window.location.origin) return;
+				const d = e.data;
+				if (!d || d.type !== 'frickmail-oauth2') return;
+				removeEventListener('message', onMsg);
+				if (d.status !== 'ok') { setStatus('OAuth failed: ' + (d.error || 'unknown'), 'error'); return; }
+				switchToPrimary();
+			};
+			addEventListener('message', onMsg);
+		};
 	};
 
 	const showFirstAccountForm = (wrap) => {

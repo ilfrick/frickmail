@@ -157,6 +157,16 @@ class Db
 		}
 	}
 
+	public function setMailAccountPassword(int $userId, int $accountId, string $encryptedBlob) : bool
+	{
+		$st = $this->pdo->prepare(
+			"UPDATE frickmail_mail_accounts
+			    SET encrypted_password = decode(:p, 'hex'), updated_at = NOW()
+			  WHERE user_id = :u AND id = :i"
+		);
+		return $st->execute([':p' => \bin2hex($encryptedBlob), ':u' => $userId, ':i' => $accountId]);
+	}
+
 	public function setUserTotpSecret(int $userId, ?string $secret) : void
 	{
 		$st = $this->pdo->prepare('UPDATE frickmail_users SET totp_secret = :s, updated_at = NOW() WHERE id = :i');

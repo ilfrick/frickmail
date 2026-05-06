@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.8',
+		VERSION  = '0.9',
 		RELEASE  = '2026-05-04',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -49,6 +49,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailDeleteAccount', 'JsonDeleteAccount');
 		$this->addJsonHook('FrickmailSetPrimary', 'JsonSetPrimary');
 		$this->addJsonHook('FrickmailSwitchAccount', 'JsonSwitchAccount');
+		$this->addJsonHook('FrickmailSetAccountPassword', 'JsonSetAccountPassword');
 		$this->addJsonHook('FrickmailRequestPasswordReset', 'JsonRequestPasswordReset');
 		$this->addJsonHook('FrickmailResetPassword', 'JsonResetPassword');
 		$this->addJsonHook('FrickmailMe', 'JsonMe');
@@ -195,6 +196,19 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 				]);
 			}
 			$account = $db->decryptedAccount($primary, $cryptKey);
+			$bMissing = ('imap' === $account['type'] && empty($account['password']))
+				|| (\in_array($account['type'], ['gmail','o365'], true) && empty($account['oauth_refresh_token']));
+			if ($bMissing) {
+				return $this->jsonResponse(__FUNCTION__, [
+					'ok' => true,
+					'no_primary' => true,
+					'reauth_required' => true,
+					'reauth_account_id' => (int) $account['id'],
+					'reauth_account_email' => (string) $account['email'],
+					'reauth_account_type' => (string) $account['type'],
+					'message' => 'Re-enter the password for ' . $account['email'] . ' (lost after the password reset).',
+				]);
+			}
 			$this->bridgeToSnappyMail($account);
 
 			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'email' => $account['email']]);
@@ -479,6 +493,25 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$this->db()->setPrimaryMailAccount($uid, $id);
 			return $this->jsonResponse(__FUNCTION__, ['ok' => true]);
 		} catch (\Throwable $e) {
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	public function JsonSetAccountPassword() : array
+	{
+		try {
+			[$uid, $cryptKey] = $this->requireSession();
+			$id = (int) $this->jsonParam('id');
+			$pwd = (string) $this->jsonParam('password');
+			if ($id <= 0) throw new \RuntimeException('Account id required');
+			if ('' === $pwd) throw new \RuntimeException('Password required');
+			$row = $this->db()->getMailAccount($uid, $id);
+			if (!$row) throw new \RuntimeException('Account not found');
+			$blob = \Frickmail\User\Crypto::encrypt($pwd, $cryptKey);
+			$this->db()->setMailAccountPassword($uid, $id, $blob);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => true]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
 			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
 		}
 	}
