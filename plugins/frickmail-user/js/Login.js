@@ -148,8 +148,9 @@
 		};
 	};
 
-	const callPlugin = (action, params, cb) => {
-		const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
+	const callPlugin = async (action, params, cb) => {
+		const fresh = await refreshCsrfToken();
+		const xtoken = fresh || rl.settings?.app?.('token') || rl.__frickmail_token;
 		if (xtoken) params.XToken = xtoken;
 		rl.pluginRemoteRequest(cb, action, params, 30000);
 	};
@@ -169,7 +170,8 @@
 				: `<p>Click below to re-link via OAuth (${type === 'gmail' ? 'Google' : 'Microsoft'}).</p>`}
 			<div style="margin-top:1em;display:flex;gap:.6em">
 				<button class="btn" type="button" data-rf="save" style="background:#4a90e2;color:white">Save and open mailbox</button>
-			</div>`;
+			</div>
+			<div class="status" data-fm="status"></div>`;
 		wrap.querySelector('form').replaceWith(setup);
 
 		const switchToPrimary = () => {
