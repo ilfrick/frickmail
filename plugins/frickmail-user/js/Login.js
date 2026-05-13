@@ -148,9 +148,8 @@
 		};
 	};
 
-	const callPlugin = async (action, params, cb) => {
-		const fresh = await refreshCsrfToken();
-		const xtoken = fresh || rl.settings?.app?.('token') || rl.__frickmail_token;
+	const callPlugin = (action, params, cb) => {
+		const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
 		if (xtoken) params.XToken = xtoken;
 		rl.pluginRemoteRequest(cb, action, params, 30000);
 	};
