@@ -18,6 +18,11 @@
 			this.otpauthUri = ko.observable('');
 			this.confirmCode = ko.observable('');
 			this.disableCode = ko.observable('');
+			this.qrCodeUrl = ko.computed(() =>
+				this.otpauthUri()
+					? 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(this.otpauthUri())
+					: ''
+			);
 		}
 
 		onBuild() {

@@ -28,7 +28,7 @@
 			<h4>Configure your authenticator</h4>
 			<p>Scan the QR code below, or paste the secret manually into your app:</p>
 			<div data-bind="visible: otpauthUri" style="text-align:center; margin:1em 0">
-				<img data-bind="attr:{ src: 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(otpauthUri()) }" alt="TOTP QR" />
+				<img data-bind="attr:{ src: qrCodeUrl }" alt="TOTP QR" />
 			</div>
 			<label>Manual entry secret</label>
 			<input type="text" data-bind="value: secret" readonly style="font-family:monospace" />
