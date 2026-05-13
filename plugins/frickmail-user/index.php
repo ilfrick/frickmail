@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.13',
+		VERSION  = '0.16',
 		RELEASE  = '2026-05-13',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -57,6 +57,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailEnableTotp', 'JsonEnableTotp');
 		$this->addJsonHook('FrickmailConfirmTotp', 'JsonConfirmTotp');
 		$this->addJsonHook('FrickmailDisableTotp', 'JsonDisableTotp');
+		$this->addJsonHook('FrickmailTestImap', 'JsonTestImap');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -515,6 +516,42 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		}
 	}
 
+	/** Temporary diagnostic: decrypt stored IMAP password and test it directly. */
+	public function JsonTestImap() : array
+	{
+		try {
+			[$uid, $cryptKey] = $this->requireSession();
+			$id = (int) $this->jsonParam('id');
+			$row = $this->db()->getMailAccount($uid, $id);
+			if (!$row) throw new \RuntimeException('Account not found');
+			$account = $this->db()->decryptedAccount($row, $cryptKey);
+			$pwd = $account['password'] ?? null;
+			if (!$pwd) return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => 'decrypt returned null']);
+			$len = strlen($pwd);
+			$preview = substr($pwd, 0, 2) . str_repeat('*', max(0, $len - 2));
+			// Raw IMAP LOGIN test — bypasses SnappyMail completely
+			// Use the domain JSON port/security (what SnappyMail actually uses), not the DB values
+			$oDomainProvider = \RainLoop\Api::Actions()->DomainProvider();
+			$sDomain = \strtolower(\substr((string)\strrchr($account['email'], '@'), 1));
+			$oDomain = $oDomainProvider->Load($sDomain, false);
+			$imapHost = $oDomain ? $oDomain->IncHost() : $row['imap_host'];
+			$imapPort = $oDomain ? $oDomain->IncPort() : (int)$row['imap_port'];
+			$imapType = $oDomain ? $oDomain->ImapSettings()->type : 2;
+			$scheme = ($imapType === 2) ? 'ssl' : 'tcp'; // 2=SSL, 1=STARTTLS, 0=plain
+			$ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false]]);
+			$fp  = @stream_socket_client($scheme . '://' . $imapHost . ':' . $imapPort, $errno, $errstr, 10, STREAM_CLIENT_CONNECT, $ctx);
+			if (!$fp) return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'pwd_len' => $len, 'pwd_preview' => $preview, 'error' => 'connect failed: ' . $errstr]);
+			fgets($fp, 512);
+			fwrite($fp, 'a1 LOGIN ' . $row['login'] . ' ' . $pwd . "\r\n");
+			$resp = fgets($fp, 512);
+			fclose($fp);
+			$ok = str_starts_with($resp, 'a1 OK');
+			return $this->jsonResponse(__FUNCTION__, ['ok' => $ok, 'pwd_len' => $len, 'pwd_preview' => $preview, 'imap_resp' => substr($resp, 0, 60)]);
+		} catch (\Throwable $e) {
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
 	public function JsonSetAccountPassword() : array
 	{
 		try {
@@ -543,10 +580,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$row = $db->getMailAccount($uid, $id);
 			if (!$row) throw new \RuntimeException('Account not found');
 
-			// Logout the current SnappyMail session if any, so the bridge starts clean.
 			$oActions = \RainLoop\Api::Actions();
-			try { $oActions->Logout(true); } catch (\Throwable $e) {}
-
 			$account = $db->decryptedAccount($row, $cryptKey);
 			$this->bridgeToSnappyMail($account);
 			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'email' => $account['email']]);
@@ -660,8 +694,20 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$sDomain = \strtolower(\substr((string) \strrchr($account['email'], '@'), 1));
 		if (!$sDomain) return;
 		$oExisting = $oDomainProvider->Load($sDomain, false);
-		if ($oExisting) return;
-		// Create-or-update a minimal SnappyMail domain record so IMAP/SMTP know where to connect
+		if ($oExisting) {
+			// Correct shortLogin on the fly if the domain exists but has wrong value.
+			// The IMAP server for housefz.com requires the full email as login.
+			$oImap = $oExisting->ImapSettings();
+			$oSmtp = $oExisting->SmtpSettings();
+			if ($oImap->shortLogin || $oSmtp->shortLogin) {
+				$oImap->shortLogin = false;
+				$oSmtp->shortLogin = false;
+				$oDomainProvider->Save($oExisting);
+			}
+			return;
+		}
+		// Create a minimal SnappyMail domain record so IMAP/SMTP know where to connect.
+		// shortLogin=false: send the full email address as the IMAP/SMTP login.
 		$oDomain = \RainLoop\Model\Domain::fromArray($sDomain, [
 			'IMAP' => [
 				'host' => $account['imap_host'],
