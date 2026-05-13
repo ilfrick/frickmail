@@ -27,17 +27,17 @@
 			</style>
 			<h2 data-fm="title">Sign in to Frickmail</h2>
 			<form data-fm="form">
-				<label>Username</label>
-				<input data-fm="username" type="text" autocomplete="username" required />
+				<label for="fm-username">Username</label>
+				<input id="fm-username" data-fm="username" type="text" autocomplete="username" required />
 				<div data-fm="email-row" style="display:none">
-					<label>Recovery email <span style="font-weight:normal;opacity:.7">(used to reset password)</span></label>
-					<input data-fm="email" type="email" autocomplete="email" />
+					<label for="fm-email">Recovery email <span style="font-weight:normal;opacity:.7">(used to reset password)</span></label>
+					<input id="fm-email" data-fm="email" type="email" autocomplete="email" />
 				</div>
-				<label>Password</label>
-				<input data-fm="password" type="password" autocomplete="current-password" required minlength="8" />
+				<label for="fm-password">Password</label>
+				<input id="fm-password" data-fm="password" type="password" autocomplete="current-password" required minlength="8" />
 				<div data-fm="totp-row" style="display:none">
-					<label>Two-factor code</label>
-					<input data-fm="totp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" />
+					<label for="fm-totp">Two-factor code</label>
+					<input id="fm-totp" data-fm="totp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" />
 				</div>
 				<div class="actions">
 					<button class="btn btn-primary" type="submit" data-fm="submit">Sign in</button>
@@ -165,7 +165,7 @@
 			<h3 style="margin-top:1em">Re-authenticate ${email}</h3>
 			<p style="color:#888">After a password reset, the encrypted IMAP/OAuth credentials are unrecoverable. Re-enter them here to keep using this mailbox.</p>
 			${type === 'imap'
-				? `<label>IMAP password</label><input data-rf="password" type="password" autocomplete="new-password" />`
+				? `<label for="fm-rf-password">IMAP password</label><input id="fm-rf-password" data-rf="password" type="password" autocomplete="new-password" />`
 				: `<p>Click below to re-link via OAuth (${type === 'gmail' ? 'Google' : 'Microsoft'}).</p>`}
 			<div style="margin-top:1em;display:flex;gap:.6em">
 				<button class="btn" type="button" data-rf="save" style="background:#4a90e2;color:white">Save and open mailbox</button>
@@ -225,29 +225,29 @@
 		const setup = document.createElement('div');
 		setup.innerHTML = `
 			<h3 style="margin-top:1em">Add your first mail account</h3>
-			<label>Type</label>
-			<select data-fa="type">
+			<label for="fm-fa-type">Type</label>
+			<select id="fm-fa-type" data-fa="type">
 				<option value="imap">IMAP / SMTP (any provider)</option>
 				<option value="gmail">Gmail (OAuth)</option>
 				<option value="o365">Office 365 / Outlook (OAuth)</option>
 			</select>
 			<div data-fa="imap-fields">
-				<label>Email</label><input data-fa="email" type="email" />
-				<label>IMAP login (if different)</label><input data-fa="login" type="text" />
-				<label>IMAP password</label><input data-fa="password" type="password" autocomplete="new-password" />
+				<label for="fm-fa-email">Email</label><input id="fm-fa-email" data-fa="email" type="email" />
+				<label for="fm-fa-login">IMAP login (if different)</label><input id="fm-fa-login" data-fa="login" type="text" />
+				<label for="fm-fa-password">IMAP password</label><input id="fm-fa-password" data-fa="password" type="password" autocomplete="new-password" />
 				<div style="display:flex;gap:.5em">
-					<div style="flex:2"><label>IMAP host</label><input data-fa="imap_host" type="text" placeholder="imap.example.com" /></div>
-					<div style="flex:1"><label>Port</label><input data-fa="imap_port" type="number" value="993" /></div>
-					<div style="flex:1"><label>Sec.</label><select data-fa="imap_secure"><option>SSL</option><option>STARTTLS</option><option>NONE</option></select></div>
+					<div style="flex:2"><label for="fm-fa-imap_host">IMAP host</label><input id="fm-fa-imap_host" data-fa="imap_host" type="text" placeholder="imap.example.com" /></div>
+					<div style="flex:1"><label for="fm-fa-imap_port">Port</label><input id="fm-fa-imap_port" data-fa="imap_port" type="number" value="993" /></div>
+					<div style="flex:1"><label for="fm-fa-imap_secure">Sec.</label><select id="fm-fa-imap_secure" data-fa="imap_secure"><option>SSL</option><option>STARTTLS</option><option>NONE</option></select></div>
 				</div>
 				<div style="display:flex;gap:.5em">
-					<div style="flex:2"><label>SMTP host</label><input data-fa="smtp_host" type="text" placeholder="smtp.example.com" /></div>
-					<div style="flex:1"><label>Port</label><input data-fa="smtp_port" type="number" value="465" /></div>
-					<div style="flex:1"><label>Sec.</label><select data-fa="smtp_secure"><option>SSL</option><option>STARTTLS</option><option>NONE</option></select></div>
+					<div style="flex:2"><label for="fm-fa-smtp_host">SMTP host</label><input id="fm-fa-smtp_host" data-fa="smtp_host" type="text" placeholder="smtp.example.com" /></div>
+					<div style="flex:1"><label for="fm-fa-smtp_port">Port</label><input id="fm-fa-smtp_port" data-fa="smtp_port" type="number" value="465" /></div>
+					<div style="flex:1"><label for="fm-fa-smtp_secure">Sec.</label><select id="fm-fa-smtp_secure" data-fa="smtp_secure"><option>SSL</option><option>STARTTLS</option><option>NONE</option></select></div>
 				</div>
 			</div>
 			<div data-fa="oauth-fields" style="display:none">
-				<label>Email</label><input data-fa="oauth_email" type="email" placeholder="(detected after consent)" />
+				<label for="fm-fa-oauth_email">Email</label><input id="fm-fa-oauth_email" data-fa="oauth_email" type="email" placeholder="(detected after consent)" />
 				<p style="color:#888;margin-top:.6em">Click below; a popup will ask the provider for consent. The refresh token is then linked to your Frickmail account.</p>
 			</div>
 			<div style="margin-top:1em;display:flex;gap:.6em">
@@ -339,8 +339,8 @@
 		setup.innerHTML = `
 			<h2>Recupero password</h2>
 			<p style="color:#888">Inserisci il tuo username Frickmail. Se esiste e ha una recovery email, ti mandiamo un link per resettare la password.</p>
-			<label>Username</label>
-			<input data-ff="username" type="text" autocomplete="username" />
+			<label for="fm-ff-username">Username</label>
+			<input id="fm-ff-username" data-ff="username" type="text" autocomplete="username" />
 			<div class="actions" style="margin-top:1em">
 				<button class="btn btn-primary" type="button" data-ff="send">Send reset link</button>
 				<button class="switch-mode" type="button" data-ff="back">Back to sign-in</button>
@@ -384,10 +384,10 @@
 			</style>
 			<h2>Imposta una nuova password</h2>
 			<p style="color:#888">Le credenziali IMAP/OAuth dei tuoi account email collegati saranno reimpostate (devi reinserirle dal Setup).</p>
-			<label>Nuova password (min 8 caratteri)</label>
-			<input data-fr="password" type="password" autocomplete="new-password" minlength="8" />
-			<label>Conferma password</label>
-			<input data-fr="password2" type="password" autocomplete="new-password" />
+			<label for="fm-fr-password">Nuova password (min 8 caratteri)</label>
+			<input id="fm-fr-password" data-fr="password" type="password" autocomplete="new-password" minlength="8" />
+			<label for="fm-fr-password2">Conferma password</label>
+			<input id="fm-fr-password2" data-fr="password2" type="password" autocomplete="new-password" />
 			<div class="actions">
 				<button class="btn btn-primary" type="button" data-fr="save">Reset password</button>
 			</div>
