@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.11',
+		VERSION  = '0.12',
 		RELEASE  = '2026-05-13',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -209,7 +209,25 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 					'message' => 'Re-enter the password for ' . $account['email'] . ' (lost after the password reset).',
 				]);
 			}
-			$this->bridgeToSnappyMail($account);
+			try {
+				$this->bridgeToSnappyMail($account);
+			} catch (\RainLoop\Exceptions\ClientException $e) {
+				if ($e->getCode() === \RainLoop\Notifications::AuthError) {
+					// Stored credentials are wrong (e.g. wrong password re-entered during
+					// a previous re-auth attempt). Treat as reauth_required so the user
+					// can correct the password rather than seeing a cryptic login error.
+					return $this->jsonResponse(__FUNCTION__, [
+						'ok' => true,
+						'no_primary' => true,
+						'reauth_required' => true,
+						'reauth_account_id' => (int) $account['id'],
+						'reauth_account_email' => (string) $account['email'],
+						'reauth_account_type' => (string) $account['type'],
+						'message' => 'IMAP authentication failed for ' . $account['email'] . ' — re-enter the password.',
+					]);
+				}
+				throw $e;
+			}
 
 			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'email' => $account['email']]);
 		} catch (\Throwable $e) {
