@@ -13,21 +13,23 @@
 			if (this.syncing()) return;
 			this.syncing(true);
 			this.lastResult('Working...');
-			rl.pluginRemoteRequest((iError, oData) => {
+			const r = window.rl;
+			const xtoken = r.settings?.app?.('token');
+			r.pluginRemoteRequest((iError, oData) => {
 				this.syncing(false);
 				if (iError) {
 					this.lastResult('Sync failed: ' + (oData?.Result?.error || 'request error'));
 					return;
 				}
-				const r = oData && oData.Result;
-				if (r && r.error) {
-					this.lastResult('Sync failed: ' + r.error);
-				} else if (r && typeof r.count === 'number') {
-					this.lastResult('Synced ' + r.count + ' contact' + (r.count === 1 ? '' : 's') + ' from ' + (r.email || 'provider') + '.');
+				const res = oData && oData.Result;
+				if (res && res.error) {
+					this.lastResult('Sync failed: ' + res.error);
+				} else if (res && typeof res.count === 'number') {
+					this.lastResult('Synced ' + res.count + ' contact' + (res.count === 1 ? '' : 's') + ' from ' + (res.email || 'provider') + '.');
 				} else {
 					this.lastResult('Sync done.');
 				}
-			}, 'JsonContactsSync', {}, 60000);
+			}, 'JsonContactsSync', xtoken ? {XToken: xtoken} : {}, 60000);
 		}
 
 		onBuild() {}
