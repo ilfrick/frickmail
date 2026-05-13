@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.18',
+		VERSION  = '0.19',
 		RELEASE  = '2026-05-13',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -95,6 +95,16 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	private function startPhpSession() : void
 	{
 		if (\PHP_SESSION_ACTIVE !== \session_status()) {
+			// PHP's default session.save_path may be empty on this Alpine build,
+			// causing session files to be written to '/' (root) which silently fails.
+			// Use the SnappyMail data directory as the session storage path.
+			if ('' === \session_save_path()) {
+				$sSavePath = \rtrim(APP_DATA_FOLDER_PATH, '/') . '/_sessions_';
+				if (!\is_dir($sSavePath)) {
+					\mkdir($sSavePath, 0700, true);
+				}
+				\session_save_path($sSavePath);
+			}
 			\session_start([
 				'cookie_httponly' => true,
 				'cookie_secure'   => !empty($_SERVER['HTTPS']),
