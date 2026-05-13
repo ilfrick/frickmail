@@ -18,11 +18,7 @@
 			this.otpauthUri = ko.observable('');
 			this.confirmCode = ko.observable('');
 			this.disableCode = ko.observable('');
-			this.qrCodeUrl = ko.computed(() =>
-				this.otpauthUri()
-					? 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(this.otpauthUri())
-					: ''
-			);
+			this.qrDataUrl = ko.observable('');
 		}
 
 		onBuild() {
@@ -47,6 +43,7 @@
 				if (!r?.ok) { this.status('Failed: ' + (r?.error || 'request error')); return; }
 				this.secret(r.secret);
 				this.otpauthUri(r.otpauth_uri);
+				this.qrDataUrl(r.qr_data_url || '');
 				this.pending(true);
 				this.status(r.message || 'Scan the QR code with your authenticator and confirm with a code.');
 			});
@@ -62,6 +59,7 @@
 				this.pending(false);
 				this.secret('');
 				this.otpauthUri('');
+				this.qrDataUrl('');
 				this.confirmCode('');
 				this.status(r.message || 'Two-factor enabled.');
 				this.refresh();

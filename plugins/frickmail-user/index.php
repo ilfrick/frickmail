@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.19',
+		VERSION  = '0.20',
 		RELEASE  = '2026-05-13',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -303,6 +303,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 				'ok' => true,
 				'secret' => $sSecret,
 				'otpauth_uri' => $sUri,
+				'qr_data_url' => $this->generateQrDataUrl($sUri),
 				'message' => 'Scan the QR code (or paste the secret) into your authenticator app, then submit a code to confirm.',
 			]);
 		} catch (\Throwable $e) {
@@ -743,6 +744,33 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			'whiteList' => ''
 		]);
 		$oDomainProvider->Save($oDomain);
+	}
+
+	private function generateQrDataUrl(string $sData) : string
+	{
+		$qr = new \SnappyMail\QRCode();
+		$qr->setErrorCorrectLevel(\SnappyMail\QRCode::ERROR_CORRECT_LEVEL_M);
+		$qr->addData($sData);
+		$qr->make();
+		$n = $qr->getModuleCount();
+		$cell = 6;
+		$pad  = 16;
+		$size = $n * $cell + $pad * 2;
+		$rects = '';
+		for ($r = 0; $r < $n; $r++) {
+			for ($c = 0; $c < $n; $c++) {
+				if ($qr->isDark($r, $c)) {
+					$x = $pad + $c * $cell;
+					$y = $pad + $r * $cell;
+					$rects .= '<rect x="'.$x.'" y="'.$y.'" width="'.$cell.'" height="'.$cell.'"/>';
+				}
+			}
+		}
+		$svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '.$size.' '.$size.'" width="220" height="220">'
+			. '<rect width="'.$size.'" height="'.$size.'" fill="white"/>'
+			. '<g fill="black">' . $rects . '</g>'
+			. '</svg>';
+		return 'data:image/svg+xml;base64,' . \base64_encode($svg);
 	}
 
 	private function mapSecure(?string $sec) : int
