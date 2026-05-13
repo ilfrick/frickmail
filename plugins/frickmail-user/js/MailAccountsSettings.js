@@ -29,7 +29,7 @@
 
 		refresh() {
 			this.loading(true);
-			rl.pluginRemoteRequest((iError, oData) => {
+			window.rl.pluginRemoteRequest((iError, oData) => {
 				this.loading(false);
 				const r = oData?.Result;
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
@@ -70,7 +70,7 @@
 				});
 			}
 			this.status('Saving…');
-			rl.pluginRemoteRequest((iError, oData) => {
+			window.rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Save failed: ' + (r?.error || 'request error')); return; }
@@ -81,7 +81,7 @@
 
 		deleteAccount(account) {
 			if (!confirm('Delete account ' + account.email + '?')) return;
-			rl.pluginRemoteRequest((iError, oData) => {
+			window.rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Delete failed: ' + (r?.error || 'request error')); return; }
@@ -90,7 +90,7 @@
 		}
 
 		setPrimary(account) {
-			rl.pluginRemoteRequest((iError, oData) => {
+			window.rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Set-primary failed: ' + (r?.error || 'request error')); return; }
@@ -100,7 +100,7 @@
 
 		switchTo(account) {
 			this.status('Switching to ' + account.email + '…');
-			rl.pluginRemoteRequest((iError, oData) => {
+			window.rl.pluginRemoteRequest((iError, oData) => {
 				const r = oData?.Result;
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Switch failed: ' + (r?.error || 'request error')); return; }

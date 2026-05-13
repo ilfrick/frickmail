@@ -1,9 +1,10 @@
 (rl => { if (!rl) return;
 
 	const callPlugin = (action, params, cb) => {
-		const xtoken = rl.settings?.app?.('token') || rl.__frickmail_token;
+		const r = window.rl;
+		const xtoken = r.settings?.app?.('token') || r.__frickmail_token;
 		if (xtoken) params.XToken = xtoken;
-		rl.pluginRemoteRequest(cb, action, params, 30000);
+		r.pluginRemoteRequest(cb, action, params, 30000);
 	};
 
 	class FrickmailTwoFactorSettings
