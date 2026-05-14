@@ -102,6 +102,15 @@
 			store = vm?.accounts || null;
 			if (!store) return;
 
+			// Override addAccountClick to navigate to Frickmail's Mail Accounts settings.
+			if (vm) {
+				vm.addAccountClick = () => { location.hash = '#/settings/mail-accounts'; };
+				// The "+" button is hidden when allowAccounts capability is off.
+				// Force it visible by finding it in the dropdown DOM.
+				const addBtn = headerDom.querySelector('[data-i18n="TOP_TOOLBAR/BUTTON_ADD_ACCOUNT"]')?.closest('li');
+				if (addBtn) addBtn.hidden = false;
+			}
+
 			// 1. Inject immediately from cache (no server round-trip needed).
 			const cached = loadCache();
 			if (cached) injectFromList(cached);
