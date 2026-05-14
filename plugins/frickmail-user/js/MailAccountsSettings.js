@@ -1,5 +1,36 @@
 (rl => { if (!rl) return;
 
+	// Known provider presets: domain pattern → IMAP/SMTP settings.
+	const PROVIDERS = {
+		'gmail.com':        { imap: ['imap.gmail.com',         993, 'SSL'],     smtp: ['smtp.gmail.com',         587, 'STARTTLS'], oauth: 'gmail' },
+		'googlemail.com':   { imap: ['imap.gmail.com',         993, 'SSL'],     smtp: ['smtp.gmail.com',         587, 'STARTTLS'], oauth: 'gmail' },
+		'outlook.com':      { imap: ['outlook.office365.com',  993, 'SSL'],     smtp: ['smtp.office365.com',     587, 'STARTTLS'], oauth: 'o365'  },
+		'hotmail.com':      { imap: ['outlook.office365.com',  993, 'SSL'],     smtp: ['smtp.office365.com',     587, 'STARTTLS'], oauth: 'o365'  },
+		'live.com':         { imap: ['outlook.office365.com',  993, 'SSL'],     smtp: ['smtp.office365.com',     587, 'STARTTLS'], oauth: 'o365'  },
+		'msn.com':          { imap: ['outlook.office365.com',  993, 'SSL'],     smtp: ['smtp.office365.com',     587, 'STARTTLS'], oauth: 'o365'  },
+		'yahoo.com':        { imap: ['imap.mail.yahoo.com',    993, 'SSL'],     smtp: ['smtp.mail.yahoo.com',    587, 'STARTTLS'] },
+		'yahoo.it':         { imap: ['imap.mail.yahoo.com',    993, 'SSL'],     smtp: ['smtp.mail.yahoo.com',    587, 'STARTTLS'] },
+		'yahoo.co.uk':      { imap: ['imap.mail.yahoo.com',    993, 'SSL'],     smtp: ['smtp.mail.yahoo.com',    587, 'STARTTLS'] },
+		'ymail.com':        { imap: ['imap.mail.yahoo.com',    993, 'SSL'],     smtp: ['smtp.mail.yahoo.com',    587, 'STARTTLS'] },
+		'icloud.com':       { imap: ['imap.mail.me.com',       993, 'SSL'],     smtp: ['smtp.mail.me.com',       587, 'STARTTLS'] },
+		'me.com':           { imap: ['imap.mail.me.com',       993, 'SSL'],     smtp: ['smtp.mail.me.com',       587, 'STARTTLS'] },
+		'mac.com':          { imap: ['imap.mail.me.com',       993, 'SSL'],     smtp: ['smtp.mail.me.com',       587, 'STARTTLS'] },
+		'fastmail.com':     { imap: ['imap.fastmail.com',      993, 'SSL'],     smtp: ['smtp.fastmail.com',      587, 'STARTTLS'] },
+		'fastmail.fm':      { imap: ['imap.fastmail.com',      993, 'SSL'],     smtp: ['smtp.fastmail.com',      587, 'STARTTLS'] },
+		'proton.me':        { imap: ['127.0.0.1',              1143,'NONE'],    smtp: ['127.0.0.1',              1025,'NONE'],    note: 'Requires Proton Mail Bridge running locally' },
+		'protonmail.com':   { imap: ['127.0.0.1',              1143,'NONE'],    smtp: ['127.0.0.1',              1025,'NONE'],    note: 'Requires Proton Mail Bridge running locally' },
+		'libero.it':        { imap: ['imapmail.libero.it',     993, 'SSL'],     smtp: ['mail.libero.it',         465, 'SSL'] },
+		'virgilio.it':      { imap: ['imapmail.libero.it',     993, 'SSL'],     smtp: ['mail.libero.it',         465, 'SSL'] },
+		'tiscali.it':       { imap: ['mail.tiscali.it',        993, 'SSL'],     smtp: ['smtp.tiscali.it',        465, 'SSL'] },
+		'tim.it':           { imap: ['imap.tim.it',            993, 'SSL'],     smtp: ['smtp.tim.it',            587, 'STARTTLS'] },
+	};
+
+	function detectProvider(email) {
+		const domain = (email || '').split('@')[1]?.toLowerCase();
+		if (!domain) return null;
+		return PROVIDERS[domain] || null;
+	}
+
 	class FrickmailMailAccountsSettings
 	{
 		constructor() {
@@ -21,6 +52,26 @@
 				smtp_secure: ko.observable('SSL'),
 				is_primary: ko.observable(false)
 			};
+			this.providerNote = ko.observable('');
+
+			// Auto-detect provider when email changes
+			this.draft.email.subscribe(email => {
+				const p = detectProvider(email);
+				if (!p) { this.providerNote(''); return; }
+				this.applyPreset(p);
+			});
+		}
+
+		applyPreset(p) {
+			const d = this.draft;
+			if (p.oauth && !d.imap_host()) {
+				d.type(p.oauth);
+			} else {
+				d.type('imap');
+			}
+			if (p.imap) { d.imap_host(p.imap[0]); d.imap_port(p.imap[1]); d.imap_secure(p.imap[2]); }
+			if (p.smtp) { d.smtp_host(p.smtp[0]); d.smtp_port(p.smtp[1]); d.smtp_secure(p.smtp[2]); }
+			this.providerNote(p.note || '');
 		}
 
 		onBuild() {

@@ -28,18 +28,20 @@
 
 		<div data-bind="visible: adding" style="border:1px solid #4a90e2; border-radius:6px; padding:1em; margin-top:1em">
 			<h4>New account</h4>
+
+			<label>Email address</label>
+			<input type="email" data-bind="value: draft.email" placeholder="you@example.com" required />
+			<div data-bind="visible: providerNote().length, text: providerNote" style="margin:.3em 0; padding:.4em .6em; background:#fff8e1; border-left:3px solid #ffc107; font-size:88%; color:#555"></div>
+
 			<label>Type</label>
 			<select data-bind="value: draft.type">
-				<option value="imap">IMAP / SMTP</option>
+				<option value="imap">IMAP / SMTP (any provider)</option>
 				<option value="gmail">Gmail (OAuth2)</option>
-				<option value="o365">Office 365 (OAuth2)</option>
+				<option value="o365">Office 365 / Outlook (OAuth2)</option>
 			</select>
 
 			<label>Label</label>
 			<input type="text" data-bind="value: draft.label" placeholder="Personal, Work, …" />
-
-			<label>Email address</label>
-			<input type="email" data-bind="value: draft.email" required />
 
 			<div data-bind="visible: draft.type() === 'imap'">
 				<label>IMAP login (if different from email)</label>
@@ -68,11 +70,14 @@
 
 			<div data-bind="visible: draft.type() === 'gmail'" style="margin: .8em 0">
 				<button class="btn" style="background:#d44638; color:white" data-bind="click: launchOAuth.bind($data, 'gmail')">Sign in with Google</button>
-				<p style="color:#888; margin-top:.4em">A popup opens with Google's consent screen. The refresh token is linked to your Frickmail account.</p>
+				<p style="color:#888; margin-top:.4em; font-size:88%">A popup opens with Google's consent screen. The refresh token is saved to your account.</p>
 			</div>
 			<div data-bind="visible: draft.type() === 'o365'" style="margin: .8em 0">
 				<button class="btn" style="background:#2b7de9; color:white" data-bind="click: launchOAuth.bind($data, 'o365')">Sign in with Microsoft</button>
-				<p style="color:#888; margin-top:.4em">A popup opens with Microsoft's consent screen.</p>
+				<p style="color:#888; margin-top:.4em; font-size:88%">A popup opens with Microsoft's consent screen.</p>
+			</div>
+			<div data-bind="visible: draft.type() === 'imap'" style="margin-top:.5em">
+				<p style="font-size:85%; color:#aaa; margin:.2em 0 .6em">Settings auto-filled from email address. Adjust if needed.</p>
 			</div>
 
 			<label><input type="checkbox" data-bind="checked: draft.is_primary" /> Use as primary</label>
