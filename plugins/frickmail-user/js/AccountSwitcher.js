@@ -31,11 +31,15 @@
 
 	function injectFromList(accounts) {
 		if (!store || !accounts) return;
+		// The current SnappyMail account email — skip this one (it's already the main entry).
+		const currentEmail = store.email?.() || '';
+
 		injecting = true;
 		emailToId = {};
 		accounts.forEach(acc => {
 			emailToId[acc.email] = acc.id;
-			if (acc.is_primary) return;
+			// Skip the account that SnappyMail is currently logged in as.
+			if (acc.email === currentEmail) return;
 			if (store().some(a => a.email === acc.email)) return;
 			store.push(buildFakeAccount(acc));
 		});
