@@ -24,6 +24,7 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 	{
 		$this->UseLangs(false);
 		$this->addJs('js/CalendarSettings.js');
+		$this->addJs('js/CalendarSidebar.js');
 		$this->addCss('css/calendar.css');
 		$this->addTemplate('templates/CalendarSettingsTab.html');
 		$this->addJsonHook('JsonCalendarEvents', 'JsonCalendarEvents');
