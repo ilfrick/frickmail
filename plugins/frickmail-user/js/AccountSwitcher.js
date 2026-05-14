@@ -3,7 +3,7 @@
 // to call FrickmailSwitchAccount instead of SnappyMail's native handler.
 
 addEventListener('rl-view-model', e => {
-	if (e.detail?.viewModelTemplateID !== 'Header') return;
+	if (e.detail?.viewModelTemplateID !== 'SystemDropDown') return;
 
 	const headerDom = e.detail.viewModelDom;
 	if (!headerDom) return;
