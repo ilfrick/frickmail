@@ -169,7 +169,7 @@ search-input-wrp,
 	border: 1px solid var(--fm-border-strong) !important;
 	transition: border-color .2s, background .2s !important;
 	overflow: hidden !important;
-	/* respect SnappyMail's own margin — don't override margin/width */
+	/* respect upstream margins — don't override margin/width */
 }
 search-input-wrp:focus-within,
 .search-input-wrp:focus-within {

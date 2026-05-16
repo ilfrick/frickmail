@@ -43,7 +43,7 @@
 	}
 
 	function injectButtons(root) {
-		// SnappyMail renders sender/recipient as elements with data-bind containing
+		// The webmail renders sender/recipient as elements with data-bind containing
 		// the email. We look for the rendered <span class="senderParent"> or any
 		// element that contains an "mailto:" link or a visible email-like text node
 		// wrapped in a span with a title or data attribute carrying the address.
@@ -77,7 +77,7 @@
 		for (const m of mutations) {
 			for (const node of m.addedNodes) {
 				if (!(node instanceof Element)) continue;
-				// Message header area identifiers in SnappyMail 2.x
+				// Message header area identifiers
 				const header = node.matches('.messageView,.b-message-view,.senderParent,#V-MailMessage')
 					? node
 					: node.querySelector?.('.messageView,.b-message-view,.senderParent,#V-MailMessage');
@@ -93,7 +93,7 @@
 		if (area) injectButtons(area);
 	});
 
-	// Re-run when SnappyMail fires rl-view-model for the message view
+	// Re-run when the message view fires rl-view-model
 	addEventListener('rl-view-model', e => {
 		const id = e.detail?.viewModelTemplateID;
 		if (!id || !id.toLowerCase().includes('message')) return;

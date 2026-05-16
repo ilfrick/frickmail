@@ -6,10 +6,10 @@
  *   1. Browser POSTs username + password to ?Json/&q[]=/0/Plugin/-/&_action=FrickmailLogin
  *   2. We verify against frickmail_users.password_hash (Argon2id)
  *   3. We derive an AEAD key from the password + per-user salt, keep it in
- *      $_SESSION (PHP session, distinct from SnappyMail's session)
+ *      $_SESSION (PHP session, distinct from the webmail session)
  *   4. We load the primary mail account from frickmail_mail_accounts
- *   5. We bridge to SnappyMail's LoginProcess() with the decrypted IMAP creds
- *   6. SnappyMail issues its session token, the user lands in the inbox
+ *   5. We bridge to IMAP login with the decrypted credentials
+ *   6. The webmail issues its session token, the user lands in the inbox
  *
  * Adding mail accounts: separate JSON endpoints write to frickmail_mail_accounts
  * with credentials encrypted under the same AEAD key. OAuth tokens go to
@@ -36,8 +36,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	public function Init() : void
 	{
-		// Frickmail is the only account management system — disable SnappyMail's
-		// built-in additional-accounts capability so its Settings→Accounts tab,
+		// Frickmail is the only account management system — disable the built-in
+		// additional-accounts capability so the Settings→Accounts tab,
 		// account-add popup, and duplicate switcher UI never appear.
 		\RainLoop\Api::Config()->Set('webmail', 'allow_additional_accounts', false);
 
@@ -194,7 +194,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$_SESSION[self::SESSION_KEY_USER] = (int) $user['id'];
 			$_SESSION[self::SESSION_KEY_KEY]  = \base64_encode($cryptKey);
 
-			// Bridge to SnappyMail's IMAP login if a primary mail account exists.
+			// Bridge to IMAP login if a primary mail account exists.
 			$primary = $db->getPrimaryMailAccount((int) $user['id']);
 			if (!$primary) {
 				return $this->jsonResponse(__FUNCTION__, [
@@ -661,7 +661,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$sPluginClass::injectOAuthData($aTokenData);
 		}
 
-		// SnappyMail stores a per-account .cryptkey encrypted with the IMAP password.
+		// The webmail stores a per-account .cryptkey encrypted with the IMAP password.
 		// For OAuth accounts we use the email as the pseudo-password. If the stored
 		// .cryptkey was encrypted with a different value (e.g. Google user-ID from an
 		// old session), LoginProcess throws CryptKeyError. Delete it first — it is
@@ -749,7 +749,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			}
 			return;
 		}
-		// Create a minimal SnappyMail domain record so IMAP/SMTP know where to connect.
+		// Create a minimal domain record so IMAP/SMTP know where to connect.
 		// shortLogin=false: send the full email address as the IMAP/SMTP login.
 		$oDomain = \RainLoop\Model\Domain::fromArray($sDomain, [
 			'IMAP' => [

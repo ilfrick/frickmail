@@ -205,7 +205,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			];
 
 			// Frickmail mode: skip the legacy LoginProcess/IMAP-identity bridge entirely.
-			// LoginProcess would throw CryptKeyError when SnappyMail finds stored credentials
+			// LoginProcess would throw CryptKeyError if cached credentials exist
 			// encrypted with a different session token. In Frickmail mode the full login
 			// is handled by FrickmailSwitchAccount after the token is persisted.
 			$sFrickmailBridge = \APP_PLUGINS_PATH . 'frickmail-user/lib/Bridge.php';
@@ -273,7 +273,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			. 'window.opener.postMessage(msg, window.location.origin);window.close();return;}}catch(e){}'
 			. 'window.location.replace(' . \json_encode($sFallback) . ');})();'
 			. '</script><p>Authentication ' . ($bOk ? 'succeeded' : 'failed') . '. You can close this window.</p>'
-			. ($bOk ? '' : '<pre style="color:red;font-size:12px">' . \htmlspecialchars($sError, ENT_QUOTES, 'UTF-8') . '</pre>')
+			
 			. '</body>';
 	}
 

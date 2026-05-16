@@ -1,4 +1,4 @@
-// Frickmail account switcher — populates SnappyMail's top-right account
+// Frickmail account switcher — populates the top-right account
 // dropdown with all Frickmail mail accounts and handles switching.
 //
 // Refactored from monkey-patching Remote.request (fragile — breaks if
@@ -98,7 +98,7 @@
 	// The original accountClick calls Remote.request('AccountSwitch', callback, {Email})
 	// and on success calls rl.route.reload(). We replace the whole method so we:
 	//  • Call FrickmailSwitchAccount for accounts we own (_frickmail: true)
-	//  • Delegate to the original handler for SnappyMail's own accounts
+	//  • Delegate to the original handler for non-Frickmail accounts
 	// This is robust: depends only on the VM object existing, not on Remote internals.
 
 	function patchAccountClick(vm) {
@@ -108,7 +108,7 @@
 		const origClick = vm.accountClick.bind(vm);
 
 		vm.accountClick = function (account, event) {
-			// Not our account → let SnappyMail handle it normally.
+			// Not a Frickmail account → let the default handler process it.
 			if (!account?._frickmail) {
 				return origClick(account, event);
 			}
@@ -125,7 +125,7 @@
 			r.pluginRemoteRequest((iErr, oData) => {
 				const res = oData?.Result;
 				if (res?.ok) {
-					// Success: SnappyMail will do location.reload() inside route.reload()
+					// Success: the account list will reload via route.reload()
 					r.route?.reload?.();
 				} else {
 					store?.loading?.(false);
@@ -142,7 +142,7 @@
 	}
 
 	// ── Redirect native accounts route → our mail-accounts ────────
-	// SnappyMail's #/settings/accounts is disabled (allow_additional_accounts=false)
+	// The native #/settings/accounts is disabled (allow_additional_accounts=false)
 	// but any stale link or bookmark should land on our tab instead.
 
 	addEventListener('hashchange', () => {
@@ -183,7 +183,7 @@
 			if (cached) injectFromList(cached);
 			fetchAndInject();
 
-			// Re-inject after SnappyMail reloads the account list.
+			// Re-inject after the account list reloads.
 			let wasLoading = false;
 			store.loading?.subscribe(isLoading => {
 				if (injecting) return;

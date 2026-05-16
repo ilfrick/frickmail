@@ -163,7 +163,7 @@ messageListItem:hover, .messageListItem:hover {
 	background: var(--fm-bg-hover) !important;
 }
 
-/* Focused / selected (override rgba gray/blue hardcoded by SnappyMail) */
+/* Focused / selected (override upstream hardcoded colors) */
 messageListItem.focused, .messageListItem.focused,
 messageListItem.selected, .messageListItem.selected {
 	background: var(--fm-bg-selected) !important;
@@ -211,7 +211,7 @@ messageListItem .messageCheckbox, .messageListItem .messageCheckbox {
 	color: var(--fm-text-muted) !important;
 }
 
-/* Thread count badge (hardcoded #eee border in SnappyMail) */
+/* Thread count badge (override upstream hardcoded border) */
 messageListItem .threadsCountParent, .messageListItem .threadsCountParent {
 	background: var(--fm-bg-hover) !important;
 	border-color: var(--fm-border-strong) !important;
@@ -535,7 +535,7 @@ a:hover { color: var(--fm-accent-hover) !important; }
 .fm-accent-swatch:hover { transform: scale(1.2); }
 .fm-accent-swatch.active { border-color: var(--fm-text-primary); }
 
-/* ── Hide SnappyMail's native account management ──────────────── */
+/* ── Hide native account management (Frickmail manages its own) ─── */
 /* allow_additional_accounts=false disables these at runtime,     */
 /* but a CSS guard ensures nothing leaks through even if the      */
 /* config change is somehow bypassed.                             */

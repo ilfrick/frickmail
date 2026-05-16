@@ -163,7 +163,7 @@ services:
   and a popup opens the provider's consent screen.
 - After granting consent, the popup closes itself and the webmail loads
   the inbox automatically — no further input needed.
-- Refresh tokens are stored encrypted in the SnappyMail session so the
+- Refresh tokens are stored encrypted in the user session so the
   user stays signed in until they log out.
 
 If a user's browser blocks popups, Frickmail falls back to a full-page
@@ -195,13 +195,13 @@ allows app passwords (this is common — it's a separate setting from
 2. On the Frickmail login screen, type the email address and click the
    **Use password instead** button (added by the OAuth2 plugin) — this
    skips OAuth for one submission. Paste the app password as the password.
-3. SnappyMail will fall back to its standard IMAP login flow, which
+3. Frickmail will fall back to standard IMAP login, which
    contacts `outlook.office365.com:993` directly with basic auth +
    the app password.
 
 > Tip: if you want this domain to *always* use password auth rather than
 > OAuth, just remove the domain from the plugin's *Domains* setting.
-> Frickmail will then leave that domain alone and let SnappyMail
+> Frickmail will then leave that domain alone and use standard IMAP auth
 > authenticate it the normal way.
 
 ### 6.2 Use a multi-tenant app registration
@@ -230,7 +230,7 @@ already stored at sign-in:
 
 ### contacts-sync
 
-Pulls contacts from the linked provider into SnappyMail's local PAB.
+Pulls contacts from the linked provider into Frickmail's local address book.
 
 - *Settings → Calendar/Contacts → Contacts Sync → Sync now*
 - Backed by Google **People API** (`contacts.readonly`) and Microsoft
@@ -266,6 +266,6 @@ consent screen captures the additional scopes.
 | `imap.authenticationfailed` after login  | The OAuth client is missing the `https://mail.google.com/` (Gmail) or       |
 |                                          | `IMAP.AccessAsUser.All` (O365) scope.                                       |
 
-Server-side errors are logged to the SnappyMail log
+Server-side errors are logged to the Frickmail log
 (`/var/lib/snappymail/_data_/_default_/logs/log-*.txt`) — check there for
 the exact OAuth2 response from the provider.

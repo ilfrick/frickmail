@@ -1,7 +1,7 @@
 <?php
 /**
  * Frickmail contacts-sync — pulls contacts from the linked Gmail / Office 365
- * account into the SnappyMail Personal Address Book using the OAuth2 tokens
+ * account into the Frickmail Personal Address Book using OAuth2 tokens
  * stored by the login-gmail / login-o365 plugins.
  */
 
@@ -98,7 +98,7 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$oActions = \RainLoop\Api::Actions();
 		$aAuth = null;
 
-		// Primary source: SnappyMail session storage (written by bridgeToSnappyMail).
+		// Primary source: session storage (written by the IMAP bridge).
 		try {
 			$raw = $oActions->StorageProvider()->Get($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken());
 			if ($raw) {
@@ -363,9 +363,9 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	/**
 	 * Read the OAuth refresh_token from the Frickmail DB for the given email.
-	 * Used as fallback when SnappyMail's session storage doesn't have the token
+	 * Used as fallback when session storage doesn't have the token
 	 * (e.g. after session token rotation or when the account is not the primary
-	 * SnappyMail account at login time).
+	 * Frickmail account at login time).
 	 */
 	private function loadFrickmailAuth(string $sEmail) : ?array
 	{

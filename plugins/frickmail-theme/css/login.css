@@ -2,7 +2,7 @@
    Frickmail Theme — Login screens
    ═══════════════════════════════════════════════════════════════ */
 
-/* ── SnappyMail login view ── */
+/* ── Login view ── */
 .LoginView {
 	background: var(--fm-bg-base) !important;
 	display: flex !important;

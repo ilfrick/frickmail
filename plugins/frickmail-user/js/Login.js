@@ -1,6 +1,6 @@
 (rl => { if (!rl) return;
 
-	// Replace SnappyMail's IMAP login form with a Frickmail user form.
+	// Replace the default IMAP login form with Frickmail's user-centred form.
 	// On submit we hit ?Json/&q[]=/0/Plugin/-/&_action=FrickmailLogin which
 	// (server-side) bridges to LoginProcess() once it has retrieved the
 	// primary mail account credentials from the user's encrypted record.
@@ -428,7 +428,7 @@
 	addEventListener('rl-view-model', e => {
 		if ('Login' !== e.detail.viewModelTemplateID) return;
 		const dom = e.detail.viewModelDom;
-		// Defer one tick so SnappyMail's own bindings finish, then take over.
+		// Defer one tick so default bindings finish, then inject Frickmail form.
 		setTimeout(() => {
 			const host = dom.querySelector('.b-login-content') || dom;
 			const resetToken = new URLSearchParams(location.search).get('reset_token');

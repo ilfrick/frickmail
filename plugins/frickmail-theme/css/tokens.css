@@ -54,7 +54,7 @@ html[data-fm-theme="dark"] {
 	--fm-scroll-track: #13131f;
 	--fm-scroll-thumb: #3b3d5a;
 
-	/* ── SnappyMail variable overrides ── */
+	/* ── Upstream theme variable overrides ── */
 	color-scheme:                      dark;
 	--main-color:                      var(--fm-text-primary);
 	--main-bg-color:                   var(--fm-bg-base);

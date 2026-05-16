@@ -142,7 +142,7 @@
 		}
 	});
 
-	// Register as a proper SnappyMail settings view model.
+	// Register as a settings view model.
 	// Waits until rl.addSettingsViewModel is available.
 	function registerSettingsTab() {
 		const rl = window.rl;
@@ -251,7 +251,7 @@
 		}
 
 		// Template: minimal placeholder (content is rendered imperatively in onBuild)
-		// We need to register a template so SnappyMail knows the template ID.
+		// Register a template so the theme system knows the template ID.
 		// We'll create it inline as a <template> tag.
 		if (!document.getElementById('FmAppearanceSettings')) {
 			const tmpl = document.createElement('template');

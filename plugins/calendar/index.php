@@ -1,6 +1,6 @@
 <?php
 /**
- * Frickmail calendar — embeds a calendar tab into SnappyMail Settings,
+ * Frickmail calendar — embeds a calendar tab into Frickmail settings,
  * showing events from Google Calendar (primary) and Microsoft Graph (/me/events).
  * Uses the OAuth2 refresh tokens stored in session by login-gmail / login-o365.
  */
@@ -40,7 +40,7 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private function loadAuth(\RainLoop\Model\Account $oAccount) : array
 	{
-		// Primary source: SnappyMail session storage.
+		// Primary source: session storage.
 		$aAuth = null;
 		try {
 			$raw = \RainLoop\Api::Actions()->StorageProvider()->Get($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken());
