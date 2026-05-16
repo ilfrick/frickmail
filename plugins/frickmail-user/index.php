@@ -25,7 +25,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.34',
+		VERSION  = '0.35',
 		RELEASE  = '2026-05-16',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -601,8 +601,22 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$iExpiresIn = (int) ($aResp['result']['expires_in'] ?? 3600);
 		$sNewRefresh = (string) ($aResp['result']['refresh_token'] ?? $account['oauth_refresh_token']);
 
-		// Use the email as a SensitiveString password for LoginProcess; the OAuth
-		// plugin's clientLogin hook will pull the real access_token from session.
+		$aTokenData = [
+			'access_token' => $sAccessToken,
+			'refresh_token' => $sNewRefresh,
+			'expires_in' => $iExpiresIn,
+			'expires' => \time() + $iExpiresIn,
+		];
+
+		// Inject the access_token into the OAuth plugin's private static::$auth
+		// BEFORE LoginProcess fires imap.before-login / clientLogin. Without this,
+		// clientLogin finds neither static::$auth nor session storage (not written
+		// yet) and falls back to IMAP password auth, which fails for OAuth accounts.
+		$sPluginClass = ('gmail' === $account['type']) ? 'LoginGMailPlugin' : 'LoginO365Plugin';
+		if (\class_exists($sPluginClass)) {
+			\Closure::bind(static function ($d) { self::$auth = $d; }, null, $sPluginClass)($aTokenData);
+		}
+
 		$oPassword = new \SnappyMail\SensitiveString($account['email']);
 		$oAccount = $oActions->LoginProcess($account['email'], $oPassword);
 		if ($oAccount) {
