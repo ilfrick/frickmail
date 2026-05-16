@@ -175,6 +175,10 @@ sed 's/^auth_syslog = .*/auth_syslog = Off/' -i $SNAPPYMAIL_CONFIG_FILE
 
     wget -T 1 -qO- 'http://127.0.0.1:8888/' > /dev/null
     echo "[INFO] Snappymail ready at http://localhost:8888/"
+    # Re-apply enabled_list AFTER SnappyMail's first-request config write
+    SNAPPYMAIL_CONFIG_FILE=/var/lib/snappymail/_data_/_default_/configs/application.ini
+    sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"|' "$SNAPPYMAIL_CONFIG_FILE"
+    echo "[INFO] Plugin list updated."
 ) &
 
 # RUN !
