@@ -178,7 +178,15 @@ sed 's/^auth_syslog = .*/auth_syslog = Off/' -i $SNAPPYMAIL_CONFIG_FILE
     # Re-apply enabled_list AFTER SnappyMail's first-request config write
     SNAPPYMAIL_CONFIG_FILE=/var/lib/snappymail/_data_/_default_/configs/application.ini
     sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"|' "$SNAPPYMAIL_CONFIG_FILE"
-    echo "[INFO] Plugin list updated."
+    echo "[INFO] Plugin list set to: $(grep enabled_list "$SNAPPYMAIL_CONFIG_FILE")"
+    # Keep polling to defend against subsequent SnappyMail config rewrites
+    for i in 1 2 3 4 5; do
+        sleep 3
+        if ! grep -q 'frickmail-theme' "$SNAPPYMAIL_CONFIG_FILE"; then
+            sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"|' "$SNAPPYMAIL_CONFIG_FILE"
+            echo "[INFO] Plugin list re-applied (attempt $i)"
+        fi
+    done
 ) &
 
 # RUN !
