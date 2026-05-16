@@ -183,6 +183,22 @@
 				if (!d || d.type !== 'frickmail-oauth2') return;
 				removeEventListener('message', onMsg);
 				if (d.status !== 'ok') { setStatus('OAuth failed: ' + (d.error || 'unknown'), 'error'); return; }
+				// If the popup couldn't save the token server-side (no session in callback),
+				// save it now from the opener window where the Frickmail session is active.
+				if (d.pending_refresh_token) {
+					setStatus('Saving OAuth token…', 'ok');
+					callPlugin('FrickmailSaveOAuthToken',
+						{ type: type, email: d.email || email, refresh_token: d.pending_refresh_token },
+						(iErr, oData) => {
+							if (!oData?.Result?.ok) {
+								setStatus('Token save failed: ' + (oData?.Result?.error || 'unknown'), 'error');
+								return;
+							}
+							switchToPrimary();
+						}
+					);
+					return;
+				}
 				switchToPrimary();
 			};
 			addEventListener('message', onMsg);

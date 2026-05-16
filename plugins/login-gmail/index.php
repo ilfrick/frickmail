@@ -204,6 +204,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			// Frickmail mode: if a Frickmail user session exists, save the account
 			// to the DB and skip the legacy IMAP-as-identity bridge.
 			$sFrickmailBridge = \APP_PLUGINS_PATH . 'frickmail-user/lib/Bridge.php';
+			$sPendingRefreshToken = null;
 			if (\is_file($sFrickmailBridge)) {
 				require_once $sFrickmailBridge;
 				if (\Frickmail\User\Bridge::currentUserId()) {
@@ -213,6 +214,12 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 					$this->renderPopupCallback($bPopupOk, $sPopupEmail, '', $uri);
 					exit;
 				}
+				// Frickmail bridge exists but no server-side session in this popup request.
+				// Pass the refresh_token back to the opener (same-origin postMessage) so the
+				// opener — which has an active Frickmail session — can persist it via
+				// FrickmailSaveOAuthToken. This avoids relying on session cookie availability
+				// in the OAuth redirect callback window.
+				$sPendingRefreshToken = (string) $aResponse['refresh_token'];
 			}
 
 			$oPassword = new \SnappyMail\SensitiveString($aUserInfo['id']);
@@ -234,21 +241,25 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 		// Render a tiny HTML page that:
 		//  - if opened in a popup, posts a message to opener and closes
 		//  - otherwise redirects back to the webmail UI (works as a normal full-page flow too)
-		$this->renderPopupCallback($bPopupOk, $sPopupEmail, $sPopupError, $uri);
+		$this->renderPopupCallback($bPopupOk, $sPopupEmail, $sPopupError, $uri, $sPendingRefreshToken);
 		exit;
 	}
 
-	private function renderPopupCallback(bool $bOk, string $sEmail, string $sError, string $sFallbackUri) : void
+	private function renderPopupCallback(bool $bOk, string $sEmail, string $sError, string $sFallbackUri, ?string $sPendingRefreshToken = null) : void
 	{
 		\header('Content-Type: text/html; charset=utf-8');
 		$sStatus = $bOk ? 'ok' : 'error';
-		$sPayload = \json_encode([
+		$aPayload = [
 			'type' => 'frickmail-oauth2',
 			'provider' => 'gmail',
 			'status' => $sStatus,
 			'email' => $sEmail,
 			'error' => $sError
-		]);
+		];
+		if ($bOk && null !== $sPendingRefreshToken) {
+			$aPayload['pending_refresh_token'] = $sPendingRefreshToken;
+		}
+		$sPayload = \json_encode($aPayload);
 		$sFallback = \htmlspecialchars($sFallbackUri ?: '/', ENT_QUOTES, 'UTF-8');
 		echo '<!doctype html><meta charset="utf-8"><title>Frickmail</title><body><script>'
 			. '(function(){var msg=' . $sPayload . ';try{if(window.opener && !window.opener.closed){'

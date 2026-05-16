@@ -67,6 +67,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		// JsonTestImap removed — diagnostic endpoint must not exist in production (C1)
 		$this->addJsonHook('FrickmailDiscoverServices', 'JsonDiscoverServices');
 		$this->addJsonHook('FrickmailActivateService', 'JsonActivateService');
+		$this->addJsonHook('FrickmailSaveOAuthToken', 'JsonSaveOAuthToken');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -550,6 +551,49 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$account = $db->decryptedAccount($row, $cryptKey);
 			$this->bridgeToSnappyMail($account);
 			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'email' => $account['email']]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	/**
+	 * Called by the opener window after receiving an OAuth postMessage that includes
+	 * a pending refresh_token. The opener has a live Frickmail session (established
+	 * during JsonFrickmailLogin), so we can encrypt the token with the user's key.
+	 */
+	public function JsonSaveOAuthToken() : array
+	{
+		try {
+			[$uid, $cryptKey] = $this->requireSession();
+			$sType  = (string) $this->jsonParam('type');   // 'gmail' | 'o365'
+			$sEmail = \trim((string) $this->jsonParam('email'));
+			$sToken = (string) $this->jsonParam('refresh_token');
+			if ('' === $sEmail || '' === $sToken) throw new \RuntimeException('Missing email or token');
+			if (!\in_array($sType, ['gmail', 'o365'], true)) throw new \RuntimeException('Unknown type');
+
+			$db = $this->db();
+			$rows = $db->listMailAccounts($uid);
+			$found = null;
+			foreach ($rows as $r) {
+				if (\strtolower($r['email']) === \strtolower($sEmail)) { $found = $r; break; }
+			}
+			if (!$found) throw new \RuntimeException('Account not found for email ' . $sEmail);
+
+			$cipher = \Frickmail\User\Crypto::encrypt($sToken, $cryptKey);
+			$db->pdo()->prepare(
+				"UPDATE frickmail_mail_accounts
+				    SET type = :type,
+				        encrypted_oauth_refresh_token = decode(:tok, 'hex'),
+				        updated_at = NOW()
+				  WHERE id = :id AND user_id = :uid"
+			)->execute([
+				':type' => $sType,
+				':tok'  => \bin2hex($cipher),
+				':id'   => (int) $found['id'],
+				':uid'  => $uid,
+			]);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => true]);
 		} catch (\Throwable $e) {
 			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
 			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
