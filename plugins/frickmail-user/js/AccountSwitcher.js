@@ -1,35 +1,37 @@
 // Frickmail account switcher — populates SnappyMail's top-right account
-// dropdown with all Frickmail mail accounts and intercepts AccountSwitch.
-// Uses localStorage to cache the account list so it survives page reloads.
+// dropdown with all Frickmail mail accounts and handles switching.
+//
+// Refactored from monkey-patching Remote.request (fragile — breaks if
+// SnappyMail replaces r.app.Remote) to overriding vm.accountClick directly
+// on the SystemDropDown view model (M2 fix). The VM is stable for the
+// lifetime of the page; no dependency on Remote internals.
 
 (function () {
 	const STORAGE_KEY = 'frickmail_accounts_cache';
-	let emailToId = {};
+	let emailToId = {};   // email → frickmail DB account id
 	let injecting = false;
-	let store = null;
+	let store     = null;
+	let dropVm    = null; // SystemDropDown view model reference
+
+	// ── Cache helpers ──────────────────────────────────────────────
 
 	function saveCache(accounts) {
 		try { localStorage.setItem(STORAGE_KEY, JSON.stringify(accounts)); } catch (e) {}
 	}
-
 	function loadCache() {
 		try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (e) { return null; }
 	}
-
 	function clearCache() {
 		try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
 	}
 
-	// Clear cache on logout or detected session loss so a subsequent user
-	// on the same browser does not see stale accounts (M3).
+	// Clear on logout or session loss (M3).
 	window.addEventListener('rl-logout', clearCache);
 	window.addEventListener('beforeunload', () => {
-		// If we detect the page is being unloaded without a user-initiated reload
-		// (i.e. the SnappyMail session ended), clear the cache.
-		// We can't distinguish logout from normal navigation here, so only clear
-		// if the FrickmailListAccounts last returned an auth error.
 		if (window._fmSessionLost) clearCache();
 	});
+
+	// ── Build fake AccountModel-compatible object ──────────────────
 
 	function buildFakeAccount(acc) {
 		return {
@@ -41,25 +43,27 @@
 			unreadEmails: window.ko?.observable(null),
 			askDelete:    window.ko?.observable(false),
 			count:        () => 0,
+			_frickmail:   true,   // marker so accountClick knows this is ours
 		};
 	}
 
+	// ── Inject accounts into AccountUserStore ──────────────────────
+
 	function injectFromList(accounts) {
 		if (!store || !accounts) return;
-		// The current SnappyMail account email — skip this one (it's already the main entry).
 		const currentEmail = store.email?.() || '';
-
 		injecting = true;
 		emailToId = {};
 		accounts.forEach(acc => {
 			emailToId[acc.email] = acc.id;
-			// Skip the account that SnappyMail is currently logged in as.
 			if (acc.email === currentEmail) return;
 			if (store().some(a => a.email === acc.email)) return;
 			store.push(buildFakeAccount(acc));
 		});
 		injecting = false;
 	}
+
+	// ── Fetch accounts from server + inject ────────────────────────
 
 	function fetchAndInject() {
 		const r = window.rl;
@@ -73,7 +77,7 @@
 		.then(data => {
 			const tok = data?.System?.token;
 			if (!tok) return;
-			if (r) r.__frickmail_token = tok;
+			r.__frickmail_token = tok;
 
 			r.pluginRemoteRequest((iErr, oData) => {
 				const res = oData?.Result;
@@ -89,23 +93,55 @@
 		.catch(() => {});
 	}
 
-	function patchRemote(r) {
-		if (r.app.Remote._frickmail_patched) return;
-		r.app.Remote._frickmail_patched = true;
-		const orig = r.app.Remote.request.bind(r.app.Remote);
-		r.app.Remote.request = (action, callback, params, ...rest) => {
-			if (action === 'AccountSwitch' && params?.Email && emailToId[params.Email]) {
-				const tok = r.__frickmail_token || r.settings?.app?.('token');
-				r.pluginRemoteRequest((iErr, oData) => {
-					callback(oData?.Result?.ok ? 0 : 1, oData);
-				}, 'FrickmailSwitchAccount',
-					{ id: emailToId[params.Email], XToken: tok },
-					30000);
-				return;
+	// ── Override vm.accountClick (replaces Remote.request monkey-patch) ──
+	//
+	// The original accountClick calls Remote.request('AccountSwitch', callback, {Email})
+	// and on success calls rl.route.reload(). We replace the whole method so we:
+	//  • Call FrickmailSwitchAccount for accounts we own (_frickmail: true)
+	//  • Delegate to the original handler for SnappyMail's own accounts
+	// This is robust: depends only on the VM object existing, not on Remote internals.
+
+	function patchAccountClick(vm) {
+		if (vm._frickmail_click_patched) return;
+		vm._frickmail_click_patched = true;
+
+		const origClick = vm.accountClick.bind(vm);
+
+		vm.accountClick = function (account, event) {
+			// Not our account → let SnappyMail handle it normally.
+			if (!account?._frickmail) {
+				return origClick(account, event);
 			}
-			return orig(action, callback, params, ...rest);
+			// Our account → must be left-click and not already the active one.
+			if (!account?.email || event?.button !== 0) return true;
+			if (store?.email?.() === account.email) return true;
+
+			store?.loading?.(true);
+			event && typeof event.stopPropagation === 'function' && event.stopPropagation();
+
+			const r = window.rl;
+			const tok = r.__frickmail_token || r.settings?.app?.('token');
+
+			r.pluginRemoteRequest((iErr, oData) => {
+				const res = oData?.Result;
+				if (res?.ok) {
+					// Success: SnappyMail will do location.reload() inside route.reload()
+					r.route?.reload?.();
+				} else {
+					store?.loading?.(false);
+					const msg = res?.error || 'Switch failed';
+					// Show error in the same way the original handler would.
+					alert('Account error: ' + msg);
+				}
+			}, 'FrickmailSwitchAccount',
+				{ id: emailToId[account.email], XToken: tok },
+				30000
+			);
+			return true;
 		};
 	}
+
+	// ── rl-view-model handler ──────────────────────────────────────
 
 	addEventListener('rl-view-model', e => {
 		if (e.detail?.viewModelTemplateID !== 'SystemDropDown') return;
@@ -113,42 +149,36 @@
 		if (!headerDom) return;
 
 		setTimeout(() => {
-			const r = window.rl;
-			if (!r?.app?.Remote) return;
-			patchRemote(r);
-
 			const vm = window.ko?.dataFor(headerDom);
-			store = vm?.accounts || null;
+			if (!vm) return;
+
+			dropVm = vm;
+			store  = vm.accounts || null;
 			if (!store) return;
 
-			// Override addAccountClick to navigate to Frickmail's Mail Accounts settings.
-			if (vm) {
-				vm.addAccountClick = () => { location.hash = '#/settings/mail-accounts'; };
-				// The "+" button is hidden when allowAccounts capability is off.
-				// Force it visible by finding it in the dropdown DOM.
-				const addBtn = headerDom.querySelector('[data-i18n="TOP_TOOLBAR/BUTTON_ADD_ACCOUNT"]')?.closest('li');
-				if (addBtn) addBtn.hidden = false;
-			}
+			// Patch accountClick on the VM (safe refactor of Remote.request monkey-patch).
+			patchAccountClick(vm);
 
-			// 1. Inject immediately from cache (no server round-trip needed).
+			// Wire "+" button to Frickmail Mail Accounts settings.
+			vm.addAccountClick = () => { location.hash = '#/settings/mail-accounts'; };
+			const addBtn = headerDom.querySelector('[data-i18n="TOP_TOOLBAR/BUTTON_ADD_ACCOUNT"]')?.closest('li');
+			if (addBtn) addBtn.hidden = false;
+
+			// Inject from cache immediately, then refresh from server.
 			const cached = loadCache();
 			if (cached) injectFromList(cached);
-
-			// 2. Refresh from server in background to keep cache up to date.
 			fetchAndInject();
 
-			// 3. Re-inject after SnappyMail reloads the account list
-			//    (loadAccountsAndIdentities sets loading true → false).
+			// Re-inject after SnappyMail reloads the account list.
 			let wasLoading = false;
 			store.loading?.subscribe(isLoading => {
 				if (injecting) return;
-				if (isLoading) { wasLoading = true; }
-				else if (wasLoading) {
+				if (isLoading) {
+					wasLoading = true;
+				} else if (wasLoading) {
 					wasLoading = false;
 					const cached2 = loadCache();
-					if (cached2) {
-						setTimeout(() => injectFromList(cached2), 50);
-					}
+					if (cached2) setTimeout(() => injectFromList(cached2), 50);
 					setTimeout(fetchAndInject, 200);
 				}
 			});
