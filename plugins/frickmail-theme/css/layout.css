@@ -1,9 +1,7 @@
-/* ═══════════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════
    Frickmail Theme — Layout
-   Adds icon-nav column and adjusts 3-column layout.
-   ═══════════════════════════════════════════════════════════════════ */
+   ═══════════════════════════════════════════════════════════════ */
 
-/* ── Global base ── */
 * { box-sizing: border-box; }
 
 html, body, #rl-app, rl-app {
@@ -11,7 +9,7 @@ html, body, #rl-app, rl-app {
 	color: var(--fm-text-primary) !important;
 }
 
-/* ── Icon navigation column (injected by ThemeSwitcher.js) ── */
+/* ── Icon navigation column ── */
 #fm-icon-nav {
 	position: fixed;
 	top: 0; left: 0; bottom: 0;
@@ -21,94 +19,76 @@ html, body, #rl-app, rl-app {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	padding: 8px 0;
+	padding: 10px 0 8px;
 	z-index: 1000;
-	gap: 2px;
 }
 
 #fm-icon-nav .fm-logo {
-	width: 40px; height: 40px;
+	width: 36px; height: 36px;
 	border-radius: 50%;
 	background: var(--fm-accent);
 	color: var(--fm-text-inverse);
 	display: flex; align-items: center; justify-content: center;
-	font-weight: 700; font-size: 18px;
-	margin-bottom: 8px;
-	cursor: default;
-	user-select: none;
-	flex-shrink: 0;
+	font-weight: 800; font-size: 17px;
+	margin-bottom: 12px;
+	user-select: none; flex-shrink: 0;
 }
 
 #fm-icon-nav .fm-nav-items {
 	display: flex; flex-direction: column;
-	align-items: center; gap: 4px;
-	flex: 1;
+	align-items: center; gap: 2px; flex: 1;
 }
-
-#fm-icon-nav .fm-nav-spacer {
-	flex: 1;
-}
+#fm-icon-nav .fm-nav-spacer { flex: 1; }
 
 #fm-icon-nav .fm-nav-item {
 	width: 40px; height: 40px;
-	border-radius: 20px;
+	border-radius: 10px;
 	display: flex; align-items: center; justify-content: center;
-	font-size: 18px;
+	font-size: 19px;
 	color: var(--fm-text-secondary);
-	text-decoration: none;
-	cursor: pointer;
-	transition: background 0.15s ease, color 0.15s ease;
+	text-decoration: none; cursor: pointer;
+	transition: background .15s, color .15s;
 	position: relative;
 }
-
 #fm-icon-nav .fm-nav-item:hover {
 	background: var(--fm-bg-hover);
 	color: var(--fm-text-primary);
 }
-
 #fm-icon-nav .fm-nav-item.active {
 	background: var(--fm-accent-surface);
 	color: var(--fm-accent);
 }
-
+/* Tooltip */
 #fm-icon-nav .fm-nav-item[data-tooltip]::after {
 	content: attr(data-tooltip);
-	position: absolute;
-	left: calc(100% + 8px);
-	background: var(--fm-bg-surface);
+	position: absolute; left: calc(100% + 10px);
+	background: var(--fm-bg-elevated);
 	color: var(--fm-text-primary);
-	padding: 4px 8px;
-	border-radius: 4px;
-	font-size: 12px;
-	white-space: nowrap;
+	padding: 4px 10px; border-radius: 5px;
+	font-size: 12px; white-space: nowrap;
 	box-shadow: var(--fm-shadow-md);
-	pointer-events: none;
-	opacity: 0;
-	transition: opacity 0.15s;
+	pointer-events: none; opacity: 0;
+	transition: opacity .15s;
 	border: 1px solid var(--fm-border-strong);
+	z-index: 9999;
 }
-#fm-icon-nav .fm-nav-item[data-tooltip]:hover::after {
-	opacity: 1;
-}
+#fm-icon-nav .fm-nav-item[data-tooltip]:hover::after { opacity: 1; }
 
-/* ── Shift main app to make room for icon nav ── */
-#rl-app, rl-app {
-	padding-left: 56px !important;
-}
+/* ── App padding for icon nav ── */
+#rl-app, rl-app { padding-left: 56px !important; }
 
-/* ── Left panel — wide enough for 3 toolbar buttons ── */
+/* ── Left sidebar ── */
 #rl-left, rl-left {
 	background: var(--fm-bg-panel) !important;
 	border-right: 1px solid var(--fm-border) !important;
 	width: 256px !important;
 	min-width: 240px !important;
-	flex-shrink: 0;
+	flex-shrink: 0 !important;
 }
 
-/* ── Toolbar: flex row, no overflow ── */
-#rl-left .b-toolbar,
-rl-left .b-toolbar {
-	padding: 12px 8px 8px 8px !important;
+/* ── Toolbar: flex row, items never overflow ── */
+#rl-left .b-toolbar, rl-left .b-toolbar {
+	padding: 10px 8px !important;
 	background: var(--fm-bg-panel) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
 	display: flex !important;
@@ -118,121 +98,61 @@ rl-left .b-toolbar {
 	overflow: visible !important;
 }
 
-/* Compose button — teal pill, icon+text or icon-only both centred */
-rl-left .buttonCompose,
-#rl-left .buttonCompose {
-	background: #14b8a6 !important;   /* teal */
+/* Compose — teal pill */
+rl-left .buttonCompose, #rl-left .buttonCompose {
+	background: var(--fm-teal) !important;
 	color: #ffffff !important;
 	border: none !important;
 	border-radius: 24px !important;
 	height: 36px !important;
-	padding: 0 18px 0 14px !important;
-	font-weight: 600 !important;
-	font-size: 13px !important;
+	padding: 0 16px 0 12px !important;
+	font-weight: 600 !important; font-size: 13px !important;
 	line-height: 36px !important;
 	box-shadow: var(--fm-shadow-sm) !important;
-	transition: background 0.15s, box-shadow 0.15s !important;
-	/* flex so icon and text align */
+	transition: background .15s, box-shadow .15s !important;
 	display: inline-flex !important;
-	align-items: center !important;
-	justify-content: center !important;
+	align-items: center !important; justify-content: center !important;
 	gap: 6px !important;
-	/* take remaining space but not overflow */
 	flex: 1 1 auto !important;
-	min-width: 0 !important;
-	max-width: none !important;
-	width: auto !important;
+	min-width: 0 !important; max-width: none !important; width: auto !important;
 	overflow: hidden !important;
 }
-rl-left .buttonCompose:hover,
-#rl-left .buttonCompose:hover {
-	background: #0d9488 !important;   /* teal-600 */
+rl-left .buttonCompose:hover, #rl-left .buttonCompose:hover {
+	background: var(--fm-teal-hover) !important;
 	box-shadow: var(--fm-shadow-md) !important;
 }
-/* Icon inside compose (paper-plane i element) */
-rl-left .buttonCompose i,
-#rl-left .buttonCompose i {
-	flex-shrink: 0 !important;
-	font-size: 16px !important;
-	line-height: 1 !important;
+rl-left .buttonCompose i, #rl-left .buttonCompose i {
+	flex-shrink: 0 !important; font-size: 15px !important; line-height: 1 !important;
 }
-/* Text inside compose */
-rl-left .buttonCompose .buttonComposeText,
-#rl-left .buttonCompose .buttonComposeText {
-	overflow: hidden !important;
-	text-overflow: ellipsis !important;
-	white-space: nowrap !important;
-	flex: 0 1 auto !important;
+rl-left .buttonCompose .buttonComposeText, #rl-left .buttonCompose .buttonComposeText {
+	overflow: hidden !important; text-overflow: ellipsis !important;
+	white-space: nowrap !important; flex: 0 1 auto !important;
+	color: #ffffff !important;
 }
 
-/* Light theme teal */
-html[data-fm-theme="light"] rl-left .buttonCompose,
-html[data-fm-theme="light"] #rl-left .buttonCompose {
-	background: #0d9488 !important;
-}
-html[data-fm-theme="light"] rl-left .buttonCompose:hover,
-html[data-fm-theme="light"] #rl-left .buttonCompose:hover {
-	background: #0f766e !important;
-}
-
-/* Contacts + Calendar buttons — fixed 36×36 squares */
-rl-left .buttonContacts,
-rl-left .buttonCalendar,
-#rl-left .buttonContacts,
-#rl-left .buttonCalendar {
-	background: transparent !important;
-	border: none !important;
+/* Contacts + Calendar — 36×36, no shrink */
+rl-left .buttonContacts, rl-left .buttonCalendar,
+#rl-left .buttonContacts, #rl-left .buttonCalendar {
+	background: transparent !important; border: none !important;
 	border-radius: 8px !important;
-	width: 36px !important;
-	height: 36px !important;
-	min-width: 36px !important;
-	padding: 0 !important;
-	display: inline-flex !important;
-	align-items: center !important;
-	justify-content: center !important;
-	font-size: 17px !important;
-	color: var(--fm-text-secondary) !important;
-	transition: background 0.15s, color 0.15s !important;
-	flex-shrink: 0 !important;
+	width: 36px !important; height: 36px !important; min-width: 36px !important;
+	padding: 0 !important; display: inline-flex !important;
+	align-items: center !important; justify-content: center !important;
+	font-size: 17px !important; color: var(--fm-text-secondary) !important;
+	transition: background .15s, color .15s !important; flex-shrink: 0 !important;
 }
-rl-left .buttonContacts:hover,
-rl-left .buttonCalendar:hover,
-#rl-left .buttonContacts:hover,
-#rl-left .buttonCalendar:hover {
-	background: var(--fm-bg-hover) !important;
-	color: var(--fm-text-primary) !important;
+rl-left .buttonContacts:hover, rl-left .buttonCalendar:hover,
+#rl-left .buttonContacts:hover, #rl-left .buttonCalendar:hover {
+	background: var(--fm-bg-hover) !important; color: var(--fm-text-primary) !important;
 }
 
-/* Hide compose text when screen is too narrow (panel < 220px) */
-@media (max-width: 350px) {
-	rl-left .buttonComposeText,
-	#rl-left .buttonComposeText { display: none !important; }
-}
-
-/* Folder list area */
-#rl-left .b-content,
-rl-left .b-content {
+/* Sidebar content */
+#rl-left .b-content, rl-left .b-content {
 	background: var(--fm-bg-panel) !important;
-	padding: 8px 0 !important;
 }
-
-/* Footer toolbar */
-#rl-left .b-footer,
-rl-left .b-footer {
+#rl-left .b-footer, rl-left .b-footer {
 	background: var(--fm-bg-panel) !important;
 	border-top: 1px solid var(--fm-border) !important;
-}
-
-/* ── Right panel ── */
-#rl-right, rl-right {
-	background: var(--fm-bg-base) !important;
-	flex: 1 !important;
-}
-
-/* Top bar */
-.g-ui-user-select-none,
-.btn-toolbar {
-	background: var(--fm-bg-panel) !important;
 }
 
 /* ── Search bar ── */
@@ -240,35 +160,50 @@ rl-left .b-footer {
 	background: var(--fm-bg-hover) !important;
 	border-radius: 24px !important;
 	border: 1px solid transparent !important;
-	transition: border-color 0.2s, background 0.2s !important;
+	transition: border-color .2s, background .2s !important;
+	overflow: hidden !important;
 }
 .search-input-wrp:focus-within {
-	background: var(--fm-bg-surface) !important;
-	border-color: var(--fm-accent) !important;
+	background: var(--fm-bg-input) !important;
+	border-color: var(--fm-border-focus) !important;
+	box-shadow: 0 0 0 2px var(--fm-accent-surface) !important;
 }
 .search-input-wrp input {
 	background: transparent !important;
 	color: var(--fm-text-primary) !important;
 	border: none !important;
 }
-
-/* ── Scrollbars ── */
-* {
-	scrollbar-width: thin;
-	scrollbar-color: var(--fm-scroll-thumb) var(--fm-scroll-track);
+.search-input-wrp input::placeholder {
+	color: var(--fm-text-placeholder) !important;
+	opacity: 1 !important;
 }
-*::-webkit-scrollbar { width: 6px; height: 6px; }
-*::-webkit-scrollbar-track { background: var(--fm-scroll-track); }
-*::-webkit-scrollbar-thumb { background: var(--fm-scroll-thumb); border-radius: 3px; }
+
+/* ── Right panel ── */
+#rl-right, rl-right { background: var(--fm-bg-base) !important; flex: 1 !important; }
+
+/* ── Top bar / SystemDropDown ── */
+#V-SystemDropDown {
+	background: var(--fm-bg-panel) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+}
+#V-SystemDropDown .accountPlace { color: var(--fm-text-primary) !important; }
+#V-SystemDropDown .btn, #V-SystemDropDown a {
+	color: var(--fm-text-primary) !important;
+}
 
 /* ── Settings layout ── */
-#V-SettingsPane,
-.settingsPane {
-	background: var(--fm-bg-base) !important;
-}
-
-#V-SettingsMenu,
-.settingsMenu {
+#V-SettingsMenu {
 	background: var(--fm-bg-panel) !important;
 	border-right: 1px solid var(--fm-border) !important;
 }
+#V-SettingsPane {
+	background: var(--fm-bg-surface) !important;
+	border: 1px solid var(--fm-border) !important;
+	border-radius: 8px !important;
+}
+
+/* ── Scrollbars ── */
+* { scrollbar-width: thin; scrollbar-color: var(--fm-scroll-thumb) var(--fm-scroll-track); }
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--fm-scroll-track); }
+::-webkit-scrollbar-thumb { background: var(--fm-scroll-thumb); border-radius: 3px; }

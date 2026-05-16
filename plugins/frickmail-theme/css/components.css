@@ -1,18 +1,16 @@
-/* ═══════════════════════════════════════════════════════════════════
-   Frickmail Theme — Components (corrected SnappyMail 2.38 selectors)
-   ═══════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════
+   Frickmail Theme — Components
+   ═══════════════════════════════════════════════════════════════ */
 
 /* ── Folder list ── */
-.b-folders {
-	background: var(--fm-bg-panel) !important;
-}
+.b-folders { background: var(--fm-bg-panel) !important; }
 .b-folders li a {
 	color: var(--fm-text-secondary) !important;
-	transition: background 0.1s, color 0.1s !important;
-	border-radius: 0 24px 24px 0 !important;
-	margin-right: 6px !important;
-	padding-top: 4px !important;
-	padding-bottom: 4px !important;
+	border-radius: 0 20px 20px 0 !important;
+	margin-right: 8px !important;
+	padding: 5px 12px 5px 16px !important;
+	font-size: 13px !important;
+	transition: background .1s, color .1s !important;
 }
 .b-folders li a.selectable:hover {
 	background: var(--fm-bg-hover) !important;
@@ -26,220 +24,195 @@
 .b-folders li a[data-unread]::after {
 	background: var(--fm-accent) !important;
 	color: var(--fm-text-inverse) !important;
-	border-radius: 10px !important;
-	font-size: 11px !important;
-	font-weight: 600 !important;
-	padding: 1px 5px !important;
+	border-radius: 10px !important; font-size: 11px !important;
+	font-weight: 700 !important; padding: 1px 6px !important;
 }
 
-/* ── Message list ── */
-.messageList {
-	background: var(--fm-bg-base) !important;
-}
-messageListItem {
-	background: var(--fm-bg-base) !important;
-	border-bottom: 1px solid var(--fm-border) !important;
-	border-left: 3px solid transparent !important;
-	transition: background 0.1s !important;
-}
-messageListItem:hover {
-	background: var(--fm-bg-hover) !important;
-}
-messageListItem.focused {
-	background: var(--fm-bg-selected) !important;
-	border-left-color: var(--fm-accent) !important;
-}
-/* Unread messages */
-messageListItem[data-unseen="1"] .senderParent,
-messageListItem:not(.read) .senderParent {
-	font-weight: 700 !important;
-	color: var(--fm-text-primary) !important;
-}
-messageListItem[data-unseen="1"] .subjectParent {
-	font-weight: 600 !important;
-}
-messageListItem .senderParent {
-	color: var(--fm-text-primary) !important;
-	font-size: 13px !important;
-}
-messageListItem .subjectParent {
-	color: var(--fm-text-secondary) !important;
-	font-size: 13px !important;
-}
-messageListItem time {
-	color: var(--fm-text-muted) !important;
-	font-size: 11px !important;
-}
-/* Message list toolbar */
-.message-fixed-button-toolbar,
-.b-list-content .b-toolbar {
+/* ── Message list toolbar ── */
+.message-fixed-button-toolbar {
 	background: var(--fm-bg-panel) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
 }
 
-/* ── Message view / reading pane ── */
+/* ── Message list items ── */
+.messageList { background: var(--fm-bg-base) !important; }
+
+messageListItem {
+	background: var(--fm-bg-base) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+	border-left: 3px solid transparent !important;
+	transition: background .1s !important;
+	cursor: pointer !important;
+}
+messageListItem:hover { background: var(--fm-bg-hover) !important; }
+messageListItem.focused, messageListItem.selected {
+	background: var(--fm-bg-selected) !important;
+	border-left-color: var(--fm-accent) !important;
+}
+/* Unread */
+messageListItem[data-unseen="1"] .senderParent {
+	font-weight: 700 !important; color: var(--fm-text-primary) !important;
+}
+messageListItem[data-unseen="1"] .subjectParent {
+	color: var(--fm-text-primary) !important; font-weight: 600 !important;
+}
+messageListItem[data-unseen="1"] { border-left-color: var(--fm-accent) !important; }
+
+messageListItem .senderParent { color: var(--fm-text-primary) !important; font-size: 13px !important; }
+messageListItem .subjectParent { color: var(--fm-text-secondary) !important; font-size: 13px !important; }
+messageListItem time { color: var(--fm-text-muted) !important; font-size: 11px !important; }
+messageListItem .messageCheckbox { color: var(--fm-text-muted) !important; }
+
+/* ── Reading pane ── */
 .messageView {
 	background: var(--fm-bg-surface) !important;
 	border: 1px solid var(--fm-border) !important;
 	border-radius: 8px !important;
 	box-shadow: var(--fm-shadow-sm) !important;
+	margin: 8px !important;
 }
-.messageView .messageItemHeader,
-.messageItemHeader {
+.messageView .b-message-header, .messageItemHeader {
 	background: var(--fm-bg-surface) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
-	padding: 16px !important;
+	padding: 16px 20px !important;
 }
-.messageView .subject,
-.messageView h2 {
+.messageView .subject, .messageView h1, .messageView h2 {
 	color: var(--fm-text-primary) !important;
-	font-size: 18px !important;
-	font-weight: 500 !important;
+	font-size: 18px !important; font-weight: 500 !important;
 }
-.messageView .b-message {
-	background: var(--fm-bg-surface) !important;
-}
+.messageView .b-message { background: var(--fm-bg-surface) !important; }
 
-/* ── Top system dropdown bar ── */
-#V-SystemDropDown {
+/* Reading pane action toolbar */
+.messageView .b-message-view-buttons,
+.messageView .btn-toolbar {
 	background: var(--fm-bg-panel) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
-}
-#V-SystemDropDown .btn-group a,
-#V-SystemDropDown .accountPlace {
-	color: var(--fm-text-primary) !important;
+	padding: 6px 12px !important;
 }
 
-/* ── Settings ── */
-#V-SettingsMenu {
-	background: var(--fm-bg-panel) !important;
-}
-#V-SettingsMenu nav a {
-	color: var(--fm-text-secondary) !important;
-	border-radius: 0 24px 24px 0 !important;
-	margin-right: 6px !important;
-	transition: background 0.1s, color 0.1s !important;
-}
-#V-SettingsMenu nav a:hover {
-	background: var(--fm-bg-hover) !important;
+/* Message body — ensure contrast */
+.messageView .b-message-view-desc,
+.messageView .rlText,
+.messageView .b-text {
 	color: var(--fm-text-primary) !important;
-}
-#V-SettingsMenu nav a.selected {
-	background: var(--fm-accent-surface) !important;
-	color: var(--fm-accent) !important;
-	font-weight: 600 !important;
-}
-#V-SettingsPane {
-	background: var(--fm-bg-surface) !important;
-	border: 1px solid var(--fm-border) !important;
-	border-radius: 8px !important;
-}
-#V-SettingsPane .legend {
-	font-size: 16px !important;
-	font-weight: 500 !important;
-	color: var(--fm-text-primary) !important;
-	border-bottom: 1px solid var(--fm-border) !important;
-	padding-bottom: 10px !important;
-	margin-bottom: 16px !important;
-}
-#V-SettingsPane label {
-	color: var(--fm-text-secondary) !important;
-	font-size: 13px !important;
+	padding: 16px 20px !important;
 }
 
-/* ── Buttons ── */
-.btn {
-	background: var(--fm-bg-hover) !important;
-	color: var(--fm-text-primary) !important;
-	border: 1px solid var(--fm-border-strong) !important;
-	border-radius: 6px !important;
-	transition: background 0.12s !important;
-	font-size: 13px !important;
-}
-.btn:hover {
-	background: var(--fm-bg-selected) !important;
-}
-.btn-success, .btn.btn-success {
-	background: var(--fm-green) !important;
-	color: var(--fm-text-inverse) !important;
-	border-color: var(--fm-green) !important;
-}
-.btn-danger, .btn.btn-danger {
-	background: var(--fm-red) !important;
-	color: var(--fm-text-inverse) !important;
-	border-color: var(--fm-red) !important;
-}
-.btn-primary, .btn.btn-primary {
-	background: var(--fm-accent) !important;
-	color: var(--fm-text-inverse) !important;
-	border-color: var(--fm-accent) !important;
-}
-.btn-warning, .btn.btn-warning {
-	background: var(--fm-yellow) !important;
-	color: #1a1a1a !important;
-	border-color: var(--fm-yellow) !important;
-}
+/* Quoted text */
+blockquote, .gmail_quote { border-left: 3px solid var(--fm-border-strong) !important; }
 
-/* Compose button — green pill */
-rl-left .buttonCompose,
-#rl-left .buttonCompose {
-	background: var(--fm-green) !important;
-	color: var(--fm-text-inverse) !important;
-	border: none !important;
-	border-radius: 24px !important;
-	padding: 8px 18px 8px 14px !important;
-	font-weight: 600 !important;
-	font-size: 14px !important;
-	box-shadow: var(--fm-shadow-sm) !important;
-	transition: background 0.15s, box-shadow 0.15s !important;
-}
-rl-left .buttonCompose:hover,
-#rl-left .buttonCompose:hover {
-	background: var(--fm-green-hover) !important;
-	box-shadow: var(--fm-shadow-md) !important;
-}
+/* ── Compose popup ── */
+.popups .compose-overlay,
+.popups.compose { background: var(--fm-bg-overlay) !important; }
 
-/* ── Inputs ── */
-input[type="text"]:not([class*="search"]),
-input[type="email"],
-input[type="password"],
-input[type="number"],
-select,
-textarea {
-	background: var(--fm-bg-hover) !important;
-	color: var(--fm-text-primary) !important;
-	border: 1px solid var(--fm-border-strong) !important;
-	border-radius: 6px !important;
-	transition: border-color 0.2s, box-shadow 0.2s !important;
-}
-input:focus, select:focus, textarea:focus {
-	border-color: var(--fm-accent) !important;
-	box-shadow: 0 0 0 2px var(--fm-accent-surface) !important;
-	outline: none !important;
-}
-
-/* ── Dialogs / popups ── */
 .popups .dialog,
-.modal-dialog .modal-content {
-	background: var(--fm-bg-surface) !important;
+.modal-content {
+	background: var(--fm-bg-elevated) !important;
 	border: 1px solid var(--fm-border-strong) !important;
 	border-radius: 12px !important;
 	box-shadow: var(--fm-shadow-lg) !important;
 	color: var(--fm-text-primary) !important;
 }
-.popups .modal-header,
-.popups .b-header {
+.popups .modal-header, .popups .b-header {
+	background: var(--fm-bg-hover) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
-	background: var(--fm-bg-surface) !important;
+	border-radius: 12px 12px 0 0 !important;
+	padding: 12px 16px !important;
 }
-.popups .modal-footer {
+.popups .modal-footer, .popups .b-footer {
+	background: var(--fm-bg-elevated) !important;
 	border-top: 1px solid var(--fm-border) !important;
-	background: var(--fm-bg-surface) !important;
+	border-radius: 0 0 12px 12px !important;
+	padding: 10px 16px !important;
 }
 
-/* ── Dropdown menus ── */
+/* Compose to/cc/subject fields */
+.popups .emailaddresses .e-address,
+.popups .composeField label {
+	color: var(--fm-text-secondary) !important;
+}
+.popups .compose-subject input,
+.popups input[type="text"] {
+	background: var(--fm-bg-input) !important;
+	color: var(--fm-text-primary) !important;
+	border-bottom: 1px solid var(--fm-border-input) !important;
+}
+
+/* ── Buttons (global) ── */
+.btn {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-primary) !important;
+	border: 1px solid var(--fm-border-strong) !important;
+	border-radius: 6px !important;
+	font-size: 13px !important;
+	transition: background .12s !important;
+}
+.btn:hover { background: var(--fm-bg-selected) !important; }
+
+.btn-primary, .btn.btn-primary {
+	background: var(--fm-accent) !important;
+	color: var(--fm-text-inverse) !important;
+	border-color: var(--fm-accent) !important;
+}
+.btn-primary:hover { background: var(--fm-accent-hover) !important; }
+
+.btn-success, .btn.btn-success {
+	background: var(--fm-teal) !important;
+	color: #fff !important;
+	border-color: var(--fm-teal) !important;
+}
+.btn-success:hover { background: var(--fm-teal-hover) !important; }
+
+.btn-danger, .btn.btn-danger {
+	background: var(--fm-red) !important;
+	color: #fff !important;
+	border-color: var(--fm-red) !important;
+}
+.btn-warning, .btn.btn-warning {
+	background: var(--fm-yellow) !important;
+	color: #fff !important;
+	border-color: var(--fm-yellow) !important;
+}
+
+/* ── Inputs & forms — readability critical ── */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="search"],
+input[type="tel"],
+select,
+textarea {
+	background: var(--fm-bg-input) !important;
+	color: var(--fm-text-primary) !important;
+	border: 1px solid var(--fm-border-input) !important;
+	border-radius: 6px !important;
+	padding: 8px 12px !important;
+	font-size: 14px !important;
+	transition: border-color .2s, box-shadow .2s !important;
+}
+input::placeholder, textarea::placeholder {
+	color: var(--fm-text-placeholder) !important;
+	opacity: 1 !important;
+}
+input:focus, select:focus, textarea:focus {
+	border-color: var(--fm-border-focus) !important;
+	box-shadow: 0 0 0 2px var(--fm-accent-surface) !important;
+	outline: none !important;
+}
+select option {
+	background: var(--fm-bg-elevated) !important;
+	color: var(--fm-text-primary) !important;
+}
+/* Labels */
+label, .control-label {
+	color: var(--fm-text-secondary) !important;
+	font-size: 13px !important;
+}
+
+/* ── Dropdowns ── */
 .dropdown-menu {
-	background: var(--fm-bg-surface) !important;
+	background: var(--fm-bg-elevated) !important;
 	border: 1px solid var(--fm-border-strong) !important;
 	border-radius: 8px !important;
 	box-shadow: var(--fm-shadow-md) !important;
@@ -247,43 +220,158 @@ input:focus, select:focus, textarea:focus {
 .dropdown-menu li a {
 	color: var(--fm-text-primary) !important;
 	font-size: 13px !important;
+	padding: 7px 14px !important;
 }
-.dropdown-menu li a:hover,
-.dropdown-menu .dropdown-menu-hover-bg-color {
-	background: var(--fm-bg-hover) !important;
+.dropdown-menu li a:hover { background: var(--fm-bg-hover) !important; }
+.dropdown-menu .divider, .dropdown-menu .dividerbar {
+	border-color: var(--fm-border) !important;
 }
 
-/* ── Theme picker cards ── */
+/* Accounts dropdown */
+.dropdown-menu .email-title { color: var(--fm-text-primary) !important; }
+
+/* ── Settings ── */
+#V-SettingsMenu nav a {
+	color: var(--fm-text-secondary) !important;
+	border-radius: 0 20px 20px 0 !important;
+	margin-right: 8px !important;
+	font-size: 13px !important;
+	transition: background .1s, color .1s !important;
+}
+#V-SettingsMenu nav a:hover {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-primary) !important;
+}
+#V-SettingsMenu nav a.selected {
+	background: var(--fm-accent-surface) !important;
+	color: var(--fm-accent) !important; font-weight: 600 !important;
+}
+#V-SettingsPane .legend {
+	font-size: 16px !important; font-weight: 500 !important;
+	color: var(--fm-text-primary) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+	padding-bottom: 10px !important; margin-bottom: 16px !important;
+}
+#V-SettingsPane label, #V-SettingsPane .control-label {
+	color: var(--fm-text-secondary) !important;
+}
+#V-SettingsPane input, #V-SettingsPane select, #V-SettingsPane textarea {
+	background: var(--fm-bg-input) !important;
+	color: var(--fm-text-primary) !important;
+	border-color: var(--fm-border-input) !important;
+}
+
+/* ── Contacts 2-panel ── */
+.b-contacts { background: var(--fm-bg-base) !important; }
+.b-contacts-list .e-item, .contactItem {
+	border-bottom: 1px solid var(--fm-border) !important;
+	padding: 8px 14px !important;
+	transition: background .1s !important;
+	color: var(--fm-text-primary) !important;
+	cursor: pointer !important;
+}
+.b-contacts-list .e-item:hover, .contactItem:hover {
+	background: var(--fm-bg-hover) !important;
+}
+.b-contacts-list .e-item.focused, .contactItem.selected {
+	background: var(--fm-bg-selected) !important;
+}
+.b-contacts-view {
+	background: var(--fm-bg-surface) !important;
+	border-left: 1px solid var(--fm-border) !important;
+	padding: 20px !important;
+}
+.b-contacts-view h3, .contactName {
+	color: var(--fm-text-primary) !important;
+	font-size: 20px !important; font-weight: 500 !important;
+}
+.b-contacts-view .contactEmail,
+.b-contacts-view .contactPhone {
+	color: var(--fm-text-secondary) !important;
+}
+
+/* ── Mini-calendar in sidebar ── */
+.b-calendar { background: transparent !important; }
+.b-calendar .b-calendar-month { color: var(--fm-text-secondary) !important; font-size: 12px !important; }
+.b-calendar td, .b-calendar th { color: var(--fm-text-secondary) !important; font-size: 12px !important; }
+.b-calendar .today a { color: var(--fm-accent) !important; font-weight: 700 !important; }
+.b-calendar .selected a { background: var(--fm-accent) !important; color: var(--fm-text-inverse) !important; border-radius: 50% !important; }
+.b-calendar a { color: var(--fm-text-secondary) !important; }
+.b-calendar a:hover { color: var(--fm-text-primary) !important; }
+
+/* ── Calendar plugin ── */
+.frickmail-calendar-grid .day {
+	background: var(--fm-bg-surface) !important;
+	border-color: var(--fm-border) !important;
+	color: var(--fm-text-primary) !important;
+}
+.frickmail-calendar-grid .dow {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-secondary) !important;
+	border-color: var(--fm-border) !important;
+}
+.frickmail-calendar-grid .day.today { box-shadow: inset 0 0 0 2px var(--fm-accent) !important; }
+.frickmail-calendar-grid .day.othermonth { opacity: .45 !important; }
+.frickmail-calendar-toolbar button.btn { font-size: 13px !important; }
+
+/* ── Attachments ── */
+.attachmentItem, .b-attachment {
+	background: var(--fm-bg-hover) !important;
+	border: 1px solid var(--fm-border) !important;
+	border-radius: 8px !important;
+	color: var(--fm-text-primary) !important;
+	padding: 8px 12px !important;
+}
+
+/* ── Tags / badges ── */
+.label, .badge, .unread-count {
+	font-size: 11px !important; font-weight: 600 !important;
+	border-radius: 10px !important; padding: 2px 7px !important;
+}
+.label-default, .unread-count {
+	background: var(--fm-accent) !important;
+	color: var(--fm-text-inverse) !important;
+}
+.label-danger { background: var(--fm-red) !important; color: #fff !important; }
+.label-success { background: var(--fm-green) !important; color: #fff !important; }
+.label-warning { background: var(--fm-yellow) !important; color: #fff !important; }
+
+/* ── Checkboxes / radios (readability) ── */
+input[type="checkbox"], input[type="radio"] {
+	accent-color: var(--fm-accent) !important;
+	width: 14px !important; height: 14px !important;
+}
+
+/* ── Tables ── */
+table { color: var(--fm-text-primary) !important; }
+th { color: var(--fm-text-secondary) !important; font-weight: 600 !important; font-size: 12px !important; text-transform: uppercase !important; letter-spacing: .4px !important; }
+tr:hover td { background: var(--fm-bg-hover) !important; }
+td { color: var(--fm-text-primary) !important; border-color: var(--fm-border) !important; }
+
+/* ── Misc ── */
+hr { border-color: var(--fm-border) !important; }
+code, pre { background: var(--fm-bg-hover) !important; color: var(--fm-text-primary) !important; border-radius: 4px !important; padding: 2px 6px !important; }
+a { color: var(--fm-accent-text) !important; }
+a:hover { color: var(--fm-accent-hover) !important; }
+
+/* Theme picker (in Settings tab) */
 .fm-theme-picker { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
 .fm-theme-card {
-	width: 110px; border: 2px solid var(--fm-border); border-radius: 10px;
-	overflow: hidden; cursor: pointer;
-	transition: border-color 0.15s, box-shadow 0.15s;
+	width: 110px; border: 2px solid var(--fm-border-strong);
+	border-radius: 10px; overflow: hidden; cursor: pointer;
+	transition: border-color .15s, box-shadow .15s;
 }
 .fm-theme-card:hover { border-color: var(--fm-accent); }
 .fm-theme-card.active { border-color: var(--fm-accent); box-shadow: 0 0 0 3px var(--fm-accent-surface); }
 .fm-theme-card .fm-card-preview { height: 56px; display: flex; }
 .fm-theme-card .fm-card-preview .col1 { width: 28%; }
 .fm-theme-card .fm-card-preview .col2 { flex: 1; }
-.fm-theme-card .fm-card-label { padding: 5px 6px; font-size: 11px; font-weight: 600; text-align: center; background: var(--fm-bg-surface); color: var(--fm-text-primary); }
-.fm-card-dark .col1 { background: #181825; } .fm-card-dark .col2 { background: #1e1e2e; }
-.fm-card-light .col1 { background: #f1f3f4; } .fm-card-light .col2 { background: #ffffff; }
-.fm-card-system .col1 { background: linear-gradient(to bottom, #181825 50%, #f1f3f4 50%); }
-.fm-card-system .col2 { background: linear-gradient(to bottom, #1e1e2e 50%, #ffffff 50%); }
-/* Accent swatches */
+.fm-theme-card .fm-card-label { padding: 5px 6px; font-size: 11px; font-weight: 600; text-align: center; background: var(--fm-bg-elevated); color: var(--fm-text-primary); }
+.fm-card-dark .col1 { background: #0f0f1a; } .fm-card-dark .col2 { background: #13131f; }
+.fm-card-light .col1 { background: #f8f9fa; } .fm-card-light .col2 { background: #ffffff; }
+.fm-card-system .col1 { background: linear-gradient(to bottom, #0f0f1a 50%, #f8f9fa 50%); }
+.fm-card-system .col2 { background: linear-gradient(to bottom, #13131f 50%, #fff 50%); }
 .fm-accent-picker { display: flex; gap: 8px; margin: 8px 0; }
-.fm-accent-swatch { width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: transform 0.15s, border-color 0.15s; }
+.fm-accent-swatch { width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: transform .15s, border-color .15s; }
 .fm-accent-swatch:hover { transform: scale(1.2); }
 .fm-accent-swatch.active { border-color: var(--fm-text-primary); }
-
-/* ── Calendar ── */
-.frickmail-calendar-grid .day { background: var(--fm-bg-surface) !important; border-color: var(--fm-border) !important; color: var(--fm-text-primary) !important; }
-.frickmail-calendar-grid .dow { background: var(--fm-bg-hover) !important; color: var(--fm-text-secondary) !important; border-color: var(--fm-border) !important; }
-.frickmail-calendar-grid .day.today { box-shadow: inset 0 0 0 2px var(--fm-accent) !important; }
-.frickmail-calendar-grid .day.othermonth { opacity: .45 !important; }
-
-/* ── Custom scrollbars ── */
-* { scrollbar-width: thin; scrollbar-color: var(--fm-scroll-thumb) var(--fm-scroll-track); }
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: var(--fm-scroll-track); }
-::-webkit-scrollbar-thumb { background: var(--fm-scroll-thumb); border-radius: 3px; }

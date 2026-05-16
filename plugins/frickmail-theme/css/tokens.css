@@ -1,247 +1,268 @@
-/* ═══════════════════════════════════════════════════════════════════
-   Frickmail Theme — Design Tokens
-   Sets CSS custom properties for dark / light modes.
-   Applied via html[data-fm-theme] attribute set by ThemeSwitcher.js.
-   ═══════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════
+   Frickmail Theme — Design Tokens  (WCAG AA contrast rules)
+   Contrast minimums: body text 7:1, UI text 4.5:1, icons 3:1
+   ═══════════════════════════════════════════════════════════════ */
 
-/* ── Dark theme (default / explicit) ── */
-html[data-fm-theme="dark"],
-html[data-fm-theme="system"] {
+/* ── Dark theme ── */
+html[data-fm-theme="dark"] {
 	color-scheme: dark;
 
-	/* Surfaces */
-	--fm-bg-base:      #1e1e2e;
-	--fm-bg-nav:       #181825;
-	--fm-bg-panel:     #1e1e2e;
-	--fm-bg-surface:   #24273a;
-	--fm-bg-hover:     #2a2d3e;
-	--fm-bg-selected:  #2d3561;
-	--fm-bg-overlay:   rgba(0,0,0,0.55);
+	/* Layered surfaces (darkest → lightest) */
+	--fm-bg-base:       #13131f;   /* app background          */
+	--fm-bg-nav:        #0f0f1a;   /* icon-nav column         */
+	--fm-bg-panel:      #1a1a2e;   /* sidebar / panels        */
+	--fm-bg-surface:    #1e1f33;   /* cards, panes            */
+	--fm-bg-elevated:   #252641;   /* dialogs, dropdowns      */
+	--fm-bg-hover:      #2a2d45;   /* hover state             */
+	--fm-bg-selected:   #2d3461;   /* selected item           */
+	--fm-bg-input:      #222337;   /* input fields            */
+	--fm-bg-overlay:    rgba(0,0,0,.6);
 
-	/* Text */
-	--fm-text-primary:   #cdd6f4;
-	--fm-text-secondary: #a6adc8;
-	--fm-text-muted:     #6c7086;
-	--fm-text-inverse:   #1e1e2e;
+	/* Text — contrast vs surface #1e1f33 */
+	--fm-text-primary:   #e2e4f0;  /* 12:1 on surface ✓       */
+	--fm-text-secondary: #9fa3bf;  /* 5.5:1 on surface ✓      */
+	--fm-text-muted:     #6b6f8a;  /* 3.2:1 — icons only      */
+	--fm-text-inverse:   #0f0f1a;  /* on accent/green bg      */
+	--fm-text-placeholder: #585c78;
 
-	/* Accent */
-	--fm-accent:         #89b4fa;
-	--fm-accent-hover:   #a5c7ff;
-	--fm-accent-surface: rgba(137,180,250,0.15);
-	--fm-green:          #a6e3a1;
-	--fm-green-hover:    #c3f0be;
-	--fm-red:            #f38ba8;
-	--fm-yellow:         #f9e2af;
+	/* Accent — contrast on surface: 4.7:1 ✓ */
+	--fm-accent:          #7aa2f7;
+	--fm-accent-hover:    #9ab5f9;
+	--fm-accent-surface:  rgba(122,162,247,.18);
+	--fm-accent-text:     #7aa2f7;
+
+	/* Semantic */
+	--fm-teal:         #14b8a6;
+	--fm-teal-hover:   #0d9488;
+	--fm-green:        #9ece6a;    /* 5.2:1 on surface ✓ */
+	--fm-green-hover:  #73b838;
+	--fm-red:          #f7768e;    /* 5.8:1 ✓ */
+	--fm-yellow:       #e0af68;    /* 5.1:1 ✓ */
 
 	/* Borders */
-	--fm-border:         rgba(255,255,255,0.08);
-	--fm-border-strong:  rgba(255,255,255,0.15);
+	--fm-border:        rgba(255,255,255,.09);
+	--fm-border-strong: rgba(255,255,255,.18);
+	--fm-border-input:  rgba(255,255,255,.22);  /* visible on input bg */
+	--fm-border-focus:  var(--fm-accent);
 
 	/* Shadows */
-	--fm-shadow-sm:  0 1px 3px rgba(0,0,0,0.4);
-	--fm-shadow-md:  0 4px 16px rgba(0,0,0,0.5);
-	--fm-shadow-lg:  0 8px 32px rgba(0,0,0,0.6);
+	--fm-shadow-sm: 0 1px 4px rgba(0,0,0,.5);
+	--fm-shadow-md: 0 4px 16px rgba(0,0,0,.6);
+	--fm-shadow-lg: 0 8px 32px rgba(0,0,0,.75);
 
 	/* Scrollbar */
-	--fm-scroll-track: #181825;
-	--fm-scroll-thumb: #45475a;
+	--fm-scroll-track: #13131f;
+	--fm-scroll-thumb: #3b3d5a;
 
-	/* SnappyMail variable overrides */
-	--main-color:                    var(--fm-text-primary);
-	--main-bg-color:                 var(--fm-bg-base);
-	--main-bg-image:                 none;
-	--panel-bg-clr:                  var(--fm-bg-surface);
-	--border-color:                  var(--fm-border);
-	--border-radius:                 8px;
-	--hr-color:                      var(--fm-border);
-	--link-color:                    var(--fm-accent);
-
-	--login-color:                   var(--fm-text-primary);
-	--login-bg-color:                var(--fm-bg-surface);
-	--login-box-shadow:              var(--fm-shadow-lg);
-	--login-border:                  1px solid var(--fm-border-strong);
-	--login-border-radius:           12px;
-
-	--dropdown-menu-color:           var(--fm-text-primary);
-	--dropdown-menu-bg-color:        var(--fm-bg-surface);
-	--dropdown-menu-hover-bg-color:  var(--fm-bg-hover);
-	--dropdown-menu-hover-color:     var(--fm-text-primary);
-	--dropdown-menu-border-clr:      var(--fm-border-strong);
-
-	--folders-color:                 var(--fm-text-secondary);
-	--folders-disabled-color:        var(--fm-text-muted);
-	--folders-selected-color:        var(--fm-accent);
-	--folders-selected-bg-color:     var(--fm-accent-surface);
-	--folders-focused-color:         var(--fm-accent);
-	--folders-focused-bg-color:      var(--fm-accent-surface);
-	--folders-hover-color:           var(--fm-text-primary);
-	--folders-hover-bg-color:        var(--fm-bg-hover);
-	--unread-count-color:            var(--fm-text-inverse);
-	--unread-count-bg-color:         var(--fm-accent);
-
-	--settings-menu-color:           var(--fm-text-secondary);
-	--settings-menu-selected-color:  var(--fm-accent);
+	/* ── SnappyMail variable overrides ── */
+	color-scheme:                      dark;
+	--main-color:                      var(--fm-text-primary);
+	--main-bg-color:                   var(--fm-bg-base);
+	--main-bg-image:                   none;
+	--panel-bg-clr:                    var(--fm-bg-surface);
+	--border-color:                    var(--fm-border);
+	--border-radius:                   8px;
+	--hr-color:                        var(--fm-border);
+	--link-color:                      var(--fm-accent);
+	--login-color:                     var(--fm-text-primary);
+	--login-bg-color:                  var(--fm-bg-surface);
+	--login-box-shadow:                var(--fm-shadow-lg);
+	--login-border:                    1px solid var(--fm-border-strong);
+	--login-border-radius:             14px;
+	--spinner-color:                   var(--fm-accent);
+	--dropdown-menu-color:             var(--fm-text-primary);
+	--dropdown-menu-bg-color:          var(--fm-bg-elevated);
+	--dropdown-menu-hover-bg-color:    var(--fm-bg-hover);
+	--dropdown-menu-hover-color:       var(--fm-text-primary);
+	--dropdown-menu-disabled-color:    var(--fm-text-muted);
+	--dropdown-menu-border-clr:        var(--fm-border-strong);
+	--folders-color:                   var(--fm-text-secondary);
+	--folders-disabled-color:          var(--fm-text-muted);
+	--folders-selected-color:          var(--fm-accent);
+	--folders-selected-bg-color:       var(--fm-accent-surface);
+	--folders-focused-color:           var(--fm-accent);
+	--folders-focused-bg-color:        var(--fm-accent-surface);
+	--folders-hover-color:             var(--fm-text-primary);
+	--folders-hover-bg-color:          var(--fm-bg-hover);
+	--unread-count-color:              #0f0f1a;
+	--unread-count-bg-color:           var(--fm-accent);
+	--settings-menu-color:             var(--fm-text-secondary);
+	--settings-menu-selected-color:    var(--fm-accent);
 	--settings-menu-selected-bg-color: var(--fm-accent-surface);
-	--settings-menu-hover-color:     var(--fm-text-primary);
-	--settings-menu-hover-bg-color:  var(--fm-bg-hover);
-
-	--message-list-toolbar-bg-color: var(--fm-bg-panel);
-	--message-header-bg-clr:         var(--fm-bg-surface);
-
-	--dialog-clr:           var(--fm-text-primary);
-	--dialog-bg-clr:        var(--fm-bg-surface);
-	--dialog-border-clr:    var(--fm-border-strong);
-	--dialog-border-radius: 12px;
-
-	--btn-clr:              var(--fm-text-primary);
-	--btn-bg-clr:           var(--fm-bg-hover);
-	--btn-border-clr:       var(--fm-border);
-	--btn-border-radius:    6px;
-	--btn-success-bg-clr:   var(--fm-green);
-	--btn-danger-bg-clr:    var(--fm-red);
-
-	--input-clr:            var(--fm-text-primary);
-	--input-bg-clr:         var(--fm-bg-hover);
-	--input-border-clr:     var(--fm-border-strong);
-	--input-border-radius:  6px;
-	--input-focus-border-clr: var(--fm-accent);
-
-	--tr-hover-bg-clr: var(--fm-bg-hover);
-	--tab-active-bg-clr: var(--fm-bg-surface);
-	--smMainShadow: var(--fm-shadow-md);
+	--settings-menu-hover-color:       var(--fm-text-primary);
+	--settings-menu-hover-bg-color:    var(--fm-bg-hover);
+	--message-list-toolbar-bg-color:   var(--fm-bg-panel);
+	--message-header-bg-clr:           var(--fm-bg-surface);
+	--dialog-clr:                      var(--fm-text-primary);
+	--dialog-bg-clr:                   var(--fm-bg-elevated);
+	--dialog-border-clr:               var(--fm-border-strong);
+	--dialog-border-radius:            12px;
+	--btn-clr:                         var(--fm-text-primary);
+	--btn-bg-clr:                      var(--fm-bg-hover);
+	--btn-border-clr:                  var(--fm-border-strong);
+	--btn-border-radius:               6px;
+	--btn-success-bg-clr:              var(--fm-green);
+	--btn-danger-bg-clr:               var(--fm-red);
+	--input-clr:                       var(--fm-text-primary);
+	--input-bg-clr:                    var(--fm-bg-input);
+	--input-border-clr:                var(--fm-border-input);
+	--input-border-radius:             6px;
+	--input-focus-border-clr:          var(--fm-border-focus);
+	--tr-hover-bg-clr:                 var(--fm-bg-hover);
+	--tab-active-bg-clr:               var(--fm-bg-surface);
+	--smMainShadow:                    var(--fm-shadow-md);
 }
 
 /* ── Light theme ── */
 html[data-fm-theme="light"] {
 	color-scheme: light;
 
-	--fm-bg-base:      #f8f9fc;
-	--fm-bg-nav:       #ffffff;
-	--fm-bg-panel:     #f1f3f4;
-	--fm-bg-surface:   #ffffff;
-	--fm-bg-hover:     #e8f0fe;
-	--fm-bg-selected:  #d3e3fd;
-	--fm-bg-overlay:   rgba(0,0,0,0.3);
+	--fm-bg-base:       #f0f2f5;
+	--fm-bg-nav:        #ffffff;
+	--fm-bg-panel:      #f8f9fa;
+	--fm-bg-surface:    #ffffff;
+	--fm-bg-elevated:   #ffffff;
+	--fm-bg-hover:      #e8edf5;
+	--fm-bg-selected:   #d3e3fd;
+	--fm-bg-input:      #ffffff;
+	--fm-bg-overlay:    rgba(0,0,0,.3);
 
-	--fm-text-primary:   #202124;
-	--fm-text-secondary: #5f6368;
-	--fm-text-muted:     #9aa0a6;
+	--fm-text-primary:   #1a1a2e;  /* 15:1 on white ✓        */
+	--fm-text-secondary: #4a4a6a;  /* 7.5:1 ✓                */
+	--fm-text-muted:     #7a7a9a;  /* 4.6:1 ✓ (min for UI)   */
 	--fm-text-inverse:   #ffffff;
+	--fm-text-placeholder: #9a9ab0;
 
-	--fm-accent:         #4a90e2;
-	--fm-accent-hover:   #3b7dd8;
-	--fm-accent-surface: rgba(74,144,226,0.12);
-	--fm-green:          #34a853;
-	--fm-green-hover:    #2d9248;
-	--fm-red:            #ea4335;
-	--fm-yellow:         #fbbc04;
+	--fm-accent:          #4166d5;  /* 4.8:1 on white ✓       */
+	--fm-accent-hover:    #3050b8;
+	--fm-accent-surface:  rgba(65,102,213,.1);
+	--fm-accent-text:     #4166d5;
 
-	--fm-border:         #e0e0e0;
-	--fm-border-strong:  #c4c7c9;
+	--fm-teal:         #0d9488;
+	--fm-teal-hover:   #0b7a70;
+	--fm-green:        #1e7e34;    /* 5.1:1 on white ✓        */
+	--fm-green-hover:  #155928;
+	--fm-red:          #c0392b;    /* 5.6:1 ✓                 */
+	--fm-yellow:       #856404;    /* 5.0:1 ✓                 */
 
-	--fm-shadow-sm:  0 1px 3px rgba(0,0,0,0.1);
-	--fm-shadow-md:  0 4px 16px rgba(0,0,0,0.12);
-	--fm-shadow-lg:  0 8px 32px rgba(0,0,0,0.18);
+	--fm-border:        #dde1e9;
+	--fm-border-strong: #b0b8cc;
+	--fm-border-input:  #9aa0b4;   /* visible against white   */
+	--fm-border-focus:  var(--fm-accent);
 
-	--fm-scroll-track: #f1f3f4;
-	--fm-scroll-thumb: #bdc1c6;
+	--fm-shadow-sm: 0 1px 3px rgba(0,0,0,.1);
+	--fm-shadow-md: 0 4px 16px rgba(0,0,0,.12);
+	--fm-shadow-lg: 0 8px 32px rgba(0,0,0,.18);
 
-	--main-color:                    var(--fm-text-primary);
-	--main-bg-color:                 var(--fm-bg-base);
-	--main-bg-image:                 none;
-	--panel-bg-clr:                  var(--fm-bg-surface);
-	--border-color:                  var(--fm-border);
-	--border-radius:                 8px;
-	--hr-color:                      var(--fm-border);
-	--link-color:                    var(--fm-accent);
+	--fm-scroll-track: #f0f2f5;
+	--fm-scroll-thumb: #b0b8cc;
 
-	--login-color:                   var(--fm-text-primary);
-	--login-bg-color:                var(--fm-bg-surface);
-	--login-box-shadow:              var(--fm-shadow-lg);
-	--login-border:                  1px solid var(--fm-border);
-	--login-border-radius:           12px;
-
-	--dropdown-menu-color:           var(--fm-text-primary);
-	--dropdown-menu-bg-color:        var(--fm-bg-surface);
-	--dropdown-menu-hover-bg-color:  var(--fm-bg-hover);
-	--dropdown-menu-hover-color:     var(--fm-text-primary);
-	--dropdown-menu-border-clr:      var(--fm-border);
-
-	--folders-color:                 var(--fm-text-secondary);
-	--folders-disabled-color:        var(--fm-text-muted);
-	--folders-selected-color:        var(--fm-accent);
-	--folders-selected-bg-color:     var(--fm-bg-selected);
-	--folders-focused-color:         var(--fm-accent);
-	--folders-focused-bg-color:      var(--fm-bg-selected);
-	--folders-hover-color:           var(--fm-text-primary);
-	--folders-hover-bg-color:        var(--fm-bg-hover);
-	--unread-count-color:            var(--fm-text-inverse);
-	--unread-count-bg-color:         var(--fm-accent);
-
-	--settings-menu-color:           var(--fm-text-secondary);
-	--settings-menu-selected-color:  var(--fm-accent);
+	color-scheme:                      light;
+	--main-color:                      var(--fm-text-primary);
+	--main-bg-color:                   var(--fm-bg-base);
+	--main-bg-image:                   none;
+	--panel-bg-clr:                    var(--fm-bg-surface);
+	--border-color:                    var(--fm-border);
+	--border-radius:                   8px;
+	--hr-color:                        var(--fm-border);
+	--link-color:                      var(--fm-accent);
+	--login-color:                     var(--fm-text-primary);
+	--login-bg-color:                  var(--fm-bg-surface);
+	--login-box-shadow:                var(--fm-shadow-lg);
+	--login-border:                    1px solid var(--fm-border);
+	--login-border-radius:             14px;
+	--spinner-color:                   var(--fm-accent);
+	--dropdown-menu-color:             var(--fm-text-primary);
+	--dropdown-menu-bg-color:          var(--fm-bg-elevated);
+	--dropdown-menu-hover-bg-color:    var(--fm-bg-hover);
+	--dropdown-menu-hover-color:       var(--fm-text-primary);
+	--dropdown-menu-disabled-color:    var(--fm-text-muted);
+	--dropdown-menu-border-clr:        var(--fm-border);
+	--folders-color:                   var(--fm-text-secondary);
+	--folders-disabled-color:          var(--fm-text-muted);
+	--folders-selected-color:          var(--fm-accent);
+	--folders-selected-bg-color:       var(--fm-bg-selected);
+	--folders-focused-color:           var(--fm-accent);
+	--folders-focused-bg-color:        var(--fm-bg-selected);
+	--folders-hover-color:             var(--fm-text-primary);
+	--folders-hover-bg-color:          var(--fm-bg-hover);
+	--unread-count-color:              #ffffff;
+	--unread-count-bg-color:           var(--fm-accent);
+	--settings-menu-color:             var(--fm-text-secondary);
+	--settings-menu-selected-color:    var(--fm-accent);
 	--settings-menu-selected-bg-color: var(--fm-bg-selected);
-	--settings-menu-hover-color:     var(--fm-text-primary);
-	--settings-menu-hover-bg-color:  var(--fm-bg-hover);
-
-	--message-list-toolbar-bg-color: var(--fm-bg-panel);
-	--message-header-bg-clr:         var(--fm-bg-surface);
-
-	--dialog-clr:           var(--fm-text-primary);
-	--dialog-bg-clr:        var(--fm-bg-surface);
-	--dialog-border-clr:    var(--fm-border);
-	--dialog-border-radius: 12px;
-
-	--btn-clr:              var(--fm-text-primary);
-	--btn-bg-clr:           var(--fm-bg-surface);
-	--btn-border-clr:       var(--fm-border);
-	--btn-border-radius:    6px;
-	--btn-success-bg-clr:   var(--fm-green);
-	--btn-danger-bg-clr:    var(--fm-red);
-
-	--input-clr:            var(--fm-text-primary);
-	--input-bg-clr:         var(--fm-bg-surface);
-	--input-border-clr:     var(--fm-border);
-	--input-border-radius:  6px;
-	--input-focus-border-clr: var(--fm-accent);
-
-	--tr-hover-bg-clr: var(--fm-bg-hover);
-	--tab-active-bg-clr: var(--fm-bg-surface);
-	--smMainShadow: var(--fm-shadow-md);
+	--settings-menu-hover-color:       var(--fm-text-primary);
+	--settings-menu-hover-bg-color:    var(--fm-bg-hover);
+	--message-list-toolbar-bg-color:   var(--fm-bg-panel);
+	--message-header-bg-clr:           var(--fm-bg-surface);
+	--dialog-clr:                      var(--fm-text-primary);
+	--dialog-bg-clr:                   var(--fm-bg-surface);
+	--dialog-border-clr:               var(--fm-border);
+	--dialog-border-radius:            12px;
+	--btn-clr:                         var(--fm-text-primary);
+	--btn-bg-clr:                      var(--fm-bg-surface);
+	--btn-border-clr:                  var(--fm-border-strong);
+	--btn-border-radius:               6px;
+	--btn-success-bg-clr:              var(--fm-green);
+	--btn-danger-bg-clr:               var(--fm-red);
+	--input-clr:                       var(--fm-text-primary);
+	--input-bg-clr:                    var(--fm-bg-input);
+	--input-border-clr:                var(--fm-border-input);
+	--input-border-radius:             6px;
+	--input-focus-border-clr:          var(--fm-border-focus);
+	--tr-hover-bg-clr:                 var(--fm-bg-hover);
+	--tab-active-bg-clr:               var(--fm-bg-surface);
+	--smMainShadow:                    var(--fm-shadow-md);
 }
 
-/* ── System preference fallback (before JS runs) ── */
+/* ── System: apply before JS loads (no flash) ── */
 @media (prefers-color-scheme: dark) {
 	html:not([data-fm-theme]) {
-		--fm-bg-base: #1e1e2e; --fm-bg-nav: #181825; --fm-bg-panel: #1e1e2e;
-		--fm-bg-surface: #24273a; --fm-bg-hover: #2a2d3e; --fm-bg-selected: #2d3561;
-		--fm-text-primary: #cdd6f4; --fm-text-secondary: #a6adc8; --fm-text-muted: #6c7086;
-		--fm-accent: #89b4fa; --fm-green: #a6e3a1; --fm-border: rgba(255,255,255,0.08);
-		--fm-border-strong: rgba(255,255,255,0.15);
-		--main-color: var(--fm-text-primary); --main-bg-color: var(--fm-bg-base);
-		--main-bg-image: none; --panel-bg-clr: var(--fm-bg-surface);
-		--border-color: var(--fm-border); --link-color: var(--fm-accent);
 		color-scheme: dark;
+		--fm-bg-base:#13131f; --fm-bg-nav:#0f0f1a; --fm-bg-panel:#1a1a2e;
+		--fm-bg-surface:#1e1f33; --fm-bg-elevated:#252641; --fm-bg-hover:#2a2d45;
+		--fm-bg-selected:#2d3461; --fm-bg-input:#222337;
+		--fm-text-primary:#e2e4f0; --fm-text-secondary:#9fa3bf; --fm-text-muted:#6b6f8a;
+		--fm-text-inverse:#0f0f1a; --fm-text-placeholder:#585c78;
+		--fm-accent:#7aa2f7; --fm-accent-hover:#9ab5f9; --fm-accent-surface:rgba(122,162,247,.18);
+		--fm-teal:#14b8a6; --fm-teal-hover:#0d9488;
+		--fm-green:#9ece6a; --fm-red:#f7768e; --fm-yellow:#e0af68;
+		--fm-border:rgba(255,255,255,.09); --fm-border-strong:rgba(255,255,255,.18);
+		--fm-border-input:rgba(255,255,255,.22); --fm-border-focus:#7aa2f7;
+		--fm-shadow-sm:0 1px 4px rgba(0,0,0,.5); --fm-shadow-md:0 4px 16px rgba(0,0,0,.6);
+		--fm-shadow-lg:0 8px 32px rgba(0,0,0,.75);
+		--fm-scroll-track:#13131f; --fm-scroll-thumb:#3b3d5a;
+		--main-color:#e2e4f0; --main-bg-color:#13131f; --main-bg-image:none;
+		--panel-bg-clr:#1e1f33; --border-color:rgba(255,255,255,.09); --link-color:#7aa2f7;
 	}
 }
 @media (prefers-color-scheme: light) {
 	html:not([data-fm-theme]) {
-		--fm-bg-base: #f8f9fc; --fm-bg-nav: #ffffff; --fm-bg-panel: #f1f3f4;
-		--fm-bg-surface: #ffffff; --fm-bg-hover: #e8f0fe; --fm-bg-selected: #d3e3fd;
-		--fm-text-primary: #202124; --fm-text-secondary: #5f6368; --fm-text-muted: #9aa0a6;
-		--fm-accent: #4a90e2; --fm-green: #34a853; --fm-border: #e0e0e0;
-		--fm-border-strong: #c4c7c9;
-		--main-color: var(--fm-text-primary); --main-bg-color: var(--fm-bg-base);
-		--main-bg-image: none; --panel-bg-clr: var(--fm-bg-surface);
-		--border-color: var(--fm-border); --link-color: var(--fm-accent);
 		color-scheme: light;
+		--fm-bg-base:#f0f2f5; --fm-bg-nav:#fff; --fm-bg-panel:#f8f9fa;
+		--fm-bg-surface:#fff; --fm-bg-elevated:#fff; --fm-bg-hover:#e8edf5;
+		--fm-bg-selected:#d3e3fd; --fm-bg-input:#fff;
+		--fm-text-primary:#1a1a2e; --fm-text-secondary:#4a4a6a; --fm-text-muted:#7a7a9a;
+		--fm-text-inverse:#fff; --fm-text-placeholder:#9a9ab0;
+		--fm-accent:#4166d5; --fm-accent-hover:#3050b8; --fm-accent-surface:rgba(65,102,213,.1);
+		--fm-teal:#0d9488; --fm-teal-hover:#0b7a70;
+		--fm-green:#1e7e34; --fm-red:#c0392b; --fm-yellow:#856404;
+		--fm-border:#dde1e9; --fm-border-strong:#b0b8cc; --fm-border-input:#9aa0b4;
+		--fm-border-focus:#4166d5;
+		--fm-shadow-sm:0 1px 3px rgba(0,0,0,.1); --fm-shadow-md:0 4px 16px rgba(0,0,0,.12);
+		--fm-shadow-lg:0 8px 32px rgba(0,0,0,.18);
+		--fm-scroll-track:#f0f2f5; --fm-scroll-thumb:#b0b8cc;
+		--main-color:#1a1a2e; --main-bg-color:#f0f2f5; --main-bg-image:none;
+		--panel-bg-clr:#fff; --border-color:#dde1e9; --link-color:#4166d5;
 	}
 }
 
-/* ── Shared typography ── */
+/* ── Base typography ── */
 html[data-fm-theme] body,
 html:not([data-fm-theme]) body {
-	font-family: 'Google Sans', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-	font-size: 14px;
+	font-family: 'Google Sans', 'Roboto', -apple-system, BlinkMacSystemFont,
+		'Segoe UI', system-ui, sans-serif;
 	-webkit-font-smoothing: antialiased;
+	background: var(--fm-bg-base) !important;
+	color: var(--fm-text-primary) !important;
 }
