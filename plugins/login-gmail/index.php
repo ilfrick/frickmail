@@ -84,12 +84,15 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$sChallenge = $this->codeChallenge($sVerifier);
 		$sNonce = \bin2hex(\random_bytes(8));
 
+		// Use APP_SALT (server-side constant) as explicit key so decryption in the
+		// OAuth callback does not depend on the smctoken cookie, which SameSite=Strict
+		// browsers suppress on the cross-origin redirect back from Google.
 		$sState = \SnappyMail\Crypt::EncryptUrlSafe([
 			'p' => 'gmail',
 			'v' => $sVerifier,
 			'n' => $sNonce,
 			't' => \time()
-		]);
+		], \APP_SALT);
 
 		$sRedirectUri = $this->baseUrl($oHttp) . '/?LoginGMail';
 		$sAuthUrl = static::LOGIN_URI . '?' . \http_build_query([
@@ -137,7 +140,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 				exit;
 			}
 
-			$aState = \SnappyMail\Crypt::DecryptUrlSafe((string) $_GET['state']);
+			$aState = \SnappyMail\Crypt::DecryptUrlSafe((string) $_GET['state'], \APP_SALT);
 			if (!\is_array($aState) || ($aState['p'] ?? '') !== 'gmail' || empty($aState['v'])) {
 				throw new \RuntimeException('invalid state');
 			}
