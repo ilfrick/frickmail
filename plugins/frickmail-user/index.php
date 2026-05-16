@@ -661,6 +661,13 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$sPluginClass::injectOAuthData($aTokenData);
 		}
 
+		// SnappyMail stores a per-account .cryptkey encrypted with the IMAP password.
+		// For OAuth accounts we use the email as the pseudo-password. If the stored
+		// .cryptkey was encrypted with a different value (e.g. Google user-ID from an
+		// old session), LoginProcess throws CryptKeyError. Delete it first — it is
+		// recreated automatically with the correct password on the next LoginProcess.
+		$this->deleteStaleCryptKey($account['email']);
+
 		$oPassword = new \SnappyMail\SensitiveString($account['email']);
 		$oAccount = $oActions->LoginProcess($account['email'], $oPassword);
 		if ($oAccount) {
@@ -673,6 +680,18 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 					'expires' => \time() + $iExpiresIn,
 				], $oAccount->CryptKey())
 			);
+		}
+	}
+
+	private function deleteStaleCryptKey(string $sEmail) : void
+	{
+		$sAt = \strpos($sEmail, '@');
+		if (false === $sAt) return;
+		$sLocal  = \strtolower(\substr($sEmail, 0, $sAt));
+		$sDomain = \strtolower(\substr($sEmail, $sAt + 1));
+		$sPath   = \rtrim(\APP_DATA_FOLDER_PATH, '/') . '/storage/' . $sDomain . '/' . $sLocal . '/.cryptkey';
+		if (\is_file($sPath)) {
+			\unlink($sPath);
 		}
 	}
 
