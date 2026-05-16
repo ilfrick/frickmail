@@ -40,15 +40,36 @@
 	border-bottom: 1px solid var(--fm-border) !important;
 	color: var(--fm-text-primary) !important;
 }
+/* All buttons/links/inputs inside the toolbar */
 .b-list-toolbar .btn,
 .b-list-toolbar a,
-.b-list-toolbar select {
+.b-list-toolbar button {
 	background: transparent !important;
 	color: var(--fm-text-primary) !important;
 	border-color: var(--fm-border-strong) !important;
 }
+.b-list-toolbar .btn:hover,
+.b-list-toolbar a:hover {
+	background: var(--fm-bg-hover) !important;
+}
 .b-list-toolbar select {
 	background: var(--fm-bg-input) !important;
+	color: var(--fm-text-primary) !important;
+	border-color: var(--fm-border-strong) !important;
+}
+/* Sort/filter dropdown toggle button */
+.b-list-toolbar .dropdown-toggle,
+.b-list-toolbar [data-icon],
+.b-list-toolbar .e-sort {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-primary) !important;
+	border: 1px solid var(--fm-border-strong) !important;
+	border-radius: 6px !important;
+}
+/* Search wrapper inside toolbar */
+.b-list-toolbar search-input-wrp,
+.b-list-toolbar .search-input-wrp {
+	background: var(--fm-bg-hover) !important;
 }
 
 /* Footer pagination bar */
@@ -88,31 +109,77 @@
 /* ── Message list items ── */
 .messageList { background: var(--fm-bg-base) !important; }
 
-messageListItem {
+messageListItem, .messageListItem {
 	background: var(--fm-bg-base) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
-	border-left: 3px solid transparent !important;
+	border-left: 6px solid transparent !important;
+	border-right: 0 !important;
 	transition: background .1s !important;
 	cursor: pointer !important;
+	color: var(--fm-text-primary) !important;
 }
-messageListItem:hover { background: var(--fm-bg-hover) !important; }
-messageListItem.focused, messageListItem.selected {
+messageListItem:hover, .messageListItem:hover {
+	background: var(--fm-bg-hover) !important;
+}
+
+/* Focused / selected (override rgba gray/blue hardcoded by SnappyMail) */
+messageListItem.focused, .messageListItem.focused,
+messageListItem.selected, .messageListItem.selected {
 	background: var(--fm-bg-selected) !important;
 	border-left-color: var(--fm-accent) !important;
+	border-right-color: transparent !important;
 }
-/* Unread */
-messageListItem[data-unseen="1"] .senderParent {
+
+/* Unread / unseen — override yellow rgba(255,255,64,.15) + orange border */
+messageListItem.unseen, .messageListItem.unseen,
+messageListItem[data-unseen], .messageListItem[data-unseen] {
+	background: var(--fm-bg-base) !important;   /* same base, no tint */
+	border-left-color: var(--fm-accent) !important;
+	border-right-color: transparent !important;
+}
+messageListItem.unseen:hover, .messageListItem.unseen:hover,
+messageListItem[data-unseen]:hover {
+	background: var(--fm-bg-hover) !important;
+}
+messageListItem.unseen.focused, .messageListItem.unseen.focused {
+	background: var(--fm-bg-selected) !important;
+	border-left-color: var(--fm-accent) !important;
+	border-right-color: transparent !important;
+}
+/* Bold text for unread */
+messageListItem.unseen .senderParent, .messageListItem.unseen .senderParent,
+messageListItem[data-unseen] .senderParent {
 	font-weight: 700 !important; color: var(--fm-text-primary) !important;
 }
-messageListItem[data-unseen="1"] .subjectParent {
-	color: var(--fm-text-primary) !important; font-weight: 600 !important;
+messageListItem.unseen .subjectParent, .messageListItem.unseen .subjectParent,
+messageListItem[data-unseen] .subjectParent {
+	font-weight: 600 !important; color: var(--fm-text-primary) !important;
 }
-messageListItem[data-unseen="1"] { border-left-color: var(--fm-accent) !important; }
 
-messageListItem .senderParent { color: var(--fm-text-primary) !important; font-size: 13px !important; }
-messageListItem .subjectParent { color: var(--fm-text-secondary) !important; font-size: 13px !important; }
-messageListItem time { color: var(--fm-text-muted) !important; font-size: 11px !important; }
-messageListItem .messageCheckbox { color: var(--fm-text-muted) !important; }
+/* Text colors */
+messageListItem .senderParent, .messageListItem .senderParent {
+	color: var(--fm-text-primary) !important; font-size: 13px !important;
+}
+messageListItem .subjectParent, .messageListItem .subjectParent {
+	color: var(--fm-text-secondary) !important; font-size: 13px !important;
+}
+messageListItem time, .messageListItem time {
+	color: var(--fm-text-muted) !important; font-size: 11px !important;
+}
+messageListItem .messageCheckbox, .messageListItem .messageCheckbox {
+	color: var(--fm-text-muted) !important;
+}
+
+/* Thread count badge (hardcoded #eee border in SnappyMail) */
+messageListItem .threadsCountParent, .messageListItem .threadsCountParent {
+	background: var(--fm-bg-hover) !important;
+	border-color: var(--fm-border-strong) !important;
+	color: var(--fm-text-secondary) !important;
+}
+messageListItem .threads-len, .messageListItem .threads-len {
+	border-color: var(--fm-border-strong) !important;
+	color: var(--fm-text-secondary) !important;
+}
 
 /* ── Reading pane ── */
 .messageView {

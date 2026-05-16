@@ -8,7 +8,7 @@ class FrickmailThemePlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME        = 'Frickmail Theme',
-		VERSION     = '1.4',
+		VERSION     = '1.5',
 		RELEASE     = '2026-05-16',
 		REQUIRED    = '2.36.1',
 		CATEGORY    = 'Appearance',
