@@ -20,6 +20,6 @@
 .frickmail-event-popup .row .btn { padding: .4em .8em; }
 
 /* Ensure the left panel is wide enough to show compose + contacts + calendar buttons */
-#rl-left { min-width: 185px !important; }
+
 /* When the calendar button is present, hide the compose button text to save space */
-#rl-left .b-toolbar:has(.buttonCalendar) .buttonComposeText { display: none; }
+

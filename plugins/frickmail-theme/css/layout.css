@@ -96,53 +96,96 @@ html, body, #rl-app, rl-app {
 	padding-left: 56px !important;
 }
 
-/* ── Left panel ── */
+/* ── Left panel — wide enough for 3 toolbar buttons ── */
 #rl-left, rl-left {
 	background: var(--fm-bg-panel) !important;
 	border-right: 1px solid var(--fm-border) !important;
-	width: 220px !important;
-	min-width: 185px !important;
+	width: 256px !important;
+	min-width: 240px !important;
 	flex-shrink: 0;
 }
 
-/* ── Toolbar (compose + icon buttons) ── */
+/* ── Toolbar: flex row, no overflow ── */
 #rl-left .b-toolbar,
 rl-left .b-toolbar {
 	padding: 12px 8px 8px 8px !important;
 	background: var(--fm-bg-panel) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
+	display: flex !important;
+	align-items: center !important;
+	gap: 4px !important;
+	white-space: nowrap !important;
+	overflow: visible !important;
 }
 
-/* Compose button — green pill */
+/* Compose button — teal pill, icon+text or icon-only both centred */
 rl-left .buttonCompose,
 #rl-left .buttonCompose {
-	background: var(--fm-green) !important;
-	color: var(--fm-text-inverse) !important;
+	background: #14b8a6 !important;   /* teal */
+	color: #ffffff !important;
 	border: none !important;
 	border-radius: 24px !important;
-	padding: 8px 16px !important;
+	height: 36px !important;
+	padding: 0 18px 0 14px !important;
 	font-weight: 600 !important;
-	font-size: 14px !important;
+	font-size: 13px !important;
+	line-height: 36px !important;
 	box-shadow: var(--fm-shadow-sm) !important;
 	transition: background 0.15s, box-shadow 0.15s !important;
+	/* flex so icon and text align */
+	display: inline-flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	gap: 6px !important;
+	/* take remaining space but not overflow */
+	flex: 1 1 auto !important;
+	min-width: 0 !important;
 	max-width: none !important;
-	width: calc(100% - 48px) !important;
+	width: auto !important;
+	overflow: hidden !important;
 }
 rl-left .buttonCompose:hover,
 #rl-left .buttonCompose:hover {
-	background: var(--fm-green-hover) !important;
+	background: #0d9488 !important;   /* teal-600 */
 	box-shadow: var(--fm-shadow-md) !important;
 }
+/* Icon inside compose (paper-plane i element) */
+rl-left .buttonCompose i,
+#rl-left .buttonCompose i {
+	flex-shrink: 0 !important;
+	font-size: 16px !important;
+	line-height: 1 !important;
+}
+/* Text inside compose */
+rl-left .buttonCompose .buttonComposeText,
+#rl-left .buttonCompose .buttonComposeText {
+	overflow: hidden !important;
+	text-overflow: ellipsis !important;
+	white-space: nowrap !important;
+	flex: 0 1 auto !important;
+}
 
-/* Contacts + Calendar buttons */
+/* Light theme teal */
+html[data-fm-theme="light"] rl-left .buttonCompose,
+html[data-fm-theme="light"] #rl-left .buttonCompose {
+	background: #0d9488 !important;
+}
+html[data-fm-theme="light"] rl-left .buttonCompose:hover,
+html[data-fm-theme="light"] #rl-left .buttonCompose:hover {
+	background: #0f766e !important;
+}
+
+/* Contacts + Calendar buttons — fixed 36×36 squares */
 rl-left .buttonContacts,
 rl-left .buttonCalendar,
 #rl-left .buttonContacts,
 #rl-left .buttonCalendar {
 	background: transparent !important;
 	border: none !important;
-	border-radius: 20px !important;
-	width: 36px !important; height: 36px !important;
+	border-radius: 8px !important;
+	width: 36px !important;
+	height: 36px !important;
+	min-width: 36px !important;
 	padding: 0 !important;
 	display: inline-flex !important;
 	align-items: center !important;
@@ -150,6 +193,7 @@ rl-left .buttonCalendar,
 	font-size: 17px !important;
 	color: var(--fm-text-secondary) !important;
 	transition: background 0.15s, color 0.15s !important;
+	flex-shrink: 0 !important;
 }
 rl-left .buttonContacts:hover,
 rl-left .buttonCalendar:hover,
@@ -157,6 +201,12 @@ rl-left .buttonCalendar:hover,
 #rl-left .buttonCalendar:hover {
 	background: var(--fm-bg-hover) !important;
 	color: var(--fm-text-primary) !important;
+}
+
+/* Hide compose text when screen is too narrow (panel < 220px) */
+@media (max-width: 350px) {
+	rl-left .buttonComposeText,
+	#rl-left .buttonComposeText { display: none !important; }
 }
 
 /* Folder list area */
