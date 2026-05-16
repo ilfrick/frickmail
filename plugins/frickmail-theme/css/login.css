@@ -1,135 +1,126 @@
 /* ═══════════════════════════════════════════════════════════════════
-   Frickmail Theme — Login Screen
+   Frickmail Theme — Login (.LoginView is the SnappyMail selector)
    ═══════════════════════════════════════════════════════════════════ */
 
-/* Full-page centered layout */
-.b-login {
+/* Full-screen background */
+.LoginView {
 	background: var(--fm-bg-base) !important;
 	display: flex !important;
 	align-items: center !important;
 	justify-content: center !important;
-	min-height: 100vh !important;
 }
 
 /* Login card */
-.b-login-content,
-.frickmail-login {
+.LoginView form {
 	background: var(--fm-bg-surface) !important;
 	border: 1px solid var(--fm-border-strong) !important;
 	border-radius: 16px !important;
-	padding: 36px 40px !important;
-	max-width: 400px !important;
-	width: 100% !important;
+	padding: 36px 40px 28px !important;
 	box-shadow: var(--fm-shadow-lg) !important;
+	max-width: 380px !important;
+	width: 100% !important;
 }
-
-/* Logo / title */
-.b-login-content h2,
-.frickmail-login h2 {
+.LoginView form * {
 	color: var(--fm-text-primary) !important;
-	font-size: 24px !important;
+}
+
+/* Title above the form */
+.LoginView .descWrapper {
+	color: var(--fm-text-primary) !important;
+	text-shadow: none !important;
+	font-size: 160% !important;
 	font-weight: 500 !important;
-	margin: 0 0 8px !important;
+	margin-bottom: 6px !important;
 	text-align: center !important;
-}
-
-/* Subtitle */
-.b-login-content p,
-.frickmail-login p {
-	color: var(--fm-text-secondary) !important;
-	text-align: center !important;
-	font-size: 14px !important;
-	margin-bottom: 24px !important;
-}
-
-/* Labels */
-.b-login-content label,
-.frickmail-login label {
-	color: var(--fm-text-secondary) !important;
-	font-size: 12px !important;
-	font-weight: 600 !important;
-	text-transform: uppercase !important;
-	letter-spacing: 0.5px !important;
-	margin-top: 16px !important;
 }
 
 /* Inputs */
-.b-login-content input,
-.frickmail-login input {
-	width: 100% !important;
+.LoginView input {
 	background: var(--fm-bg-hover) !important;
 	border: 1px solid var(--fm-border-strong) !important;
 	border-radius: 8px !important;
 	color: var(--fm-text-primary) !important;
 	padding: 10px 14px !important;
 	font-size: 14px !important;
+	height: auto !important;
 	transition: border-color 0.2s, box-shadow 0.2s !important;
 }
-.b-login-content input:focus,
+.LoginView input:focus {
+	border-color: var(--fm-accent) !important;
+	box-shadow: 0 0 0 3px var(--fm-accent-surface) !important;
+	outline: none !important;
+}
+
+/* Labels */
+.LoginView .control-label {
+	color: var(--fm-text-secondary) !important;
+	font-size: 12px !important;
+	font-weight: 600 !important;
+	text-transform: uppercase !important;
+	letter-spacing: 0.4px !important;
+}
+
+/* Spinner color */
+.LoginView form.submitting::after {
+	border-top-color: var(--fm-accent) !important;
+}
+
+/* ── Frickmail login form (custom, in Login.js) ── */
+.frickmail-login {
+	background: var(--fm-bg-surface) !important;
+	border: 1px solid var(--fm-border-strong) !important;
+	border-radius: 16px !important;
+	padding: 32px 36px 24px !important;
+	max-width: 380px !important;
+	box-shadow: var(--fm-shadow-lg) !important;
+}
+.frickmail-login h2 {
+	color: var(--fm-text-primary) !important;
+	font-size: 22px !important;
+	font-weight: 500 !important;
+	text-align: center !important;
+	margin: 0 0 4px !important;
+}
+.frickmail-login label {
+	color: var(--fm-text-secondary) !important;
+	font-size: 12px !important;
+	font-weight: 600 !important;
+	text-transform: uppercase !important;
+	letter-spacing: 0.4px !important;
+	margin-top: 14px !important;
+}
+.frickmail-login input {
+	width: 100% !important;
+	background: var(--fm-bg-hover) !important;
+	border: 1px solid var(--fm-border-strong) !important;
+	border-radius: 8px !important;
+	color: var(--fm-text-primary) !important;
+	padding: 10px 12px !important;
+	font-size: 14px !important;
+	transition: border-color 0.2s, box-shadow 0.2s !important;
+}
 .frickmail-login input:focus {
 	border-color: var(--fm-accent) !important;
 	box-shadow: 0 0 0 3px var(--fm-accent-surface) !important;
+	outline: none !important;
 }
-
-/* Sign-in button */
-.b-login-content .btn-primary,
-.b-login-content [type="submit"],
-.frickmail-login .btn-primary,
-.frickmail-login .btn.btn-primary {
+.frickmail-login .btn.btn-primary,
+.frickmail-login button[type="submit"] {
 	width: 100% !important;
 	background: var(--fm-accent) !important;
 	color: var(--fm-text-inverse) !important;
 	border: none !important;
 	border-radius: 8px !important;
 	padding: 11px !important;
-	font-size: 15px !important;
+	font-size: 14px !important;
 	font-weight: 600 !important;
-	margin-top: 20px !important;
-	cursor: pointer !important;
-	transition: background 0.15s, box-shadow 0.15s !important;
+	margin-top: 18px !important;
 	box-shadow: var(--fm-shadow-sm) !important;
+	transition: background 0.15s !important;
 }
-.b-login-content .btn-primary:hover,
-.frickmail-login .btn-primary:hover,
 .frickmail-login .btn.btn-primary:hover {
 	background: var(--fm-accent-hover) !important;
-	box-shadow: var(--fm-shadow-md) !important;
 }
-
-/* Forgot password link */
-.b-login-content a,
-.frickmail-login a {
-	color: var(--fm-accent) !important;
-	text-decoration: none !important;
-	font-size: 13px !important;
-}
-.b-login-content a:hover,
-.frickmail-login a:hover {
-	text-decoration: underline !important;
-}
-
-/* Status messages */
-.b-login-content .status,
-.frickmail-login .status {
-	font-size: 13px !important;
-	margin-top: 12px !important;
-	padding: 8px 12px !important;
-	border-radius: 6px !important;
-}
-.b-login-content .status.error,
-.frickmail-login .status.error {
-	background: rgba(243,139,168,0.15) !important;
-	color: var(--fm-red) !important;
-	border: 1px solid rgba(243,139,168,0.3) !important;
-}
-.b-login-content .status.ok,
-.frickmail-login .status.ok {
-	background: rgba(166,227,161,0.15) !important;
-	color: var(--fm-green) !important;
-	border: 1px solid rgba(166,227,161,0.3) !important;
-}
-
-/* Switch mode link */
 .frickmail-login .switch-mode {
 	background: none !important;
 	border: none !important;
@@ -138,27 +129,30 @@
 	font-size: 13px !important;
 	padding: 0 !important;
 }
-
-/* Actions row */
 .frickmail-login .actions {
-	margin-top: 16px !important;
+	margin-top: 14px !important;
 	display: flex !important;
 	gap: 8px !important;
 	align-items: center !important;
 }
-
-/* Frickmail logo mark above card */
-.b-login::before {
-	content: 'M';
-	display: block;
-	position: absolute;
-	top: 32px; left: 50%; transform: translateX(-50%);
-	width: 48px; height: 48px;
-	border-radius: 50%;
-	background: var(--fm-accent);
-	color: var(--fm-text-inverse);
-	font-size: 22px;
-	font-weight: 700;
-	line-height: 48px;
-	text-align: center;
+.frickmail-login .status {
+	margin-top: 10px !important;
+	font-size: 13px !important;
+	padding: 7px 10px !important;
+	border-radius: 6px !important;
+}
+.frickmail-login .status.error {
+	background: rgba(243,139,168,0.12) !important;
+	color: var(--fm-red) !important;
+	border: 1px solid rgba(243,139,168,0.25) !important;
+}
+.frickmail-login .status.ok {
+	background: rgba(166,227,161,0.12) !important;
+	color: var(--fm-green) !important;
+	border: 1px solid rgba(166,227,161,0.25) !important;
+}
+.frickmail-login a {
+	color: var(--fm-accent) !important;
+	text-decoration: none !important;
+	font-size: 13px !important;
 }

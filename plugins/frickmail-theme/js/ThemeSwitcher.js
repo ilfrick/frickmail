@@ -164,8 +164,8 @@
 		updateActiveNavItem();
 
 		// Inject appearance panel into General settings tab
-		if (id === 'SettingsGeneral' || id === 'UserSettingsGeneral') {
-			setTimeout(() => injectAppearancePanel(e.detail.viewModelDom), 100);
+		if (id === 'UserSettingsGeneral') {
+			setTimeout(() => injectAppearancePanel(e.detail.viewModelDom), 150);
 		}
 	});
 
