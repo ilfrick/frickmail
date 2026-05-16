@@ -52,7 +52,7 @@ services:
     image: postgres:17-alpine
     environment:
       - POSTGRES_USER=frickmail
-      - POSTGRES_PASSWORD=frickmail
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-frickmail}
       - POSTGRES_DB=frickmail
     volumes:
       - ./postgres:/var/lib/postgresql/data

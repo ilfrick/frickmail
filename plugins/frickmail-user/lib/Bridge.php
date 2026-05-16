@@ -85,17 +85,18 @@ class Bridge
 			]);
 			return (int) $existing['id'];
 		}
+		// Check before insert so the count reflects the pre-insert state (M4).
+		$bIsFirst = 0 === \count($db->listMailAccounts($uid));
 		$id = $db->insertMailAccount($uid, [
-			'label' => $sEmail,
-			'email' => $sEmail,
-			'type' => $sType,
-			'login' => $sEmail,
+			'label'                        => $sEmail,
+			'email'                        => $sEmail,
+			'type'                         => $sType,
+			'login'                        => $sEmail,
 			'encrypted_oauth_refresh_token' => $cipher,
-			'oauth_tenant' => $sTenant,
-			'is_primary' => 0 === \count($db->listMailAccounts($uid)),
+			'oauth_tenant'                 => $sTenant,
+			'is_primary'                   => $bIsFirst,
 		]);
-		// If this is the first account, mark it primary.
-		if ($id && 0 === \count($db->listMailAccounts($uid)) - 1) {
+		if ($id && $bIsFirst) {
 			$db->setPrimaryMailAccount($uid, $id);
 		}
 		return $id;

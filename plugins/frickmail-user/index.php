@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.30',
+		VERSION  = '0.31',
 		RELEASE  = '2026-05-13',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -171,11 +171,12 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 					]);
 				}
 				if (!\SnappyMail\TOTP::Verify($user['totp_secret'], $sTotpCode)) {
-					return $this->jsonResponse(__FUNCTION__, [
-						'ok' => false,
-						'requires_totp' => true,
-						'error' => 'Invalid two-factor code'
-					]);
+					return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'requires_totp' => true, 'error' => 'Invalid two-factor code']);
+				}
+				// Replay protection (H6): reject a code that was already used in this 30-second window.
+				$iWindow = (int) \floor(\time() / 30);
+				if (!$this->db()->recordTotpUse((int) $user['id'], $sTotpCode, $iWindow)) {
+					return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'requires_totp' => true, 'error' => 'Two-factor code already used']);
 				}
 			}
 
@@ -767,9 +768,26 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	}
 
 	/** Probe .well-known/{carddav|caldav} and return found service descriptor or []. */
+	/** Return true if $ip is a private/loopback/link-local address (SSRF guard). */
+	private function isPrivateIp(string $ip) : bool
+	{
+		return !\filter_var($ip,
+			\FILTER_VALIDATE_IP,
+			\FILTER_FLAG_NO_PRIV_RANGE | \FILTER_FLAG_NO_RES_RANGE
+		);
+	}
+
 	private function probeWellKnown(string $domain, string $email, string $proto) : array
 	{
+		// SSRF guard: reject domains that resolve to private/loopback/link-local IPs (NEW-M).
+		$resolvedIp = \gethostbyname($domain);
+		if ($resolvedIp === $domain || $this->isPrivateIp($resolvedIp)) {
+			// Either DNS failed or IP is private — skip silently.
+			return [];
+		}
+
 		$url = 'https://' . $domain . '/.well-known/' . $proto;
+		// TLS verification ENABLED (NEW-H) — no verify_peer overrides.
 		$ctx = \stream_context_create([
 			'http' => [
 				'method'          => 'PROPFIND',
@@ -779,7 +797,6 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 				'follow_location' => 1,
 				'ignore_errors'   => true,
 			],
-			'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
 		]);
 		$body = @\file_get_contents($url, false, $ctx);
 		// Check HTTP status from $http_response_header

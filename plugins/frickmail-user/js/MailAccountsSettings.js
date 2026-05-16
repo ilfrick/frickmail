@@ -230,7 +230,7 @@
 					style="margin-top:3px;accent-color:var(--fm-accent,#7aa2f7);width:16px;height:16px;flex-shrink:0">
 				<div>
 					<strong>${ICONS[s.type] || '🔗'} ${escHtml(s.name)}</strong>
-					<span style="font-size:12px;color:var(--fm-text-muted,#6b6f8a);margin-left:6px">${PROVIDERS[s.provider] || s.provider}</span>
+					<span style="font-size:12px;color:var(--fm-text-muted,#6b6f8a);margin-left:6px">${escHtml(PROVIDERS[s.provider] || s.provider)}</span>
 					<div style="font-size:12px;color:var(--fm-text-secondary,#9fa3bf);margin-top:3px">${escHtml(s.note)}</div>
 				</div>
 			</label>`).join('');
