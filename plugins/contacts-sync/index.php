@@ -97,16 +97,24 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 	{
 		$oActions = \RainLoop\Api::Actions();
 		$aAuth = null;
+
+		// Primary source: SnappyMail session storage (written by bridgeToSnappyMail).
 		try {
-			$aAuth = \SnappyMail\Crypt::DecryptFromJSON(
-				$oActions->StorageProvider()->Get($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken()),
-				$oAccount->CryptKey()
-			);
+			$raw = $oActions->StorageProvider()->Get($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken());
+			if ($raw) {
+				$aAuth = \SnappyMail\Crypt::DecryptFromJSON($raw, $oAccount->CryptKey());
+			}
 		} catch (\Throwable $e) {
-			throw new \RuntimeException('No OAuth2 tokens for this account — sign in with Google/Microsoft first.');
+			$aAuth = null;
 		}
+
+		// Fallback: read refresh_token from Frickmail DB via Bridge.
 		if (empty($aAuth['refresh_token'])) {
-			throw new \RuntimeException('No OAuth2 refresh token available — sign in with Google/Microsoft first.');
+			$aAuth = $this->loadFrickmailAuth($oAccount->Email()) ?? $aAuth;
+		}
+
+		if (empty($aAuth['refresh_token'])) {
+			throw new \RuntimeException('No OAuth2 refresh token — sign in with Google/Microsoft via the OAuth2 popup first.');
 		}
 
 		$oProvider = $oActions->AddressBookProvider($oAccount);
@@ -351,5 +359,35 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$oContact = new \RainLoop\Providers\AddressBook\Classes\Contact();
 		$oContact->setVCard($oVCard);
 		return $oProvider->ContactSave($oContact);
+	}
+
+	/**
+	 * Read the OAuth refresh_token from the Frickmail DB for the given email.
+	 * Used as fallback when SnappyMail's session storage doesn't have the token
+	 * (e.g. after session token rotation or when the account is not the primary
+	 * SnappyMail account at login time).
+	 */
+	private function loadFrickmailAuth(string $sEmail) : ?array
+	{
+		$sBase = \APP_PLUGINS_PATH . 'frickmail-user/lib/';
+		if (!\is_file($sBase . 'Bridge.php')) return null;
+		try {
+			require_once $sBase . 'Crypto.php';
+			require_once $sBase . 'Db.php';
+			require_once $sBase . 'Bridge.php';
+			$uid = \Frickmail\User\Bridge::currentUserId();
+			$key = \Frickmail\User\Bridge::currentCryptKey();
+			if (!$uid || !$key) return null;
+			$db = new \Frickmail\User\Db();
+			foreach ($db->listMailAccounts($uid) as $row) {
+				if (\strtolower((string) $row['email']) !== \strtolower($sEmail)) continue;
+				$dec = $db->decryptedAccount($row, $key);
+				if (empty($dec['oauth_refresh_token'])) continue;
+				return ['refresh_token' => $dec['oauth_refresh_token']];
+			}
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+		}
+		return null;
 	}
 }

@@ -40,14 +40,50 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private function loadAuth(\RainLoop\Model\Account $oAccount) : array
 	{
-		$aAuth = \SnappyMail\Crypt::DecryptFromJSON(
-			\RainLoop\Api::Actions()->StorageProvider()->Get($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken()),
-			$oAccount->CryptKey()
-		);
+		// Primary source: SnappyMail session storage.
+		$aAuth = null;
+		try {
+			$raw = \RainLoop\Api::Actions()->StorageProvider()->Get($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken());
+			if ($raw) {
+				$aAuth = \SnappyMail\Crypt::DecryptFromJSON($raw, $oAccount->CryptKey());
+			}
+		} catch (\Throwable $e) {
+			$aAuth = null;
+		}
+
+		// Fallback: read directly from Frickmail DB via Bridge.
+		if (empty($aAuth['refresh_token'])) {
+			$aAuth = $this->loadFrickmailAuth($oAccount->Email()) ?? $aAuth;
+		}
+
 		if (!\is_array($aAuth) || empty($aAuth['refresh_token'])) {
-			throw new \RuntimeException('No OAuth2 refresh token — sign in with Gmail/Microsoft first.');
+			throw new \RuntimeException('No OAuth2 refresh token — sign in with Gmail/Microsoft via the OAuth2 popup first.');
 		}
 		return $aAuth;
+	}
+
+	private function loadFrickmailAuth(string $sEmail) : ?array
+	{
+		$sBase = \APP_PLUGINS_PATH . 'frickmail-user/lib/';
+		if (!\is_file($sBase . 'Bridge.php')) return null;
+		try {
+			require_once $sBase . 'Crypto.php';
+			require_once $sBase . 'Db.php';
+			require_once $sBase . 'Bridge.php';
+			$uid = \Frickmail\User\Bridge::currentUserId();
+			$key = \Frickmail\User\Bridge::currentCryptKey();
+			if (!$uid || !$key) return null;
+			$db = new \Frickmail\User\Db();
+			foreach ($db->listMailAccounts($uid) as $row) {
+				if (\strtolower((string) $row['email']) !== \strtolower($sEmail)) continue;
+				$dec = $db->decryptedAccount($row, $key);
+				if (empty($dec['oauth_refresh_token'])) continue;
+				return ['refresh_token' => $dec['oauth_refresh_token']];
+			}
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+		}
+		return null;
 	}
 
 	private function detectProvider(string $sEmail) : string
