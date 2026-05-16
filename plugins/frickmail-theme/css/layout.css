@@ -74,8 +74,14 @@ html, body, #rl-app, rl-app {
 }
 #fm-icon-nav .fm-nav-item[data-tooltip]:hover::after { opacity: 1; }
 
-/* ── App padding for icon nav ── */
+/* ── App padding for icon nav (removed on login screen via JS) ── */
 #rl-app, rl-app { padding-left: 56px !important; }
+
+/* Safety net: never show icon nav on login screen */
+.LoginView ~ #fm-icon-nav,
+body:has(.LoginView) #fm-icon-nav {
+	display: none !important;
+}
 
 /* ── Left sidebar ── */
 #rl-left, rl-left {

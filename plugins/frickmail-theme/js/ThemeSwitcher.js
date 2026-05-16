@@ -110,17 +110,36 @@
 
 	window.addEventListener('hashchange', syncActiveNav);
 
+	function setNavVisible(visible) {
+		const nav = document.getElementById('fm-icon-nav');
+		if (!nav) return;
+		nav.style.display = visible ? '' : 'none';
+		// Also shift the app padding accordingly
+		const app = document.getElementById('rl-app');
+		if (app) app.style.paddingLeft = visible ? '56px' : '';
+	}
+
 	if (document.readyState === 'loading') {
 		document.addEventListener('DOMContentLoaded', buildIconNav);
 	} else {
 		buildIconNav();
 	}
 
-	// ── Appearance settings tab ───────────────────────────────────
+	// ── Hide nav on login screen, show on app screens ─────────────
 
 	addEventListener('rl-view-model', e => {
 		const id = e.detail?.viewModelTemplateID;
-		if (id) syncActiveNav();
+		if (!id) return;
+
+		if (id === 'Login') {
+			// Login screen: hide icon nav and remove app padding
+			setNavVisible(false);
+		} else {
+			// Any other screen (inbox, settings, …): show nav
+			buildIconNav();   // no-op if already built
+			setNavVisible(true);
+			syncActiveNav();
+		}
 	});
 
 	// Register as a proper SnappyMail settings view model.
