@@ -50,7 +50,7 @@ fi
 SNAPPYMAIL_PLUGINS_DIR=/var/lib/snappymail/_data_/_default_/plugins
 if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_default_ ]; then
     mkdir -p "$SNAPPYMAIL_PLUGINS_DIR"
-    for plugin in login-oauth2 login-gmail login-o365 contacts-sync calendar frickmail-user; do
+    for plugin in login-oauth2 login-gmail login-o365 contacts-sync calendar frickmail-user frickmail-theme; do
         if [ -d "/snappymail/plugins-bundled/$plugin" ]; then
             echo "[INFO] Syncing Frickmail plugin: $plugin"
             rm -rf "$SNAPPYMAIL_PLUGINS_DIR/$plugin"
@@ -64,8 +64,8 @@ if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_defaul
     if grep -q '^enable = Off' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
         sed -i '/^\[plugins\]/,/^\[/{s/^enable = Off/enable = On/}' "$SNAPPYMAIL_CONFIG_FILE"
     fi
-    if ! grep -qE '^enabled_list = .*frickmail-user' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
-        sed -i '/^\[plugins\]/,/^\[/{s/^enabled_list = .*$/enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user"/}' "$SNAPPYMAIL_CONFIG_FILE"
+    if ! grep -qE '^enabled_list = .*frickmail-theme' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
+        sed -i '/^\[plugins\]/,/^\[/{s/^enabled_list = .*$/enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"/}' "$SNAPPYMAIL_CONFIG_FILE"
     fi
 fi
 
