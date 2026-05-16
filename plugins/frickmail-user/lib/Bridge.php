@@ -22,9 +22,20 @@ class Bridge
 	public static function startSession() : void
 	{
 		if (\PHP_SESSION_ACTIVE !== \session_status()) {
+			// Guard: Alpine default save_path is empty → sessions silently write to '/' (H1).
+			if ('' === \session_save_path()) {
+				$sSavePath = \rtrim(APP_DATA_FOLDER_PATH, '/') . '/_sessions_';
+				if (!\is_dir($sSavePath)) {
+					\mkdir($sSavePath, 0700, true);
+				}
+				\session_save_path($sSavePath);
+			}
+			// Consider both HTTPS server var and X-Forwarded-Proto from reverse proxy (L1).
+			$bSecure = !empty($_SERVER['HTTPS'])
+				|| (\strtolower($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
 			\session_start([
 				'cookie_httponly' => true,
-				'cookie_secure'   => !empty($_SERVER['HTTPS']),
+				'cookie_secure'   => $bSecure,
 				'cookie_samesite' => 'Lax',
 				'use_strict_mode' => true,
 			]);

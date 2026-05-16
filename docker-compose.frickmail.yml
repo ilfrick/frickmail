@@ -16,12 +16,20 @@ services:
       - FRICKMAIL_O365_CLIENT_ID=
       - FRICKMAIL_O365_CLIENT_SECRET=
       - FRICKMAIL_O365_TENANT=common
+      # SMTP for recovery email
+      - FRICKMAIL_SMTP_HOST=posta.housefz.com
+      - FRICKMAIL_SMTP_PORT=587
+      - FRICKMAIL_SMTP_SECURE=starttls
+      - FRICKMAIL_SMTP_USER=frickmail
+      - FRICKMAIL_SMTP_PASSWORD=${FRICKMAIL_SMTP_PASSWORD}
+      - FRICKMAIL_SMTP_FROM=Frickmail Admin <frickmail@housefz.com>
+      - FRICKMAIL_BASE_URL=https://posta.housefz.com
     networks:
       - default
       - db-network
       - redis-network
     ports:
-      - "8888:8888"
+      - "127.0.0.1:8888:8888"
     volumes:
       - ./frickmail-data:/var/lib/snappymail
     healthcheck:
@@ -34,7 +42,7 @@ services:
   php-fpm-exporter:
     image: hipages/php-fpm_exporter:2.2.0
     ports:
-      - 9253:9253
+      - 127.0.0.1:9253:9253
     environment:
       - PHP_FPM_SCRAPE_URI=tcp://frickmail:9000/status
     networks:

@@ -11,20 +11,6 @@
 		const wrap = document.createElement('div');
 		wrap.className = 'frickmail-login compact';
 		wrap.innerHTML = `
-			<style>
-				.frickmail-login { max-width: 720px; margin: 4em auto; padding: 1.6em 1.8em; border:1px solid var(--border-color, #ccc); border-radius: 6px; background: var(--main-background, #fff); }
-				.frickmail-login.compact { max-width: 380px; }
-				.frickmail-login h2 { margin: 0 0 0.6em; font-size: 1.4em; }
-				.frickmail-login label { display:block; margin-top: .8em; font-size: 90%; font-weight: 600; }
-				.frickmail-login input { width:100%; box-sizing:border-box; padding:.45em .6em; }
-				.frickmail-login .actions { margin-top: 1em; display:flex; gap:.6em; align-items:center; }
-				.frickmail-login .actions .btn { padding:.5em 1em; }
-				.frickmail-login .actions .btn-primary { background:#4a90e2; color:white; border:none; }
-				.frickmail-login .switch-mode { margin-left:auto; background:none; border:none; color:#4a90e2; cursor:pointer; padding:0; }
-				.frickmail-login .status { margin-top: .8em; min-height: 1em; color:#888; font-size:90%; }
-				.frickmail-login .status.error { color:#c33; }
-				.frickmail-login .status.ok { color:#2a8; }
-			</style>
 			<h2 data-fm="title">Sign in to Frickmail</h2>
 			<form data-fm="form">
 				<label for="fm-username">Username</label>
@@ -109,8 +95,7 @@
 			if (totpCode) params.totp_code = totpCode;
 			if (xtoken) params.XToken = xtoken;
 			rl.pluginRemoteRequest((iError, oData) => {
-				console.log('[frickmail-login] iError=', iError, 'oData=', oData);
-				if (iError && !oData) { setStatus('Network error (no response)', 'error'); return; }
+					if (iError && !oData) { setStatus('Network error (no response)', 'error'); return; }
 				const r = oData?.Result;
 				if (false === r || null == r) {
 					const dump = JSON.stringify(oData).slice(0, 200);
@@ -371,18 +356,6 @@
 		const wrap = document.createElement('div');
 		wrap.className = 'frickmail-login compact';
 		wrap.innerHTML = `
-			<style>
-				.frickmail-login { max-width: 720px; margin: 4em auto; padding: 1.6em 1.8em; border:1px solid var(--border-color, #ccc); border-radius: 6px; background: var(--main-background, #fff); }
-				.frickmail-login.compact { max-width: 380px; }
-				.frickmail-login h2 { margin: 0 0 0.6em; font-size: 1.4em; }
-				.frickmail-login label { display:block; margin-top: .8em; font-size: 90%; font-weight: 600; }
-				.frickmail-login input { width:100%; box-sizing:border-box; padding:.45em .6em; }
-				.frickmail-login .actions { margin-top: 1em; display:flex; gap:.6em; }
-				.frickmail-login .actions .btn-primary { background:#4a90e2; color:white; border:none; padding:.5em 1em; }
-				.frickmail-login .status { margin-top: .8em; min-height: 1em; color:#888; font-size:90%; }
-				.frickmail-login .status.error { color:#c33; }
-				.frickmail-login .status.ok { color:#2a8; }
-			</style>
 			<h2>Imposta una nuova password</h2>
 			<p style="color:#888">Le credenziali IMAP/OAuth dei tuoi account email collegati saranno reimpostate (devi reinserirle dal Setup).</p>
 			<label for="fm-fr-password">Nuova password (min 8 caratteri)</label>

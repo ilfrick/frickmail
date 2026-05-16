@@ -49,9 +49,12 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 	{
 		if (!empty($aPaths[0]) && \in_array($aPaths[0], ['LoginGMail', 'StartLoginGMail'], true)) {
 			$oConfig = \RainLoop\Api::Config();
-			$oConfig->Set('security', 'secfetch_allow',
-				\trim($oConfig->Get('security', 'secfetch_allow', '') . ';site=cross-site', ';')
-			);
+			$sCurrent = $oConfig->Get('security', 'secfetch_allow', '');
+			$aParts = \array_filter(\array_unique(\explode(';', $sCurrent)));
+			if (!\in_array('site=cross-site', $aParts, true)) {
+				$aParts[] = 'site=cross-site';
+				$oConfig->Set('security', 'secfetch_allow', \implode(';', $aParts));
+			}
 		}
 	}
 

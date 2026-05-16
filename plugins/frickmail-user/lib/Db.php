@@ -11,7 +11,10 @@ class Db
 		$port = \getenv('FRICKMAIL_DB_PORT') ?: '5432';
 		$name = \getenv('FRICKMAIL_DB_NAME') ?: 'frickmail';
 		$user = \getenv('FRICKMAIL_DB_USER') ?: 'frickmail';
-		$pass = \getenv('FRICKMAIL_DB_PASSWORD') ?: 'frickmail';
+		$pass = \getenv('FRICKMAIL_DB_PASSWORD');
+		if ('' === $pass || false === $pass) {
+			throw new \RuntimeException('FRICKMAIL_DB_PASSWORD environment variable is not set');
+		}
 		$dsn = \sprintf('pgsql:host=%s;port=%s;dbname=%s', $host, $port, $name);
 		$this->pdo = new \PDO($dsn, $user, $pass, [
 			\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
@@ -177,11 +180,18 @@ class Db
 
 	public function createPasswordResetToken(int $userId, string $tokenHash, int $ttlSeconds = 1800) : int
 	{
+		// Invalidate any existing unused tokens for this user before creating a new one (C3).
+		$this->pdo->prepare(
+			'DELETE FROM frickmail_password_resets WHERE user_id = :u AND used_at IS NULL'
+		)->execute([':u' => $userId]);
+
+		// Use a literal interval to avoid parameter-interpolation into SQL expressions (L2).
+		$intervalSql = 'NOW() + INTERVAL \'' . \abs($ttlSeconds) . ' seconds\'';
 		$st = $this->pdo->prepare(
 			"INSERT INTO frickmail_password_resets (user_id, token_hash, expires_at)
-			 VALUES (:u, :t, NOW() + (:s || ' seconds')::interval) RETURNING id"
+			 VALUES (:u, :t, {$intervalSql}) RETURNING id"
 		);
-		$st->execute([':u' => $userId, ':t' => $tokenHash, ':s' => (string) $ttlSeconds]);
+		$st->execute([':u' => $userId, ':t' => $tokenHash]);
 		return (int) $st->fetchColumn();
 	}
 

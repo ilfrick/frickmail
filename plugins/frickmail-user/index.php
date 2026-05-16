@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.29',
+		VERSION  = '0.30',
 		RELEASE  = '2026-05-13',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -58,7 +58,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailEnableTotp', 'JsonEnableTotp');
 		$this->addJsonHook('FrickmailConfirmTotp', 'JsonConfirmTotp');
 		$this->addJsonHook('FrickmailDisableTotp', 'JsonDisableTotp');
-		$this->addJsonHook('FrickmailTestImap', 'JsonTestImap');
+		// JsonTestImap removed — diagnostic endpoint must not exist in production (C1)
 		$this->addJsonHook('FrickmailDiscoverServices', 'JsonDiscoverServices');
 		$this->addJsonHook('FrickmailActivateService', 'JsonActivateService');
 
@@ -72,9 +72,12 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		// Allow cross-site navigations whenever the URL is a reset-password landing.
 		if (isset($_GET['reset_token']) && '' !== \trim((string) $_GET['reset_token'])) {
 			$oConfig = \RainLoop\Api::Config();
-			$oConfig->Set('security', 'secfetch_allow',
-				\trim($oConfig->Get('security', 'secfetch_allow', '') . ';site=cross-site', ';')
-			);
+				$sCurrent = $oConfig->Get('security', 'secfetch_allow', '');
+			$aParts = \array_filter(\array_unique(\explode(';', $sCurrent)));
+			if (!\in_array('site=cross-site', $aParts, true)) {
+				$aParts[] = 'site=cross-site';
+			}
+			$oConfig->Set('security', 'secfetch_allow', \implode(';', $aParts));
 		}
 	}
 
@@ -97,24 +100,9 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private function startPhpSession() : void
 	{
-		if (\PHP_SESSION_ACTIVE !== \session_status()) {
-			// PHP's default session.save_path may be empty on this Alpine build,
-			// causing session files to be written to '/' (root) which silently fails.
-			// Use the SnappyMail data directory as the session storage path.
-			if ('' === \session_save_path()) {
-				$sSavePath = \rtrim(APP_DATA_FOLDER_PATH, '/') . '/_sessions_';
-				if (!\is_dir($sSavePath)) {
-					\mkdir($sSavePath, 0700, true);
-				}
-				\session_save_path($sSavePath);
-			}
-			\session_start([
-				'cookie_httponly' => true,
-				'cookie_secure'   => !empty($_SERVER['HTTPS']),
-				'cookie_samesite' => 'Lax',
-				'use_strict_mode' => true,
-			]);
-		}
+		// Delegate to Bridge::startSession() which has the full save_path guard
+		// and X-Forwarded-Proto handling — single implementation, no duplication.
+		\Frickmail\User\Bridge::startSession();
 	}
 
 	private function isSignupOpen() : bool
@@ -150,9 +138,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$id = $db->createUser($sUsername, $sEmail ?: null, $sHash, $sSalt);
 
 			return $this->jsonResponse(__FUNCTION__, [
-				'ok' => true,
-				'user_id' => $id,
-				'first_user' => $bFirstUser,
+				'ok'      => true,
 				'message' => 'Account created. Sign in to add your mail accounts.'
 			]);
 		} catch (\Throwable $e) {
@@ -398,12 +384,6 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			if ('' === $sToken) throw new \RuntimeException('Token required');
 			if (\strlen($sPassword) < 8) throw new \RuntimeException('Password must be at least 8 chars');
 			$sTokenHash = \hash('sha256', $sToken);
-			\RainLoop\Api::Actions()->Logger()->Write(
-				"[FrickmailReset] token len=" . \strlen($sToken)
-				. " head=" . \substr($sToken, 0, 6) . " tail=" . \substr($sToken, -6)
-				. " hashHead=" . \substr($sTokenHash, 0, 12),
-				\LOG_INFO
-			);
 			$db = $this->db();
 			$row = $db->findActivePasswordReset($sTokenHash);
 			if (!$row) throw new \RuntimeException('Invalid or expired token');
@@ -531,41 +511,6 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	}
 
 	/** Temporary diagnostic: decrypt stored IMAP password and test it directly. */
-	public function JsonTestImap() : array
-	{
-		try {
-			[$uid, $cryptKey] = $this->requireSession();
-			$id = (int) $this->jsonParam('id');
-			$row = $this->db()->getMailAccount($uid, $id);
-			if (!$row) throw new \RuntimeException('Account not found');
-			$account = $this->db()->decryptedAccount($row, $cryptKey);
-			$pwd = $account['password'] ?? null;
-			if (!$pwd) return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => 'decrypt returned null']);
-			$len = strlen($pwd);
-			$preview = substr($pwd, 0, 2) . str_repeat('*', max(0, $len - 2));
-			// Raw IMAP LOGIN test — bypasses SnappyMail completely
-			// Use the domain JSON port/security (what SnappyMail actually uses), not the DB values
-			$oDomainProvider = \RainLoop\Api::Actions()->DomainProvider();
-			$sDomain = \strtolower(\substr((string)\strrchr($account['email'], '@'), 1));
-			$oDomain = $oDomainProvider->Load($sDomain, false);
-			$imapHost = $oDomain ? $oDomain->IncHost() : $row['imap_host'];
-			$imapPort = $oDomain ? $oDomain->IncPort() : (int)$row['imap_port'];
-			$imapType = $oDomain ? $oDomain->ImapSettings()->type : 2;
-			$scheme = ($imapType === 2) ? 'ssl' : 'tcp'; // 2=SSL, 1=STARTTLS, 0=plain
-			$ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false]]);
-			$fp  = @stream_socket_client($scheme . '://' . $imapHost . ':' . $imapPort, $errno, $errstr, 10, STREAM_CLIENT_CONNECT, $ctx);
-			if (!$fp) return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'pwd_len' => $len, 'pwd_preview' => $preview, 'error' => 'connect failed: ' . $errstr]);
-			fgets($fp, 512);
-			fwrite($fp, 'a1 LOGIN ' . $row['login'] . ' ' . $pwd . "\r\n");
-			$resp = fgets($fp, 512);
-			fclose($fp);
-			$ok = str_starts_with($resp, 'a1 OK');
-			return $this->jsonResponse(__FUNCTION__, ['ok' => $ok, 'pwd_len' => $len, 'pwd_preview' => $preview, 'imap_resp' => substr($resp, 0, 60)]);
-		} catch (\Throwable $e) {
-			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
-		}
-	}
-
 	public function JsonSetAccountPassword() : array
 	{
 		try {

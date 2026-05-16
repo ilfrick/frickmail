@@ -16,6 +16,21 @@
 		try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (e) { return null; }
 	}
 
+	function clearCache() {
+		try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+	}
+
+	// Clear cache on logout or detected session loss so a subsequent user
+	// on the same browser does not see stale accounts (M3).
+	window.addEventListener('rl-logout', clearCache);
+	window.addEventListener('beforeunload', () => {
+		// If we detect the page is being unloaded without a user-initiated reload
+		// (i.e. the SnappyMail session ended), clear the cache.
+		// We can't distinguish logout from normal navigation here, so only clear
+		// if the FrickmailListAccounts last returned an auth error.
+		if (window._fmSessionLost) clearCache();
+	});
+
 	function buildFakeAccount(acc) {
 		return {
 			email:        acc.email,
@@ -62,7 +77,11 @@
 
 			r.pluginRemoteRequest((iErr, oData) => {
 				const res = oData?.Result;
-				if (!res?.ok || !res.accounts) return;
+				if (!res?.ok || !res.accounts) {
+					if (res && !res.ok) window._fmSessionLost = true;
+					return;
+				}
+				window._fmSessionLost = false;
 				saveCache(res.accounts);
 				injectFromList(res.accounts);
 			}, 'FrickmailListAccounts', { XToken: tok }, 10000);
