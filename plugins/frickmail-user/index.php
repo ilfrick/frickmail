@@ -24,8 +24,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.32',
-		RELEASE  = '2026-05-13',
+		VERSION  = '0.33',
+		RELEASE  = '2026-05-16',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'Frickmail: first-class user identity in Postgres, mail accounts as linked records.';
@@ -35,6 +35,11 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	public function Init() : void
 	{
+		// Frickmail is the only account management system — disable SnappyMail's
+		// built-in additional-accounts capability so its Settings→Accounts tab,
+		// account-add popup, and duplicate switcher UI never appear.
+		\RainLoop\Api::Config()->Set('webmail', 'allow_additional_accounts', false);
+
 		$this->UseLangs(false);
 		$this->addJs('js/Login.js');
 		$this->addJs('js/AccountSwitcher.js');

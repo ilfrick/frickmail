@@ -534,3 +534,9 @@ a:hover { color: var(--fm-accent-hover) !important; }
 .fm-accent-swatch { width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: transform .15s, border-color .15s; }
 .fm-accent-swatch:hover { transform: scale(1.2); }
 .fm-accent-swatch.active { border-color: var(--fm-text-primary); }
+
+/* ── Hide SnappyMail's native account management ──────────────── */
+/* allow_additional_accounts=false disables these at runtime,     */
+/* but a CSS guard ensures nothing leaks through even if the      */
+/* config change is somehow bypassed.                             */
+#V-Settings-Accounts { display: none !important; }

@@ -141,6 +141,20 @@
 		};
 	}
 
+	// ── Redirect native accounts route → our mail-accounts ────────
+	// SnappyMail's #/settings/accounts is disabled (allow_additional_accounts=false)
+	// but any stale link or bookmark should land on our tab instead.
+
+	addEventListener('hashchange', () => {
+		if (location.hash === '#/settings/accounts') {
+			location.replace('#/settings/mail-accounts');
+		}
+	});
+	// Also handle the initial load.
+	if (location.hash === '#/settings/accounts') {
+		location.replace('#/settings/mail-accounts');
+	}
+
 	// ── rl-view-model handler ──────────────────────────────────────
 
 	addEventListener('rl-view-model', e => {
