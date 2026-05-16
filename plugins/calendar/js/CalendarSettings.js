@@ -4,6 +4,15 @@
 	const toIso = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 	const monthName = m => ['January','February','March','April','May','June','July','August','September','October','November','December'][m];
 
+	const CAL_PREF_KEY = 'fm_calendar_ids';
+
+	function loadSelectedIds() {
+		try { return JSON.parse(localStorage.getItem(CAL_PREF_KEY) || 'null'); } catch(e) { return null; }
+	}
+	function saveSelectedIds(ids) {
+		try { localStorage.setItem(CAL_PREF_KEY, JSON.stringify(ids)); } catch(e) {}
+	}
+
 	class CalendarSettings
 	{
 		constructor()
@@ -16,13 +25,16 @@
 			this.status = ko.observable('');
 			this.loading = ko.observable(false);
 			this.eventsByDay = {};
+			this.calendars = ko.observableArray([]);   // [{id, name, color, primary, selected}]
+			this.calLoading = ko.observable(false);
+			this.calStatus = ko.observable('');
 		}
 
 		onBuild(el)
 		{
 			this.root = el;
 			this.render();
-			this.fetch();
+			this.loadCalendars();
 		}
 
 		prevMonth() {
@@ -43,15 +55,58 @@
 			this.fetch();
 		}
 
+		// ── Calendar list ──────────────────────────────────────────────
+
+		loadCalendars() {
+			this.calLoading(true);
+			this.calStatus('Loading calendars…');
+			rl.pluginRemoteRequest((iError, oData) => {
+				this.calLoading(false);
+				const r = oData?.Result;
+				if (iError || r?.error) {
+					this.calStatus('Could not load calendars: ' + (r?.error || 'request error'));
+					// Still try to fetch events with default calendar
+					this.fetch();
+					return;
+				}
+				const savedIds = loadSelectedIds();
+				const cals = (r.calendars || []).map(c => ({
+					...c,
+					selected: ko.observable(savedIds ? savedIds.includes(c.id) : c.primary)
+				}));
+				this.calendars(cals);
+				this.calStatus('');
+				this.fetch();
+			}, 'JsonCalendarList', {}, 20000);
+		}
+
+		selectedCalendarIds() {
+			const cals = this.calendars();
+			if (!cals.length) return null; // null → server uses primary
+			const sel = cals.filter(c => c.selected()).map(c => c.id);
+			return sel.length ? sel : [cals.find(c => c.primary)?.id || 'primary'];
+		}
+
+		saveCalendarPrefs() {
+			const ids = this.selectedCalendarIds();
+			saveSelectedIds(ids);
+			this.fetch();
+		}
+
+		// ── Event fetch ────────────────────────────────────────────────
+
 		fetch() {
 			this.loading(true);
 			this.status('Loading…');
 			const start = new Date(Date.UTC(this.year(), this.month() - 1, 1)).toISOString();
 			const end   = new Date(Date.UTC(this.year(), this.month() + 2, 0, 23, 59, 59)).toISOString();
+			const ids = this.selectedCalendarIds();
+			const params = { start, end };
+			if (ids) params.calendar_ids = JSON.stringify(ids);
 			rl.pluginRemoteRequest((iError, oData) => {
 				this.loading(false);
 				if (iError || !oData?.Result) {
-					this.status('Failed to load events');
+					this.status('Failed to load events — check that the Google Calendar API is enabled in your Google Cloud project');
 					this.events([]);
 					this.render();
 					return;
@@ -61,8 +116,10 @@
 				this.events(r.events || []);
 				this.status((r.events?.length || 0) + ' events from ' + (r.provider || 'provider'));
 				this.render();
-			}, 'JsonCalendarEvents', { start, end }, 30000);
+			}, 'JsonCalendarEvents', params, 30000);
 		}
+
+		// ── Calendar render ────────────────────────────────────────────
 
 		groupByDay() {
 			this.eventsByDay = {};
@@ -104,6 +161,7 @@
 					e.className = 'ev ' + (ev.provider || '');
 					e.textContent = ev.title;
 					e.title = ev.title + (ev.location ? ' @ ' + ev.location : '');
+					e.style.borderLeft = ev._calColor ? '3px solid ' + ev._calColor : '';
 					e.onclick = (event) => { event.stopPropagation(); this.openEditPopup(ev); };
 					cell.appendChild(e);
 				});
@@ -117,13 +175,66 @@
 				cell.onclick = () => this.openCreatePopup(d);
 				grid.appendChild(cell);
 			}
+
+			// Render calendar selector panel
+			this.renderCalendarPanel();
 		}
+
+		renderCalendarPanel() {
+			let panel = this.root.querySelector('.fm-calendar-panel');
+			if (!panel) return;
+			panel.innerHTML = '';
+
+			if (this.calLoading()) {
+				panel.textContent = 'Loading calendars…';
+				return;
+			}
+			if (this.calStatus()) {
+				const msg = document.createElement('div');
+				msg.style.cssText = 'font-size:12px;color:var(--fm-text-secondary);margin-bottom:8px';
+				msg.textContent = this.calStatus();
+				panel.appendChild(msg);
+			}
+			const cals = this.calendars();
+			if (!cals.length) return;
+
+			const title = document.createElement('div');
+			title.style.cssText = 'font-size:12px;font-weight:600;color:var(--fm-text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px';
+			title.textContent = 'Calendars';
+			panel.appendChild(title);
+
+			cals.forEach(c => {
+				const row = document.createElement('label');
+				row.style.cssText = 'display:flex;align-items:center;gap:7px;padding:4px 0;cursor:pointer;font-size:13px';
+				const cb = document.createElement('input');
+				cb.type = 'checkbox';
+				cb.checked = c.selected();
+				cb.style.cssText = 'accent-color:' + (c.color || 'var(--fm-accent)') + ';width:14px;height:14px;flex-shrink:0';
+				cb.onchange = () => {
+					c.selected(cb.checked);
+					saveSelectedIds(this.selectedCalendarIds());
+					this.fetch();
+				};
+				const dot = document.createElement('span');
+				dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:' + (c.color || 'var(--fm-accent)') + ';flex-shrink:0';
+				const lbl = document.createElement('span');
+				lbl.textContent = c.name + (c.primary ? ' ★' : '');
+				lbl.style.color = 'var(--fm-text-primary)';
+				row.append(cb, dot, lbl);
+				panel.appendChild(row);
+			});
+		}
+
+		// ── Event popup ────────────────────────────────────────────────
 
 		openCreatePopup(date) {
 			const start = new Date(date); start.setHours(9, 0, 0, 0);
 			const end = new Date(start); end.setHours(10, 0, 0, 0);
+			// Default calendar: first selected one
+			const defCal = this.calendars().find(c => c.selected())?.id || 'primary';
 			this.openPopup({
-				id: '', title: '', description: '', location: '',
+				id: '', _raw_id: '', _calendar: defCal,
+				title: '', description: '', location: '',
 				start: start.toISOString(), end: end.toISOString(), allDay: false
 			}, false);
 		}
@@ -137,8 +248,18 @@
 			backdrop.className = 'frickmail-event-popup-backdrop';
 			const popup = document.createElement('div');
 			popup.className = 'frickmail-event-popup';
+
+			// Calendar selector for new events (when multiple calendars available)
+			const cals = this.calendars().filter(c => c.selected());
+			const calSelector = (!isEdit && cals.length > 1) ? `
+				<label>Calendar</label>
+				<select data-f="calendar" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--fm-border-input);background:var(--fm-bg-input);color:var(--fm-text-primary)">
+					${cals.map(c => `<option value="${c.id}" ${c.id === ev._calendar ? 'selected' : ''}>${c.name}</option>`).join('')}
+				</select>` : '';
+
 			popup.innerHTML = `
 				<h3 style="margin:0 0 .6em">${isEdit ? 'Edit event' : 'New event'}</h3>
+				${calSelector}
 				<label>Title</label><input data-f="title" type="text" />
 				<label>Start (UTC ISO)</label><input data-f="start" type="text" />
 				<label>End (UTC ISO)</label><input data-f="end" type="text" />
@@ -160,14 +281,17 @@
 			backdrop.onclick = close;
 			popup.querySelector('[data-act="cancel"]').onclick = close;
 			popup.querySelector('[data-act="save"]').onclick = () => {
+				const calSel = popup.querySelector('[data-f="calendar"]');
 				const data = {
-					id: ev.id || '',
-					title: popup.querySelector('[data-f="title"]').value.trim(),
-					start: popup.querySelector('[data-f="start"]').value.trim(),
-					end:   popup.querySelector('[data-f="end"]').value.trim(),
-					location: popup.querySelector('[data-f="location"]').value.trim(),
+					id:          ev.id || '',
+					_raw_id:     ev._raw_id || '',
+					_calendar:   calSel ? calSel.value : (ev._calendar || 'primary'),
+					title:       popup.querySelector('[data-f="title"]').value.trim(),
+					start:       popup.querySelector('[data-f="start"]').value.trim(),
+					end:         popup.querySelector('[data-f="end"]').value.trim(),
+					location:    popup.querySelector('[data-f="location"]').value.trim(),
 					description: popup.querySelector('[data-f="description"]').value.trim(),
-					allDay: popup.querySelector('[data-f="allDay"]').checked
+					allDay:      popup.querySelector('[data-f="allDay"]').checked
 				};
 				if (!data.title || !data.start || !data.end) { alert('Title/start/end required'); return; }
 				this.status('Saving…');
@@ -191,7 +315,7 @@
 					}
 					close();
 					this.fetch();
-				}, 'JsonCalendarDelete', { id: ev.id }, 30000);
+				}, 'JsonCalendarDelete', { id: ev.id, _raw_id: ev._raw_id, _calendar: ev._calendar }, 30000);
 			};
 			document.body.appendChild(backdrop);
 			document.body.appendChild(popup);

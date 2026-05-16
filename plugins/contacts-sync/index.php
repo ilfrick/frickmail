@@ -11,8 +11,8 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Contacts Sync',
-		VERSION  = '0.1',
-		RELEASE  = '2026-05-03',
+		VERSION  = '0.2',
+		RELEASE  = '2026-05-16',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Contacts',
 		DESCRIPTION = 'Frickmail: import contacts from Gmail (People API) or Office 365 (Microsoft Graph) into the local PAB.';
@@ -24,8 +24,10 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 	{
 		$this->UseLangs(false);
 		$this->addJs('js/ContactsSyncSettings.js');
+		$this->addJs('js/ContactsQuickAdd.js');
 		$this->addTemplate('templates/ContactsSyncSettingsTab.html');
-		$this->addJsonHook('JsonContactsSync', 'JsonContactsSync');
+		$this->addJsonHook('JsonContactsSync',  'JsonContactsSync');
+		$this->addJsonHook('JsonAddContact',    'JsonAddContact');
 	}
 
 	public function configMapping() : array
@@ -38,6 +40,41 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 				->SetAllowedInJs()
 				->SetDescription('When enabled, contacts are pulled from the provider every time a user signs in via Gmail/O365 OAuth2.')
 		];
+	}
+
+	public function JsonAddContact() : array
+	{
+		$oActions = \RainLoop\Api::Actions();
+		$oAccount = $oActions->getMainAccountFromToken(false);
+		if (!$oAccount) {
+			return $this->jsonResponse(__FUNCTION__, ['error' => 'not authenticated']);
+		}
+		$sEmail = \trim((string) $this->jsonParam('email'));
+		$sName  = \trim((string) ($this->jsonParam('name') ?: $sEmail));
+		if ('' === $sEmail || !\filter_var($sEmail, \FILTER_VALIDATE_EMAIL)) {
+			return $this->jsonResponse(__FUNCTION__, ['error' => 'invalid email address']);
+		}
+		$oProvider = $oActions->AddressBookProvider($oAccount);
+		if (!$oProvider || !$oProvider->IsActive()) {
+			return $this->jsonResponse(__FUNCTION__, ['error' => 'Address book is not active — enable it in admin settings.']);
+		}
+		try {
+			$oVCard = new \Sabre\VObject\Component\VCard(['VERSION' => '4.0']);
+			$oVCard->UID = 'manual:' . \md5($sEmail . \microtime(true));
+			$oVCard->FN  = $sName;
+			$oVCard->add('EMAIL', $sEmail);
+			if ($sName !== $sEmail) {
+				$parts = \explode(' ', $sName, 2);
+				$oVCard->add('N', [$parts[1] ?? '', $parts[0] ?? '', '', '', '']);
+			}
+			$oContact = new \RainLoop\Providers\AddressBook\Classes\Contact();
+			$oContact->setVCard($oVCard);
+			$bOk = $oProvider->ContactSave($oContact);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => $bOk, 'email' => $sEmail, 'name' => $sName]);
+		} catch (\Throwable $e) {
+			$oActions->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['error' => $e->getMessage()]);
+		}
 	}
 
 	public function JsonContactsSync() : array

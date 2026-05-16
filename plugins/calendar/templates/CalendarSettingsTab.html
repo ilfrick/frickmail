@@ -1,16 +1,18 @@
-<div class="frickmail-calendar">
-	<div class="frickmail-calendar-toolbar">
-		<button class="btn" data-bind="click: prevMonth">&laquo;</button>
-		<button class="btn" data-bind="click: today">Today</button>
-		<button class="btn" data-bind="click: nextMonth">&raquo;</button>
-		<span class="frickmail-cal-title" data-bind="text: title"></span>
-		<span style="flex:1"></span>
-		<button class="btn" data-bind="click: fetch">
-			<i data-bind="css: { 'icon-spinner animated': loading(), 'icon-reload': !loading() }"></i>
-			Refresh
-		</button>
+<div class="frickmail-calendar-wrap" style="display:flex;gap:20px;align-items:flex-start">
+	<div class="frickmail-calendar" style="flex:1;min-width:0">
+		<div class="frickmail-calendar-toolbar">
+			<button class="btn" data-bind="click: prevMonth">&laquo;</button>
+			<button class="btn" data-bind="click: today">Today</button>
+			<button class="btn" data-bind="click: nextMonth">&raquo;</button>
+			<span class="frickmail-cal-title" data-bind="text: title"></span>
+			<span style="flex:1"></span>
+			<button class="btn" data-bind="click: fetch">
+				<i data-bind="css: { 'icon-spinner animated': loading(), 'icon-reload': !loading() }"></i>
+				Refresh
+			</button>
+		</div>
+		<div class="frickmail-calendar-grid"></div>
+		<div class="frickmail-calendar-status" data-bind="text: status"></div>
 	</div>
-	<div class="frickmail-calendar-grid"></div>
-	<div class="frickmail-calendar-status" data-bind="text: status"></div>
-	<p style="margin-top:1em;color:#888;font-size:90%">Click a day to add an event. Click an event to edit or delete it. Events are read from your linked Google Calendar (primary) or Outlook /me/events.</p>
+	<div class="fm-calendar-panel" style="width:180px;flex-shrink:0;padding-top:48px"></div>
 </div>

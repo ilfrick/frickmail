@@ -11,8 +11,8 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Calendar',
-		VERSION  = '0.1',
-		RELEASE  = '2026-05-03',
+		VERSION  = '0.2',
+		RELEASE  = '2026-05-16',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Calendar',
 		DESCRIPTION = 'Frickmail: embedded calendar showing Google Calendar / Microsoft Graph events for the linked OAuth2 account.';
@@ -28,6 +28,7 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addCss('css/calendar.css');
 		$this->addTemplate('templates/CalendarSettingsTab.html');
 		$this->addJsonHook('JsonCalendarEvents', 'JsonCalendarEvents');
+		$this->addJsonHook('JsonCalendarList',   'JsonCalendarList');
 		$this->addJsonHook('JsonCalendarSave',   'JsonCalendarSave');
 		$this->addJsonHook('JsonCalendarDelete', 'JsonCalendarDelete');
 	}
@@ -146,6 +147,54 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 			'https://graph.microsoft.com/Calendars.ReadWrite offline_access');
 	}
 
+	public function JsonCalendarList() : array
+	{
+		try {
+			$oAccount = $this->currentAccount();
+			if (!$oAccount) throw new \RuntimeException('not authenticated');
+			$aAuth = $this->loadAuth($oAccount);
+			$sProv = $this->detectProvider($oAccount->Email());
+			$aCalendars = [];
+			if ('gmail' === $sProv) {
+				$sToken = $this->gmailToken($aAuth);
+				$r = $this->http('GET', 'https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=100', $sToken);
+				if (200 != $r['code']) {
+					$err = $r['result']['error']['message'] ?? 'HTTP ' . $r['code'];
+					throw new \RuntimeException('Google Calendar API: ' . $err . ' — make sure the Google Calendar API is enabled in your Google Cloud project.');
+				}
+				foreach (($r['result']['items'] ?? []) as $cal) {
+					$aCalendars[] = [
+						'id'      => (string) ($cal['id'] ?? ''),
+						'name'    => (string) ($cal['summary'] ?? $cal['id'] ?? ''),
+						'color'   => (string) ($cal['backgroundColor'] ?? '#4a90e2'),
+						'primary' => !empty($cal['primary']),
+					];
+				}
+			} elseif ('o365' === $sProv) {
+				$sToken = $this->o365GraphToken($aAuth);
+				$r = $this->http('GET', 'https://graph.microsoft.com/v1.0/me/calendars?$top=50', $sToken);
+				if (200 != $r['code']) {
+					$err = $r['result']['error']['message'] ?? 'HTTP ' . $r['code'];
+					throw new \RuntimeException('Microsoft Graph: ' . $err);
+				}
+				foreach (($r['result']['value'] ?? []) as $cal) {
+					$aCalendars[] = [
+						'id'      => (string) ($cal['id'] ?? ''),
+						'name'    => (string) ($cal['name'] ?? $cal['id'] ?? ''),
+						'color'   => '#4a90e2',
+						'primary' => !empty($cal['isDefaultCalendar']),
+					];
+				}
+			} else {
+				throw new \RuntimeException('Calendar requires a Gmail or Office 365 account');
+			}
+			return $this->jsonResponse(__FUNCTION__, ['calendars' => $aCalendars, 'provider' => $sProv]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['error' => $e->getMessage()]);
+		}
+	}
+
 	public function JsonCalendarEvents() : array
 	{
 		try {
@@ -154,63 +203,90 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$aAuth = $this->loadAuth($oAccount);
 			$sStart = (string) ($this->jsonParam('start') ?: \gmdate('Y-m-d\T00:00:00\Z', \strtotime('first day of this month')));
 			$sEnd   = (string) ($this->jsonParam('end')   ?: \gmdate('Y-m-d\T23:59:59\Z', \strtotime('last day of next month')));
+			// calendar_ids: JSON-encoded array sent from JS; defaults to ['primary']
+			$sCalIds = (string) ($this->jsonParam('calendar_ids') ?: '');
+			$aCalIds = $sCalIds ? \json_decode($sCalIds, true) : null;
+			if (!\is_array($aCalIds) || empty($aCalIds)) $aCalIds = ['primary'];
+			$aCalIds = \array_values(\array_filter(\array_map('strval', $aCalIds)));
+
 			$sProv = $this->detectProvider($oAccount->Email());
 			$aEvents = [];
 			if ('gmail' === $sProv) {
 				$sToken = $this->gmailToken($aAuth);
-				$sUrl = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?'
-					. \http_build_query([
-						'timeMin' => $sStart,
-						'timeMax' => $sEnd,
-						'singleEvents' => 'true',
-						'orderBy' => 'startTime',
-						'maxResults' => 250
-					]);
-				$r = $this->http('GET', $sUrl, $sToken);
-				if (200 != $r['code']) throw new \RuntimeException('Google Calendar API: HTTP ' . $r['code']);
-				foreach (($r['result']['items'] ?? []) as $e) {
-					$aEvents[] = [
-						'id' => (string) ($e['id'] ?? ''),
-						'title' => (string) ($e['summary'] ?? '(no title)'),
-						'start' => (string) ($e['start']['dateTime'] ?? $e['start']['date'] ?? ''),
-						'end'   => (string) ($e['end']['dateTime']   ?? $e['end']['date']   ?? ''),
-						'allDay' => isset($e['start']['date']) && !isset($e['start']['dateTime']),
-						'description' => (string) ($e['description'] ?? ''),
-						'location' => (string) ($e['location'] ?? ''),
-						'provider' => 'gmail'
-					];
+				$sQuery = \http_build_query([
+					'timeMin' => $sStart, 'timeMax' => $sEnd,
+					'singleEvents' => 'true', 'orderBy' => 'startTime', 'maxResults' => 250
+				]);
+				foreach ($aCalIds as $sCalId) {
+					$sUrl = 'https://www.googleapis.com/calendar/v3/calendars/' . \rawurlencode($sCalId) . '/events?' . $sQuery;
+					$r = $this->http('GET', $sUrl, $sToken);
+					if (200 != $r['code']) {
+						$err = $r['result']['error']['message'] ?? 'HTTP ' . $r['code'];
+						throw new \RuntimeException('Google Calendar API (' . $sCalId . '): ' . $err . ' — make sure the Google Calendar API is enabled in your Google Cloud project and the token has the calendar scope (re-authorize if needed).');
+					}
+					foreach (($r['result']['items'] ?? []) as $e) {
+						$aEvents[] = [
+							'id'          => $sCalId . ':' . ($e['id'] ?? ''),
+							'_raw_id'     => (string) ($e['id'] ?? ''),
+							'_calendar'   => $sCalId,
+							'title'       => (string) ($e['summary'] ?? '(no title)'),
+							'start'       => (string) ($e['start']['dateTime'] ?? $e['start']['date'] ?? ''),
+							'end'         => (string) ($e['end']['dateTime']   ?? $e['end']['date']   ?? ''),
+							'allDay'      => isset($e['start']['date']) && !isset($e['start']['dateTime']),
+							'description' => (string) ($e['description'] ?? ''),
+							'location'    => (string) ($e['location'] ?? ''),
+							'provider'    => 'gmail',
+						];
+					}
 				}
 			} elseif ('o365' === $sProv) {
 				$sToken = $this->o365GraphToken($aAuth);
-				$sUrl = 'https://graph.microsoft.com/v1.0/me/calendarview?'
-					. \http_build_query([
-						'startDateTime' => $sStart,
-						'endDateTime' => $sEnd,
-						'$top' => 250,
-						'$orderby' => 'start/dateTime'
-					]);
-				$r = $this->http('GET', $sUrl, $sToken);
-				if (200 != $r['code']) throw new \RuntimeException('Graph calendarview: HTTP ' . $r['code']);
-				foreach (($r['result']['value'] ?? []) as $e) {
-					$aEvents[] = [
-						'id' => (string) ($e['id'] ?? ''),
-						'title' => (string) ($e['subject'] ?? '(no title)'),
-						'start' => (string) ($e['start']['dateTime'] ?? ''),
-						'end'   => (string) ($e['end']['dateTime']   ?? ''),
-						'allDay' => (bool) ($e['isAllDay'] ?? false),
-						'description' => (string) (\strip_tags((string) ($e['bodyPreview'] ?? ''))),
-						'location' => (string) ($e['location']['displayName'] ?? ''),
-						'provider' => 'o365'
-					];
+				if (\count($aCalIds) === 1 && 'primary' === $aCalIds[0]) {
+					// default: use /me/calendarview
+					$sUrl = 'https://graph.microsoft.com/v1.0/me/calendarview?'
+						. \http_build_query(['startDateTime' => $sStart, 'endDateTime' => $sEnd, '$top' => 250, '$orderby' => 'start/dateTime']);
+					$r = $this->http('GET', $sUrl, $sToken);
+					if (200 != $r['code']) throw new \RuntimeException('Graph calendarview: HTTP ' . $r['code']);
+					foreach (($r['result']['value'] ?? []) as $e) {
+						$aEvents[] = $this->graphEventToArray($e, 'primary');
+					}
+				} else {
+					foreach ($aCalIds as $sCalId) {
+						$sUrl = 'https://graph.microsoft.com/v1.0/me/calendars/' . \rawurlencode($sCalId) . '/calendarview?'
+							. \http_build_query(['startDateTime' => $sStart, 'endDateTime' => $sEnd, '$top' => 250]);
+						$r = $this->http('GET', $sUrl, $sToken);
+						if (200 != $r['code']) throw new \RuntimeException('Graph calendarview (' . $sCalId . '): HTTP ' . $r['code']);
+						foreach (($r['result']['value'] ?? []) as $e) {
+							$aEvents[] = $this->graphEventToArray($e, $sCalId);
+						}
+					}
 				}
 			} else {
 				throw new \RuntimeException('Calendar requires a Gmail or Office 365 account');
 			}
+			// Sort merged events from multiple calendars by start time
+			\usort($aEvents, fn($a, $b) => strcmp($a['start'], $b['start']));
 			return $this->jsonResponse(__FUNCTION__, ['events' => $aEvents, 'provider' => $sProv]);
 		} catch (\Throwable $e) {
 			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
 			return $this->jsonResponse(__FUNCTION__, ['error' => $e->getMessage()]);
 		}
+	}
+
+	private function graphEventToArray(array $e, string $calId) : array
+	{
+		return [
+			'id'          => $calId . ':' . ($e['id'] ?? ''),
+			'_raw_id'     => (string) ($e['id'] ?? ''),
+			'_calendar'   => $calId,
+			'title'       => (string) ($e['subject'] ?? '(no title)'),
+			'start'       => (string) ($e['start']['dateTime'] ?? ''),
+			'end'         => (string) ($e['end']['dateTime']   ?? ''),
+			'allDay'      => (bool) ($e['isAllDay'] ?? false),
+			'description' => (string) (\strip_tags((string) ($e['bodyPreview'] ?? ''))),
+			'location'    => (string) ($e['location']['displayName'] ?? ''),
+			'provider'    => 'o365',
+		];
 	}
 
 	public function JsonCalendarSave() : array
@@ -228,6 +304,15 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$bAll   = (bool)   ($this->jsonParam('allDay') ?: false);
 			if ('' === $sTitle || '' === $sStart || '' === $sEnd) throw new \RuntimeException('title/start/end required');
 
+			// id format from JsonCalendarEvents: "calendarId:eventId" — split it
+			$sRawId  = (string) ($this->jsonParam('_raw_id') ?: $sId);
+			$sCalId  = (string) ($this->jsonParam('_calendar') ?: 'primary');
+			// Legacy: if _raw_id not sent, fall back to splitting composite id
+			if ('' === $sRawId && \str_contains($sId, ':')) {
+				[$sCalId, $sRawId] = \explode(':', $sId, 2);
+			}
+			if ('' === $sRawId) $sRawId = $sId;
+
 			$sProv = $this->detectProvider($oAccount->Email());
 			if ('gmail' === $sProv) {
 				$sToken = $this->gmailToken($aAuth);
@@ -239,9 +324,9 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 					$body['start'] = ['dateTime' => $sStart];
 					$body['end']   = ['dateTime' => $sEnd];
 				}
-				$base = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
-				$r = $sId
-					? $this->http('PATCH', $base . '/' . \urlencode($sId), $sToken, $body)
+				$base = 'https://www.googleapis.com/calendar/v3/calendars/' . \rawurlencode($sCalId) . '/events';
+				$r = $sRawId
+					? $this->http('PATCH', $base . '/' . \urlencode($sRawId), $sToken, $body)
 					: $this->http('POST',  $base, $sToken, $body);
 			} elseif ('o365' === $sProv) {
 				$sToken = $this->o365GraphToken($aAuth);
@@ -277,14 +362,21 @@ class CalendarPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$oAccount = $this->currentAccount();
 			if (!$oAccount) throw new \RuntimeException('not authenticated');
 			$aAuth = $this->loadAuth($oAccount);
-			$sId = (string) $this->jsonParam('id');
-			if ('' === $sId) throw new \RuntimeException('id required');
+			$sId    = (string) $this->jsonParam('id');
+			$sRawId = (string) ($this->jsonParam('_raw_id') ?: '');
+			$sCalId = (string) ($this->jsonParam('_calendar') ?: 'primary');
+			if ('' === $sRawId && \str_contains($sId, ':')) {
+				[$sCalId, $sRawId] = \explode(':', $sId, 2);
+			}
+			if ('' === $sRawId) $sRawId = $sId;
+			if ('' === $sRawId) throw new \RuntimeException('id required');
 			$sProv = $this->detectProvider($oAccount->Email());
 			if ('gmail' === $sProv) {
-				$r = $this->http('DELETE', 'https://www.googleapis.com/calendar/v3/calendars/primary/events/' . \urlencode($sId),
+				$r = $this->http('DELETE',
+					'https://www.googleapis.com/calendar/v3/calendars/' . \rawurlencode($sCalId) . '/events/' . \urlencode($sRawId),
 					$this->gmailToken($aAuth));
 			} elseif ('o365' === $sProv) {
-				$r = $this->http('DELETE', 'https://graph.microsoft.com/v1.0/me/events/' . \urlencode($sId),
+				$r = $this->http('DELETE', 'https://graph.microsoft.com/v1.0/me/events/' . \urlencode($sRawId),
 					$this->o365GraphToken($aAuth));
 			} else {
 				throw new \RuntimeException('Calendar requires a Gmail or Office 365 account');
