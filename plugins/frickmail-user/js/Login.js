@@ -152,8 +152,9 @@
 			${type === 'imap'
 				? `<label for="fm-rf-password">IMAP password</label><input id="fm-rf-password" data-rf="password" type="password" autocomplete="new-password" />`
 				: `<p>Click below to re-link via OAuth (${type === 'gmail' ? 'Google' : 'Microsoft'}).</p>`}
-			<div style="margin-top:1em;display:flex;gap:.6em">
+			<div style="margin-top:1em;display:flex;gap:.6em;flex-wrap:wrap">
 				<button class="btn" type="button" data-rf="save" style="background:#4a90e2;color:white">Save and open mailbox</button>
+				${type !== 'imap' ? '<button class="btn" type="button" data-rf="relink" style="background:transparent;border:1px solid #4a90e2;color:#4a90e2">Re-link OAuth (renew)</button>' : ''}
 			</div>
 			<div class="status" data-fm="status"></div>`;
 		wrap.querySelector('form').replaceWith(setup);
@@ -166,19 +167,7 @@
 			});
 		};
 
-		setup.querySelector('[data-rf="save"]').onclick = () => {
-			if ('imap' === type) {
-				const pwd = setup.querySelector('[data-rf="password"]').value;
-				if (!pwd) { setStatus('Password required', 'error'); return; }
-				setStatus('Saving…', 'ok');
-				callPlugin('FrickmailSetAccountPassword', { id: accountId, password: pwd }, (iErr, oData) => {
-					const r = oData?.Result;
-					if (!r?.ok) { setStatus('Save failed: ' + (r?.error || 'unknown'), 'error'); return; }
-					switchToPrimary();
-				});
-				return;
-			}
-			// OAuth — open popup, on success the bridge will pick up the new refresh_token
+		const openOAuthPopup = () => {
 			const path = type === 'gmail' ? 'StartLoginGMail' : 'StartLoginO365';
 			const base = document.location.href.replace(/[#?].*$/, '').replace(/\/+$/, '');
 			const w = 520, h = 640,
@@ -198,6 +187,32 @@
 			};
 			addEventListener('message', onMsg);
 		};
+
+		setup.querySelector('[data-rf="save"]').onclick = () => {
+			if ('imap' === type) {
+				const pwd = setup.querySelector('[data-rf="password"]').value;
+				if (!pwd) { setStatus('Password required', 'error'); return; }
+				setStatus('Saving…', 'ok');
+				callPlugin('FrickmailSetAccountPassword', { id: accountId, password: pwd }, (iErr, oData) => {
+					const r = oData?.Result;
+					if (!r?.ok) { setStatus('Save failed: ' + (r?.error || 'unknown'), 'error'); return; }
+					switchToPrimary();
+				});
+				return;
+			}
+			// OAuth — try the saved token in DB first (no popup needed if still valid).
+			setStatus('Trying saved credentials…', 'ok');
+			callPlugin('FrickmailSwitchAccount', { id: accountId }, (iErr, oData) => {
+				const r = oData?.Result;
+				if (r?.ok) { setTimeout(() => document.location.reload(), 400); return; }
+				// Saved token missing or expired → fall back to OAuth popup.
+				setStatus('Saved token invalid (' + (r?.error || 'unknown') + '). Re-linking…', 'ok');
+				setTimeout(openOAuthPopup, 600);
+			});
+		};
+
+		// Explicit "Re-link OAuth" button forces the popup regardless of DB state.
+		setup.querySelector('[data-rf="relink"]')?.addEventListener('click', openOAuthPopup);
 	};
 
 	const showFirstAccountForm = (wrap) => {
