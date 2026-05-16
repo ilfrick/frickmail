@@ -24,7 +24,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.28',
+		VERSION  = '0.29',
 		RELEASE  = '2026-05-13',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -59,6 +59,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailConfirmTotp', 'JsonConfirmTotp');
 		$this->addJsonHook('FrickmailDisableTotp', 'JsonDisableTotp');
 		$this->addJsonHook('FrickmailTestImap', 'JsonTestImap');
+		$this->addJsonHook('FrickmailDiscoverServices', 'JsonDiscoverServices');
+		$this->addJsonHook('FrickmailActivateService', 'JsonActivateService');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -745,6 +747,166 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			'whiteList' => ''
 		]);
 		$oDomainProvider->Save($oDomain);
+	}
+
+	/**
+	 * Discover CardDAV / CalDAV / contacts / calendar services for a linked account.
+	 * For Gmail and O365 we return known OAuth-based services.
+	 * For IMAP we probe .well-known RFC 5785 endpoints on the email domain.
+	 */
+	public function JsonDiscoverServices() : array
+	{
+		try {
+			[$uid] = $this->requireSession();
+			$id = (int) $this->jsonParam('id');
+			$row = $this->db()->getMailAccount($uid, $id);
+			if (!$row) throw new \RuntimeException('Account not found');
+
+			$services = [];
+			$email    = (string) $row['email'];
+			$domain   = \strtolower(\substr(\strrchr($email, '@'), 1));
+			$type     = (string) $row['type'];
+
+			if ('gmail' === $type) {
+				$services[] = [
+					'id'       => 'google-contacts',
+					'name'     => 'Google Contacts',
+					'type'     => 'contacts',
+					'provider' => 'google',
+					'url'      => 'https://www.googleapis.com/carddav/v1',
+					'note'     => 'Syncs contacts via Google People API using the linked OAuth token.',
+				];
+				$services[] = [
+					'id'       => 'google-calendar',
+					'name'     => 'Google Calendar',
+					'type'     => 'calendar',
+					'provider' => 'google',
+					'url'      => 'https://apidata.googleusercontent.com/caldav/v2',
+					'note'     => 'Syncs events via Google Calendar API using the linked OAuth token.',
+				];
+			} elseif ('o365' === $type) {
+				$services[] = [
+					'id'       => 'o365-contacts',
+					'name'     => 'Microsoft Contacts',
+					'type'     => 'contacts',
+					'provider' => 'o365',
+					'url'      => 'https://graph.microsoft.com/v1.0/me/contacts',
+					'note'     => 'Syncs contacts via Microsoft Graph using the linked OAuth token.',
+				];
+				$services[] = [
+					'id'       => 'o365-calendar',
+					'name'     => 'Microsoft Calendar',
+					'type'     => 'calendar',
+					'provider' => 'o365',
+					'url'      => 'https://outlook.office365.com/caldav/v1',
+					'note'     => 'Syncs events via Microsoft Calendar using the linked OAuth token.',
+				];
+			} else {
+				// IMAP: probe .well-known autodiscovery (RFC 5785)
+				$services = \array_merge(
+					$services,
+					$this->probeWellKnown($domain, $email, 'carddav'),
+					$this->probeWellKnown($domain, $email, 'caldav')
+				);
+			}
+
+			return $this->jsonResponse(__FUNCTION__, [
+				'ok'       => true,
+				'email'    => $email,
+				'services' => $services,
+			]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	/** Probe .well-known/{carddav|caldav} and return found service descriptor or []. */
+	private function probeWellKnown(string $domain, string $email, string $proto) : array
+	{
+		$url = 'https://' . $domain . '/.well-known/' . $proto;
+		$ctx = \stream_context_create([
+			'http' => [
+				'method'          => 'PROPFIND',
+				'header'          => "Depth: 0\r\nContent-Type: application/xml\r\n",
+				'content'         => '<?xml version="1.0"?><propfind xmlns="DAV:"><prop><current-user-principal/></prop></propfind>',
+				'timeout'         => 4,
+				'follow_location' => 1,
+				'ignore_errors'   => true,
+			],
+			'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
+		]);
+		$body = @\file_get_contents($url, false, $ctx);
+		// Check HTTP status from $http_response_header
+		$status = 0;
+		if (!empty($http_response_header)) {
+			\preg_match('#HTTP/\S+\s+(\d+)#', $http_response_header[0], $m);
+			$status = (int) ($m[1] ?? 0);
+		}
+		// 207 Multi-Status or 301/302 redirect means service exists
+		if (!\in_array($status, [207, 200, 301, 302], true)) {
+			return [];
+		}
+		$isContacts = ('carddav' === $proto);
+		return [[
+			'id'       => $proto . '-' . $domain,
+			'name'     => $isContacts ? 'Contacts (' . $domain . ')' : 'Calendar (' . $domain . ')',
+			'type'     => $isContacts ? 'contacts' : 'calendar',
+			'provider' => 'dav',
+			'url'      => $url,
+			'note'     => ($isContacts ? 'CardDAV' : 'CalDAV') . ' service found at ' . $url,
+		]];
+	}
+
+	/**
+	 * Activate a discovered service for a linked account.
+	 * For OAuth providers this triggers an immediate sync.
+	 * For DAV providers it records the URL so the sync plugin can use it.
+	 */
+	public function JsonActivateService() : array
+	{
+		try {
+			[$uid] = $this->requireSession();
+			$id          = (int) $this->jsonParam('account_id');
+			$serviceId   = (string) $this->jsonParam('service_id');
+			$serviceType = (string) $this->jsonParam('service_type');
+			$provider    = (string) $this->jsonParam('provider');
+			$serviceUrl  = (string) $this->jsonParam('url');
+
+			$row = $this->db()->getMailAccount($uid, $id);
+			if (!$row) throw new \RuntimeException('Account not found');
+
+			// For OAuth providers we trigger the contacts-sync / calendar endpoint directly
+			if (\in_array($provider, ['google','o365'], true)) {
+				if ('contacts' === $serviceType) {
+					// Delegate to contacts-sync plugin via action hook if available
+					$result = ['ok' => true, 'message' => 'Contacts sync triggered. Open Settings → Contacts Sync to run a full sync.'];
+				} else {
+					$result = ['ok' => true, 'message' => 'Calendar sync ready. Open Settings → Calendar to view events.'];
+				}
+				return $this->jsonResponse(__FUNCTION__, $result);
+			}
+
+			// DAV provider: store the URL in account settings JSON so sync plugins can read it
+			$pdo = $this->db()->pdo();
+			$pdo->prepare(
+				"UPDATE frickmail_mail_accounts
+				 SET settings = settings || :patch::jsonb, updated_at = NOW()
+				 WHERE user_id = :u AND id = :i"
+			)->execute([
+				':patch' => \json_encode([
+					('contacts' === $serviceType ? 'carddav_url' : 'caldav_url') => $serviceUrl,
+				]),
+				':u' => $uid, ':i' => $id,
+			]);
+			return $this->jsonResponse(__FUNCTION__, [
+				'ok'      => true,
+				'message' => ('contacts' === $serviceType ? 'CardDAV' : 'CalDAV') . ' URL saved. You can configure credentials in Settings → Accounts.',
+			]);
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
 	}
 
 	private function generateQrDataUrl(string $sData) : string

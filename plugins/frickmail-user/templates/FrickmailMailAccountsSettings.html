@@ -11,9 +11,10 @@
 					<span data-bind="visible: is_primary" style="margin-left:.4em; padding:1px 6px; background:#4a90e2; color:white; border-radius:3px; font-size:80%">primary</span>
 					<div style="font-size:85%; color:#888" data-bind="text: type.toUpperCase() + (imap_host ? ' · ' + imap_host + ':' + imap_port : '')"></div>
 				</div>
-				<button class="btn" data-bind="click: $parent.switchTo.bind($parent)">Open mailbox</button>
-				<button class="btn" data-bind="click: $parent.setPrimary.bind($parent), visible: !is_primary">Set primary</button>
-				<button class="btn" data-bind="click: $parent.deleteAccount.bind($parent)" style="background:#c33; color:white">Delete</button>
+				<button class="btn" data-bind="click: $parent.switchTo.bind($parent)" title="Open this mailbox">Open</button>
+				<button class="btn" data-bind="click: $parent.discoverServices.bind($parent, id), attr:{title: 'Find contacts & calendar for ' + email}" style="font-size:90%">🔍 Services</button>
+				<button class="btn" data-bind="click: $parent.setPrimary.bind($parent), visible: !is_primary">Primary</button>
+				<button class="btn" data-bind="click: $parent.deleteAccount.bind($parent)" style="background:#c33; color:white" title="Remove account">✕</button>
 			</div>
 		</div>
 

@@ -125,9 +125,27 @@
 				const r = oData?.Result;
 				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
 				if (!r?.ok) { this.status('Save failed: ' + (r?.error || 'request error')); return; }
+				const newId = r.id;
 				this.cancelAdd();
 				this.refresh();
+				// Auto-discover services for the new account
+				if (newId) this.discoverServices(newId);
 			}, 'FrickmailAddAccount', payload, 30000);
+		}
+
+		discoverServices(accountId) {
+			// Can be called with an account object (from existing accounts button) or an id
+			const id = (typeof accountId === 'object') ? accountId.id : accountId;
+			this.status('Ricerca servizi…');
+			window.rl.pluginRemoteRequest((iError, oData) => {
+				const r = oData?.Result;
+				this.status('');
+				if (!r?.ok || !r.services?.length) {
+					if (r?.ok) this.status('Nessun servizio aggiuntivo trovato per questo account.');
+					return;
+				}
+				showServiceDiscoveryDialog(r.email, r.services, id);
+			}, 'FrickmailDiscoverServices', { id }, 10000);
 		}
 
 		deleteAccount(account) {
@@ -189,5 +207,82 @@
 
 	rl.addSettingsViewModel(FrickmailMailAccountsSettings, 'FrickmailMailAccountsSettings',
 		'Mail Accounts', 'mail-accounts');
+
+	// ── Service discovery dialog ─────────────────────────────────
+
+	function showServiceDiscoveryDialog(email, services, accountId) {
+		// Remove any existing dialog
+		document.getElementById('fm-svc-dialog')?.remove();
+
+		const ICONS = { contacts: '👤', calendar: '📅' };
+		const PROVIDERS = { google: 'Google', o365: 'Microsoft', dav: 'DAV' };
+
+		const overlay = document.createElement('div');
+		overlay.id = 'fm-svc-dialog';
+		overlay.style.cssText = 'position:fixed;inset:0;background:var(--fm-bg-overlay,rgba(0,0,0,.55));z-index:9999;display:flex;align-items:center;justify-content:center';
+
+		const box = document.createElement('div');
+		box.style.cssText = 'background:var(--fm-bg-elevated,#252641);border:1px solid var(--fm-border-strong,rgba(255,255,255,.18));border-radius:14px;padding:28px 32px;max-width:480px;width:calc(100% - 40px);box-shadow:var(--fm-shadow-lg,0 8px 32px rgba(0,0,0,.6));color:var(--fm-text-primary,#e2e4f0)';
+
+		const rows = services.map((s, i) => `
+			<label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--fm-border,rgba(255,255,255,.09));margin-bottom:8px;cursor:pointer">
+				<input type="checkbox" id="fm-svc-${i}" value="${i}" checked
+					style="margin-top:3px;accent-color:var(--fm-accent,#7aa2f7);width:16px;height:16px;flex-shrink:0">
+				<div>
+					<strong>${ICONS[s.type] || '🔗'} ${escHtml(s.name)}</strong>
+					<span style="font-size:12px;color:var(--fm-text-muted,#6b6f8a);margin-left:6px">${PROVIDERS[s.provider] || s.provider}</span>
+					<div style="font-size:12px;color:var(--fm-text-secondary,#9fa3bf);margin-top:3px">${escHtml(s.note)}</div>
+				</div>
+			</label>`).join('');
+
+		box.innerHTML = `
+			<h3 style="margin:0 0 6px;font-size:18px;font-weight:500">Servizi trovati</h3>
+			<p style="color:var(--fm-text-secondary,#9fa3bf);font-size:13px;margin:0 0 16px">Per l'account <strong>${escHtml(email)}</strong> sono disponibili i seguenti servizi. Seleziona quelli da attivare:</p>
+			${rows}
+			<div style="display:flex;gap:8px;margin-top:18px;justify-content:flex-end">
+				<button id="fm-svc-cancel" class="btn" style="background:transparent;border:1px solid var(--fm-border-strong)">Non ora</button>
+				<button id="fm-svc-confirm" class="btn" style="background:var(--fm-accent,#7aa2f7);color:#0f0f1a;border:none;font-weight:600">Attiva selezionati</button>
+			</div>
+			<div id="fm-svc-status" style="margin-top:10px;font-size:13px;color:var(--fm-text-secondary)"></div>`;
+
+		overlay.appendChild(box);
+		document.body.appendChild(overlay);
+
+		overlay.querySelector('#fm-svc-cancel').onclick = () => overlay.remove();
+		overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+		overlay.querySelector('#fm-svc-confirm').onclick = () => {
+			const checked = services.filter((_, i) => overlay.querySelector(`#fm-svc-${i}`)?.checked);
+			if (!checked.length) { overlay.remove(); return; }
+
+			const statusEl = overlay.querySelector('#fm-svc-status');
+			statusEl.textContent = 'Attivazione in corso…';
+
+			let pending = checked.length;
+			const messages = [];
+
+			checked.forEach(s => {
+				window.rl.pluginRemoteRequest((iErr, oData) => {
+					const r = oData?.Result;
+					messages.push(r?.message || (r?.ok ? 'OK' : (r?.error || 'Errore')));
+					pending--;
+					if (pending === 0) {
+						statusEl.textContent = messages.join(' · ');
+						setTimeout(() => overlay.remove(), 2500);
+					}
+				}, 'FrickmailActivateService', {
+					account_id:   accountId,
+					service_id:   s.id,
+					service_type: s.type,
+					provider:     s.provider,
+					url:          s.url,
+				}, 15000);
+			});
+		};
+	}
+
+	function escHtml(s) {
+		return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+	}
 
 })(window.rl);
