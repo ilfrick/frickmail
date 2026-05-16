@@ -25,7 +25,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.33',
+		VERSION  = '0.34',
 		RELEASE  = '2026-05-16',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -719,14 +719,27 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$domain   = \strtolower(\substr(\strrchr($email, '@'), 1));
 			$type     = (string) $row['type'];
 
-			if ('gmail' === $type) {
+			// Detect Google and Microsoft by domain regardless of account type (imap
+			// accounts added with app-passwords have type='imap', not 'gmail'/'o365').
+			$bGoogle    = 'gmail' === $type
+				|| \in_array($domain, ['gmail.com', 'googlemail.com'], true)
+				|| \str_ends_with($domain, '.google.com');
+			$bMicrosoft = 'o365' === $type
+				|| \in_array($domain, ['outlook.com', 'hotmail.com', 'live.com', 'msn.com'], true);
+
+			if ($bGoogle) {
+				$bHasOAuth = ('gmail' === $type);
+				$sNote = $bHasOAuth
+					? 'Syncs via Google API using the linked OAuth token.'
+					: 'Requires Google OAuth2 — app passwords are not supported by Google for contacts/calendar sync. Re-add this account via "Sign in with Google" to enable sync.';
 				$services[] = [
 					'id'       => 'google-contacts',
 					'name'     => 'Google Contacts',
 					'type'     => 'contacts',
 					'provider' => 'google',
 					'url'      => 'https://www.googleapis.com/carddav/v1',
-					'note'     => 'Syncs contacts via Google People API using the linked OAuth token.',
+					'note'     => $sNote,
+					'needs_oauth' => !$bHasOAuth,
 				];
 				$services[] = [
 					'id'       => 'google-calendar',
@@ -734,16 +747,22 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 					'type'     => 'calendar',
 					'provider' => 'google',
 					'url'      => 'https://apidata.googleusercontent.com/caldav/v2',
-					'note'     => 'Syncs events via Google Calendar API using the linked OAuth token.',
+					'note'     => $sNote,
+					'needs_oauth' => !$bHasOAuth,
 				];
-			} elseif ('o365' === $type) {
+			} elseif ($bMicrosoft) {
+				$bHasOAuth = ('o365' === $type);
+				$sNote = $bHasOAuth
+					? 'Syncs via Microsoft Graph using the linked OAuth token.'
+					: 'Requires Microsoft OAuth2 — re-add this account via "Sign in with Microsoft" to enable sync.';
 				$services[] = [
 					'id'       => 'o365-contacts',
 					'name'     => 'Microsoft Contacts',
 					'type'     => 'contacts',
 					'provider' => 'o365',
 					'url'      => 'https://graph.microsoft.com/v1.0/me/contacts',
-					'note'     => 'Syncs contacts via Microsoft Graph using the linked OAuth token.',
+					'note'     => $sNote,
+					'needs_oauth' => !$bHasOAuth,
 				];
 				$services[] = [
 					'id'       => 'o365-calendar',
@@ -751,10 +770,11 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 					'type'     => 'calendar',
 					'provider' => 'o365',
 					'url'      => 'https://outlook.office365.com/caldav/v1',
-					'note'     => 'Syncs events via Microsoft Calendar using the linked OAuth token.',
+					'note'     => $sNote,
+					'needs_oauth' => !$bHasOAuth,
 				];
 			} else {
-				// IMAP: probe .well-known autodiscovery (RFC 5785)
+				// Generic IMAP: probe .well-known autodiscovery (RFC 5785)
 				$services = \array_merge(
 					$services,
 					$this->probeWellKnown($domain, $email, 'carddav'),

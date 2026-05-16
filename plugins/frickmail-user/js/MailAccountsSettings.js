@@ -224,16 +224,23 @@
 		const box = document.createElement('div');
 		box.style.cssText = 'background:var(--fm-bg-elevated,#252641);border:1px solid var(--fm-border-strong,rgba(255,255,255,.18));border-radius:14px;padding:28px 32px;max-width:480px;width:calc(100% - 40px);box-shadow:var(--fm-shadow-lg,0 8px 32px rgba(0,0,0,.6));color:var(--fm-text-primary,#e2e4f0)';
 
-		const rows = services.map((s, i) => `
-			<label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--fm-border,rgba(255,255,255,.09));margin-bottom:8px;cursor:pointer">
-				<input type="checkbox" id="fm-svc-${i}" value="${i}" checked
+		const rows = services.map((s, i) => {
+			const needsOAuth = !!s.needs_oauth;
+			const badge = needsOAuth
+				? `<span style="font-size:11px;font-weight:600;background:rgba(255,160,50,.18);color:#ffb347;border-radius:4px;padding:1px 6px;margin-left:6px">Richiede OAuth2</span>`
+				: '';
+			return `
+			<label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--fm-border,rgba(255,255,255,.09));margin-bottom:8px;cursor:${needsOAuth ? 'default' : 'pointer'};opacity:${needsOAuth ? '.65' : '1'}">
+				<input type="checkbox" id="fm-svc-${i}" value="${i}" ${needsOAuth ? '' : 'checked'}
+					${needsOAuth ? 'disabled' : ''}
 					style="margin-top:3px;accent-color:var(--fm-accent,#7aa2f7);width:16px;height:16px;flex-shrink:0">
 				<div>
 					<strong>${ICONS[s.type] || '🔗'} ${escHtml(s.name)}</strong>
-					<span style="font-size:12px;color:var(--fm-text-muted,#6b6f8a);margin-left:6px">${escHtml(PROVIDERS[s.provider] || s.provider)}</span>
+					<span style="font-size:12px;color:var(--fm-text-muted,#6b6f8a);margin-left:6px">${escHtml(PROVIDERS[s.provider] || s.provider)}</span>${badge}
 					<div style="font-size:12px;color:var(--fm-text-secondary,#9fa3bf);margin-top:3px">${escHtml(s.note)}</div>
 				</div>
-			</label>`).join('');
+			</label>`;
+		}).join('');
 
 		box.innerHTML = `
 			<h3 style="margin:0 0 6px;font-size:18px;font-weight:500">Servizi trovati</h3>
