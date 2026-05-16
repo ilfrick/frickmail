@@ -64,9 +64,8 @@ if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_defaul
     if grep -q '^enable = Off' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
         sed -i '/^\[plugins\]/,/^\[/{s/^enable = Off/enable = On/}' "$SNAPPYMAIL_CONFIG_FILE"
     fi
-    if ! grep -qE '^enabled_list = .*frickmail-theme' "$SNAPPYMAIL_CONFIG_FILE" 2>/dev/null; then
-        sed -i '/^\[plugins\]/,/^\[/{s/^enabled_list = .*$/enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"/}' "$SNAPPYMAIL_CONFIG_FILE"
-    fi
+    # Always ensure the full plugin list is set (idempotent)
+    sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"|' "$SNAPPYMAIL_CONFIG_FILE"
 fi
 
 # Frickmail: provision Postgres schema for users + mail accounts (idempotent)
