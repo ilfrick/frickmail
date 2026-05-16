@@ -204,36 +204,40 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 				'expires' => $iExpires
 			];
 
-			// Frickmail mode: if a Frickmail user session exists, save the account
-			// to the DB and skip the legacy IMAP-as-identity bridge.
+			// Frickmail mode: skip the legacy LoginProcess/IMAP-identity bridge entirely.
+			// LoginProcess would throw CryptKeyError when SnappyMail finds stored credentials
+			// encrypted with a different session token. In Frickmail mode the full login
+			// is handled by FrickmailSwitchAccount after the token is persisted.
 			$sFrickmailBridge = \APP_PLUGINS_PATH . 'frickmail-user/lib/Bridge.php';
 			$sPendingRefreshToken = null;
 			if (\is_file($sFrickmailBridge)) {
 				require_once $sFrickmailBridge;
 				if (\Frickmail\User\Bridge::currentUserId()) {
+					// Session available: save token to DB directly and we're done.
 					\Frickmail\User\Bridge::upsertOAuthAccount('gmail', (string) $aUserInfo['email'], (string) $aResponse['refresh_token']);
 					$bPopupOk = true;
 					$sPopupEmail = (string) $aUserInfo['email'];
 					$this->renderPopupCallback($bPopupOk, $sPopupEmail, '', $uri);
 					exit;
 				}
-				// Frickmail bridge exists but no server-side session in this popup request.
-				// Pass the refresh_token back to the opener (same-origin postMessage) so the
-				// opener — which has an active Frickmail session — can persist it via
-				// FrickmailSaveOAuthToken. This avoids relying on session cookie availability
-				// in the OAuth redirect callback window.
+				// No session in popup callback — pass token to opener via postMessage.
+				// The opener has the live Frickmail session and will call FrickmailSaveOAuthToken
+				// then FrickmailSwitchAccount to complete the login.
 				$sPendingRefreshToken = (string) $aResponse['refresh_token'];
+				$bPopupOk = true;
+				$sPopupEmail = (string) $aUserInfo['email'];
+			} else {
+				// Non-Frickmail mode: legacy IMAP-as-identity login.
+				$oPassword = new \SnappyMail\SensitiveString($aUserInfo['id']);
+				$oAccount = $oActions->LoginProcess($aUserInfo['email'], $oPassword);
+				if ($oAccount) {
+					$oActions->StorageProvider()->Put($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken(),
+						\SnappyMail\Crypt::EncryptToJSON(static::$auth, $oAccount->CryptKey())
+					);
+				}
+				$bPopupOk = true;
+				$sPopupEmail = (string) $aUserInfo['email'];
 			}
-
-			$oPassword = new \SnappyMail\SensitiveString($aUserInfo['id']);
-			$oAccount = $oActions->LoginProcess($aUserInfo['email'], $oPassword);
-			if ($oAccount) {
-				$oActions->StorageProvider()->Put($oAccount, StorageType::SESSION, \RainLoop\Utils::GetSessionToken(),
-					\SnappyMail\Crypt::EncryptToJSON(static::$auth, $oAccount->CryptKey())
-				);
-			}
-			$bPopupOk = true;
-			$sPopupEmail = (string) $aUserInfo['email'];
 		}
 		catch (\Exception $oException)
 		{
