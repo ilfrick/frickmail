@@ -1,0 +1,379 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Frickmail Theme — Components
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Folder items ── */
+.e-item.e-item-link,
+.b-folders .e-item {
+	border-radius: 0 24px 24px 0 !important;
+	margin-right: 8px !important;
+	padding: 6px 12px 6px 16px !important;
+	font-size: 13px !important;
+	transition: background 0.12s, color 0.12s !important;
+}
+
+/* ── Message list ── */
+.messageList .e-item,
+.b-list-content .e-item {
+	border-bottom: 1px solid var(--fm-border) !important;
+	padding: 10px 16px !important;
+	transition: background 0.1s !important;
+	position: relative;
+}
+.messageList .e-item:hover,
+.b-list-content .e-item:hover {
+	background: var(--fm-bg-hover) !important;
+}
+.messageList .e-item.focused,
+.messageList .e-item.selected,
+.b-list-content .e-item.focused,
+.b-list-content .e-item.selected {
+	background: var(--fm-bg-selected) !important;
+}
+
+/* Unread messages — bold sender */
+.messageList .e-item.unread .sender,
+.messageList .e-item:not(.read) .msgFrom,
+.b-list-content .e-item.unread .e-from {
+	font-weight: 700 !important;
+	color: var(--fm-text-primary) !important;
+}
+
+/* Unread indicator dot */
+.messageList .e-item.unread::before,
+.b-list-content .e-item:not(.read)::before {
+	content: '';
+	position: absolute;
+	left: 4px; top: 50%; transform: translateY(-50%);
+	width: 6px; height: 6px;
+	border-radius: 50%;
+	background: var(--fm-accent);
+}
+
+/* Message sender avatar */
+.messageList .e-item .userpic,
+.b-list-content .checkboxCkl {
+	width: 36px; height: 36px;
+	border-radius: 50% !important;
+	background: var(--fm-accent-surface) !important;
+	color: var(--fm-accent) !important;
+	display: flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	font-weight: 600 !important;
+	font-size: 14px !important;
+	flex-shrink: 0 !important;
+}
+
+/* Message date */
+.messageList .e-item .date,
+.b-list-content .e-item .e-date {
+	color: var(--fm-text-muted) !important;
+	font-size: 12px !important;
+}
+
+/* Message subject */
+.b-list-content .e-item .e-subject {
+	color: var(--fm-text-primary) !important;
+	font-size: 13px !important;
+}
+
+/* Message preview text */
+.b-list-content .e-item .e-preview {
+	color: var(--fm-text-secondary) !important;
+	font-size: 12px !important;
+}
+
+/* ── Reading pane ── */
+.messageView,
+#V-MailMessageView {
+	background: var(--fm-bg-surface) !important;
+	border-radius: 8px !important;
+	margin: 8px !important;
+	box-shadow: var(--fm-shadow-sm) !important;
+}
+
+.messageView .messageItemHeader,
+.b-message-view .b-header {
+	background: var(--fm-bg-surface) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+	padding: 16px 20px !important;
+}
+
+.messageView h2,
+.b-message-view .subject {
+	font-size: 20px !important;
+	font-weight: 500 !important;
+	color: var(--fm-text-primary) !important;
+	margin-bottom: 12px !important;
+}
+
+.b-message-view .b-text {
+	padding: 16px 20px !important;
+	color: var(--fm-text-primary) !important;
+}
+
+/* ── Toolbar / top bar ── */
+#V-SystemDropDown,
+.g-ui-user-select-none {
+	background: var(--fm-bg-panel) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+	padding: 4px 8px !important;
+}
+
+/* ── Buttons ── */
+.btn {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-primary) !important;
+	border: 1px solid var(--fm-border) !important;
+	border-radius: 6px !important;
+	transition: background 0.15s, box-shadow 0.15s !important;
+	font-size: 13px !important;
+}
+.btn:hover {
+	background: var(--fm-bg-selected) !important;
+	box-shadow: var(--fm-shadow-sm) !important;
+}
+.btn.btn-primary,
+.btn-success {
+	background: var(--fm-accent) !important;
+	color: var(--fm-text-inverse) !important;
+	border-color: var(--fm-accent) !important;
+}
+.btn.btn-primary:hover,
+.btn-success:hover {
+	background: var(--fm-accent-hover) !important;
+}
+.btn.btn-danger,
+.btn-danger {
+	background: var(--fm-red) !important;
+	color: var(--fm-text-inverse) !important;
+	border-color: var(--fm-red) !important;
+}
+
+/* ── Inputs ── */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="search"],
+select,
+textarea {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-primary) !important;
+	border: 1px solid var(--fm-border-strong) !important;
+	border-radius: 6px !important;
+	padding: 8px 12px !important;
+	transition: border-color 0.2s, box-shadow 0.2s !important;
+}
+input:focus,
+select:focus,
+textarea:focus {
+	border-color: var(--fm-accent) !important;
+	box-shadow: 0 0 0 2px var(--fm-accent-surface) !important;
+	outline: none !important;
+}
+
+/* ── Dialogs / modals ── */
+.modal-content,
+.popups .dialog,
+.popups .b-wrap {
+	background: var(--fm-bg-surface) !important;
+	border: 1px solid var(--fm-border-strong) !important;
+	border-radius: 12px !important;
+	box-shadow: var(--fm-shadow-lg) !important;
+}
+.modal-header,
+.popups .b-header {
+	border-bottom: 1px solid var(--fm-border) !important;
+	padding: 16px 20px !important;
+	font-weight: 600 !important;
+}
+.modal-footer,
+.popups .b-footer {
+	border-top: 1px solid var(--fm-border) !important;
+}
+
+/* ── Dropdown menus ── */
+.dropdown-menu {
+	background: var(--fm-bg-surface) !important;
+	border: 1px solid var(--fm-border-strong) !important;
+	border-radius: 8px !important;
+	box-shadow: var(--fm-shadow-md) !important;
+	overflow: hidden !important;
+}
+.dropdown-menu li a {
+	color: var(--fm-text-primary) !important;
+	padding: 8px 16px !important;
+	font-size: 13px !important;
+	transition: background 0.1s !important;
+}
+.dropdown-menu li a:hover {
+	background: var(--fm-bg-hover) !important;
+}
+
+/* ── Badge / unread count ── */
+.unread-count,
+.badge {
+	background: var(--fm-accent) !important;
+	color: var(--fm-text-inverse) !important;
+	border-radius: 10px !important;
+	font-size: 11px !important;
+	font-weight: 600 !important;
+	padding: 2px 6px !important;
+	min-width: 18px !important;
+}
+
+/* ── Settings ── */
+.settings-menu-item,
+.settings-links a {
+	border-radius: 0 24px 24px 0 !important;
+	margin-right: 8px !important;
+	padding: 8px 16px !important;
+	font-size: 13px !important;
+	transition: background 0.12s, color 0.12s !important;
+}
+.settings-links a.selected,
+.settings-menu-item.selected {
+	font-weight: 500 !important;
+}
+
+.settings-content,
+.form-horizontal {
+	color: var(--fm-text-primary) !important;
+}
+
+.settings-content .legend,
+.form-horizontal .legend {
+	font-size: 18px !important;
+	font-weight: 500 !important;
+	color: var(--fm-text-primary) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+	padding-bottom: 12px !important;
+	margin-bottom: 16px !important;
+}
+
+/* ── Theme picker (in Settings > Appearance) ── */
+.fm-theme-picker {
+	display: flex;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin: 12px 0;
+}
+
+.fm-theme-card {
+	width: 120px;
+	border: 2px solid var(--fm-border);
+	border-radius: 10px;
+	overflow: hidden;
+	cursor: pointer;
+	transition: border-color 0.15s, box-shadow 0.15s;
+}
+.fm-theme-card:hover {
+	border-color: var(--fm-accent);
+}
+.fm-theme-card.active {
+	border-color: var(--fm-accent);
+	box-shadow: 0 0 0 3px var(--fm-accent-surface);
+}
+.fm-theme-card .fm-card-preview {
+	height: 64px;
+	display: flex;
+}
+.fm-theme-card .fm-card-preview .col1 { width: 30%; }
+.fm-theme-card .fm-card-preview .col2 { flex: 1; }
+.fm-theme-card .fm-card-label {
+	padding: 6px 8px;
+	font-size: 12px;
+	font-weight: 500;
+	text-align: center;
+	background: var(--fm-bg-surface);
+	color: var(--fm-text-primary);
+}
+
+/* Dark card preview colors */
+.fm-card-dark .col1 { background: #181825; }
+.fm-card-dark .col2 { background: #1e1e2e; }
+/* Light card preview colors */
+.fm-card-light .col1 { background: #f1f3f4; }
+.fm-card-light .col2 { background: #ffffff; }
+/* System card */
+.fm-card-system .col1 { background: linear-gradient(to bottom, #181825 50%, #f1f3f4 50%); }
+.fm-card-system .col2 { background: linear-gradient(to bottom, #1e1e2e 50%, #ffffff 50%); }
+
+/* Accent color picker */
+.fm-accent-picker {
+	display: flex;
+	gap: 8px;
+	margin: 8px 0;
+}
+.fm-accent-swatch {
+	width: 28px; height: 28px;
+	border-radius: 50%;
+	cursor: pointer;
+	border: 2px solid transparent;
+	transition: transform 0.15s, border-color 0.15s;
+}
+.fm-accent-swatch:hover { transform: scale(1.15); }
+.fm-accent-swatch.active { border-color: var(--fm-text-primary); }
+
+/* ── Compose window ── */
+.popups .compose-content,
+#V-PopupsCompose .dialog {
+	background: var(--fm-bg-surface) !important;
+	border-radius: 12px !important;
+}
+.popups .compose-header {
+	background: var(--fm-bg-hover) !important;
+	border-radius: 12px 12px 0 0 !important;
+}
+
+/* ── Contact list ── */
+.contacts-list .e-item {
+	padding: 8px 12px !important;
+	border-radius: 8px !important;
+	transition: background 0.1s !important;
+}
+.contacts-list .e-item:hover {
+	background: var(--fm-bg-hover) !important;
+}
+
+/* ── Calendar events ── */
+.frickmail-calendar-grid .day {
+	background: var(--fm-bg-surface) !important;
+	border-color: var(--fm-border) !important;
+}
+.frickmail-calendar-grid .dow {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-secondary) !important;
+	border-color: var(--fm-border) !important;
+}
+.frickmail-calendar-grid .day.today {
+	box-shadow: inset 0 0 0 2px var(--fm-accent) !important;
+}
+
+/* ── Mini-calendar in sidebar ── */
+.b-calendar,
+.mini-calendar {
+	background: var(--fm-bg-panel) !important;
+	color: var(--fm-text-primary) !important;
+	padding: 8px !important;
+}
+
+/* ── Attachments ── */
+.attachment-item,
+.attachments .e-item {
+	background: var(--fm-bg-hover) !important;
+	border: 1px solid var(--fm-border) !important;
+	border-radius: 8px !important;
+	padding: 8px 12px !important;
+}
+
+/* ── Tags / labels ── */
+.label, .label-default {
+	background: var(--fm-accent-surface) !important;
+	color: var(--fm-accent) !important;
+	border-radius: 12px !important;
+	padding: 2px 8px !important;
+	font-size: 11px !important;
+}

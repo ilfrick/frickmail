@@ -1,0 +1,224 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Frickmail Theme — Layout
+   Adds icon-nav column and adjusts 3-column layout.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Global base ── */
+* { box-sizing: border-box; }
+
+html, body, #rl-app, rl-app {
+	background: var(--fm-bg-base) !important;
+	color: var(--fm-text-primary) !important;
+}
+
+/* ── Icon navigation column (injected by ThemeSwitcher.js) ── */
+#fm-icon-nav {
+	position: fixed;
+	top: 0; left: 0; bottom: 0;
+	width: 56px;
+	background: var(--fm-bg-nav);
+	border-right: 1px solid var(--fm-border);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 8px 0;
+	z-index: 1000;
+	gap: 2px;
+}
+
+#fm-icon-nav .fm-logo {
+	width: 40px; height: 40px;
+	border-radius: 50%;
+	background: var(--fm-accent);
+	color: var(--fm-text-inverse);
+	display: flex; align-items: center; justify-content: center;
+	font-weight: 700; font-size: 18px;
+	margin-bottom: 8px;
+	cursor: default;
+	user-select: none;
+	flex-shrink: 0;
+}
+
+#fm-icon-nav .fm-nav-items {
+	display: flex; flex-direction: column;
+	align-items: center; gap: 4px;
+	flex: 1;
+}
+
+#fm-icon-nav .fm-nav-spacer {
+	flex: 1;
+}
+
+#fm-icon-nav .fm-nav-item {
+	width: 40px; height: 40px;
+	border-radius: 20px;
+	display: flex; align-items: center; justify-content: center;
+	font-size: 18px;
+	color: var(--fm-text-secondary);
+	text-decoration: none;
+	cursor: pointer;
+	transition: background 0.15s ease, color 0.15s ease;
+	position: relative;
+}
+
+#fm-icon-nav .fm-nav-item:hover {
+	background: var(--fm-bg-hover);
+	color: var(--fm-text-primary);
+}
+
+#fm-icon-nav .fm-nav-item.active {
+	background: var(--fm-accent-surface);
+	color: var(--fm-accent);
+}
+
+#fm-icon-nav .fm-nav-item[data-tooltip]::after {
+	content: attr(data-tooltip);
+	position: absolute;
+	left: calc(100% + 8px);
+	background: var(--fm-bg-surface);
+	color: var(--fm-text-primary);
+	padding: 4px 8px;
+	border-radius: 4px;
+	font-size: 12px;
+	white-space: nowrap;
+	box-shadow: var(--fm-shadow-md);
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 0.15s;
+	border: 1px solid var(--fm-border-strong);
+}
+#fm-icon-nav .fm-nav-item[data-tooltip]:hover::after {
+	opacity: 1;
+}
+
+/* ── Shift main app to make room for icon nav ── */
+#rl-app, rl-app {
+	padding-left: 56px !important;
+}
+
+/* ── Left panel ── */
+#rl-left, rl-left {
+	background: var(--fm-bg-panel) !important;
+	border-right: 1px solid var(--fm-border) !important;
+	width: 220px !important;
+	min-width: 185px !important;
+	flex-shrink: 0;
+}
+
+/* ── Toolbar (compose + icon buttons) ── */
+#rl-left .b-toolbar,
+rl-left .b-toolbar {
+	padding: 12px 8px 8px 8px !important;
+	background: var(--fm-bg-panel) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+}
+
+/* Compose button — green pill */
+rl-left .buttonCompose,
+#rl-left .buttonCompose {
+	background: var(--fm-green) !important;
+	color: var(--fm-text-inverse) !important;
+	border: none !important;
+	border-radius: 24px !important;
+	padding: 8px 16px !important;
+	font-weight: 600 !important;
+	font-size: 14px !important;
+	box-shadow: var(--fm-shadow-sm) !important;
+	transition: background 0.15s, box-shadow 0.15s !important;
+	max-width: none !important;
+	width: calc(100% - 48px) !important;
+}
+rl-left .buttonCompose:hover,
+#rl-left .buttonCompose:hover {
+	background: var(--fm-green-hover) !important;
+	box-shadow: var(--fm-shadow-md) !important;
+}
+
+/* Contacts + Calendar buttons */
+rl-left .buttonContacts,
+rl-left .buttonCalendar,
+#rl-left .buttonContacts,
+#rl-left .buttonCalendar {
+	background: transparent !important;
+	border: none !important;
+	border-radius: 20px !important;
+	width: 36px !important; height: 36px !important;
+	padding: 0 !important;
+	display: inline-flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	font-size: 17px !important;
+	color: var(--fm-text-secondary) !important;
+	transition: background 0.15s, color 0.15s !important;
+}
+rl-left .buttonContacts:hover,
+rl-left .buttonCalendar:hover,
+#rl-left .buttonContacts:hover,
+#rl-left .buttonCalendar:hover {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-primary) !important;
+}
+
+/* Folder list area */
+#rl-left .b-content,
+rl-left .b-content {
+	background: var(--fm-bg-panel) !important;
+	padding: 8px 0 !important;
+}
+
+/* Footer toolbar */
+#rl-left .b-footer,
+rl-left .b-footer {
+	background: var(--fm-bg-panel) !important;
+	border-top: 1px solid var(--fm-border) !important;
+}
+
+/* ── Right panel ── */
+#rl-right, rl-right {
+	background: var(--fm-bg-base) !important;
+	flex: 1 !important;
+}
+
+/* Top bar */
+.g-ui-user-select-none,
+.btn-toolbar {
+	background: var(--fm-bg-panel) !important;
+}
+
+/* ── Search bar ── */
+.search-input-wrp {
+	background: var(--fm-bg-hover) !important;
+	border-radius: 24px !important;
+	border: 1px solid transparent !important;
+	transition: border-color 0.2s, background 0.2s !important;
+}
+.search-input-wrp:focus-within {
+	background: var(--fm-bg-surface) !important;
+	border-color: var(--fm-accent) !important;
+}
+.search-input-wrp input {
+	background: transparent !important;
+	color: var(--fm-text-primary) !important;
+	border: none !important;
+}
+
+/* ── Scrollbars ── */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--fm-scroll-thumb) var(--fm-scroll-track);
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: var(--fm-scroll-track); }
+*::-webkit-scrollbar-thumb { background: var(--fm-scroll-thumb); border-radius: 3px; }
+
+/* ── Settings layout ── */
+#V-SettingsPane,
+.settingsPane {
+	background: var(--fm-bg-base) !important;
+}
+
+#V-SettingsMenu,
+.settingsMenu {
+	background: var(--fm-bg-panel) !important;
+	border-right: 1px solid var(--fm-border) !important;
+}
