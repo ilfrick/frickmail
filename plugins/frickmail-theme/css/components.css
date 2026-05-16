@@ -34,42 +34,75 @@
 	border-color: var(--fm-border) !important;
 }
 
-/* Toolbar above message list (sort/filter bar) */
+/* ── Toolbar above message list — use --fm-bg-selected (same blue as selected items) ── */
 .b-list-toolbar {
-	background: var(--fm-bg-panel) !important;
-	border-bottom: 1px solid var(--fm-border) !important;
+	background: var(--fm-bg-selected) !important;
+	border-bottom: 1px solid var(--fm-border-strong) !important;
 	color: var(--fm-text-primary) !important;
 }
-/* All buttons/links/inputs inside the toolbar */
-.b-list-toolbar .btn,
-.b-list-toolbar a,
-.b-list-toolbar button {
-	background: transparent !important;
-	color: var(--fm-text-primary) !important;
-	border-color: var(--fm-border-strong) !important;
-}
-.b-list-toolbar .btn:hover,
-.b-list-toolbar a:hover {
-	background: var(--fm-bg-hover) !important;
-}
-.b-list-toolbar select {
-	background: var(--fm-bg-input) !important;
-	color: var(--fm-text-primary) !important;
-	border-color: var(--fm-border-strong) !important;
-}
-/* Sort/filter dropdown toggle button */
-.b-list-toolbar .dropdown-toggle,
-.b-list-toolbar [data-icon],
-.b-list-toolbar .e-sort {
-	background: var(--fm-bg-hover) !important;
-	color: var(--fm-text-primary) !important;
-	border: 1px solid var(--fm-border-strong) !important;
-	border-radius: 6px !important;
-}
-/* Search wrapper inside toolbar */
+/* Search input wrapper: slightly transparent so the blue shows through */
 .b-list-toolbar search-input-wrp,
 .b-list-toolbar .search-input-wrp {
-	background: var(--fm-bg-hover) !important;
+	background: rgba(255,255,255,.08) !important;
+	border-color: rgba(255,255,255,.2) !important;
+}
+.b-list-toolbar search-input-wrp:focus-within,
+.b-list-toolbar .search-input-wrp:focus-within {
+	background: rgba(255,255,255,.14) !important;
+	border-color: var(--fm-accent) !important;
+}
+.b-list-toolbar search-input-wrp input,
+.b-list-toolbar .search-input-wrp input {
+	color: var(--fm-text-primary) !important;
+	background: transparent !important;
+}
+.b-list-toolbar search-input-wrp input::placeholder,
+.b-list-toolbar .search-input-wrp input::placeholder {
+	color: rgba(255,255,255,.5) !important;
+}
+/* All buttons in toolbar: same blue bg, white-ish text */
+.b-list-toolbar .btn,
+.b-list-toolbar a,
+.b-list-toolbar button,
+.b-list-toolbar .dropdown-toggle,
+.b-list-toolbar [data-icon] {
+	background: rgba(255,255,255,.1) !important;
+	color: var(--fm-text-primary) !important;
+	border: 1px solid rgba(255,255,255,.2) !important;
+	border-radius: 6px !important;
+}
+.b-list-toolbar .btn:hover,
+.b-list-toolbar a:hover,
+.b-list-toolbar button:hover {
+	background: rgba(255,255,255,.18) !important;
+}
+.b-list-toolbar select {
+	background: rgba(255,255,255,.1) !important;
+	color: var(--fm-text-primary) !important;
+	border: 1px solid rgba(255,255,255,.2) !important;
+	border-radius: 6px !important;
+}
+
+/* Light theme: use accent-surface instead */
+html[data-fm-theme="light"] .b-list-toolbar {
+	background: var(--fm-bg-selected) !important;
+}
+html[data-fm-theme="light"] .b-list-toolbar search-input-wrp,
+html[data-fm-theme="light"] .b-list-toolbar .search-input-wrp {
+	background: rgba(255,255,255,.7) !important;
+	border-color: var(--fm-border) !important;
+}
+html[data-fm-theme="light"] .b-list-toolbar search-input-wrp input::placeholder,
+html[data-fm-theme="light"] .b-list-toolbar .search-input-wrp input::placeholder {
+	color: var(--fm-text-placeholder) !important;
+}
+html[data-fm-theme="light"] .b-list-toolbar .btn,
+html[data-fm-theme="light"] .b-list-toolbar a,
+html[data-fm-theme="light"] .b-list-toolbar button,
+html[data-fm-theme="light"] .b-list-toolbar .dropdown-toggle {
+	background: rgba(255,255,255,.6) !important;
+	color: var(--fm-text-primary) !important;
+	border-color: var(--fm-border) !important;
 }
 
 /* Footer pagination bar */
