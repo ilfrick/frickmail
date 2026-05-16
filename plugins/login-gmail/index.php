@@ -268,7 +268,9 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			. '(function(){var msg=' . $sPayload . ';try{if(window.opener && !window.opener.closed){'
 			. 'window.opener.postMessage(msg, window.location.origin);window.close();return;}}catch(e){}'
 			. 'window.location.replace(' . \json_encode($sFallback) . ');})();'
-			. '</script><p>Authentication ' . ($bOk ? 'succeeded' : 'failed') . '. You can close this window.</p></body>';
+			. '</script><p>Authentication ' . ($bOk ? 'succeeded' : 'failed') . '. You can close this window.</p>'
+			. ($bOk ? '' : '<pre style="color:red;font-size:12px">' . \htmlspecialchars($sError, ENT_QUOTES, 'UTF-8') . '</pre>')
+			. '</body>';
 	}
 
 	public function configMapping() : array
