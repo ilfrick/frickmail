@@ -18,6 +18,7 @@
 
 require_once __DIR__ . '/lib/Crypto.php';
 require_once __DIR__ . '/lib/Db.php';
+require_once __DIR__ . '/lib/Bridge.php';
 require_once __DIR__ . '/lib/Mailer.php';
 
 class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
