@@ -313,7 +313,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 		return $sValue;
 	}
 
-	private function baseUrl(\RainLoop\Http $oHttp) : string
+	private function baseUrl(\MailSo\Base\Http $oHttp) : string
 	{
 		$sEnv = \rtrim((string) \getenv('FRICKMAIL_BASE_URL'), '/');
 		if ('' !== $sEnv) return $sEnv;
