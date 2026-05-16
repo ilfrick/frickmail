@@ -250,23 +250,24 @@ class Db
 	public function recordTotpUse(int $userId, string $code, int $window) : bool
 	{
 		// Ensure table exists (idempotent DDL — OK to run on every call, cheap on PG).
+		// "window" is a reserved word in PG so every reference must be double-quoted.
 		$this->pdo->exec(
 			'CREATE TABLE IF NOT EXISTS frickmail_totp_used (
-				user_id   BIGINT  NOT NULL,
-				code      TEXT    NOT NULL,
-				window    BIGINT  NOT NULL,
+				user_id   BIGINT      NOT NULL,
+				code      TEXT        NOT NULL,
+				"window"  BIGINT      NOT NULL,
 				used_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-				PRIMARY KEY (user_id, code, window)
+				PRIMARY KEY (user_id, code, "window")
 			)'
 		);
 		// Prune codes older than 2 windows (~60s) to keep the table small.
 		$this->pdo->prepare(
-			'DELETE FROM frickmail_totp_used WHERE window < :w'
+			'DELETE FROM frickmail_totp_used WHERE "window" < :w'
 		)->execute([':w' => $window - 2]);
 
 		// INSERT ... ON CONFLICT DO NOTHING; rowCount() = 0 means already used.
 		$st = $this->pdo->prepare(
-			'INSERT INTO frickmail_totp_used (user_id, code, window) VALUES (:u, :c, :w)
+			'INSERT INTO frickmail_totp_used (user_id, code, "window") VALUES (:u, :c, :w)
 			 ON CONFLICT DO NOTHING'
 		);
 		$st->execute([':u' => $userId, ':c' => $code, ':w' => $window]);
