@@ -28,10 +28,61 @@
 	font-weight: 700 !important; padding: 1px 6px !important;
 }
 
-/* ── Message list toolbar ── */
+/* ── Message list container ── */
+.messageList {
+	background: var(--fm-bg-base) !important;
+	border-color: var(--fm-border) !important;
+}
+
+/* Toolbar above message list (sort/filter bar) */
+.b-list-toolbar {
+	background: var(--fm-bg-panel) !important;
+	border-bottom: 1px solid var(--fm-border) !important;
+	color: var(--fm-text-primary) !important;
+}
+.b-list-toolbar .btn,
+.b-list-toolbar a,
+.b-list-toolbar select {
+	background: transparent !important;
+	color: var(--fm-text-primary) !important;
+	border-color: var(--fm-border-strong) !important;
+}
+.b-list-toolbar select {
+	background: var(--fm-bg-input) !important;
+}
+
+/* Footer pagination bar */
+.b-list-footer-toolbar,
+.messageList .b-footer {
+	background: var(--fm-bg-panel) !important;
+	border-top: 1px solid var(--fm-border) !important;
+	color: var(--fm-text-secondary) !important;
+}
+.b-list-footer-toolbar .btn,
+.messageList .b-footer .btn {
+	color: var(--fm-text-primary) !important;
+	background: var(--fm-bg-hover) !important;
+	border-color: var(--fm-border-strong) !important;
+}
+
+/* Empty list message */
+.b-list-content .listEmptyList,
+.b-list-content .listEmptyListLoading {
+	color: var(--fm-text-muted) !important;
+}
+.b-list-content .listClear {
+	background: var(--fm-bg-hover) !important;
+	color: var(--fm-text-secondary) !important;
+	box-shadow: none !important;
+}
+
+/* Message list toolbar (fixed top bar with checkboxes/actions) */
 .message-fixed-button-toolbar {
 	background: var(--fm-bg-panel) !important;
 	border-bottom: 1px solid var(--fm-border) !important;
+}
+.message-fixed-button-toolbar .btn {
+	color: var(--fm-text-primary) !important;
 }
 
 /* ── Message list items ── */

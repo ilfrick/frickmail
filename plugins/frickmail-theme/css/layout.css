@@ -156,23 +156,29 @@ rl-left .buttonContacts:hover, rl-left .buttonCalendar:hover,
 }
 
 /* ── Search bar ── */
+search-input-wrp,
 .search-input-wrp {
 	background: var(--fm-bg-hover) !important;
 	border-radius: 24px !important;
-	border: 1px solid transparent !important;
+	border: 1px solid var(--fm-border-strong) !important;
 	transition: border-color .2s, background .2s !important;
 	overflow: hidden !important;
+	/* respect SnappyMail's own margin — don't override margin/width */
 }
+search-input-wrp:focus-within,
 .search-input-wrp:focus-within {
 	background: var(--fm-bg-input) !important;
 	border-color: var(--fm-border-focus) !important;
 	box-shadow: 0 0 0 2px var(--fm-accent-surface) !important;
 }
+search-input-wrp input,
 .search-input-wrp input {
 	background: transparent !important;
 	color: var(--fm-text-primary) !important;
 	border: none !important;
+	padding: 6px 10px !important;
 }
+search-input-wrp input::placeholder,
 .search-input-wrp input::placeholder {
 	color: var(--fm-text-placeholder) !important;
 	opacity: 1 !important;
