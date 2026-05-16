@@ -30,6 +30,11 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private static ?array $auth = null;
 
+	public static function injectOAuthData(?array $data) : void
+	{
+		static::$auth = $data;
+	}
+
 	public function Init() : void
 	{
 		$this->UseLangs(true);

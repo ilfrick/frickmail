@@ -608,13 +608,13 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			'expires' => \time() + $iExpiresIn,
 		];
 
-		// Inject the access_token into the OAuth plugin's private static::$auth
-		// BEFORE LoginProcess fires imap.before-login / clientLogin. Without this,
+		// Inject the access_token into the OAuth plugin's static::$auth BEFORE
+		// LoginProcess fires imap.before-login / clientLogin. Without this,
 		// clientLogin finds neither static::$auth nor session storage (not written
 		// yet) and falls back to IMAP password auth, which fails for OAuth accounts.
 		$sPluginClass = ('gmail' === $account['type']) ? 'LoginGMailPlugin' : 'LoginO365Plugin';
-		if (\class_exists($sPluginClass)) {
-			\Closure::bind(static function ($d) { self::$auth = $d; }, null, $sPluginClass)($aTokenData);
+		if (\class_exists($sPluginClass) && \method_exists($sPluginClass, 'injectOAuthData')) {
+			$sPluginClass::injectOAuthData($aTokenData);
 		}
 
 		$oPassword = new \SnappyMail\SensitiveString($account['email']);
