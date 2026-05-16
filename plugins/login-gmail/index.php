@@ -91,7 +91,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			't' => \time()
 		]);
 
-		$sRedirectUri = $oHttp->GetFullUrl() . '?LoginGMail';
+		$sRedirectUri = $this->baseUrl($oHttp) . '/?LoginGMail';
 		$sAuthUrl = static::LOGIN_URI . '?' . \http_build_query([
 			'response_type' => 'code',
 			'client_id' => $sClientId,
@@ -154,7 +154,7 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 				'authorization_code',
 				array(
 					'code' => $_GET['code'],
-					'redirect_uri' => $oHttp->GetFullUrl() . '?LoginGMail',
+					'redirect_uri' => $this->baseUrl($oHttp) . '/?LoginGMail',
 					'code_verifier' => $sVerifier
 				)
 			);
@@ -311,6 +311,13 @@ class LoginGMailPlugin extends \RainLoop\Plugins\AbstractPlugin
 			}
 		}
 		return $sValue;
+	}
+
+	private function baseUrl(\RainLoop\Http $oHttp) : string
+	{
+		$sEnv = \rtrim((string) \getenv('FRICKMAIL_BASE_URL'), '/');
+		if ('' !== $sEnv) return $sEnv;
+		return \rtrim($oHttp->GetFullUrl(), '/');
 	}
 
 	private function resolveClientId() : string
