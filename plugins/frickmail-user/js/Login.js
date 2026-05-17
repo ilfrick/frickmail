@@ -10,7 +10,9 @@
 	const buildForm = (root, openSignup) => {
 		const wrap = document.createElement('div');
 		wrap.className = 'frickmail-login compact';
-		const _iconSrc = document.querySelector('link[rel="icon"]')?.href || '';
+		const _iconSrc = document.querySelector('link[rel="apple-touch-icon"]')?.href
+			|| document.querySelector('link[rel="shortcut icon"][type="image/png"]')?.href
+			|| '';
 		wrap.innerHTML = `
 			${_iconSrc ? `<div style="text-align:center;margin-bottom:.6em"><img src="${_iconSrc}" alt="" style="width:64px;height:64px;border-radius:14px"></div>` : ''}
 			<h2 data-fm="title">Sign in to Frickmail</h2>
