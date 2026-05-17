@@ -1,10 +1,10 @@
 {
-	"name": "SnappyMail Webmail",
-	"short_name": "SnappyMail",
-	"description": "Simple, modern & fast web-based email client",
+	"name": "Frickmail",
+	"short_name": "Frickmail",
+	"description": "Frickmail — webmail with first-class user identity",
 	"display": "standalone",
 	"background_color": "white",
-	"theme_color": "black",
+	"theme_color": "#4a90e2",
 	"icons": [{
 		"src": "apple-touch-icon.png",
 		"sizes": "64x64",
