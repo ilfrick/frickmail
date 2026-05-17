@@ -65,7 +65,11 @@
 
 		const wrap = document.createElement('div');
 		wrap.id = 'fm-icon-nav';
-		wrap.innerHTML = `<div class="fm-logo" title="Frickmail">M</div><div class="fm-nav-items"></div><div class="fm-nav-spacer"></div>`;
+		const iconSrc = document.querySelector('link[rel="icon"]')?.href || '';
+		const logoInner = iconSrc
+			? `<img src="${iconSrc}" alt="Frickmail" style="width:30px;height:30px;border-radius:6px;display:block;">`
+			: 'F';
+		wrap.innerHTML = `<div class="fm-logo" title="Frickmail">${logoInner}</div><div class="fm-nav-items"></div><div class="fm-nav-spacer"></div>`;
 
 		const items = wrap.querySelector('.fm-nav-items');
 		NAV.forEach(n => {

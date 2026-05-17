@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="snappymail/v/0.0.0/static/frickmail-icon-source.png" alt="Frickmail" width="120" height="120">
+  <img src="docs/frickmail-icon.png" alt="Frickmail" width="120" height="120">
   <h1>Frickmail</h1>
   <p>Self-hosted webmail with Thunderbird-style OAuth2 for Gmail and Office 365, plus contacts &amp; calendar sync.</p>
   <p>
