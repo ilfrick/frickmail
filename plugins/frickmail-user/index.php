@@ -25,7 +25,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.35',
+		VERSION  = '0.38',
 		RELEASE  = '2026-05-16',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -46,6 +46,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJs('js/AccountSwitcher.js');
 		$this->addJs('js/MailAccountsSettings.js');
 		$this->addJs('js/TwoFactorSettings.js');
+		$this->addJs('js/AdminBranding.js', true);
 		$this->addTemplate('templates/FrickmailMailAccountsSettings.html');
 		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
 

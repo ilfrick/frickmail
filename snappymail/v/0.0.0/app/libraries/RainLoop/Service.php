@@ -178,7 +178,7 @@ abstract class Service
 				'{{BaseAppFaviconPngLinkTag}}' => $sFaviconPngLink ? '<link type="image/png" rel="shortcut icon" href="'.$sFaviconPngLink.'">' : '',
 				'{{BaseAppFaviconTouchLinkTag}}' => $sAppleTouchLink ? '<link type="image/png" rel="apple-touch-icon" href="'.$sAppleTouchLink.'">' : '',
 				'{{BaseAppManifestLink}}' => Utils::WebStaticPath('manifest.json'),
-				'{{BaseFavIconSvg}}' => $sFaviconUrl ? '' : Utils::WebStaticPath('favicon.svg'),
+				'{{BaseFavIconSvg}}' => $sFaviconUrl ? '' : Utils::WebStaticPath('favicon.svg') . '?v=' . \substr($oActions->Plugins()->Hash(), 0, 8),
 				'{{LoadingDescriptionEsc}}' => \htmlspecialchars($oConfig->Get('webmail', 'loading_description', 'SnappyMail'), ENT_QUOTES|ENT_IGNORE, 'UTF-8'),
 				'{{BaseAppAdmin}}' => $bAdmin ? 1 : 0
 			);

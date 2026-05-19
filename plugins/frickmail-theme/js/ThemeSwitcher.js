@@ -65,11 +65,12 @@
 
 		const wrap = document.createElement('div');
 		wrap.id = 'fm-icon-nav';
-		const iconSrc = document.querySelector('link[rel="apple-touch-icon"]')?.href
-			|| document.querySelector('link[rel="shortcut icon"][type="image/png"]')?.href
-			|| '';
+		const _base = (typeof rl !== 'undefined') && rl.settings?.app?.('webVersionPath') || '';
+		const iconSrc = _base ? _base + 'static/apple-touch-icon.png'
+			: (document.querySelector('link[rel="apple-touch-icon"]')
+				|| document.querySelector('link[rel="shortcut icon"][type="image/png"]'))?.getAttribute('href') || '';
 		const logoInner = iconSrc
-			? `<img src="${iconSrc}" alt="Frickmail" style="width:32px;height:32px;border-radius:6px;display:block;object-fit:cover;">`
+			? '<img src="' + iconSrc + '" alt="Frickmail" style="width:32px;height:32px;border-radius:6px;display:block;object-fit:cover;">'
 			: 'F';
 		wrap.innerHTML = `<div class="fm-logo" title="Frickmail">${logoInner}</div><div class="fm-nav-items"></div><div class="fm-nav-spacer"></div>`;
 
