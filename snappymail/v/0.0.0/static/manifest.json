@@ -7,7 +7,7 @@
 	"theme_color": "#4a90e2",
 	"icons": [{
 		"src": "apple-touch-icon.png",
-		"sizes": "64x64",
+		"sizes": "512x512",
 		"type": "image/png"
 	}, {
 		"src": "android-icon.png",
