@@ -65,7 +65,7 @@ if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_defaul
         sed -i '/^\[plugins\]/,/^\[/{s/^enable = Off/enable = On/}' "$SNAPPYMAIL_CONFIG_FILE"
     fi
     # Always ensure the full plugin list is set (idempotent)
-    sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"|' "$SNAPPYMAIL_CONFIG_FILE"
+    sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme,cache-redis"|' "$SNAPPYMAIL_CONFIG_FILE"
 fi
 
 # Frickmail: provision Postgres schema for users + mail accounts (idempotent)
@@ -142,6 +142,17 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
     ' || echo "[WARN] Frickmail schema migration skipped (DB unreachable)"
 fi
 
+# Frickmail: write cache-redis plugin config pointing at the redis service
+REDIS_HOST="${FRICKMAIL_REDIS_HOST:-redis}"
+REDIS_PORT="${FRICKMAIL_REDIS_PORT:-6379}"
+REDIS_PLUGIN_CONFIG=/var/lib/snappymail/_data_/_default_/configs/plugin-cache-redis.json
+if [ ! -f "$REDIS_PLUGIN_CONFIG" ]; then
+    echo "[INFO] Writing cache-redis plugin config: $REDIS_PLUGIN_CONFIG"
+    printf '{"plugin":{"host":"%s","port":%s}}\n' "$REDIS_HOST" "$REDIS_PORT" > "$REDIS_PLUGIN_CONFIG"
+    chown www-data:www-data "$REDIS_PLUGIN_CONFIG"
+    chmod 640 "$REDIS_PLUGIN_CONFIG"
+fi
+
 echo "[INFO] Overriding values in snappymail configuration: $SNAPPYMAIL_CONFIG_FILE"
 # Frickmail: rebrand title/loading_description if still using the upstream defaults
 sed -i 's/^title = "SnappyMail Webmail"/title = "Frickmail"/' "$SNAPPYMAIL_CONFIG_FILE"
@@ -177,13 +188,13 @@ sed 's/^auth_syslog = .*/auth_syslog = Off/' -i $SNAPPYMAIL_CONFIG_FILE
     echo "[INFO] Snappymail ready at http://localhost:8888/"
     # Re-apply enabled_list AFTER SnappyMail's first-request config write
     SNAPPYMAIL_CONFIG_FILE=/var/lib/snappymail/_data_/_default_/configs/application.ini
-    sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"|' "$SNAPPYMAIL_CONFIG_FILE"
+    sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme,cache-redis"|' "$SNAPPYMAIL_CONFIG_FILE"
     echo "[INFO] Plugin list set to: $(grep enabled_list "$SNAPPYMAIL_CONFIG_FILE")"
     # Keep polling to defend against subsequent SnappyMail config rewrites
     for i in 1 2 3 4 5; do
         sleep 3
         if ! grep -q 'frickmail-theme' "$SNAPPYMAIL_CONFIG_FILE"; then
-            sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme"|' "$SNAPPYMAIL_CONFIG_FILE"
+            sed -i 's|^enabled_list = .*|enabled_list = "login-oauth2,login-gmail,login-o365,contacts-sync,calendar,frickmail-user,frickmail-theme,cache-redis"|' "$SNAPPYMAIL_CONFIG_FILE"
             echo "[INFO] Plugin list re-applied (attempt $i)"
         fi
     done
