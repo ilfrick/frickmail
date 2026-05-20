@@ -179,14 +179,14 @@
 
 	function openOverlay() {
 		if (!overlayEl) overlayEl = createOverlay();
-		overlayEl.hidden = false;
+		overlayEl.style.display = 'flex'; // must use style.display, not hidden (inline style overrides UA hidden)
 		isOpen = true;
 		if (navItemEl) navItemEl.classList.add('active');
 		loadTasks();
 	}
 
 	function closeOverlay() {
-		if (overlayEl) overlayEl.hidden = true;
+		if (overlayEl) overlayEl.style.display = 'none';
 		isOpen = false;
 		if (navItemEl) navItemEl.classList.remove('active');
 	}
