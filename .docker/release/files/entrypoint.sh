@@ -176,6 +176,31 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
         )");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_identities_account ON frickmail_identities(account_id)");
         $pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_fm_identities_default ON frickmail_identities(account_id) WHERE is_default");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_tasks (
+            id           BIGSERIAL PRIMARY KEY,
+            user_id      BIGINT NOT NULL REFERENCES frickmail_users(id) ON DELETE CASCADE,
+            title        TEXT NOT NULL,
+            notes        TEXT,
+            due_date     DATE,
+            completed    BOOLEAN NOT NULL DEFAULT FALSE,
+            completed_at TIMESTAMPTZ,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_tasks_user ON frickmail_tasks(user_id, completed, due_date)");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_rules (
+            id         BIGSERIAL PRIMARY KEY,
+            user_id    BIGINT NOT NULL REFERENCES frickmail_users(id) ON DELETE CASCADE,
+            account_id BIGINT NOT NULL REFERENCES frickmail_mail_accounts(id) ON DELETE CASCADE,
+            name       TEXT NOT NULL,
+            enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+            conditions JSONB NOT NULL,
+            actions    JSONB NOT NULL,
+            last_run   TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_rules_account ON frickmail_rules(account_id)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_rules_user    ON frickmail_rules(user_id, enabled)");
         echo "[OK] Frickmail schema ready" . PHP_EOL;
     ' || echo "[WARN] Frickmail schema migration skipped (DB unreachable)"
 fi

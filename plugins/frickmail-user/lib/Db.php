@@ -469,4 +469,130 @@ class Db
 			':i'     => $accountId,
 		]);
 	}
+	/* ---------- Tasks ---------- */
+
+	public function listTasks(int $userId, ?bool $completed = null, int $limit = 200): array
+	{
+		if ($completed === null) {
+			$st = $this->pdo->prepare(
+				'SELECT * FROM frickmail_tasks WHERE user_id = :u
+				 ORDER BY completed ASC, due_date ASC NULLS LAST, created_at ASC
+				 LIMIT :lim'
+			);
+			$st->bindValue(':u', $userId, \PDO::PARAM_INT);
+			$st->bindValue(':lim', $limit, \PDO::PARAM_INT);
+		} else {
+			$st = $this->pdo->prepare(
+				'SELECT * FROM frickmail_tasks WHERE user_id = :u AND completed = :c
+				 ORDER BY due_date ASC NULLS LAST, created_at ASC
+				 LIMIT :lim'
+			);
+			$st->bindValue(':u', $userId, \PDO::PARAM_INT);
+			$st->bindValue(':c', $completed, \PDO::PARAM_BOOL);
+			$st->bindValue(':lim', $limit, \PDO::PARAM_INT);
+		}
+		$st->execute();
+		return $st->fetchAll();
+	}
+
+	public function addTask(int $userId, string $title, ?string $notes, ?string $dueDate): int
+	{
+		$st = $this->pdo->prepare(
+			'INSERT INTO frickmail_tasks (user_id, title, notes, due_date)
+			 VALUES (:u, :t, :n, :d) RETURNING id'
+		);
+		$st->execute([
+			':u' => $userId,
+			':t' => $title,
+			':n' => $notes,
+			':d' => $dueDate,
+		]);
+		return (int) $st->fetchColumn();
+	}
+
+	public function completeTask(int $userId, int $taskId, bool $completed): bool
+	{
+		$st = $this->pdo->prepare(
+			'UPDATE frickmail_tasks
+			    SET completed = :c,
+			        completed_at = CASE WHEN :c2 THEN NOW() ELSE NULL END,
+			        updated_at = NOW()
+			  WHERE user_id = :u AND id = :i'
+		);
+		$st->bindValue(':c',  $completed, \PDO::PARAM_BOOL);
+		$st->bindValue(':c2', $completed, \PDO::PARAM_BOOL);
+		$st->bindValue(':u',  $userId,    \PDO::PARAM_INT);
+		$st->bindValue(':i',  $taskId,    \PDO::PARAM_INT);
+		$st->execute();
+		return $st->rowCount() > 0;
+	}
+
+	public function deleteTask(int $userId, int $taskId): bool
+	{
+		$st = $this->pdo->prepare('DELETE FROM frickmail_tasks WHERE user_id = :u AND id = :i');
+		$st->execute([':u' => $userId, ':i' => $taskId]);
+		return $st->rowCount() > 0;
+	}
+
+	public function updateTask(int $userId, int $taskId, string $title, ?string $notes, ?string $dueDate): bool
+	{
+		$st = $this->pdo->prepare(
+			'UPDATE frickmail_tasks
+			    SET title = :t, notes = :n, due_date = :d, updated_at = NOW()
+			  WHERE user_id = :u AND id = :i'
+		);
+		$st->execute([':t' => $title, ':n' => $notes, ':d' => $dueDate, ':u' => $userId, ':i' => $taskId]);
+		return $st->rowCount() > 0;
+	}
+
+	/* ---------- Message rules ---------- */
+
+	public function listRules(int $userId, int $accountId) : array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT * FROM frickmail_rules WHERE user_id = :u AND account_id = :a ORDER BY id ASC'
+		);
+		$st->execute([':u' => $userId, ':a' => $accountId]);
+		return $st->fetchAll();
+	}
+
+	public function addRule(int $userId, int $accountId, string $name, array $conditions, string $conditionsLogic, array $actions) : int
+	{
+		$st = $this->pdo->prepare(
+			'INSERT INTO frickmail_rules (user_id, account_id, name, conditions, actions)
+			 VALUES (:u, :a, :n, :c, :act) RETURNING id'
+		);
+		$conditionsPayload = \json_encode([
+			'conditions'        => $conditions,
+			'conditions_logic'  => $conditionsLogic,
+		]);
+		$st->execute([
+			':u'   => $userId,
+			':a'   => $accountId,
+			':n'   => $name,
+			':c'   => $conditionsPayload,
+			':act' => \json_encode($actions),
+		]);
+		return (int) $st->fetchColumn();
+	}
+
+	public function deleteRule(int $userId, int $ruleId) : bool
+	{
+		$st = $this->pdo->prepare('DELETE FROM frickmail_rules WHERE user_id = :u AND id = :i');
+		return $st->execute([':u' => $userId, ':i' => $ruleId]);
+	}
+
+	public function toggleRule(int $userId, int $ruleId, bool $enabled) : bool
+	{
+		$st = $this->pdo->prepare(
+			'UPDATE frickmail_rules SET enabled = :e WHERE user_id = :u AND id = :i'
+		);
+		return $st->execute([':e' => $enabled ? 'true' : 'false', ':u' => $userId, ':i' => $ruleId]);
+	}
+
+	public function updateRuleLastRun(int $ruleId) : void
+	{
+		$st = $this->pdo->prepare('UPDATE frickmail_rules SET last_run = NOW() WHERE id = :i');
+		$st->execute([':i' => $ruleId]);
+	}
 }

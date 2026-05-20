@@ -725,6 +725,217 @@ class MailAccountHandler
 	}
 
 
+	/* ---- Message rules ----------------------------------------------- */
+
+	public function listRules(int $uid, int $accountId) : array
+	{
+		if (!$this->db->getMailAccount($uid, $accountId)) throw new \RuntimeException('Account not found');
+		$rows   = $this->db->listRules($uid, $accountId);
+		$result = [];
+		foreach ($rows as $row) {
+			$conditions = \json_decode((string) $row['conditions'], true) ?: [];
+			$actions    = \json_decode((string) $row['actions'],    true) ?: [];
+			$result[] = [
+				'id'                => (int)  $row['id'],
+				'account_id'        => (int)  $row['account_id'],
+				'name'              => $row['name'],
+				'enabled'           => (bool) $row['enabled'],
+				'conditions'        => $conditions['conditions']       ?? [],
+				'conditions_logic'  => $conditions['conditions_logic'] ?? 'all',
+				'actions'           => $actions,
+				'last_run'          => $row['last_run'],
+			];
+		}
+		return ['ok' => true, 'rules' => $result];
+	}
+
+	public function addRule(int $uid, int $accountId, string $name, array $conditions, string $conditionsLogic, array $actions) : array
+	{
+		if ('' === \trim($name)) throw new \RuntimeException('Rule name is required');
+		if (!$this->db->getMailAccount($uid, $accountId)) throw new \RuntimeException('Account not found');
+
+		$allowedFields = ['from', 'subject', 'to'];
+		$allowedOps    = ['contains', 'not_contains', 'equals'];
+		foreach ($conditions as $c) {
+			if (!\in_array($c['field'] ?? '', $allowedFields, true)) throw new \RuntimeException('Invalid condition field');
+			if (!\in_array($c['op']    ?? '', $allowedOps,    true)) throw new \RuntimeException('Invalid condition operator');
+			if (!isset($c['value']) || '' === \trim((string) $c['value'])) throw new \RuntimeException('Condition value is required');
+		}
+		if (!\in_array($conditionsLogic, ['all', 'any'], true)) $conditionsLogic = 'all';
+
+		$allowedActions = ['move', 'read', 'flag', 'delete'];
+		foreach ($actions as $a) {
+			if (!\in_array($a['type'] ?? '', $allowedActions, true)) throw new \RuntimeException('Invalid action type');
+			if ('move' === ($a['type'] ?? '') && empty($a['params']['folder'])) throw new \RuntimeException('Move action requires a target folder');
+		}
+
+		$id = $this->db->addRule($uid, $accountId, \trim($name), $conditions, $conditionsLogic, $actions);
+		return ['ok' => true, 'id' => $id];
+	}
+
+	public function deleteRule(int $uid, int $ruleId) : array
+	{
+		$ok = $this->db->deleteRule($uid, $ruleId);
+		return ['ok' => $ok];
+	}
+
+	public function toggleRule(int $uid, int $ruleId, bool $enabled) : array
+	{
+		$ok = $this->db->toggleRule($uid, $ruleId, $enabled);
+		return ['ok' => $ok];
+	}
+
+	/**
+	 * Execute all enabled rules for the given account.
+	 * Opens a direct IMAP connection and applies SEARCH + STORE/MOVE/EXPUNGE.
+	 */
+	public function applyRules(int $uid, string $cryptKey, int $accountId) : array
+	{
+		$row = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		if ('imap' !== $row['type']) throw new \RuntimeException('Rules only supported for IMAP accounts');
+		$account = $this->db->decryptedAccount($row, $cryptKey);
+		if (empty($account['password'])) throw new \RuntimeException('Missing IMAP password');
+
+		$ruleRows = $this->db->listRules($uid, $accountId);
+		$applied  = [];
+
+		if (empty($ruleRows)) {
+			return ['ok' => true, 'applied' => []];
+		}
+
+		$oImap = $this->openImapConnection($account);
+		try {
+			$oImap->FolderSelect('INBOX');
+
+			foreach ($ruleRows as $ruleRow) {
+				if (!(bool) $ruleRow['enabled']) continue;
+
+				$conditionsPayload = \json_decode((string) $ruleRow['conditions'], true) ?: [];
+				$conditions        = $conditionsPayload['conditions']       ?? [];
+				$conditionsLogic   = $conditionsPayload['conditions_logic'] ?? 'all';
+				$actions           = \json_decode((string) $ruleRow['actions'], true) ?: [];
+
+				if (empty($conditions) || empty($actions)) continue;
+
+				// Build IMAP SEARCH criteria from conditions
+				$criteriaList = [];
+				foreach ($conditions as $cond) {
+					$field = $cond['field'] ?? '';
+					$op    = $cond['op']    ?? 'contains';
+					$val   = (string) ($cond['value'] ?? '');
+					if ('' === $val) continue;
+
+					// Escape double-quotes in the value for IMAP string literals
+					$escaped = '"' . \str_replace(['"', '\\'], ['\\"', '\\\\'], $val) . '"';
+
+					switch ($field) {
+						case 'from':    $imapField = 'FROM';    break;
+						case 'subject': $imapField = 'SUBJECT'; break;
+						case 'to':      $imapField = 'TO';      break;
+						default:        continue 2;
+					}
+
+					if ('not_contains' === $op) {
+						$criteriaList[] = 'NOT ' . $imapField . ' ' . $escaped;
+					} elseif ('equals' === $op) {
+						// IMAP has no exact-match; use HEADER field for closest match
+						$headerField = match($field) {
+							'from'    => 'From',
+							'subject' => 'Subject',
+							'to'      => 'To',
+							default   => $imapField,
+						};
+						$criteriaList[] = 'HEADER ' . $headerField . ' ' . $escaped;
+					} else {
+						// contains
+						$criteriaList[] = $imapField . ' ' . $escaped;
+					}
+				}
+
+				if (empty($criteriaList)) continue;
+
+				if ('any' === $conditionsLogic && \count($criteriaList) > 1) {
+					// IMAP OR is binary: OR crit1 crit2. For N>2 nest: OR crit1 (OR crit2 crit3)
+					$searchCriteria = $this->buildOrCriteria($criteriaList);
+				} else {
+					// AND: just concatenate (IMAP default is AND)
+					$searchCriteria = \implode(' ', $criteriaList);
+				}
+
+				$uids = $oImap->MessageSearch($searchCriteria, true);
+				if (empty($uids)) {
+					$this->db->updateRuleLastRun((int) $ruleRow['id']);
+					continue;
+				}
+
+				$oRange = new \MailSo\Imap\SequenceSet($uids, true);
+				$matchedCount = \count($uids);
+
+				foreach ($actions as $action) {
+					$actionType = $action['type'] ?? '';
+					switch ($actionType) {
+						case 'move':
+							$targetFolder = (string) ($action['params']['folder'] ?? '');
+							if ('' === $targetFolder) break;
+							$oImap->MessageMove('INBOX', $targetFolder, $oRange);
+							break;
+						case 'read':
+							$oImap->MessageStoreFlag(
+								$oRange,
+								[\MailSo\Imap\Enumerations\MessageFlag::SEEN],
+								\MailSo\Imap\Enumerations\StoreAction::ADD_FLAGS_SILENT
+							);
+							break;
+						case 'flag':
+							$oImap->MessageStoreFlag(
+								$oRange,
+								[\MailSo\Imap\Enumerations\MessageFlag::FLAGGED],
+								\MailSo\Imap\Enumerations\StoreAction::ADD_FLAGS_SILENT
+							);
+							break;
+						case 'delete':
+							$oImap->MessageDelete('INBOX', $oRange, false);
+							break;
+					}
+				}
+
+				$this->db->updateRuleLastRun((int) $ruleRow['id']);
+
+				$applied[] = [
+					'rule_id'      => (int)  $ruleRow['id'],
+					'rule_name'    => $ruleRow['name'],
+					'matched_count'=> $matchedCount,
+					'action_type'  => $actions[0]['type'] ?? '',
+				];
+			}
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
+
+		return ['ok' => true, 'applied' => $applied];
+	}
+
+	/**
+	 * Build nested IMAP OR expression from a list of criteria strings.
+	 * IMAP OR is binary: OR crit1 crit2 or OR crit1 (OR crit2 crit3), etc.
+	 */
+	private function buildOrCriteria(array $criteria) : string
+	{
+		if (1 === \count($criteria)) {
+			return $criteria[0];
+		}
+		$right = \array_shift($criteria);
+		return 'OR ' . $right . ' (' . $this->buildOrCriteria($criteria) . ')';
+	}
+
+	/* ---- Unified Inbox --------------------------------------------------- */
+
+
+	/* ---- Import / Export ---------------------------------------------- */
+
+
 	/**
 	 * Map a security-string to MailSo\Net\Enumerations\ConnectionSecurityType.
 	 * NONE=0, SSL=1, STARTTLS=2

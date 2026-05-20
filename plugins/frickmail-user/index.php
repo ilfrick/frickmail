@@ -23,6 +23,7 @@ require_once __DIR__ . '/lib/Mailer.php';
 require_once __DIR__ . '/lib/AuthHandler.php';
 require_once __DIR__ . '/lib/MailAccountHandler.php';
 require_once __DIR__ . '/lib/ServiceDiscoveryHandler.php';
+require_once __DIR__ . '/lib/TaskHandler.php';
 
 class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
@@ -70,6 +71,13 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		return $this->_discovery ??= new \Frickmail\User\ServiceDiscoveryHandler($this->db());
 	}
 
+	private ?\Frickmail\User\TaskHandler $_tasks = null;
+
+	private function tasks() : \Frickmail\User\TaskHandler
+	{
+		return $this->_tasks ??= new \Frickmail\User\TaskHandler($this->db());
+	}
+
 	/* ------------------------------------------------------------------ */
 	/*  Init                                                                 */
 	/* ------------------------------------------------------------------ */
@@ -94,6 +102,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJs('js/Notifications.js');
 		$this->addJs('js/ImportExport.js');
 		$this->addJs('js/IdentitySettings.js');
+		$this->addJs('js/Tasks.js');
+		$this->addJs('js/Rules.js');
 		$this->addTemplate('templates/FrickmailMailAccountsSettings.html');
 		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
 
@@ -126,6 +136,16 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailAddIdentity',         'JsonAddIdentity');
 		$this->addJsonHook('FrickmailDeleteIdentity',      'JsonDeleteIdentity');
 		$this->addJsonHook('FrickmailSetDefaultIdentity',  'JsonSetDefaultIdentity');
+		$this->addJsonHook('FrickmailListTasks',           'JsonListTasks');
+		$this->addJsonHook('FrickmailAddTask',             'JsonAddTask');
+		$this->addJsonHook('FrickmailCompleteTask',        'JsonCompleteTask');
+		$this->addJsonHook('FrickmailDeleteTask',          'JsonDeleteTask');
+		$this->addJsonHook('FrickmailUpdateTask',          'JsonUpdateTask');
+		$this->addJsonHook('FrickmailListRules',           'JsonListRules');
+		$this->addJsonHook('FrickmailAddRule',             'JsonAddRule');
+		$this->addJsonHook('FrickmailDeleteRule',          'JsonDeleteRule');
+		$this->addJsonHook('FrickmailToggleRule',          'JsonToggleRule');
+		$this->addJsonHook('FrickmailApplyRules',          'JsonApplyRules');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -549,6 +569,129 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			);
 		});
 	}
+
+	/* ------------------------------------------------------------------ */
+	/*  Task actions                                                         */
+	/* ------------------------------------------------------------------ */
+
+	public function JsonListTasks() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$filter = $this->jsonParam('filter');
+			$completed = null;
+			if ($filter === 'pending')   $completed = false;
+			if ($filter === 'completed') $completed = true;
+			return $this->tasks()->listTasks($uid, $completed);
+		});
+	}
+
+	public function JsonAddTask() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$title   = \trim((string) $this->jsonParam('title'));
+			$notes   = ($this->jsonParam('notes') !== null && $this->jsonParam('notes') !== '')
+				? (string) $this->jsonParam('notes') : null;
+			$dueDate = ($this->jsonParam('due_date') !== null && $this->jsonParam('due_date') !== '')
+				? (string) $this->jsonParam('due_date') : null;
+			return $this->tasks()->addTask($uid, $title, $notes, $dueDate);
+		});
+	}
+
+	public function JsonCompleteTask() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->tasks()->completeTask(
+				$uid,
+				(int)  $this->jsonParam('id'),
+				(bool) $this->jsonParam('completed')
+			);
+		});
+	}
+
+	public function JsonDeleteTask() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->tasks()->deleteTask($uid, (int) $this->jsonParam('id'));
+		});
+	}
+
+	public function JsonUpdateTask() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$title   = \trim((string) $this->jsonParam('title'));
+			$notes   = ($this->jsonParam('notes') !== null && $this->jsonParam('notes') !== '')
+				? (string) $this->jsonParam('notes') : null;
+			$dueDate = ($this->jsonParam('due_date') !== null && $this->jsonParam('due_date') !== '')
+				? (string) $this->jsonParam('due_date') : null;
+			return $this->tasks()->updateTask(
+				$uid,
+				(int) $this->jsonParam('id'),
+				$title,
+				$notes,
+				$dueDate
+			);
+		});
+	}
+
+	public function JsonListRules() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->mailAccounts()->listRules($uid, (int) $this->jsonParam('account_id'));
+		});
+	}
+
+	public function JsonAddRule() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$conditions      = (array)  ($this->jsonParam('conditions')       ?: []);
+			$conditionsLogic = (string) ($this->jsonParam('conditions_logic') ?: 'all');
+			$actions         = (array)  ($this->jsonParam('actions')          ?: []);
+			return $this->mailAccounts()->addRule(
+				$uid,
+				(int)    $this->jsonParam('account_id'),
+				(string) $this->jsonParam('name'),
+				$conditions,
+				$conditionsLogic,
+				$actions
+			);
+		});
+	}
+
+	public function JsonDeleteRule() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->mailAccounts()->deleteRule($uid, (int) $this->jsonParam('id'));
+		});
+	}
+
+	public function JsonToggleRule() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->mailAccounts()->toggleRule(
+				$uid,
+				(int)  $this->jsonParam('id'),
+				(bool) $this->jsonParam('enabled')
+			);
+		});
+	}
+
+	public function JsonApplyRules() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			return $this->mailAccounts()->applyRules($uid, $cryptKey, (int) $this->jsonParam('account_id'));
+		});
+	}
+
 
 	/* ------------------------------------------------------------------ */
 	/*  Private helpers                                                      */
