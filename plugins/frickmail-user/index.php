@@ -1036,12 +1036,12 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private function mapSecure(?string $sec) : int
 	{
-		// MailSo\Net\Enumerations\ConnectionSecurityType
+		// MailSo\Net\Enumerations\ConnectionSecurityType: NONE=0, SSL=1, STARTTLS=2
 		return match (\strtoupper((string) $sec)) {
-			'SSL', 'TLS' => 2, // SSL
-			'STARTTLS'   => 1,
+			'SSL', 'TLS' => 1,
+			'STARTTLS'   => 2,
 			'NONE'       => 0,
-			default      => 2,
+			default      => 1,
 		};
 	}
 }
