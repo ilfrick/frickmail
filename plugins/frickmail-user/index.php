@@ -25,6 +25,7 @@ require_once __DIR__ . '/lib/MailAccountHandler.php';
 require_once __DIR__ . '/lib/ServiceDiscoveryHandler.php';
 require_once __DIR__ . '/lib/TaskHandler.php';
 require_once __DIR__ . '/lib/SmimeHandler.php';
+require_once __DIR__ . '/lib/GraphClient.php';
 
 class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
@@ -137,6 +138,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 		if ($bSmimeEnabled) {
 			$this->addJs('js/SmimeSettings.js');
+		$this->addJs('js/GraphMailbox.js');
 		}
 
 		$this->addJsonHook('FrickmailLogin',               'JsonFrickmailLogin');

@@ -367,7 +367,11 @@ class MailAccountHandler
 				"https://login.microsoftonline.com/{$tenant}/oauth2/v2.0/token",
 				$this->resolveOauthEnv('FRICKMAIL_O365_CLIENT_ID', 'login-o365', 'client_id'),
 				$this->resolveOauthEnv('FRICKMAIL_O365_CLIENT_SECRET', null, null),
-				'https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access',
+				// NOTE: Azure AD app must have Mail.Read, Mail.ReadWrite, Mail.Send, User.Read
+				// added as Delegated permissions in the Azure portal for Graph API calls to work.
+				'https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access'
+				. ' https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite'
+				. ' https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read',
 			];
 		}
 		throw new \RuntimeException('Unknown OAuth provider');
@@ -948,5 +952,150 @@ class MailAccountHandler
 			'NONE'       => 0,
 			default      => 1,
 		};
+	}
+
+	/* ---- Microsoft Graph API -------------------------------------------- */
+
+	/**
+	 * Return true when the given account row represents an Office 365 / Outlook account.
+	 */
+	private function isO365Account(array $account) : bool
+	{
+		return 'o365' === ($account['type'] ?? '');
+	}
+
+	/**
+	 * Build an authenticated GraphClient for the given account.
+	 *
+	 * 1. Loads the account row and verifies it is type=o365.
+	 * 2. Decrypts the stored OAuth refresh token.
+	 * 3. Exchanges the refresh token for a Graph access token (incremental consent).
+	 */
+	private function graphClientForAccount(array $row, string $cryptKey) : \Frickmail\User\GraphClient
+	{
+		if (!$this->isO365Account($row)) {
+			throw new \RuntimeException('Account is not an Office 365 account (type must be o365)');
+		}
+
+		$account = $this->db->decryptedAccount($row, $cryptKey);
+		if (empty($account['oauth_refresh_token'])) {
+			throw new \RuntimeException('Missing OAuth refresh token — re-authorize this account first.');
+		}
+
+		$clientId     = $this->resolveOauthEnv('FRICKMAIL_O365_CLIENT_ID',     'login-o365', 'client_id');
+		$clientSecret = $this->resolveOauthEnv('FRICKMAIL_O365_CLIENT_SECRET', null,         null);
+		$tenant       = (string) ($row['oauth_tenant'] ?: 'common');
+
+		return \Frickmail\User\GraphClient::fromRefreshToken(
+			$account['oauth_refresh_token'],
+			$clientId,
+			$clientSecret,
+			$tenant
+		);
+	}
+
+	/** List messages in a folder via Graph. */
+	public function graphListMessages(
+		int $uid, string $cryptKey, int $accountId,
+		string $folder = 'inbox', int $top = 50
+	) : array {
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$data   = $client->listMessages($folder, $top);
+		return ['ok' => true, 'data' => $data];
+	}
+
+	/** Get a single message with full body via Graph. */
+	public function graphGetMessage(
+		int $uid, string $cryptKey, int $accountId, string $messageId
+	) : array {
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$data   = $client->getMessage($messageId);
+		return ['ok' => true, 'message' => $data];
+	}
+
+	/** Search messages across all folders via Graph. */
+	public function graphSearch(
+		int $uid, string $cryptKey, int $accountId, string $query, int $top = 50
+	) : array {
+		if ('' === \trim($query)) throw new \RuntimeException('Search query is required');
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$data   = $client->searchMessages($query, $top);
+		return ['ok' => true, 'query' => $query, 'data' => $data];
+	}
+
+	/** List mail folders via Graph. */
+	public function graphListFolders(int $uid, string $cryptKey, int $accountId) : array
+	{
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$data   = $client->listFolders();
+		return ['ok' => true, 'data' => $data];
+	}
+
+	/** Send a message via Graph /me/sendMail. */
+	public function graphSendMail(
+		int $uid, string $cryptKey, int $accountId,
+		string $to, string $subject, string $bodyHtml
+	) : array {
+		if ('' === \trim($to))      throw new \RuntimeException('Recipient address is required');
+		if ('' === \trim($subject)) throw new \RuntimeException('Subject is required');
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$client->sendMail([\trim($to)], $subject, $bodyHtml);
+		return ['ok' => true];
+	}
+
+	/** Mark a message as read or unread via Graph. */
+	public function graphMarkRead(
+		int $uid, string $cryptKey, int $accountId, string $messageId, bool $isRead
+	) : array {
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$client->markRead($messageId, $isRead);
+		return ['ok' => true];
+	}
+
+	/** Move a message to another folder via Graph. */
+	public function graphMove(
+		int $uid, string $cryptKey, int $accountId,
+		string $messageId, string $targetFolderId
+	) : array {
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$data   = $client->move($messageId, $targetFolderId);
+		return ['ok' => true, 'message' => $data];
+	}
+
+	/** Delete a message via Graph (moves to Deleted Items). */
+	public function graphDelete(
+		int $uid, string $cryptKey, int $accountId, string $messageId
+	) : array {
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$client->deleteMessage($messageId);
+		return ['ok' => true];
+	}
+
+	/** Get delta (incremental changes) for a folder via Graph. */
+	public function graphDelta(
+		int $uid, string $cryptKey, int $accountId,
+		string $folderId = 'inbox', ?string $deltaToken = null
+	) : array {
+		$row    = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$client = $this->graphClientForAccount($row, $cryptKey);
+		$data   = $client->getDelta($folderId, $deltaToken);
+		return ['ok' => true, 'data' => $data];
 	}
 }
