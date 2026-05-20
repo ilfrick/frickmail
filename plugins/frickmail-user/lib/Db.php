@@ -313,13 +313,20 @@ class Db
 		?string $messageId, ?string $subject, ?string $fromAddr, ?string $fromName,
 		?string $dateTsIso, ?string $snippet
 	): void {
+		// tsvector is computed in SQL — avoids shell quoting issues in the migration script.
 		$st = $this->pdo->prepare(
-			'INSERT INTO frickmail_message_index
+			"INSERT INTO frickmail_message_index
 				(user_id, account_id, folder, imap_uid, message_id, subject,
-				 from_addr, from_name, date_ts, snippet, indexed_at)
+				 from_addr, from_name, date_ts, snippet, tsv, indexed_at)
 			 VALUES
 				(:uid, :aid, :folder, :imap_uid, :message_id, :subject,
-				 :from_addr, :from_name, :date_ts, :snippet, NOW())
+				 :from_addr, :from_name, :date_ts, :snippet,
+				 to_tsvector('simple',
+				     coalesce(:tsv_subject,'')  || ' ' ||
+				     coalesce(:tsv_from_name,'')|| ' ' ||
+				     coalesce(:tsv_from_addr,'')|| ' ' ||
+				     coalesce(:tsv_snippet,'')),
+				 NOW())
 			 ON CONFLICT (account_id, folder, imap_uid)
 			 DO UPDATE SET
 				message_id = EXCLUDED.message_id,
@@ -328,19 +335,24 @@ class Db
 				from_name  = EXCLUDED.from_name,
 				date_ts    = EXCLUDED.date_ts,
 				snippet    = EXCLUDED.snippet,
-				indexed_at = NOW()'
+				tsv        = EXCLUDED.tsv,
+				indexed_at = NOW()"
 		);
 		$st->execute([
-			':uid'        => $userId,
-			':aid'        => $accountId,
-			':folder'     => $folder,
-			':imap_uid'   => $imapUid,
-			':message_id' => $messageId,
-			':subject'    => $subject,
-			':from_addr'  => $fromAddr,
-			':from_name'  => $fromName,
-			':date_ts'    => $dateTsIso,
-			':snippet'    => $snippet,
+			':uid'           => $userId,
+			':aid'           => $accountId,
+			':folder'        => $folder,
+			':imap_uid'      => $imapUid,
+			':message_id'    => $messageId,
+			':subject'       => $subject,
+			':from_addr'     => $fromAddr,
+			':from_name'     => $fromName,
+			':date_ts'       => $dateTsIso,
+			':snippet'       => $snippet,
+			':tsv_subject'   => $subject,
+			':tsv_from_name' => $fromName,
+			':tsv_from_addr' => $fromAddr,
+			':tsv_snippet'   => $snippet,
 		]);
 	}
 

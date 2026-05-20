@@ -157,13 +157,7 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
             from_name   TEXT,
             date_ts     TIMESTAMPTZ,
             snippet     TEXT,
-            tsv         tsvector GENERATED ALWAYS AS (
-                            to_tsvector(\'simple\',
-                                coalesce(subject,\'\') || \' \' ||
-                                coalesce(from_name,\'\') || \' \' ||
-                                coalesce(from_addr,\'\') || \' \' ||
-                                coalesce(snippet,\'\'))
-                        ) STORED,
+            tsv         tsvector,
             indexed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(account_id, folder, imap_uid)
         )");
