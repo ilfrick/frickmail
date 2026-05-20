@@ -246,20 +246,11 @@ class Db
 	 * TOTP replay protection (H6): atomically insert (user_id, code, window) into a
 	 * short-lived used-codes table. Returns true if the code had not been used before,
 	 * false if this is a replay. Old rows (> 2 windows = 60s) are pruned on each call.
+	 *
+	 * The frickmail_totp_used table is created by the migration in entrypoint.sh.
 	 */
 	public function recordTotpUse(int $userId, string $code, int $window) : bool
 	{
-		// Ensure table exists (idempotent DDL — OK to run on every call, cheap on PG).
-		// "window" is a reserved word in PG so every reference must be double-quoted.
-		$this->pdo->exec(
-			'CREATE TABLE IF NOT EXISTS frickmail_totp_used (
-				user_id   BIGINT      NOT NULL,
-				code      TEXT        NOT NULL,
-				"window"  BIGINT      NOT NULL,
-				used_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-				PRIMARY KEY (user_id, code, "window")
-			)'
-		);
 		// Prune codes older than 2 windows (~60s) to keep the table small.
 		$this->pdo->prepare(
 			'DELETE FROM frickmail_totp_used WHERE "window" < :w'
@@ -286,5 +277,45 @@ class Db
 		// strip raw blobs from the returned representation
 		unset($copy['encrypted_password'], $copy['encrypted_oauth_refresh_token']);
 		return $copy;
+	}
+
+	/* ---------- Convenience writers (P3) ---------- */
+
+	/**
+	 * Persist an encrypted OAuth refresh token for an existing mail account.
+	 * Updates the account type at the same time so the stored type always
+	 * matches the OAuth provider (gmail / o365).
+	 */
+	public function saveOAuthRefreshToken(int $userId, int $accountId, string $type, string $encryptedCipher) : void
+	{
+		$this->pdo->prepare(
+			"UPDATE frickmail_mail_accounts
+			    SET type = :type,
+			        encrypted_oauth_refresh_token = decode(:tok, 'hex'),
+			        updated_at = NOW()
+			  WHERE id = :id AND user_id = :uid"
+		)->execute([
+			':type' => $type,
+			':tok'  => \bin2hex($encryptedCipher),
+			':id'   => $accountId,
+			':uid'  => $userId,
+		]);
+	}
+
+	/**
+	 * Persist a single key→url entry in the JSONB settings column of a mail account.
+	 * Used for CardDAV / CalDAV URLs discovered via service discovery.
+	 */
+	public function saveAccountServiceUrl(int $userId, int $accountId, string $key, string $url) : void
+	{
+		$this->pdo->prepare(
+			"UPDATE frickmail_mail_accounts
+			 SET settings = settings || :patch::jsonb, updated_at = NOW()
+			 WHERE user_id = :u AND id = :i"
+		)->execute([
+			':patch' => \json_encode([$key => $url]),
+			':u'     => $userId,
+			':i'     => $accountId,
+		]);
 	}
 }

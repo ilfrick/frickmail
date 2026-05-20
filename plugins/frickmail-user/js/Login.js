@@ -366,8 +366,8 @@
 		};
 		const setup = document.createElement('div');
 		setup.innerHTML = `
-			<h2>Recupero password</h2>
-			<p style="color:#888">Inserisci il tuo username Frickmail. Se esiste e ha una recovery email, ti mandiamo un link per resettare la password.</p>
+			<h2>Password recovery</h2>
+			<p style="color:#888">Enter your Frickmail username. If it exists and has a recovery email, we will send you a reset link.</p>
 			<label for="fm-ff-username">Username</label>
 			<input id="fm-ff-username" data-ff="username" type="text" autocomplete="username" />
 			<div class="actions" style="margin-top:1em">
@@ -399,11 +399,11 @@
 		const wrap = document.createElement('div');
 		wrap.className = 'frickmail-login compact';
 		wrap.innerHTML = `
-			<h2>Imposta una nuova password</h2>
-			<p style="color:#888">Le credenziali IMAP/OAuth dei tuoi account email collegati saranno reimpostate (devi reinserirle dal Setup).</p>
-			<label for="fm-fr-password">Nuova password (min 8 caratteri)</label>
+			<h2>Set a new password</h2>
+			<p style="color:#888">The IMAP/OAuth credentials of your linked mail accounts will be reset (you will need to re-enter them from Settings).</p>
+			<label for="fm-fr-password">New password (min 8 characters)</label>
 			<input id="fm-fr-password" data-fr="password" type="password" autocomplete="new-password" minlength="8" />
-			<label for="fm-fr-password2">Conferma password</label>
+			<label for="fm-fr-password2">Confirm password</label>
 			<input id="fm-fr-password2" data-fr="password2" type="password" autocomplete="new-password" />
 			<div class="actions">
 				<button class="btn btn-primary" type="button" data-fr="save">Reset password</button>
