@@ -436,24 +436,20 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$enabled = \array_filter(\array_map('trim',
 			\explode(',', \RainLoop\Api::Config()->Get('plugins', 'enabled_list', ''))
 		));
-		$logger  = \RainLoop\Api::Actions()->Logger();
 
+		// Use error_log only — calling Actions()->Logger() during Init() is unsafe
+		// (Actions may not be fully bootstrapped yet, causing recursive initialisation).
 		$found = \array_intersect($critical, $enabled);
 		if ($found) {
-			$msg = '[frickmail-user] CRITICAL: incompatible plugin(s) enabled — '
+			\error_log('[frickmail-user] CRITICAL: incompatible plugin(s) enabled — '
 				. \implode(', ', $found)
-				. '. These bypass or corrupt frickmail-user auth. Disable them immediately.';
-			$logger->Write($msg, \LOG_CRIT);
-			\error_log($msg);
+				. '. These bypass or corrupt frickmail-user auth. Disable them immediately.');
 		}
 
 		$found = \array_intersect($warning, $enabled);
 		if ($found) {
-			$logger->Write(
-				'[frickmail-user] WARNING: plugin(s) ' . \implode(', ', $found)
-				. ' may conflict with frickmail-user functionality.',
-				\LOG_WARNING
-			);
+			\error_log('[frickmail-user] WARNING: plugin(s) ' . \implode(', ', $found)
+				. ' may conflict with frickmail-user functionality.');
 		}
 	}
 

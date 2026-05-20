@@ -6,7 +6,7 @@ if [ "$DEBUG" = 'true' ]; then
     set -x
 fi
 UPLOAD_MAX_SIZE=${UPLOAD_MAX_SIZE:-25M}
-MEMORY_LIMIT=${MEMORY_LIMIT:-128M}
+MEMORY_LIMIT=${MEMORY_LIMIT:-256M}
 SECURE_COOKIES=${SECURE_COOKIES:-true}
 
 # Set attachment size limit
