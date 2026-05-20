@@ -1,0 +1,12 @@
+{
+  "name": "frickmail-desktop",
+  "version": "1.0.0",
+  "description": "Frickmail desktop app (Tauri wrapper)",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

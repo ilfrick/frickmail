@@ -1,14 +1,16 @@
 /* Frickmail Service Worker
  *
  * Cache strategy:
- *   /snappymail/v/<ver>/static/*  cache-first   (version in path → content-addressed)
- *   /?/Css/* and /?/Js/*          stale-while-revalidate
- *   /?Json/* and /?/*             network-only  (live email data must be fresh)
- *   /  (app shell)                network-first, offline fallback to cache
+ *   /snappymail/v/<ver>/static/*          cache-first     (content-addressed)
+ *   /?/Css/* and /?/Js/*                  stale-while-revalidate
+ *   /?Json/…MessageList or …Message       network-first, offline fallback (readable offline)
+ *   /?Json/* (other API)                  network-only    (must be fresh)
+ *   /  (app shell)                        network-first, offline fallback
  */
 'use strict';
 
-const CACHE = 'fm-v1';
+const CACHE    = 'fm-v2';
+const MSG_CACHE = 'fm-messages-v1'; // separate TTL-controlled cache for email data
 
 const isVersionedStatic = url =>
 	/\/snappymail\/v\/[^/]+\/static\//.test(url.pathname);
@@ -16,17 +18,28 @@ const isVersionedStatic = url =>
 const isBundleAsset = url =>
 	/[?&]\/(Css|Js)\//.test(url.search) || /\/\?(Css|Js)\//.test(url.pathname + url.search);
 
+const isMessageApiCall = url => {
+	const s = url.search;
+	return s.includes('Json') && (
+		s.includes('_action=MessageList') ||
+		s.includes('_action=Message') ||
+		s.includes('_action=FrickmailUnifiedInbox')
+	);
+};
+
 const isApiCall = url =>
 	url.search.includes('Json') || url.search.startsWith('?/');
 
 // ── Install: activate immediately ────────────────────────────────────────
 self.addEventListener('install', () => self.skipWaiting());
 
-// ── Activate: delete stale caches, claim all clients ─────────────────────
+// ── Activate: clean up old caches, claim clients ─────────────────────────
 self.addEventListener('activate', e => {
 	e.waitUntil(
 		caches.keys()
-			.then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+			.then(keys => Promise.all(
+				keys.filter(k => k !== CACHE && k !== MSG_CACHE).map(k => caches.delete(k))
+			))
 			.then(() => self.clients.claim())
 	);
 });
@@ -37,14 +50,18 @@ self.addEventListener('fetch', e => {
 	const url = new URL(e.request.url);
 	if (url.origin !== self.location.origin) return;
 
-	// API / live actions: always fresh
+	// Message data: network-first, serve from cache when offline
+	if (isMessageApiCall(url)) {
+		e.respondWith(networkFirstMsg(e.request));
+		return;
+	}
+
+	// Other API calls: always fresh
 	if (isApiCall(url)) return;
 
-	// Versioned static files: cache-first (safe — URL changes when content changes)
+	// Versioned static: cache-first
 	if (isVersionedStatic(url)) {
-		e.respondWith(
-			caches.match(e.request).then(hit => hit || fetchAndCache(e.request))
-		);
+		e.respondWith(caches.match(e.request).then(hit => hit || fetchAndCache(CACHE, e.request)));
 		return;
 	}
 
@@ -52,14 +69,14 @@ self.addEventListener('fetch', e => {
 	if (isBundleAsset(url)) {
 		e.respondWith(
 			caches.match(e.request).then(hit => {
-				const fresh = fetchAndCache(e.request);
+				const fresh = fetchAndCache(CACHE, e.request);
 				return hit || fresh;
 			})
 		);
 		return;
 	}
 
-	// App shell (root): network-first, fall back to cache for offline indicator
+	// App shell: network-first, offline fallback
 	if (url.pathname === '/' || url.pathname === '/index.php') {
 		e.respondWith(
 			fetch(e.request)
@@ -69,10 +86,51 @@ self.addEventListener('fetch', e => {
 	}
 });
 
-function fetchAndCache(request) {
+// Network-first for message data: cache up to 30 min, serve stale when offline
+async function networkFirstMsg(request) {
+	const cached = await caches.match(request, { cacheName: MSG_CACHE });
+	try {
+		const fresh = await fetch(request);
+		if (fresh.ok) {
+			const cache = await caches.open(MSG_CACHE);
+			cache.put(request, fresh.clone());
+			// Prune entries older than 30 min (best-effort)
+			pruneOldMsgCache();
+		}
+		return fresh;
+	} catch {
+		// Offline: serve cached version with a header indicating it's stale
+		if (cached) {
+			const headers = new Headers(cached.headers);
+			headers.set('X-Frickmail-Offline', '1');
+			return new Response(cached.body, { status: cached.status, headers });
+		}
+		return new Response(JSON.stringify({ Result: null, ErrorCode: 0, ErrorMessage: 'Offline' }), {
+			status: 503, headers: { 'Content-Type': 'application/json', 'X-Frickmail-Offline': '1' }
+		});
+	}
+}
+
+let _pruning = false;
+async function pruneOldMsgCache() {
+	if (_pruning) return;
+	_pruning = true;
+	try {
+		const cache = await caches.open(MSG_CACHE);
+		const keys  = await cache.keys();
+		const cutoff = Date.now() - 30 * 60 * 1000;
+		for (const req of keys) {
+			const resp = await cache.match(req);
+			const date = resp?.headers.get('date');
+			if (date && new Date(date).getTime() < cutoff) await cache.delete(req);
+		}
+	} finally { _pruning = false; }
+}
+
+function fetchAndCache(cacheName, request) {
 	return fetch(request).then(response => {
 		if (response.ok && response.type !== 'opaque') {
-			caches.open(CACHE).then(c => c.put(request, response.clone()));
+			caches.open(cacheName).then(c => c.put(request, response.clone()));
 		}
 		return response;
 	});
