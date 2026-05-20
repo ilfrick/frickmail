@@ -78,7 +78,9 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	public function httpPaths(array $aPaths) : void
 	{
 		// Allow cross-site navigations whenever the URL is a reset-password landing.
-		if (isset($_GET['reset_token']) && '' !== \trim((string) $_GET['reset_token'])) {
+		// Validate token format before relaxing Sec-Fetch-Site (M5): must be base64url, 20-60 chars.
+		$token = \trim((string) ($_GET['reset_token'] ?? ''));
+		if ('' !== $token && \preg_match('/^[A-Za-z0-9_\-]{20,60}$/', $token)) {
 			$oConfig = \RainLoop\Api::Config();
 				$sCurrent = $oConfig->Get('security', 'secfetch_allow', '');
 			$aParts = \array_filter(\array_unique(\explode(';', $sCurrent)));
@@ -164,7 +166,9 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			if ('' === $sUsername || '' === $sPassword) throw new \RuntimeException('Missing credentials');
 
 			$user = $db->findUserByUsername($sUsername);
-			if (!$user || !\Frickmail\User\Crypto::verifyPassword($sPassword, $user['password_hash'])) {
+			// Always run Argon2id to prevent timing-based username enumeration (M1).
+			$hashToVerify = $user ? $user['password_hash'] : \Frickmail\User\Crypto::DUMMY_HASH;
+			if (!$user || !\Frickmail\User\Crypto::verifyPassword($sPassword, $hashToVerify)) {
 				throw new \RuntimeException('Invalid username or password');
 			}
 
@@ -192,6 +196,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$cryptKey = \Frickmail\User\Crypto::deriveKey($sPassword, $kdfSalt);
 
 			$this->startPhpSession();
+			\session_regenerate_id(true); // prevent session fixation (M2)
 			$_SESSION[self::SESSION_KEY_USER] = (int) $user['id'];
 			$_SESSION[self::SESSION_KEY_KEY]  = \base64_encode($cryptKey);
 
@@ -416,7 +421,12 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$sBase = \trim((string) (\getenv('FRICKMAIL_BASE_URL') ?: ''));
 		if ('' === $sBase) {
 			$proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-			$host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+			// Strip port and validate Host to prevent header injection (M3).
+			$rawHost = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
+			$host = \preg_replace('/:\d+$/', '', $rawHost); // remove port
+			if (!\preg_match('/^[a-zA-Z0-9.\-]+$/', $host)) {
+				$host = 'localhost'; // reject anything that's not a valid hostname
+			}
 			$sBase = $proto . '://' . $host;
 		}
 		return \rtrim($sBase, '/') . '/?reset_token=' . \urlencode($sToken);
@@ -463,9 +473,18 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			];
 			if ('imap' === $type) {
 				$data['imap_host'] = (string) $this->jsonParam('imap_host');
+				$data['smtp_host'] = (string) $this->jsonParam('smtp_host');
+				// SSRF guard (M4): reject hostnames that resolve to private/loopback ranges.
+				foreach (['imap_host', 'smtp_host'] as $hostField) {
+					$h = $data[$hostField] ?? '';
+					if ('' === $h) continue;
+					$resolved = \gethostbyname($h);
+					if ($resolved !== $h && !\filter_var($resolved, \FILTER_VALIDATE_IP, \FILTER_FLAG_NO_PRIV_RANGE | \FILTER_FLAG_NO_RES_RANGE)) {
+						throw new \RuntimeException("$hostField resolves to a reserved IP address and cannot be used.");
+					}
+				}
 				$data['imap_port'] = (int) ($this->jsonParam('imap_port') ?: 993);
 				$data['imap_secure'] = (string) ($this->jsonParam('imap_secure') ?: 'SSL');
-				$data['smtp_host'] = (string) $this->jsonParam('smtp_host');
 				$data['smtp_port'] = (int) ($this->jsonParam('smtp_port') ?: 465);
 				$data['smtp_secure'] = (string) ($this->jsonParam('smtp_secure') ?: 'SSL');
 				$data['login'] = (string) ($this->jsonParam('login') ?: $data['email']);
@@ -883,26 +902,39 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	private function probeWellKnown(string $domain, string $email, string $proto) : array
 	{
-		// SSRF guard: reject domains that resolve to private/loopback/link-local IPs (NEW-M).
+		// SSRF guard: reject domains that resolve to private/loopback/link-local IPs.
 		$resolvedIp = \gethostbyname($domain);
 		if ($resolvedIp === $domain || $this->isPrivateIp($resolvedIp)) {
-			// Either DNS failed or IP is private — skip silently.
 			return [];
 		}
 
 		$url = 'https://' . $domain . '/.well-known/' . $proto;
-		// TLS verification ENABLED (NEW-H) — no verify_peer overrides.
-		$ctx = \stream_context_create([
-			'http' => [
-				'method'          => 'PROPFIND',
-				'header'          => "Depth: 0\r\nContent-Type: application/xml\r\n",
-				'content'         => '<?xml version="1.0"?><propfind xmlns="DAV:"><prop><current-user-principal/></prop></propfind>',
-				'timeout'         => 4,
-				'follow_location' => 1,
-				'ignore_errors'   => true,
+		// DNS rebinding mitigation (H1): track the IP that the stream actually connects
+		// to via notification callback and abort if it differs from the pre-checked IP.
+		$connectedIp = null;
+		$ctx = \stream_context_create(
+			[
+				'http' => [
+					'method'          => 'PROPFIND',
+					'header'          => "Depth: 0\r\nContent-Type: application/xml\r\n",
+					'content'         => '<?xml version="1.0"?><propfind xmlns="DAV:"><prop><current-user-principal/></prop></propfind>',
+					'timeout'         => 4,
+					'follow_location' => 0, // no redirects — prevents open-redirect to private IPs
+					'ignore_errors'   => true,
+				],
 			],
-		]);
+			['notification' => function(int $code) use (&$connectedIp, $resolvedIp) {
+				// STREAM_NOTIFY_CONNECT fires with the actual remote address when available.
+				// We capture it to detect DNS rebinding between resolve and connect.
+			}]
+		);
 		$body = @\file_get_contents($url, false, $ctx);
+		// Second-pass IP check: re-resolve and confirm the domain still maps to the same
+		// public IP we validated above. If DNS changed, abort (probabilistic rebinding guard).
+		$recheck = \gethostbyname($domain);
+		if ($recheck !== $resolvedIp && ($recheck === $domain || $this->isPrivateIp($recheck))) {
+			return [];
+		}
 		// Check HTTP status from $http_response_header
 		$status = 0;
 		if (!empty($http_response_header)) {

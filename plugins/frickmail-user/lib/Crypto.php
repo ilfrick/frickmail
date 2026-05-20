@@ -15,6 +15,10 @@ class Crypto
 	const KDF_OPSLIMIT = 3;       // SODIUM_CRYPTO_PWHASH_OPSLIMIT_INTERACTIVE
 	const KDF_MEMLIMIT = 67108864; // SODIUM_CRYPTO_PWHASH_MEMLIMIT_INTERACTIVE (64 MB)
 
+	// Pre-generated Argon2id hash used when a username does not exist, so login
+	// always runs the full Argon2id computation and prevents timing-based enumeration.
+	const DUMMY_HASH = '$argon2id$v=19$m=65536,t=4,p=1$TTJYNUVsNlE5Q1RwTzZacQ$AnMUliGcTz3HHGhxmAib/d0fPagGYhpUa1uQxLPgyeg';
+
 	public static function hashPassword(string $password) : string
 	{
 		return \password_hash($password, \PASSWORD_ARGON2ID);
