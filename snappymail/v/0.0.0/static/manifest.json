@@ -19,5 +19,7 @@
 		"type": "image/png",
 		"purpose": "any maskable"
 	}],
-	"start_url": "../../../../"
+	"id": "/",
+	"start_url": "/",
+	"scope": "/"
 }

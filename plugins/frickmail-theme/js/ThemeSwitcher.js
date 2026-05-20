@@ -2,6 +2,12 @@
 // 1. Applies dark/light/system theme immediately (no flash)
 // 2. Injects icon navigation column
 // 3. Registers a "Appearance" settings tab for theme/accent/font controls
+// 4. Registers Service Worker for PWA + Web Push
+
+if ('serviceWorker' in navigator) {
+	navigator.serviceWorker.register('/sw.js', { scope: '/' })
+		.catch(() => {});
+}
 
 (function () {
 	const THEME_KEY  = 'fm_theme';
