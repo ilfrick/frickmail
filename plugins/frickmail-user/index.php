@@ -91,6 +91,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJs('js/Search.js');
 		$this->addJs('js/UnifiedInbox.js');
 		$this->addJs('js/AdminBranding.js', true);
+		$this->addJs('js/Notifications.js');
 		$this->addTemplate('templates/FrickmailMailAccountsSettings.html');
 		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
 
@@ -115,6 +116,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailSaveOAuthToken',      'JsonSaveOAuthToken');
 		$this->addJsonHook('FrickmailSearch',              'JsonSearch');
 		$this->addJsonHook('FrickmailUnifiedInbox',        'JsonUnifiedInbox');
+		$this->addJsonHook('FrickmailCheckNewMail',        'JsonCheckNewMail');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -400,6 +402,15 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			[$uid, $cryptKey] = $this->auth()->requireSession();
 			$limit = \min(100, \max(1, (int) ($this->jsonParam('limit') ?: 40)));
 			return $this->mailAccounts()->unifiedInbox($uid, $cryptKey, $limit);
+		});
+	}
+
+	public function JsonCheckNewMail() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$lastUids = (array) ($this->jsonParam('last_uids') ?: []);
+			return $this->mailAccounts()->checkNewMail($uid, $cryptKey, $lastUids);
 		});
 	}
 

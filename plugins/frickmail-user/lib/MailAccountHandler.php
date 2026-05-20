@@ -356,6 +356,85 @@ class MailAccountHandler
 		$oDomainProvider->Save($oDomain);
 	}
 
+	/* ---- Check new mail -------------------------------------------------- */
+
+	/**
+	 * For each IMAP account with a password, issue IMAP STATUS INBOX to obtain
+	 * UIDNEXT. Compare against the caller-supplied baseline to detect new mail.
+	 *
+	 * @param  int    $uid       Frickmail user id
+	 * @param  string $cryptKey  Session AEAD key (to decrypt passwords)
+	 * @param  array  $lastUids  Map of account_id (string) => last known UIDNEXT (int)
+	 * @return array  {ok, accounts: [{account_id, account_email, uidnext, new_count}]}
+	 */
+	public function checkNewMail(int $uid, string $cryptKey, array $lastUids): array
+	{
+		$rows    = $this->db->listMailAccounts($uid);
+		$results = [];
+
+		foreach ($rows as $row) {
+			if ('imap' !== $row['type']) continue;
+			$account = $this->db->decryptedAccount($row, $cryptKey);
+			if (empty($account['password'])) continue;
+
+			$accountId = (int) $row['id'];
+			$lastUidnext = (int) ($lastUids[(string) $accountId] ?? 0);
+
+			try {
+				[$uidnext, $messages] = $this->fetchInboxStatus($account);
+			} catch (\Throwable $e) {
+				// Skip failing accounts silently — same pattern as unifiedInbox.
+				continue;
+			}
+
+			$newCount = 0;
+			if ($lastUidnext > 0 && $uidnext > $lastUidnext) {
+				// Each increment of UIDNEXT by N means N new messages arrived.
+				$newCount = $uidnext - $lastUidnext;
+			}
+
+			$results[] = [
+				'account_id'    => $accountId,
+				'account_email' => $account['email'],
+				'uidnext'       => $uidnext,
+				'messages'      => $messages,
+				'new_count'     => $newCount,
+			];
+		}
+
+		return ['ok' => true, 'accounts' => $results];
+	}
+
+	/**
+	 * Open IMAP, SELECT/EXAMINE INBOX, return [uidnext, messages].
+	 */
+	private function fetchInboxStatus(array $account): array
+	{
+		$oSettings = \MailSo\Imap\Settings::fromArray([
+			'host'       => $account['imap_host'],
+			'port'       => (int) $account['imap_port'],
+			'type'       => $this->mapSecure($account['imap_secure']),
+			'timeout'    => 10,
+			'shortLogin' => false,
+		]);
+		$oSettings->username   = $account['login'] ?: $account['email'];
+		$oSettings->passphrase = $account['password'];
+
+		$oImap = new \MailSo\Imap\ImapClient();
+		$oImap->SetTimeOuts(10);
+		try {
+			$oImap->Connect($oSettings);
+			$oImap->Login($oSettings);
+			$oInfo   = $oImap->FolderExamine('INBOX');
+			$uidnext = (int) ($oInfo->UIDNEXT   ?? 0);
+			$messages = (int) ($oInfo->MESSAGES  ?? 0);
+			return [$uidnext, $messages];
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
+	}
+
 	/* ---- Unified Inbox --------------------------------------------------- */
 
 	public function unifiedInbox(int $uid, string $cryptKey, int $limit = 40) : array
