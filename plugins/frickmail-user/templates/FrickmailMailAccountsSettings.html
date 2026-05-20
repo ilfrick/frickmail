@@ -41,9 +41,6 @@
 				<option value="o365">Office 365 / Outlook (OAuth2)</option>
 			</select>
 
-			<label>Label</label>
-			<input type="text" data-bind="value: draft.label" placeholder="Personal, Work, …" />
-
 			<div data-bind="visible: draft.type() === 'imap'">
 				<label>IMAP login (if different from email)</label>
 				<input type="text" data-bind="value: draft.login" />
