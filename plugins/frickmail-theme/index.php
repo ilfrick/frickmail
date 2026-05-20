@@ -23,6 +23,7 @@ class FrickmailThemePlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addCss('css/components.css');
 		$this->addCss('css/login.css');
 		$this->addJs('js/ThemeSwitcher.js');
+		$this->addJs('js/KeyboardShortcuts.js');
 		// Admin UI: tokens + admin-specific overrides
 		$this->addCss('css/tokens.css',          true);
 		$this->addCss('css/admin-overrides.css', true);

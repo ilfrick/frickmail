@@ -9,6 +9,13 @@ if ('serviceWorker' in navigator) {
 		.catch(() => {});
 }
 
+// Register as default mailto: handler so clicking email links opens Frickmail
+if (navigator.registerProtocolHandler) {
+	try {
+		navigator.registerProtocolHandler('mailto', location.origin + '/?compose=%s', 'Frickmail');
+	} catch (e) {}
+}
+
 (function () {
 	const THEME_KEY  = 'fm_theme';
 	const ACCENT_KEY = 'fm_accent';
