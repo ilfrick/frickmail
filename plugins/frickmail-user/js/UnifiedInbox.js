@@ -331,4 +331,7 @@
 		}, 300);
 	});
 
+	// Expose public API so ThemeSwitcher nav can open the overlay directly
+	window.FrickmailUnifiedInbox = { open: openOverlay };
+
 })();

@@ -72,6 +72,7 @@ if (navigator.registerProtocolHandler) {
 		if (document.getElementById('fm-icon-nav')) return;
 		const NAV = [
 			{ id:'mail',     icon:'✉',  tip:'Mail',     hash:'#/mailbox/INBOX' },
+			{ id:'unified',  icon:'⊞',  tip:'All accounts inbox', action:'unified' },
 			{ id:'contacts', icon:'👤', tip:'Contacts', action:'contacts' },
 			{ id:'calendar', icon:'📅', tip:'Calendar', hash:'#/settings/calendar' },
 		];
@@ -110,6 +111,13 @@ if (navigator.registerProtocolHandler) {
 	function doNav(n) {
 		if (n.action === 'contacts') {
 			document.querySelector('.buttonContacts')?.click(); return;
+		}
+		if (n.action === 'unified') {
+			// Delegate to UnifiedInbox.js which exposes FrickmailUnifiedInbox.open()
+			if (window.FrickmailUnifiedInbox?.open) {
+				window.FrickmailUnifiedInbox.open();
+			}
+			return;
 		}
 		if (n.hash) location.hash = n.hash;
 		syncActiveNav();

@@ -131,7 +131,9 @@
 
 	function openPanel(prefill) {
 		buildPanel();
-		panel.style.transform = 'translateX(0px)';
+		panel.style.display = 'flex';
+		// rAF ensures display:flex is applied before the transform transition starts
+		requestAnimationFrame(() => { panel.style.transform = 'translateX(0px)'; });
 		if (prefill !== undefined && prefill !== null) {
 			panelInput.value = prefill;
 		}
@@ -140,7 +142,10 @@
 	}
 
 	function closePanel() {
-		if (panel) panel.style.transform = 'translateX(100%)';
+		if (!panel) return;
+		panel.style.transform = 'translateX(100%)';
+		// Belt-and-suspenders: hide after transition in case transform doesn't work on this device
+		setTimeout(() => { if (panel) panel.style.display = 'none'; }, 250);
 	}
 
 	function setStatus(msg) {
