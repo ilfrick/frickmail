@@ -72,7 +72,7 @@ if (navigator.registerProtocolHandler) {
 		if (document.getElementById('fm-icon-nav')) return;
 		const NAV = [
 			{ id:'mail',     icon:'✉',  tip:'Mail',     hash:'#/mailbox/INBOX' },
-			{ id:'unified',  icon:'⊞',  tip:'All accounts inbox', action:'unified' },
+			{ id:'unified',  icon:'📬', tip:'All accounts inbox', action:'unified' },
 			{ id:'contacts', icon:'👤', tip:'Contacts', action:'contacts' },
 			{ id:'calendar', icon:'📅', tip:'Calendar', hash:'#/settings/calendar' },
 		];
