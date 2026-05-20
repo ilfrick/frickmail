@@ -1,14 +1,5 @@
 # Frickmail Roadmap
 
-## In progress
-
-| Feature | Status |
-|---|---|
-| Message rules / filters | agent running |
-| Task management | agent running |
-
----
-
 ## Implemented
 
 - Frickmail user identity (Postgres, Argon2id, xchacha20-poly1305)
@@ -28,6 +19,16 @@
 - Keyboard shortcuts: ?, c, /, j/k, r/a/f, u, m + help overlay
 - mailto: protocol registration
 - Upstream integration procedure documented
+- Desktop notifications (IMAP UIDNEXT polling + SW showNotification)
+- Import/Export: EML download, MBOX folder export, EML IMAP APPEND import
+- Multiple sender identities: per-account aliases, default identity, Settings UI
+- Keyboard shortcuts: ?, c, /, j/k, r/a/f, u, m + help overlay + hint toast
+- mailto: protocol registration
+- Task management: Postgres-backed task list, All/Pending/Done tabs, ✓ nav icon
+- Message filter rules: IMAP SEARCH+MOVE/FLAG/DELETE, enable/disable, "Run now"
+- S/MIME: import .p12/.pem, sign/verify via openssl_pkcs7, key encrypted at rest
+- Offline message reading: SW caches MessageList/Message JSON 30min, offline fallback
+- Tauri desktop wrapper: system tray, hide-to-tray, native notifications (tauri/)
 - Login rate limiting (nginx, per-IP)
 - PWA: Service Worker, Web Push skeleton, installable manifest
 
@@ -35,9 +36,9 @@
 
 ## Gaps vs Thunderbird — priority order
 
-### P1 — High impact, medium effort
+### P1 — High impact, medium effort ✅ all done
 
-**Unified Inbox** _(in progress)_
+**Unified Inbox** ✅
 Show messages from all accounts in a single merged view sorted by date.
 Each message carries an account badge. Click navigates into that account.
 Backend: direct MailSo connections per account. Frontend: new "All" tab.
