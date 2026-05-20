@@ -179,6 +179,7 @@ COPY --chown=www-data:www-data plugins/contacts-sync /snappymail/plugins-bundled
 COPY --chown=www-data:www-data plugins/calendar      /snappymail/plugins-bundled/calendar
 COPY --chown=www-data:www-data plugins/frickmail-user  /snappymail/plugins-bundled/frickmail-user
 COPY --chown=www-data:www-data plugins/frickmail-theme /snappymail/plugins-bundled/frickmail-theme
+COPY --chown=www-data:www-data plugins/cache-redis     /snappymail/plugins-bundled/cache-redis
 # Setup configs
 COPY --chown=root:root .docker/release/files /
 RUN set -eux; \
