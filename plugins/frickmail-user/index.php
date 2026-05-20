@@ -92,6 +92,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJs('js/UnifiedInbox.js');
 		$this->addJs('js/AdminBranding.js', true);
 		$this->addJs('js/Notifications.js');
+		$this->addJs('js/ImportExport.js');
+		$this->addJs('js/IdentitySettings.js');
 		$this->addTemplate('templates/FrickmailMailAccountsSettings.html');
 		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
 
@@ -117,6 +119,13 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailSearch',              'JsonSearch');
 		$this->addJsonHook('FrickmailUnifiedInbox',        'JsonUnifiedInbox');
 		$this->addJsonHook('FrickmailCheckNewMail',        'JsonCheckNewMail');
+		$this->addJsonHook('FrickmailExportMessage',       'JsonExportMessage');
+		$this->addJsonHook('FrickmailExportFolder',        'JsonExportFolder');
+		$this->addJsonHook('FrickmailImportEml',           'JsonImportEml');
+		$this->addJsonHook('FrickmailListIdentities',      'JsonListIdentities');
+		$this->addJsonHook('FrickmailAddIdentity',         'JsonAddIdentity');
+		$this->addJsonHook('FrickmailDeleteIdentity',      'JsonDeleteIdentity');
+		$this->addJsonHook('FrickmailSetDefaultIdentity',  'JsonSetDefaultIdentity');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -411,6 +420,107 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			[$uid, $cryptKey] = $this->auth()->requireSession();
 			$lastUids = (array) ($this->jsonParam('last_uids') ?: []);
 			return $this->mailAccounts()->checkNewMail($uid, $cryptKey, $lastUids);
+		});
+	}
+
+	/* ------------------------------------------------------------------ */
+	/*  Import / Export actions                                             */
+	/* ------------------------------------------------------------------ */
+
+	public function JsonExportMessage() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$folder    = (string) $this->jsonParam('folder');
+			$imapUid   = (int)    $this->jsonParam('uid');
+			$subject   = (string) ($this->jsonParam('subject') ?: 'message');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $folder)  throw new \RuntimeException('folder required');
+			if ($imapUid <= 0)   throw new \RuntimeException('uid required');
+			$rawEml   = $this->mailAccounts()->exportMessage($uid, $cryptKey, $accountId, $folder, $imapUid);
+			$filename = \preg_replace('/[^\w\-. ]+/', '_', $subject);
+			$filename = \trim($filename, ' _') ?: 'message';
+			return ['ok' => true, 'filename' => \substr($filename, 0, 80) . '.eml', 'content_b64' => \base64_encode($rawEml)];
+		});
+	}
+
+	public function JsonExportFolder() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$folder    = (string) $this->jsonParam('folder');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $folder)  throw new \RuntimeException('folder required');
+			$mbox = '';
+			$this->mailAccounts()->exportFolder($uid, $cryptKey, $accountId, $folder,
+				function (string $rawEml) use (&$mbox) {
+					$mbox .= 'From nobody ' . \date('D M d H:i:s Y') . "\r\n";
+					$mbox .= \preg_replace('/^From /m', '>From ', $rawEml) . "\r\n";
+				});
+			$filename = \preg_replace('/[^\w\-. ]+/', '_', $folder) ?: 'folder';
+			return ['ok' => true, 'filename' => \substr($filename, 0, 80) . '.mbox', 'content_b64' => \base64_encode($mbox)];
+		});
+	}
+
+	public function JsonImportEml() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId    = (int)    $this->jsonParam('account_id');
+			$targetFolder = (string) ($this->jsonParam('folder') ?: 'INBOX');
+			$emlB64       = (string) $this->jsonParam('eml_b64');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $emlB64)  throw new \RuntimeException('eml_b64 required');
+			$rawEml = \base64_decode($emlB64, true);
+			if (false === $rawEml) throw new \RuntimeException('Invalid base64 in eml_b64');
+			$this->mailAccounts()->importEml($uid, $cryptKey, $accountId, $rawEml, $targetFolder);
+			return ['ok' => true];
+		});
+	}
+
+	/* ------------------------------------------------------------------ */
+	/*  Sender identity actions                                             */
+	/* ------------------------------------------------------------------ */
+
+	public function JsonListIdentities() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->mailAccounts()->listIdentities($uid, (int) $this->jsonParam('account_id'));
+		});
+	}
+
+	public function JsonAddIdentity() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$replyTo = $this->jsonParam('reply_to');
+			return $this->mailAccounts()->addIdentity(
+				$uid,
+				(int)    $this->jsonParam('account_id'),
+				(string) $this->jsonParam('name'),
+				(string) $this->jsonParam('email'),
+				($replyTo !== null && $replyTo !== '') ? (string) $replyTo : null,
+				(bool)   $this->jsonParam('is_default')
+			);
+		});
+	}
+
+	public function JsonDeleteIdentity() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->mailAccounts()->deleteIdentity($uid, (int) $this->jsonParam('id'));
+		});
+	}
+
+	public function JsonSetDefaultIdentity() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->mailAccounts()->setDefaultIdentity($uid, (int) $this->jsonParam('id'));
 		});
 	}
 

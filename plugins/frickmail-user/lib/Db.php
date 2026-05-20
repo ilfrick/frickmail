@@ -391,6 +391,68 @@ class Db
 		)->execute([':aid' => $accountId]);
 	}
 
+	/* ---------- Sender identities ---------- */
+
+	public function listIdentities(int $userId, int $accountId) : array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT * FROM frickmail_identities WHERE user_id = :u AND account_id = :a ORDER BY is_default DESC, id ASC'
+		);
+		$st->execute([':u' => $userId, ':a' => $accountId]);
+		return $st->fetchAll();
+	}
+
+	public function addIdentity(int $userId, int $accountId, string $name, string $email, ?string $replyTo, bool $isDefault) : int
+	{
+		$st = $this->pdo->prepare(
+			'INSERT INTO frickmail_identities (account_id, user_id, name, email, reply_to, is_default)
+			 VALUES (:a, :u, :n, :e, :r, :d) RETURNING id'
+		);
+		$st->execute([
+			':a' => $accountId,
+			':u' => $userId,
+			':n' => $name,
+			':e' => $email,
+			':r' => $replyTo,
+			':d' => $isDefault ? 'true' : 'false',
+		]);
+		return (int) $st->fetchColumn();
+	}
+
+	public function deleteIdentity(int $userId, int $identityId) : bool
+	{
+		$st = $this->pdo->prepare('DELETE FROM frickmail_identities WHERE user_id = :u AND id = :i');
+		return $st->execute([':u' => $userId, ':i' => $identityId]);
+	}
+
+	public function setDefaultIdentity(int $userId, int $identityId) : void
+	{
+		// First resolve the account_id for this identity (and verify ownership).
+		$st = $this->pdo->prepare(
+			'SELECT account_id FROM frickmail_identities WHERE id = :i AND user_id = :u'
+		);
+		$st->execute([':i' => $identityId, ':u' => $userId]);
+		$row = $st->fetch();
+		if (!$row) throw new \RuntimeException('Identity not found');
+		$accountId = (int) $row['account_id'];
+
+		$this->pdo->beginTransaction();
+		try {
+			$st = $this->pdo->prepare(
+				'UPDATE frickmail_identities SET is_default = FALSE WHERE account_id = :a AND user_id = :u'
+			);
+			$st->execute([':a' => $accountId, ':u' => $userId]);
+			$st = $this->pdo->prepare(
+				'UPDATE frickmail_identities SET is_default = TRUE WHERE id = :i AND user_id = :u'
+			);
+			$st->execute([':i' => $identityId, ':u' => $userId]);
+			$this->pdo->commit();
+		} catch (\Throwable $e) {
+			$this->pdo->rollBack();
+			throw $e;
+		}
+	}
+
 	/**
 	 * Persist a single key→url entry in the JSONB settings column of a mail account.
 	 * Used for CardDAV / CalDAV URLs discovered via service discovery.

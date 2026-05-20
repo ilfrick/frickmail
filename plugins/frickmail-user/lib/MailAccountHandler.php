@@ -21,8 +21,21 @@ class MailAccountHandler
 		$rows   = $this->db->listMailAccounts($uid);
 		$result = [];
 		foreach ($rows as $row) {
+			$accountId    = (int) $row['id'];
+			$identityRows = $this->db->listIdentities($uid, $accountId);
+			$identities   = [];
+			foreach ($identityRows as $ir) {
+				$identities[] = [
+					'id'         => (int)  $ir['id'],
+					'account_id' => $accountId,
+					'name'       => $ir['name'],
+					'email'      => $ir['email'],
+					'reply_to'   => $ir['reply_to'],
+					'is_default' => (bool) $ir['is_default'],
+				];
+			}
 			$result[] = [
-				'id'          => (int)  $row['id'],
+				'id'          => $accountId,
 				'label'       => $row['label'],
 				'email'       => $row['email'],
 				'type'        => $row['type'],
@@ -34,9 +47,74 @@ class MailAccountHandler
 				'smtp_secure' => $row['smtp_secure'],
 				'login'       => $row['login'],
 				'is_primary'  => (bool) $row['is_primary'],
+				'identities'  => $identities,
 			];
 		}
 		return ['ok' => true, 'accounts' => $result];
+	}
+
+	/* ------------------------------------------------------------------ */
+	/*  Sender identities                                                    */
+	/* ------------------------------------------------------------------ */
+
+	public function listIdentities(int $uid, int $accountId) : array
+	{
+		$rows = $this->db->listIdentities($uid, $accountId);
+		$result = [];
+		foreach ($rows as $ir) {
+			$result[] = [
+				'id'         => (int)  $ir['id'],
+				'account_id' => (int)  $ir['account_id'],
+				'name'       => $ir['name'],
+				'email'      => $ir['email'],
+				'reply_to'   => $ir['reply_to'],
+				'is_default' => (bool) $ir['is_default'],
+			];
+		}
+		return ['ok' => true, 'identities' => $result];
+	}
+
+	public function addIdentity(int $uid, int $accountId, string $name, string $email, ?string $replyTo, bool $isDefault) : array
+	{
+		if ('' === \trim($name))  throw new \RuntimeException('Name is required');
+		if ('' === \trim($email)) throw new \RuntimeException('Email is required');
+		if (!\filter_var($email, \FILTER_VALIDATE_EMAIL)) throw new \RuntimeException('Invalid email address');
+		// Verify the account belongs to this user.
+		if (!$this->db->getMailAccount($uid, $accountId)) throw new \RuntimeException('Account not found');
+
+		// If marking as default, first clear any existing default for this account.
+		if ($isDefault) {
+			$existing = $this->db->listIdentities($uid, $accountId);
+			foreach ($existing as $ex) {
+				if ($ex['is_default']) {
+					// We'll let the DB unique index handle it via setDefaultIdentity after insert;
+					// for insert we just pass isDefault=false and then set it.
+					$isDefault = false;
+					$needSetDefault = true;
+					break;
+				}
+			}
+		}
+
+		$id = $this->db->addIdentity($uid, $accountId, \trim($name), \trim($email), $replyTo ? \trim($replyTo) : null, $isDefault ?? false);
+
+		if (!empty($needSetDefault)) {
+			$this->db->setDefaultIdentity($uid, $id);
+		}
+
+		return ['ok' => true, 'id' => $id];
+	}
+
+	public function deleteIdentity(int $uid, int $identityId) : array
+	{
+		$ok = $this->db->deleteIdentity($uid, $identityId);
+		return ['ok' => $ok];
+	}
+
+	public function setDefaultIdentity(int $uid, int $identityId) : array
+	{
+		$this->db->setDefaultIdentity($uid, $identityId);
+		return ['ok' => true];
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -356,85 +434,6 @@ class MailAccountHandler
 		$oDomainProvider->Save($oDomain);
 	}
 
-	/* ---- Check new mail -------------------------------------------------- */
-
-	/**
-	 * For each IMAP account with a password, issue IMAP STATUS INBOX to obtain
-	 * UIDNEXT. Compare against the caller-supplied baseline to detect new mail.
-	 *
-	 * @param  int    $uid       Frickmail user id
-	 * @param  string $cryptKey  Session AEAD key (to decrypt passwords)
-	 * @param  array  $lastUids  Map of account_id (string) => last known UIDNEXT (int)
-	 * @return array  {ok, accounts: [{account_id, account_email, uidnext, new_count}]}
-	 */
-	public function checkNewMail(int $uid, string $cryptKey, array $lastUids): array
-	{
-		$rows    = $this->db->listMailAccounts($uid);
-		$results = [];
-
-		foreach ($rows as $row) {
-			if ('imap' !== $row['type']) continue;
-			$account = $this->db->decryptedAccount($row, $cryptKey);
-			if (empty($account['password'])) continue;
-
-			$accountId = (int) $row['id'];
-			$lastUidnext = (int) ($lastUids[(string) $accountId] ?? 0);
-
-			try {
-				[$uidnext, $messages] = $this->fetchInboxStatus($account);
-			} catch (\Throwable $e) {
-				// Skip failing accounts silently — same pattern as unifiedInbox.
-				continue;
-			}
-
-			$newCount = 0;
-			if ($lastUidnext > 0 && $uidnext > $lastUidnext) {
-				// Each increment of UIDNEXT by N means N new messages arrived.
-				$newCount = $uidnext - $lastUidnext;
-			}
-
-			$results[] = [
-				'account_id'    => $accountId,
-				'account_email' => $account['email'],
-				'uidnext'       => $uidnext,
-				'messages'      => $messages,
-				'new_count'     => $newCount,
-			];
-		}
-
-		return ['ok' => true, 'accounts' => $results];
-	}
-
-	/**
-	 * Open IMAP, SELECT/EXAMINE INBOX, return [uidnext, messages].
-	 */
-	private function fetchInboxStatus(array $account): array
-	{
-		$oSettings = \MailSo\Imap\Settings::fromArray([
-			'host'       => $account['imap_host'],
-			'port'       => (int) $account['imap_port'],
-			'type'       => $this->mapSecure($account['imap_secure']),
-			'timeout'    => 10,
-			'shortLogin' => false,
-		]);
-		$oSettings->username   = $account['login'] ?: $account['email'];
-		$oSettings->passphrase = $account['password'];
-
-		$oImap = new \MailSo\Imap\ImapClient();
-		$oImap->SetTimeOuts(10);
-		try {
-			$oImap->Connect($oSettings);
-			$oImap->Login($oSettings);
-			$oInfo   = $oImap->FolderExamine('INBOX');
-			$uidnext = (int) ($oInfo->UIDNEXT   ?? 0);
-			$messages = (int) ($oInfo->MESSAGES  ?? 0);
-			return [$uidnext, $messages];
-		} finally {
-			try { $oImap->Logout();     } catch (\Throwable $e) {}
-			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
-		}
-	}
-
 	/* ---- Unified Inbox --------------------------------------------------- */
 
 	public function unifiedInbox(int $uid, string $cryptKey, int $limit = 40) : array
@@ -532,6 +531,199 @@ class MailAccountHandler
 			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
 		}
 	}
+
+	/* ---- New mail check ------------------------------------------------ */
+
+	public function checkNewMail(int $uid, string $cryptKey, array $lastUids): array
+	{
+		$rows    = $this->db->listMailAccounts($uid);
+		$results = [];
+
+		foreach ($rows as $row) {
+			if ('imap' !== $row['type']) continue;
+			$account = $this->db->decryptedAccount($row, $cryptKey);
+			if (empty($account['password'])) continue;
+
+			$accountId = (int) $row['id'];
+			$lastUidnext = (int) ($lastUids[(string) $accountId] ?? 0);
+
+			try {
+				[$uidnext, $messages] = $this->fetchInboxStatus($account);
+			} catch (\Throwable $e) {
+				// Skip failing accounts silently — same pattern as unifiedInbox.
+				continue;
+			}
+
+			$newCount = 0;
+			if ($lastUidnext > 0 && $uidnext > $lastUidnext) {
+				// Each increment of UIDNEXT by N means N new messages arrived.
+				$newCount = $uidnext - $lastUidnext;
+			}
+
+			$results[] = [
+				'account_id'    => $accountId,
+				'account_email' => $account['email'],
+				'uidnext'       => $uidnext,
+				'messages'      => $messages,
+				'new_count'     => $newCount,
+			];
+		}
+
+		return ['ok' => true, 'accounts' => $results];
+	}
+
+	/**
+	 * Open IMAP, SELECT/EXAMINE INBOX, return [uidnext, messages].
+	 */
+	private function fetchInboxStatus(array $account): array
+	{
+		$oSettings = \MailSo\Imap\Settings::fromArray([
+			'host'       => $account['imap_host'],
+			'port'       => (int) $account['imap_port'],
+			'type'       => $this->mapSecure($account['imap_secure']),
+			'timeout'    => 10,
+			'shortLogin' => false,
+		]);
+		$oSettings->username   = $account['login'] ?: $account['email'];
+		$oSettings->passphrase = $account['password'];
+
+		$oImap = new \MailSo\Imap\ImapClient();
+		$oImap->SetTimeOuts(10);
+		try {
+			$oImap->Connect($oSettings);
+			$oImap->Login($oSettings);
+			$oInfo   = $oImap->FolderExamine('INBOX');
+			$uidnext = (int) ($oInfo->UIDNEXT   ?? 0);
+			$messages = (int) ($oInfo->MESSAGES  ?? 0);
+			return [$uidnext, $messages];
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
+	}
+
+	/* ---- Unified Inbox --------------------------------------------------- */
+
+
+	/* ---- Import / Export ---------------------------------------------- */
+
+	public function exportMessage(int $uid, string $cryptKey, int $accountId, string $folder, int $imapUid) : string
+	{
+		$row = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$account = $this->db->decryptedAccount($row, $cryptKey);
+		if (empty($account['password'])) throw new \RuntimeException('Missing IMAP password');
+
+		$oImap = $this->openImapConnection($account);
+		try {
+			$oImap->FolderExamine($folder);
+			// BODY.PEEK[] is the full RFC 2822 message (headers + body), does not set \Seen
+			$aFetch = $oImap->Fetch([\MailSo\Imap\Enumerations\FetchType::BODY_PEEK . '[]'], (string) $imapUid, true);
+			if (empty($aFetch[0])) throw new \RuntimeException('Message not found (UID ' . $imapUid . ')');
+			$rawEml = (string) $aFetch[0]->GetFetchValue('BODY[]');
+			if ('' === $rawEml) throw new \RuntimeException('Empty message body');
+			return $rawEml;
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
+	}
+
+	/**
+	 * Export all messages in a folder, calling $onMessage($rawEml) for each one.
+	 *
+	 * @param callable $onMessage(string $rawEml): void
+	 */
+	public function exportFolder(int $uid, string $cryptKey, int $accountId, string $folder, callable $onMessage) : void
+	{
+		$row = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$account = $this->db->decryptedAccount($row, $cryptKey);
+		if (empty($account['password'])) throw new \RuntimeException('Missing IMAP password');
+
+		$oImap = $this->openImapConnection($account);
+		try {
+			$oInfo = $oImap->FolderExamine($folder);
+			$total = (int) ($oInfo->MESSAGES ?? 0);
+			if (0 === $total) return;
+
+			$batchSize = 50;
+			for ($start = 1; $start <= $total; $start += $batchSize) {
+				$end   = \min($start + $batchSize - 1, $total);
+				$range = ($start === $end) ? (string) $start : "{$start}:{$end}";
+				$aFetch = $oImap->Fetch([\MailSo\Imap\Enumerations\FetchType::BODY_PEEK . '[]'], $range, false);
+				foreach ($aFetch as $oFetchResponse) {
+					$rawEml = (string) $oFetchResponse->GetFetchValue('BODY[]');
+					if ('' !== $rawEml) {
+						$onMessage($rawEml);
+					}
+				}
+			}
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
+	}
+
+	/**
+	 * Import a raw EML string by appending it to $targetFolder via IMAP APPEND.
+	 */
+	public function importEml(int $uid, string $cryptKey, int $accountId, string $rawEml, string $targetFolder = 'INBOX') : void
+	{
+		if ('' === \trim($rawEml)) throw new \RuntimeException('Empty EML content');
+		// Basic EML format check
+		if (!\preg_match('/^(From |Received:|Date:|MIME-Version:|Content-Type:|Return-Path:|Message-ID:)/i', \ltrim($rawEml))) {
+			throw new \RuntimeException('Invalid EML format: file does not look like an RFC 2822 message');
+		}
+
+		$row = $this->db->getMailAccount($uid, $accountId);
+		if (!$row) throw new \RuntimeException('Account not found');
+		$account = $this->db->decryptedAccount($row, $cryptKey);
+		if (empty($account['password'])) throw new \RuntimeException('Missing IMAP password');
+
+		$oImap = $this->openImapConnection($account);
+		try {
+			$rStream = \fopen('php://memory', 'r+');
+			if (false === $rStream) throw new \RuntimeException('Cannot open memory stream');
+			\fwrite($rStream, $rawEml);
+			\fseek($rStream, 0);
+
+			$iSize   = \strlen($rawEml);
+			$iResult = $oImap->MessageAppendStream($targetFolder, $rStream, $iSize, ['\\Seen'], 0);
+			\fclose($rStream);
+
+			if (null === $iResult && !\is_int($iResult)) {
+				// MessageAppendStream returns null when APPENDUID is not supported — still OK
+				// (it throws on real failure). No action needed.
+			}
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
+	}
+
+	/**
+	 * Open an authenticated IMAP connection for $account.
+	 */
+	private function openImapConnection(array $account) : \MailSo\Imap\ImapClient
+	{
+		$oSettings = \MailSo\Imap\Settings::fromArray([
+			'host'       => $account['imap_host'],
+			'port'       => (int) $account['imap_port'],
+			'type'       => $this->mapSecure($account['imap_secure']),
+			'timeout'    => 20,
+			'shortLogin' => false,
+		]);
+		$oSettings->username   = $account['login'] ?: $account['email'];
+		$oSettings->passphrase = $account['password'];
+
+		$oImap = new \MailSo\Imap\ImapClient();
+		$oImap->SetTimeOuts(20);
+		$oImap->Connect($oSettings);
+		$oImap->Login($oSettings);
+		return $oImap;
+	}
+
 
 	/**
 	 * Map a security-string to MailSo\Net\Enumerations\ConnectionSecurityType.
