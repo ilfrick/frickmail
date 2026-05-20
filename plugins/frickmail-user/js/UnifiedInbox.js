@@ -89,23 +89,32 @@
 			'overflow:hidden',
 		].join(';');
 		el.innerHTML = `
-			<div style="display:flex;align-items:center;padding:max(10px,env(safe-area-inset-top)) 16px 10px;border-bottom:1px solid var(--fm-border,rgba(255,255,255,.1));gap:8px;">
+			<div id="fm-ui-header" style="display:flex;align-items:center;padding:max(10px,env(safe-area-inset-top)) 16px 10px;border-bottom:1px solid var(--fm-border,rgba(255,255,255,.1));gap:8px;">
 				<span style="font-weight:var(--fm-font-weight-semi,600);font-size:var(--fm-font-size-lg,1rem);flex:1">All accounts</span>
 				<span id="fm-ui-status" style="font-size:var(--fm-font-size-sm,.8rem);opacity:.7"></span>
-				<button id="fm-ui-refresh" title="Refresh" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1rem;opacity:.8;padding:4px 8px;min-width:44px;min-height:44px;touch-action:manipulation;">&#8635;</button>
-				<button id="fm-ui-close"   title="Close"   style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.2rem;padding:4px 8px;min-width:44px;min-height:44px;touch-action:manipulation;">&times;</button>
+				<span id="fm-ui-refresh-slot"></span>
+				<span id="fm-ui-close-slot"></span>
 			</div>
 			<div id="fm-ui-list" style="flex:1;overflow-y:auto;"></div>
 		`;
 		document.body.appendChild(el);
 
-		const closeBtn = el.querySelector('#fm-ui-close');
-		closeBtn.addEventListener('click', closeOverlay);
-		closeBtn.addEventListener('touchend', (e) => { e.preventDefault(); closeOverlay(); });
+		// Standard close button
+		const closeBtn = (window.FrickmailUtils?.makeCloseButton || function(id, fn) {
+			var b = document.createElement('button'); b.id = id; b.innerHTML = '&times;';
+			b.style.cssText = 'background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.7;touch-action:manipulation';
+			['pointerdown','click','touchend'].forEach(ev => b.addEventListener(ev, function(e){e.stopPropagation();e.preventDefault();fn();}));
+			return b;
+		})('fm-ui-close', closeOverlay);
+		el.querySelector('#fm-ui-close-slot').replaceWith(closeBtn);
 
-		const refreshBtn = el.querySelector('#fm-ui-refresh');
-		refreshBtn.addEventListener('click', () => loadMessages());
-		refreshBtn.addEventListener('touchend', (e) => { e.preventDefault(); loadMessages(); });
+		// Refresh button (not a close button, but keep consistent touch target)
+		const refreshBtn = document.createElement('button');
+		refreshBtn.id = 'fm-ui-refresh'; refreshBtn.title = 'Refresh';
+		refreshBtn.innerHTML = '&#8635;';
+		refreshBtn.style.cssText = 'background:none;border:none;color:inherit;cursor:pointer;font-size:1.1rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.7;touch-action:manipulation;flex-shrink:0';
+		['pointerdown','click','touchend'].forEach(ev => refreshBtn.addEventListener(ev, function(e){e.stopPropagation();e.preventDefault();loadMessages();}));
+		el.querySelector('#fm-ui-refresh-slot').replaceWith(refreshBtn);
 
 		// Close on Escape key
 		el._keyHandler = (e) => { if (e.key === 'Escape') closeOverlay(); };

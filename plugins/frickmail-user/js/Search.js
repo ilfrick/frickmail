@@ -59,7 +59,7 @@
 			'<div id="fm-search-header">',
 			'  <input id="fm-search-input" type="search" placeholder="Search all accounts…" autocomplete="off" />',
 			'  <button id="fm-search-go" type="button">Search</button>',
-			'  <button id="fm-search-close" type="button" aria-label="Close">✕</button>',
+			'  <span id="fm-search-close-slot"></span>',
 			'</div>',
 			'<div id="fm-search-status"></div>',
 			'<ul id="fm-search-list" role="list"></ul>',
@@ -99,13 +99,17 @@
 			'touch-action:manipulation',
 		].join(';');
 
-		const closeBtn = panel.querySelector('#fm-search-close');
-		closeBtn.style.cssText = [
-			'background:none;border:none;font-size:20px;cursor:pointer',
-			'color:inherit;padding:12px 16px;min-width:44px;min-height:44px',
-			'display:flex;align-items:center;justify-content:center',
-			'-webkit-tap-highlight-color:transparent;touch-action:manipulation',
-		].join(';');
+		// Standard close button via shared utility
+		const closeBtn = (window.FrickmailUtils?.makeCloseButton || function(id, fn) {
+			var b = document.createElement('button'); b.id = id; b.innerHTML = '&times;';
+			b.style.cssText = 'background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.7;touch-action:manipulation';
+			['pointerdown','click','touchend'].forEach(ev => b.addEventListener(ev, function(e){e.stopPropagation();e.preventDefault();fn();}));
+			return b;
+		})('fm-search-close', closePanel);
+		panel.querySelector('#fm-search-close-slot').replaceWith(closeBtn);
+
+		// Remove the old separate event listeners (now inside makeCloseButton)
+		// goBtn listeners stay as-is below
 
 		const status = panel.querySelector('#fm-search-status');
 		status.style.cssText = 'padding:6px 14px;font-size:var(--fm-font-size-sm,12px);color:var(--fm-text-secondary,#666);min-height:24px';
@@ -119,9 +123,7 @@
 		goBtn.addEventListener('click', runSearch);
 		goBtn.addEventListener('touchend', (e) => { e.preventDefault(); runSearch(); });
 
-		closeBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); closePanel(); });
-		closeBtn.addEventListener('click', (e) => { e.stopPropagation(); closePanel(); });
-		closeBtn.addEventListener('touchend', (e) => { e.stopPropagation(); e.preventDefault(); closePanel(); });
+		// Note: closeBtn events are already wired inside makeCloseButton above
 
 		panelInput.addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
 		document.addEventListener('keydown', e => {

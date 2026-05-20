@@ -78,7 +78,7 @@
 		el.innerHTML = `
 <div id="fm-tasks-header" style="display:flex;align-items:center;padding:max(10px,env(safe-area-inset-top)) 16px 10px;border-bottom:1px solid var(--fm-border,rgba(255,255,255,.1));gap:8px;flex-shrink:0;">
 	<span style="font-weight:var(--fm-font-weight-bold,700);font-size:var(--fm-font-size-lg,16px);flex:1">Tasks</span>
-	<button id="fm-tasks-close" title="Close" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.8;touch-action:manipulation;-webkit-tap-highlight-color:transparent;">&times;</button>
+	<span id="fm-tasks-close-slot"></span>
 </div>
 
 <div id="fm-tasks-tabs" style="display:flex;gap:0;border-bottom:1px solid var(--fm-border,rgba(255,255,255,.1));flex-shrink:0;">
@@ -106,13 +106,15 @@
 
 		document.body.appendChild(el);
 
-		// Close button — pointerdown is the only reliable cross-platform event;
-		// it fires before touchstart/touchend and cannot be blocked by SnappyMail's
-		// global touch handlers. click + touchend kept as fallbacks.
-		const closeBtn = el.querySelector('#fm-tasks-close');
-		closeBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); closeOverlay(); });
-		closeBtn.addEventListener('click', (e) => { e.stopPropagation(); closeOverlay(); });
-		closeBtn.addEventListener('touchend', (e) => { e.stopPropagation(); e.preventDefault(); closeOverlay(); });
+		// Standard close button via shared utility (consistent style across all panels)
+		const slot = el.querySelector('#fm-tasks-close-slot');
+		const closeBtn = (window.FrickmailUtils?.makeCloseButton || function(id, fn) {
+			var b = document.createElement('button'); b.id = id; b.innerHTML = '&times;';
+			b.style.cssText = 'background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.7;touch-action:manipulation';
+			['pointerdown','click','touchend'].forEach(ev => b.addEventListener(ev, function(e){e.stopPropagation();e.preventDefault();fn();}));
+			return b;
+		})('fm-tasks-close', closeOverlay);
+		slot.replaceWith(closeBtn);
 
 		// Escape key
 		el._keyHandler = (e) => { if (e.key === 'Escape') closeOverlay(); };

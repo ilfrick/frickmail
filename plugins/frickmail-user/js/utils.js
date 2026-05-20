@@ -67,4 +67,40 @@ window.FrickmailUtils = {
 		return months[d.getMonth()] + ' ' + d.getDate() + ' ' + d.getFullYear();
 	},
 
+	/**
+	 * Create a standardised close button used by all Frickmail overlay panels.
+	 *
+	 * Consistent across every panel:
+	 *   - Character : × (&times;)
+	 *   - Size      : 44×44 px minimum touch target (WCAG 2.5.5)
+	 *   - Style     : display:flex, centred, no background/border, opacity 0.7
+	 *   - Events    : pointerdown + click + touchend, all stopPropagation so
+	 *                 SnappyMail global touch handlers cannot swallow the event.
+	 *
+	 * @param {string}   id       Element id (e.g. 'fm-tasks-close')
+	 * @param {Function} onClose  Callback invoked when the button is activated
+	 * @returns {HTMLButtonElement}
+	 */
+	makeCloseButton: function (id, onClose) {
+		var btn = document.createElement('button');
+		btn.id = id;
+		btn.type = 'button';
+		btn.setAttribute('aria-label', 'Close');
+		btn.title = 'Close';
+		btn.innerHTML = '&times;';
+		btn.style.cssText = [
+			'background:none', 'border:none', 'color:inherit', 'cursor:pointer',
+			'font-size:1.4rem', 'line-height:1',
+			'min-width:44px', 'min-height:44px',
+			'display:flex', 'align-items:center', 'justify-content:center',
+			'opacity:0.7', 'touch-action:manipulation',
+			'-webkit-tap-highlight-color:transparent', 'flex-shrink:0',
+		].join(';');
+		var h = function (e) { e.stopPropagation(); e.preventDefault(); onClose(); };
+		btn.addEventListener('pointerdown', h);
+		btn.addEventListener('click',       h);
+		btn.addEventListener('touchend',    h);
+		return btn;
+	},
+
 };
