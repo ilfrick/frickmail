@@ -119,8 +119,9 @@
 		goBtn.addEventListener('click', runSearch);
 		goBtn.addEventListener('touchend', (e) => { e.preventDefault(); runSearch(); });
 
-		closeBtn.addEventListener('click', closePanel);
-		closeBtn.addEventListener('touchend', (e) => { e.preventDefault(); closePanel(); });
+		closeBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); closePanel(); });
+		closeBtn.addEventListener('click', (e) => { e.stopPropagation(); closePanel(); });
+		closeBtn.addEventListener('touchend', (e) => { e.stopPropagation(); e.preventDefault(); closePanel(); });
 
 		panelInput.addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
 		document.addEventListener('keydown', e => {

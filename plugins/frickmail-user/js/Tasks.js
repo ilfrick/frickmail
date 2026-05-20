@@ -106,10 +106,13 @@
 
 		document.body.appendChild(el);
 
-		// Close button — click + touchend for iOS reliability
+		// Close button — pointerdown is the only reliable cross-platform event;
+		// it fires before touchstart/touchend and cannot be blocked by SnappyMail's
+		// global touch handlers. click + touchend kept as fallbacks.
 		const closeBtn = el.querySelector('#fm-tasks-close');
-		closeBtn.addEventListener('click', closeOverlay);
-		closeBtn.addEventListener('touchend', (e) => { e.preventDefault(); closeOverlay(); });
+		closeBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); closeOverlay(); });
+		closeBtn.addEventListener('click', (e) => { e.stopPropagation(); closeOverlay(); });
+		closeBtn.addEventListener('touchend', (e) => { e.stopPropagation(); e.preventDefault(); closeOverlay(); });
 
 		// Escape key
 		el._keyHandler = (e) => { if (e.key === 'Escape') closeOverlay(); };
