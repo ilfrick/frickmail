@@ -79,7 +79,7 @@
 		el.innerHTML = `
 <div id="fm-tasks-header" style="display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.1);gap:8px;flex-shrink:0;">
 	<span style="font-weight:700;font-size:1.05rem;flex:1">Tasks</span>
-	<button id="fm-tasks-close" title="Close" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.3rem;padding:4px 8px;opacity:.8;">&times;</button>
+	<button id="fm-tasks-close" title="Close" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.8;-webkit-tap-highlight-color:transparent;">&times;</button>
 </div>
 
 <div id="fm-tasks-tabs" style="display:flex;gap:0;border-bottom:1px solid rgba(255,255,255,.1);flex-shrink:0;">

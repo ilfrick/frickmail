@@ -87,7 +87,7 @@
 		goBtn.style.cssText = 'padding:6px 14px;border:none;border-radius:4px;background:var(--fm-accent,#1a73e8);color:#fff;cursor:pointer;font-size:14px';
 
 		const closeBtn = panel.querySelector('#fm-search-close');
-		closeBtn.style.cssText = 'background:none;border:none;font-size:18px;cursor:pointer;color:inherit;padding:4px 8px';
+		closeBtn.style.cssText = 'background:none;border:none;font-size:20px;cursor:pointer;color:inherit;padding:12px 16px;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent';
 
 		const status = panel.querySelector('#fm-search-status');
 		status.style.cssText = 'padding:6px 14px;font-size:12px;color:var(--fm-text-muted,#666);min-height:24px';
