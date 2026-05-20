@@ -96,8 +96,17 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		// additional-accounts capability so the Settings→Accounts tab,
 		// account-add popup, and duplicate switcher UI never appear.
 		\RainLoop\Api::Config()->Set('webmail', 'allow_additional_accounts', false);
+		// Frickmail manages sender identities — disable SnappyMail's native identity tab
+		// to prevent a duplicate UI (IdentitySettings.js provides the Frickmail-managed one).
+		\RainLoop\Api::Config()->Set('webmail', 'allow_additional_identities', false);
 
 		$this->assertNoConflictingPlugins();
+
+		// Read admin feature-flags once (defaults preserve existing behaviour).
+		$bTasksEnabled         = (bool) $this->Config()->Get('plugin', 'tasks_enabled',         true);
+		$bNotificationsEnabled = (bool) $this->Config()->Get('plugin', 'notifications_enabled', true);
+		$bAllowExport          = (bool) $this->Config()->Get('plugin', 'allow_export',          true);
+		$bSmimeEnabled         = (bool) $this->Config()->Get('plugin', 'smime_enabled',         true);
 
 		$this->UseLangs(false);
 		$this->addJs('js/utils.js');
@@ -108,14 +117,27 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJs('js/Search.js');
 		$this->addJs('js/UnifiedInbox.js');
 		$this->addJs('js/AdminBranding.js', true);
-		$this->addJs('js/Notifications.js');
-		$this->addJs('js/ImportExport.js');
 		$this->addJs('js/IdentitySettings.js');
-		$this->addJs('js/Tasks.js');
 		$this->addJs('js/Rules.js');
-		$this->addJs('js/SmimeSettings.js');
+		$this->addJs('js/UserPrefs.js');
 		$this->addTemplate('templates/FrickmailMailAccountsSettings.html');
 		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
+
+		if ($bNotificationsEnabled) {
+			$this->addJs('js/Notifications.js');
+		}
+
+		if ($bAllowExport) {
+			$this->addJs('js/ImportExport.js');
+		}
+
+		if ($bTasksEnabled) {
+			$this->addJs('js/Tasks.js');
+		}
+
+		if ($bSmimeEnabled) {
+			$this->addJs('js/SmimeSettings.js');
+		}
 
 		$this->addJsonHook('FrickmailLogin',               'JsonFrickmailLogin');
 		$this->addJsonHook('FrickmailRegister',            'JsonFrickmailRegister');
@@ -138,30 +160,44 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailSaveOAuthToken',      'JsonSaveOAuthToken');
 		$this->addJsonHook('FrickmailSearch',              'JsonSearch');
 		$this->addJsonHook('FrickmailUnifiedInbox',        'JsonUnifiedInbox');
-		$this->addJsonHook('FrickmailCheckNewMail',        'JsonCheckNewMail');
-		$this->addJsonHook('FrickmailExportMessage',       'JsonExportMessage');
-		$this->addJsonHook('FrickmailExportFolder',        'JsonExportFolder');
-		$this->addJsonHook('FrickmailImportEml',           'JsonImportEml');
+		$this->addJsonHook('FrickmailGetPrefs',            'JsonGetPrefs');
+		$this->addJsonHook('FrickmailSetPrefs',            'JsonSetPrefs');
 		$this->addJsonHook('FrickmailListIdentities',      'JsonListIdentities');
 		$this->addJsonHook('FrickmailAddIdentity',         'JsonAddIdentity');
 		$this->addJsonHook('FrickmailDeleteIdentity',      'JsonDeleteIdentity');
 		$this->addJsonHook('FrickmailSetDefaultIdentity',  'JsonSetDefaultIdentity');
-		$this->addJsonHook('FrickmailListTasks',           'JsonListTasks');
-		$this->addJsonHook('FrickmailAddTask',             'JsonAddTask');
-		$this->addJsonHook('FrickmailCompleteTask',        'JsonCompleteTask');
-		$this->addJsonHook('FrickmailDeleteTask',          'JsonDeleteTask');
-		$this->addJsonHook('FrickmailUpdateTask',          'JsonUpdateTask');
 		$this->addJsonHook('FrickmailListRules',           'JsonListRules');
 		$this->addJsonHook('FrickmailAddRule',             'JsonAddRule');
 		$this->addJsonHook('FrickmailDeleteRule',          'JsonDeleteRule');
 		$this->addJsonHook('FrickmailToggleRule',          'JsonToggleRule');
 		$this->addJsonHook('FrickmailApplyRules',          'JsonApplyRules');
-		$this->addJsonHook('FrickmailSmimeListCerts',      'JsonSmimeListCerts');
-		$this->addJsonHook('FrickmailSmimeImportP12',      'JsonSmimeImportP12');
-		$this->addJsonHook('FrickmailSmimeImportCert',     'JsonSmimeImportCert');
-		$this->addJsonHook('FrickmailSmimeDeleteCert',     'JsonSmimeDeleteCert');
-		$this->addJsonHook('FrickmailSmimeSign',           'JsonSmimeSign');
-		$this->addJsonHook('FrickmailSmimeVerify',         'JsonSmimeVerify');
+
+		if ($bNotificationsEnabled) {
+			$this->addJsonHook('FrickmailCheckNewMail', 'JsonCheckNewMail');
+		}
+
+		if ($bAllowExport) {
+			$this->addJsonHook('FrickmailExportMessage', 'JsonExportMessage');
+			$this->addJsonHook('FrickmailExportFolder',  'JsonExportFolder');
+			$this->addJsonHook('FrickmailImportEml',     'JsonImportEml');
+		}
+
+		if ($bTasksEnabled) {
+			$this->addJsonHook('FrickmailListTasks',    'JsonListTasks');
+			$this->addJsonHook('FrickmailAddTask',      'JsonAddTask');
+			$this->addJsonHook('FrickmailCompleteTask', 'JsonCompleteTask');
+			$this->addJsonHook('FrickmailDeleteTask',   'JsonDeleteTask');
+			$this->addJsonHook('FrickmailUpdateTask',   'JsonUpdateTask');
+		}
+
+		if ($bSmimeEnabled) {
+			$this->addJsonHook('FrickmailSmimeListCerts',  'JsonSmimeListCerts');
+			$this->addJsonHook('FrickmailSmimeImportP12',  'JsonSmimeImportP12');
+			$this->addJsonHook('FrickmailSmimeImportCert', 'JsonSmimeImportCert');
+			$this->addJsonHook('FrickmailSmimeDeleteCert', 'JsonSmimeDeleteCert');
+			$this->addJsonHook('FrickmailSmimeSign',       'JsonSmimeSign');
+			$this->addJsonHook('FrickmailSmimeVerify',     'JsonSmimeVerify');
+		}
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -193,6 +229,45 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 				->SetDefaultValue(false)
 				->SetAllowedInJs()
 				->SetDescription('When enabled, anyone reaching the login page can create a Frickmail account. Otherwise users must be created via CLI.'),
+
+			// Desktop notifications
+			\RainLoop\Plugins\Property::NewInstance('notifications_enabled')
+				->SetLabel('Enable desktop notifications')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
+				->SetDefaultValue(true)
+				->SetAllowedInJs()
+				->SetDescription('Allow users to enable desktop new-mail notifications.'),
+
+			// Import/Export
+			\RainLoop\Plugins\Property::NewInstance('allow_export')
+				->SetLabel('Allow email export')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
+				->SetDefaultValue(true)
+				->SetAllowedInJs()
+				->SetDescription('Allow users to download messages as EML/MBOX files.'),
+
+			// Message rules: max per user
+			\RainLoop\Plugins\Property::NewInstance('max_rules_per_user')
+				->SetLabel('Max message rules per user')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::INT)
+				->SetDefaultValue(20)
+				->SetDescription('Maximum number of message filter rules per user (0 = unlimited).'),
+
+			// S/MIME
+			\RainLoop\Plugins\Property::NewInstance('smime_enabled')
+				->SetLabel('Enable S/MIME')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
+				->SetDefaultValue(true)
+				->SetAllowedInJs()
+				->SetDescription('Allow users to import S/MIME certificates and sign/verify messages.'),
+
+			// Tasks
+			\RainLoop\Plugins\Property::NewInstance('tasks_enabled')
+				->SetLabel('Enable task management')
+				->SetType(\RainLoop\Enumerations\PluginPropertyType::BOOL)
+				->SetDefaultValue(true)
+				->SetAllowedInJs()
+				->SetDescription('Show the task panel (✓) in the navigation bar.'),
 		];
 	}
 
@@ -777,6 +852,26 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		});
 	}
 
+	/* ------------------------------------------------------------------ */
+	/*  User preferences actions                                             */
+	/* ------------------------------------------------------------------ */
+
+	public function JsonGetPrefs() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->auth()->getPrefs($uid);
+		});
+	}
+
+	public function JsonSetPrefs() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$patch = (array) ($this->jsonParam('prefs') ?: []);
+			return $this->auth()->setPrefs($uid, $patch);
+		});
+	}
 
 	/* ------------------------------------------------------------------ */
 	/*  Private helpers                                                      */

@@ -276,4 +276,76 @@ class AuthHandler
 			'message'  => 'Password reset. Sign in with your new password. Linked mail-account credentials must be re-entered.',
 		];
 	}
+
+	private const PREFS_SCHEMA = [
+		'notifications_poll_interval' => ['default' => 60,        'type' => 'int',    'min' => 30,  'max' => 300,  'enum' => null],
+		'notifications_accounts'      => ['default' => null,      'type' => 'array',  'min' => null,'max' => null, 'enum' => null],
+		'smime_auto_sign'             => ['default' => false,     'type' => 'bool',   'min' => null,'max' => null, 'enum' => null],
+		'unified_inbox_limit'         => ['default' => 40,        'type' => 'int',    'min' => 10,  'max' => 100,  'enum' => null],
+		'tasks_default_tab'           => ['default' => 'all',     'type' => 'string', 'min' => null,'max' => null, 'enum' => ['all', 'pending', 'completed']],
+	];
+
+	/**
+	 * Return the current user preferences merged with schema defaults.
+	 */
+	public function getPrefs(int $uid) : array
+	{
+		$stored = $this->db->getUserSettings($uid);
+		$result = [];
+		foreach (self::PREFS_SCHEMA as $key => $def) {
+			$result[$key] = \array_key_exists($key, $stored) ? $stored[$key] : $def['default'];
+		}
+		return ['ok' => true, 'prefs' => $result];
+	}
+
+	/**
+	 * Validate and save a partial preferences patch.
+	 * Only whitelisted keys are accepted; invalid values are silently skipped.
+	 * Returns the full updated preferences.
+	 */
+	public function setPrefs(int $uid, array $patch) : array
+	{
+		$clean = [];
+		foreach (self::PREFS_SCHEMA as $key => $def) {
+			if (!\array_key_exists($key, $patch)) continue;
+			$value = $patch[$key];
+
+			// Null is explicitly allowed for nullable fields (e.g. notifications_accounts).
+			if ($value === null && $def['default'] === null) {
+				$clean[$key] = null;
+				continue;
+			}
+
+			switch ($def['type']) {
+				case 'int':
+					$value = (int) $value;
+					if ($def['min'] !== null && $value < $def['min']) $value = $def['min'];
+					if ($def['max'] !== null && $value > $def['max']) $value = $def['max'];
+					$clean[$key] = $value;
+					break;
+
+				case 'bool':
+					$clean[$key] = (bool) $value;
+					break;
+
+				case 'string':
+					$value = (string) $value;
+					if ($def['enum'] !== null && !\in_array($value, $def['enum'], true)) break;
+					$clean[$key] = $value;
+					break;
+
+				case 'array':
+					if (\is_array($value)) {
+						$clean[$key] = \array_values(\array_map('intval', $value));
+					}
+					break;
+			}
+		}
+
+		if (!empty($clean)) {
+			$this->db->updateUserSettings($uid, $clean);
+		}
+
+		return $this->getPrefs($uid);
+	}
 }

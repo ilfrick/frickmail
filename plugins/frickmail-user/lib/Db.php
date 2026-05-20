@@ -65,6 +65,32 @@ class Db
 		return (int) $this->pdo->query('SELECT COUNT(*) FROM frickmail_users')->fetchColumn();
 	}
 
+
+	public function getUserSettings(int $userId) : array
+	{
+		$st = $this->pdo->prepare('SELECT settings FROM frickmail_users WHERE id = :i');
+		$st->execute([':i' => $userId]);
+		$row = $st->fetch();
+		if (!$row) return [];
+		$decoded = \json_decode((string) $row['settings'], true);
+		return \is_array($decoded) ? $decoded : [];
+	}
+
+	/**
+	 * Merge $patch into the JSONB settings blob for a user (shallow merge via ||).
+	 * Keys present in $patch overwrite existing values; other keys are preserved.
+	 */
+	public function updateUserSettings(int $userId, array $patch) : void
+	{
+		$st = $this->pdo->prepare(
+			"UPDATE frickmail_users
+			    SET settings = settings || :patch::jsonb, updated_at = NOW()
+			  WHERE id = :i"
+		);
+		$st->execute([':patch' => \json_encode($patch), ':i' => $userId]);
+	}
+
+	/* ---------- Mail accounts ---------- */
 	public function deleteUser(int $userId) : bool
 	{
 		$st = $this->pdo->prepare('DELETE FROM frickmail_users WHERE id = :i');
