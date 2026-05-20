@@ -2,11 +2,10 @@
 
 ## In progress
 
-| Feature | Branch / PR |
+| Feature | Status |
 |---|---|
-| Unified Inbox | worktree |
-| Full-text Search | worktree |
-| PWA + Service Worker | `master` (this commit) |
+| Message rules / filters | agent running |
+| Task management | agent running |
 
 ---
 
@@ -18,6 +17,17 @@
 - Password reset via email
 - Redis cache layer
 - Security headers (CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy)
+- Login rate limiting (nginx per-IP, scoped to login/admin endpoints only)
+- PWA: Service Worker (cache-first static, stale-while-revalidate bundles), installable manifest
+- Web Push skeleton: showNotification via SW, IMAP UIDNEXT polling for new mail detection
+- Desktop notifications: 60s poll, permission banner, tagged per-account
+- Unified Inbox: direct MailSo connections, merged sorted by date, coloured badges
+- Full-text search: Postgres tsvector, plainto_tsquery cross-account, GIN index
+- Import/Export: EML download, MBOX folder export, EML IMAP APPEND import
+- Multiple sender identities: per-account aliases, default identity, Settings UI
+- Keyboard shortcuts: ?, c, /, j/k, r/a/f, u, m + help overlay
+- mailto: protocol registration
+- Upstream integration procedure documented
 - Login rate limiting (nginx, per-IP)
 - PWA: Service Worker, Web Push skeleton, installable manifest
 
