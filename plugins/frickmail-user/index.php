@@ -81,6 +81,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		// account-add popup, and duplicate switcher UI never appear.
 		\RainLoop\Api::Config()->Set('webmail', 'allow_additional_accounts', false);
 
+		$this->assertNoConflictingPlugins();
+
 		$this->UseLangs(false);
 		$this->addJs('js/Login.js');
 		$this->addJs('js/AccountSwitcher.js');
@@ -407,6 +409,53 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	/* ------------------------------------------------------------------ */
 	/*  Private helpers                                                      */
 	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Plugins that bypass or corrupt frickmail-user's auth/account model if enabled.
+	 * CRITICAL: replace the login flow or change passwords behind frickmail's back.
+	 * WARNING:  may cause unexpected behaviour but don't break the system outright.
+	 */
+	private function assertNoConflictingPlugins() : void
+	{
+		$critical = [
+			// Alternative login systems — bypass frickmail-user entirely
+			'login-external', 'login-external-sso', 'login-override', 'login-virtuser',
+			'login-cpanel', 'login-remote', 'login-register', 'proxy-auth',
+			'ldap-login-mapping', 'ldap-mail-accounts', 'custom-login-mapping',
+			// Password changers — modify IMAP passwords without updating the encrypted blob in Postgres
+			'change-password', 'change-password-cpanel', 'change-password-froxlor',
+			'change-password-hestia', 'change-password-ispconfig', 'change-password-hmailserver',
+			'change-password-mailcow', 'change-password-poppassd',
+		];
+		$warning = [
+			// Duplicate 2FA — frickmail-user has its own TOTP; enabling this too causes two
+			// separate 2FA flows that are unaware of each other.
+			'two-factor-auth',
+		];
+
+		$enabled = \array_filter(\array_map('trim',
+			\explode(',', \RainLoop\Api::Config()->Get('plugins', 'enabled_list', ''))
+		));
+		$logger  = \RainLoop\Api::Actions()->Logger();
+
+		$found = \array_intersect($critical, $enabled);
+		if ($found) {
+			$msg = '[frickmail-user] CRITICAL: incompatible plugin(s) enabled — '
+				. \implode(', ', $found)
+				. '. These bypass or corrupt frickmail-user auth. Disable them immediately.';
+			$logger->Write($msg, \LOG_CRIT);
+			\error_log($msg);
+		}
+
+		$found = \array_intersect($warning, $enabled);
+		if ($found) {
+			$logger->Write(
+				'[frickmail-user] WARNING: plugin(s) ' . \implode(', ', $found)
+				. ' may conflict with frickmail-user functionality.',
+				\LOG_WARNING
+			);
+		}
+	}
 
 	private function isSignupOpen() : bool
 	{
