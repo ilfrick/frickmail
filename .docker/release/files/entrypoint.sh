@@ -145,6 +145,31 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
             used_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (user_id, code, \"window\")
         )");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_message_index (
+            id          BIGSERIAL PRIMARY KEY,
+            user_id     BIGINT NOT NULL REFERENCES frickmail_users(id) ON DELETE CASCADE,
+            account_id  BIGINT NOT NULL REFERENCES frickmail_mail_accounts(id) ON DELETE CASCADE,
+            folder      TEXT NOT NULL,
+            imap_uid    BIGINT NOT NULL,
+            message_id  TEXT,
+            subject     TEXT,
+            from_addr   TEXT,
+            from_name   TEXT,
+            date_ts     TIMESTAMPTZ,
+            snippet     TEXT,
+            tsv         tsvector GENERATED ALWAYS AS (
+                            to_tsvector(\'simple\',
+                                coalesce(subject,\'\') || \' \' ||
+                                coalesce(from_name,\'\') || \' \' ||
+                                coalesce(from_addr,\'\') || \' \' ||
+                                coalesce(snippet,\'\'))
+                        ) STORED,
+            indexed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(account_id, folder, imap_uid)
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_msgidx_tsv    ON frickmail_message_index USING GIN(tsv)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_msgidx_user   ON frickmail_message_index(user_id, date_ts DESC)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_msgidx_acct   ON frickmail_message_index(account_id)");
         echo "[OK] Frickmail schema ready" . PHP_EOL;
     ' || echo "[WARN] Frickmail schema migration skipped (DB unreachable)"
 fi

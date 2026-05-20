@@ -102,6 +102,9 @@ class MailAccountHandler
 
 	public function deleteAccount(int $uid, int $id) : array
 	{
+		// Clean the search index before deleting the account row (FK cascade would
+		// handle it too, but being explicit avoids any deferred-constraint surprises).
+		$this->db->deleteMessageIndex($id);
 		$ok = $this->db->deleteMailAccount($uid, $id);
 		return ['ok' => $ok];
 	}
@@ -130,6 +133,33 @@ class MailAccountHandler
 		$account = $this->db->decryptedAccount($row, $cryptKey);
 		$this->bridge($account);
 		return ['ok' => true, 'email' => $account['email']];
+	}
+
+	/* ------------------------------------------------------------------ */
+	/*  Save OAuth token                                                     */
+	/* ------------------------------------------------------------------ */
+
+	/* ------------------------------------------------------------------ */
+	/*  Full-text search                                                     */
+	/* ------------------------------------------------------------------ */
+
+	public function search(int $uid, string $query, int $limit = 50): array
+	{
+		$query = trim($query);
+		if (strlen($query) < 2) throw new \RuntimeException('Query too short');
+		$rows = $this->db->searchMessages($uid, $query, $limit);
+		return ['ok' => true, 'query' => $query, 'results' => $rows];
+	}
+
+	public function indexMessageFromHeader(int $uid, int $accountId, string $folder,
+	                                        array $header): void
+	{
+		// header array: uid, message_id, subject, from_addr, from_name, date_ts, snippet
+		$this->db->indexMessage($uid, $accountId, $folder,
+			(int)$header['uid'], $header['message_id'] ?? null,
+			$header['subject'] ?? null, $header['from_addr'] ?? null,
+			$header['from_name'] ?? null, $header['date_ts'] ?? null,
+			$header['snippet'] ?? null);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -324,6 +354,104 @@ class MailAccountHandler
 			'whiteList' => '',
 		]);
 		$oDomainProvider->Save($oDomain);
+	}
+
+	/* ---- Unified Inbox --------------------------------------------------- */
+
+	public function unifiedInbox(int $uid, string $cryptKey, int $limit = 40) : array
+	{
+		$rows = $this->db->listMailAccounts($uid);
+		$all  = [];
+
+		foreach ($rows as $row) {
+			if ('imap' !== $row['type']) continue;
+			$account = $this->db->decryptedAccount($row, $cryptKey);
+			if (empty($account['password'])) continue;
+
+			try {
+				$msgs = $this->fetchInboxHeaders($account, $limit);
+				foreach ($msgs as &$m) {
+					$m['account_email'] = $account['email'];
+					$m['account_id']    = (int) $row['id'];
+				}
+				unset($m);
+				$all = \array_merge($all, $msgs);
+			} catch (\Throwable $e) {
+				// Skip silently — one failing account never aborts the whole request.
+			}
+		}
+
+		\usort($all, static fn(array $a, array $b) : int =>
+			($b['date_ts'] ?? 0) <=> ($a['date_ts'] ?? 0));
+
+		return ['ok' => true, 'messages' => \array_slice($all, 0, $limit)];
+	}
+
+	private function fetchInboxHeaders(array $account, int $limit) : array
+	{
+		$oSettings = \MailSo\Imap\Settings::fromArray([
+			'host'       => $account['imap_host'],
+			'port'       => (int) $account['imap_port'],
+			'type'       => $this->mapSecure($account['imap_secure']),
+			'timeout'    => 10,
+			'shortLogin' => false,
+		]);
+		$oSettings->username   = $account['login'] ?: $account['email'];
+		$oSettings->passphrase = $account['password'];
+
+		$oImap = new \MailSo\Imap\ImapClient();
+		$oImap->SetTimeOuts(10);
+		try {
+			$oImap->Connect($oSettings);
+			$oImap->Login($oSettings);
+			$oInfo = $oImap->FolderExamine('INBOX');
+			$total = (int) ($oInfo->MESSAGES ?? 0);
+			if (0 === $total) return [];
+
+			$from  = \max(1, $total - $limit + 1);
+			$range = ($from === $total) ? (string) $total : "{$from}:{$total}";
+
+			$fetchItems = [
+				\MailSo\Imap\Enumerations\FetchType::UID,
+				\MailSo\Imap\Enumerations\FetchType::FLAGS,
+				\MailSo\Imap\Enumerations\FetchType::INTERNALDATE,
+				\MailSo\Imap\Enumerations\FetchType::ENVELOPE,
+			];
+
+			$messages = [];
+			foreach ($oImap->FetchIterate($fetchItems, $range, false) as $oFetch) {
+				$uid     = (int)    $oFetch->GetFetchValue(\MailSo\Imap\Enumerations\FetchType::UID);
+				$flags   = (array)  $oFetch->GetFetchValue(\MailSo\Imap\Enumerations\FetchType::FLAGS);
+				$dateStr = (string) ($oFetch->GetFetchValue(\MailSo\Imap\Enumerations\FetchType::INTERNALDATE) ?? '');
+				$dateTs  = $dateStr ? (int) \strtotime($dateStr) : 0;
+
+				$envelope = $oFetch->GetEnvelope();
+				$subject  = '';
+				$from     = '';
+				if (\is_array($envelope)) {
+					$subject = \MailSo\Base\Utils::DecodeHeaderValue((string) ($envelope[1] ?? ''));
+					$fromArr = $envelope[2] ?? null;
+					if (\is_array($fromArr) && !empty($fromArr[0])) {
+						$f       = $fromArr[0];
+						$display = isset($f[0]) && '' !== $f[0]
+							? \MailSo\Base\Utils::DecodeHeaderValue((string) $f[0]) : '';
+						$addr    = ((string)($f[2]??'') && (string)($f[3]??''))
+							? $f[2].'@'.$f[3] : '';
+						$from    = $display ?: $addr;
+					}
+				}
+				$messages[] = [
+					'uid'     => $uid,   'subject' => $subject,
+					'from'    => $from,  'date'    => $dateStr,
+					'date_ts' => $dateTs,'flags'   => $flags,
+					'is_seen' => \in_array('\\Seen', $flags, true),
+				];
+			}
+			return $messages;
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
 	}
 
 	/**

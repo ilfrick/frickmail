@@ -302,6 +302,83 @@ class Db
 		]);
 	}
 
+	/* ---------- Full-text search index ---------- */
+
+	/**
+	 * Upsert a message into the search index.
+	 * snippet = first ~200 chars of plain-text body (optional, pass null to omit).
+	 */
+	public function indexMessage(
+		int $userId, int $accountId, string $folder, int $imapUid,
+		?string $messageId, ?string $subject, ?string $fromAddr, ?string $fromName,
+		?string $dateTsIso, ?string $snippet
+	): void {
+		$st = $this->pdo->prepare(
+			'INSERT INTO frickmail_message_index
+				(user_id, account_id, folder, imap_uid, message_id, subject,
+				 from_addr, from_name, date_ts, snippet, indexed_at)
+			 VALUES
+				(:uid, :aid, :folder, :imap_uid, :message_id, :subject,
+				 :from_addr, :from_name, :date_ts, :snippet, NOW())
+			 ON CONFLICT (account_id, folder, imap_uid)
+			 DO UPDATE SET
+				message_id = EXCLUDED.message_id,
+				subject    = EXCLUDED.subject,
+				from_addr  = EXCLUDED.from_addr,
+				from_name  = EXCLUDED.from_name,
+				date_ts    = EXCLUDED.date_ts,
+				snippet    = EXCLUDED.snippet,
+				indexed_at = NOW()'
+		);
+		$st->execute([
+			':uid'        => $userId,
+			':aid'        => $accountId,
+			':folder'     => $folder,
+			':imap_uid'   => $imapUid,
+			':message_id' => $messageId,
+			':subject'    => $subject,
+			':from_addr'  => $fromAddr,
+			':from_name'  => $fromName,
+			':date_ts'    => $dateTsIso,
+			':snippet'    => $snippet,
+		]);
+	}
+
+	/**
+	 * Full-text search across all accounts for a user.
+	 * Returns rows with: id, account_id, folder, imap_uid, subject, from_addr,
+	 * from_name, date_ts, snippet, account_email (joined from mail_accounts).
+	 */
+	public function searchMessages(int $userId, string $query, int $limit = 50): array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT mi.id, mi.account_id, mi.folder, mi.imap_uid, mi.message_id,
+			        mi.subject, mi.from_addr, mi.from_name, mi.date_ts, mi.snippet,
+			        ma.email AS account_email
+			   FROM frickmail_message_index mi
+			   JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id
+			  WHERE mi.user_id = :uid
+			    AND mi.tsv @@ plainto_tsquery(\'simple\', :q)
+			  ORDER BY mi.date_ts DESC NULLS LAST
+			  LIMIT :lim'
+		);
+		$st->bindValue(':uid', $userId, \PDO::PARAM_INT);
+		$st->bindValue(':q', $query);
+		$st->bindValue(':lim', $limit, \PDO::PARAM_INT);
+		$st->execute();
+		return $st->fetchAll();
+	}
+
+	/**
+	 * Delete all indexed messages for an account (call on account delete).
+	 */
+	public function deleteMessageIndex(int $accountId): void
+	{
+		$this->pdo->prepare(
+			'DELETE FROM frickmail_message_index WHERE account_id = :aid'
+		)->execute([':aid' => $accountId]);
+	}
+
 	/**
 	 * Persist a single key→url entry in the JSONB settings column of a mail account.
 	 * Used for CardDAV / CalDAV URLs discovered via service discovery.
