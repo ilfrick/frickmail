@@ -9,10 +9,11 @@
 (function () {
 	'use strict';
 
-	// ── Helpers ──────────────────────────────────────────────────────────
+	// ── Helpers — delegate to FrickmailUtils (utils.js loaded first) ─────────
 
 	function getToken() {
-		return window.rl?.__frickmail_token || window.rl?.settings?.app?.('token') || '';
+		return window.FrickmailUtils ? FrickmailUtils.fmToken()
+			: (window.rl?.__frickmail_token || window.rl?.settings?.app?.('token') || '');
 	}
 
 	function pluginRequest(action, params, timeout) {
@@ -27,23 +28,20 @@
 	}
 
 	function escapeHtml(s) {
-		if (!s) return '';
-		return String(s)
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;');
+		return window.FrickmailUtils ? FrickmailUtils.escHtml(s) : (s ? String(s)
+			.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') : '');
 	}
 
 	function formatDate(iso) {
 		if (!iso) return '';
+		if (window.FrickmailUtils) return FrickmailUtils.formatDate(iso);
 		try {
 			const d = new Date(iso);
 			return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 		} catch (e) { return iso; }
 	}
 
-	// ── Panel ─────────────────────────────────────────────────────────────
+	// ── Panel ─────────────────────────────────────────────────────────────────
 
 	let panel     = null;
 	let panelList = null;
@@ -70,27 +68,47 @@
 		// Minimal inline styles — enough to be functional without a CSS file.
 		panel.style.cssText = [
 			'position:fixed;top:0;right:0;width:420px;max-width:100vw;height:100vh',
-			'background:var(--fm-surface,#fff);color:var(--fm-text,#111)',
-			'box-shadow:-4px 0 24px rgba(0,0,0,.18)',
-			'display:flex;flex-direction:column;z-index:9999',
-			'font-family:inherit;font-size:14px',
+			'background:var(--fm-bg-panel,#1a1a2e);color:var(--fm-text-primary,#e2e4f0)',
+			'box-shadow:var(--fm-shadow-overlay,-4px 0 24px rgba(0,0,0,.35))',
+			'display:flex;flex-direction:column;z-index:99999',
+			'font-family:inherit;font-size:var(--fm-font-size-base,14px)',
 			'transform:translateX(100%);transition:transform .22s ease',
 		].join(';');
 
 		const header = panel.querySelector('#fm-search-header');
-		header.style.cssText = 'display:flex;gap:6px;padding:12px;align-items:center;border-bottom:1px solid var(--fm-border,#e0e0e0)';
+		header.style.cssText = [
+			'display:flex;gap:6px;padding:max(12px,env(safe-area-inset-top)) 12px 12px',
+			'align-items:center;border-bottom:1px solid var(--fm-border,#e0e0e0)',
+		].join(';');
 
 		panelInput = panel.querySelector('#fm-search-input');
-		panelInput.style.cssText = 'flex:1;padding:6px 10px;border:1px solid var(--fm-border,#ccc);border-radius:4px;font-size:14px';
+		panelInput.style.cssText = [
+			'flex:1;padding:6px 10px',
+			'border:1px solid var(--fm-border-input,#ccc)',
+			'border-radius:var(--fm-radius-xs,4px)',
+			'font-size:var(--fm-font-size-base,14px)',
+			'background:var(--fm-bg-input);color:var(--fm-text-primary,inherit)',
+		].join(';');
 
 		const goBtn = panel.querySelector('#fm-search-go');
-		goBtn.style.cssText = 'padding:6px 14px;border:none;border-radius:4px;background:var(--fm-accent,#1a73e8);color:#fff;cursor:pointer;font-size:14px';
+		goBtn.style.cssText = [
+			'padding:6px 14px',
+			'border:none;border-radius:var(--fm-radius-xs,4px)',
+			'background:var(--fm-accent,#1a73e8);color:var(--fm-text-inverse,#fff)',
+			'cursor:pointer;font-size:var(--fm-font-size-base,14px)',
+			'touch-action:manipulation',
+		].join(';');
 
 		const closeBtn = panel.querySelector('#fm-search-close');
-		closeBtn.style.cssText = 'background:none;border:none;font-size:20px;cursor:pointer;color:inherit;padding:12px 16px;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent';
+		closeBtn.style.cssText = [
+			'background:none;border:none;font-size:20px;cursor:pointer',
+			'color:inherit;padding:12px 16px;min-width:44px;min-height:44px',
+			'display:flex;align-items:center;justify-content:center',
+			'-webkit-tap-highlight-color:transparent;touch-action:manipulation',
+		].join(';');
 
 		const status = panel.querySelector('#fm-search-status');
-		status.style.cssText = 'padding:6px 14px;font-size:12px;color:var(--fm-text-muted,#666);min-height:24px';
+		status.style.cssText = 'padding:6px 14px;font-size:var(--fm-font-size-sm,12px);color:var(--fm-text-secondary,#666);min-height:24px';
 
 		panelList = panel.querySelector('#fm-search-list');
 		panelList.style.cssText = 'flex:1;overflow-y:auto;margin:0;padding:0;list-style:none';
@@ -99,7 +117,11 @@
 
 		// Events
 		goBtn.addEventListener('click', runSearch);
+		goBtn.addEventListener('touchend', (e) => { e.preventDefault(); runSearch(); });
+
 		closeBtn.addEventListener('click', closePanel);
+		closeBtn.addEventListener('touchend', (e) => { e.preventDefault(); closePanel(); });
+
 		panelInput.addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
 		document.addEventListener('keydown', e => {
 			if (e.key === 'Escape' && panel.style.transform === 'translateX(0px)') closePanel();
@@ -125,7 +147,7 @@
 		if (el) el.textContent = msg;
 	}
 
-	// ── Search ────────────────────────────────────────────────────────────
+	// ── Search ────────────────────────────────────────────────────────────────
 
 	async function runSearch() {
 		const q = panelInput?.value?.trim() || '';
@@ -162,25 +184,25 @@
 			li.style.cssText = 'border-bottom:1px solid var(--fm-border,#eee);padding:10px 14px;cursor:pointer';
 			li.innerHTML = [
 				'<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">',
-				'  <span style="font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">',
+				'  <span style="font-weight:var(--fm-font-weight-semi,600);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">',
 				    escapeHtml(row.subject || '(no subject)'),
 				'  </span>',
-				'  <span style="font-size:11px;color:var(--fm-text-muted,#888);white-space:nowrap">',
+				'  <span style="font-size:var(--fm-font-size-xs,11px);color:var(--fm-text-muted,#888);white-space:nowrap">',
 				    escapeHtml(formatDate(row.date_ts)),
 				'  </span>',
 				'</div>',
 				'<div style="display:flex;align-items:center;gap:8px;margin-top:2px;flex-wrap:wrap">',
-				'  <span style="font-size:12px;color:var(--fm-text-muted,#555);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">',
+				'  <span style="font-size:var(--fm-font-size-sm,12px);color:var(--fm-text-secondary,#555);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">',
 				    escapeHtml(row.from_name ? row.from_name + ' <' + row.from_addr + '>' : (row.from_addr || '')),
 				'  </span>',
-				'  <span style="font-size:11px;background:var(--fm-accent,#1a73e8);color:#fff;border-radius:10px;padding:1px 8px;white-space:nowrap">',
+				'  <span style="font-size:var(--fm-font-size-xs,11px);background:var(--fm-accent,#1a73e8);color:var(--fm-text-inverse,#fff);border-radius:10px;padding:1px 8px;white-space:nowrap">',
 				    escapeHtml(row.account_email || ''),
 				'  </span>',
 				'</div>',
-				row.snippet ? '<div style="font-size:12px;color:var(--fm-text-muted,#666);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(row.snippet) + '</div>' : '',
+				row.snippet ? '<div style="font-size:var(--fm-font-size-sm,12px);color:var(--fm-text-muted,#666);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(row.snippet) + '</div>' : '',
 			].join('');
 
-			li.addEventListener('mouseenter', () => { li.style.background = 'var(--fm-hover,#f5f5f5)'; });
+			li.addEventListener('mouseenter', () => { li.style.background = 'var(--fm-bg-hover,#f5f5f5)'; });
 			li.addEventListener('mouseleave', () => { li.style.background = ''; });
 			li.addEventListener('click', () => switchAndOpen(row));
 
@@ -205,7 +227,7 @@
 		}
 	}
 
-	// ── Toolbar button injection ──────────────────────────────────────────
+	// ── Toolbar button injection ──────────────────────────────────────────────
 
 	function injectButton(toolbarEl) {
 		if (toolbarEl.querySelector('#fm-search-btn')) return;
@@ -217,9 +239,10 @@
 		btn.textContent = '🔍 All accounts';
 		btn.style.cssText = [
 			'margin-left:6px;padding:4px 10px',
-			'border:1px solid var(--fm-border,#ccc);border-radius:4px',
-			'background:var(--fm-surface,#fff);color:inherit',
-			'cursor:pointer;font-size:13px;white-space:nowrap',
+			'border:1px solid var(--fm-border,#ccc);border-radius:var(--fm-radius-xs,4px)',
+			'background:var(--fm-bg-input,#fff);color:inherit',
+			'cursor:pointer;font-size:var(--fm-font-size-sm,13px);white-space:nowrap',
+			'touch-action:manipulation',
 		].join(';');
 
 		btn.addEventListener('click', () => {
@@ -231,7 +254,7 @@
 		toolbarEl.appendChild(btn);
 	}
 
-	// ── rl-view-model integration ─────────────────────────────────────────
+	// ── rl-view-model integration ─────────────────────────────────────────────
 	// Inject button when the MessageList or SystemDropDown view model mounts.
 
 	addEventListener('rl-view-model', e => {

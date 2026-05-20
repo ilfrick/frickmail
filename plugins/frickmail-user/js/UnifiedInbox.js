@@ -22,18 +22,22 @@
 	// Map account_email → { id, color, initial }
 	let accountMeta = {};
 
-	// ── Helpers ───────────────────────────────────────────────────────────────
+	// ── Helpers — delegate to FrickmailUtils (utils.js loaded first) ─────────
 
 	function fmToken() {
-		return window.rl?.__frickmail_token || window.rl?.settings?.app?.('token') || '';
+		return window.FrickmailUtils ? FrickmailUtils.fmToken()
+			: (window.rl?.__frickmail_token || window.rl?.settings?.app?.('token') || '');
 	}
 
 	/**
 	 * Format a unix timestamp as a short human-readable date.
-	 * Same day → HH:MM, same year → Mon DD, else → Mon DD YYYY.
+	 * Delegates to FrickmailUtils.formatDate (which handles both unix timestamps
+	 * and ISO strings).  Keeps same-day → HH:MM, same-year → Mon DD, else → Mon DD YYYY.
 	 */
 	function formatDate(ts) {
 		if (!ts) return '';
+		if (window.FrickmailUtils) return FrickmailUtils.formatDate(ts);
+		// Fallback (unix seconds)
 		const d   = new Date(ts * 1000);
 		const now = new Date();
 		const pad = n => String(n).padStart(2, '0');
@@ -48,11 +52,8 @@
 	}
 
 	function escHtml(s) {
-		return String(s || '')
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;');
+		return window.FrickmailUtils ? FrickmailUtils.escHtml(s) : String(s || '')
+			.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 	}
 
 	// ── Build accountMeta from a ListAccounts response cached by AccountSwitcher
@@ -79,27 +80,32 @@
 		el.style.cssText = [
 			'position:fixed',
 			'top:0','left:0','right:0','bottom:0',
-			'z-index:9999',
+			'z-index:99999',
 			'display:flex',
 			'flex-direction:column',
-			'background:var(--background-color,#1e1e2e)',
-			'color:var(--text-color,#cdd6f4)',
+			'background:var(--fm-bg-panel,#1a1a2e)',
+			'color:var(--fm-text-primary,#e2e4f0)',
 			'font-family:inherit',
 			'overflow:hidden',
 		].join(';');
 		el.innerHTML = `
-			<div style="display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.1);gap:8px;">
-				<span style="font-weight:600;font-size:1rem;flex:1">All accounts</span>
-				<span id="fm-ui-status" style="font-size:.8rem;opacity:.7"></span>
-				<button id="fm-ui-refresh" title="Refresh" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1rem;opacity:.8;padding:4px 8px;">&#8635;</button>
-				<button id="fm-ui-close"   title="Close"   style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.2rem;padding:4px 8px;">&times;</button>
+			<div style="display:flex;align-items:center;padding:max(10px,env(safe-area-inset-top)) 16px 10px;border-bottom:1px solid var(--fm-border,rgba(255,255,255,.1));gap:8px;">
+				<span style="font-weight:var(--fm-font-weight-semi,600);font-size:var(--fm-font-size-lg,1rem);flex:1">All accounts</span>
+				<span id="fm-ui-status" style="font-size:var(--fm-font-size-sm,.8rem);opacity:.7"></span>
+				<button id="fm-ui-refresh" title="Refresh" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1rem;opacity:.8;padding:4px 8px;min-width:44px;min-height:44px;touch-action:manipulation;">&#8635;</button>
+				<button id="fm-ui-close"   title="Close"   style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.2rem;padding:4px 8px;min-width:44px;min-height:44px;touch-action:manipulation;">&times;</button>
 			</div>
 			<div id="fm-ui-list" style="flex:1;overflow-y:auto;"></div>
 		`;
 		document.body.appendChild(el);
 
-		el.querySelector('#fm-ui-close').addEventListener('click', closeOverlay);
-		el.querySelector('#fm-ui-refresh').addEventListener('click', () => loadMessages());
+		const closeBtn = el.querySelector('#fm-ui-close');
+		closeBtn.addEventListener('click', closeOverlay);
+		closeBtn.addEventListener('touchend', (e) => { e.preventDefault(); closeOverlay(); });
+
+		const refreshBtn = el.querySelector('#fm-ui-refresh');
+		refreshBtn.addEventListener('click', () => loadMessages());
+		refreshBtn.addEventListener('touchend', (e) => { e.preventDefault(); loadMessages(); });
 
 		// Close on Escape key
 		el._keyHandler = (e) => { if (e.key === 'Escape') closeOverlay(); };
@@ -176,9 +182,9 @@
 				'align-items:center',
 				'gap:10px',
 				'padding:10px 16px',
-				'border-bottom:1px solid rgba(255,255,255,.06)',
+				'border-bottom:1px solid var(--fm-border,rgba(255,255,255,.06))',
 				'cursor:pointer',
-				isSeen ? 'opacity:.7' : 'font-weight:600',
+				isSeen ? 'opacity:.7' : 'font-weight:var(--fm-font-weight-semi,600)',
 			].join(';');
 			row.setAttribute('tabindex', '0');
 			row.setAttribute('role', 'button');
@@ -194,7 +200,7 @@
 				'width:28px','height:28px',
 				'border-radius:50%',
 				'font-size:.75rem',
-				'font-weight:700',
+				'font-weight:var(--fm-font-weight-bold,700)',
 				'flex-shrink:0',
 				'background:' + meta.color,
 				'color:#fff',
@@ -220,7 +226,7 @@
 			topLine.appendChild(dateEl);
 
 			const subjectEl = document.createElement('div');
-			subjectEl.style.cssText = 'font-size:.85rem;opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;';
+			subjectEl.style.cssText = 'font-size:var(--fm-font-size-sm,.85rem);opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;';
 			subjectEl.textContent = msg.subject || '(no subject)';
 
 			content.appendChild(topLine);
@@ -229,13 +235,14 @@
 			row.appendChild(badge);
 			row.appendChild(content);
 
-			// Click / Enter: switch account then navigate to inbox
+			// Click / Enter / touch: switch account then navigate to inbox
 			const handleActivate = () => openMessage(msg, meta);
 			row.addEventListener('click', handleActivate);
+			row.addEventListener('touchend', (e) => { e.preventDefault(); handleActivate(); });
 			row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') handleActivate(); });
 
 			// Hover highlight
-			row.addEventListener('mouseenter', () => { row.style.background = 'rgba(255,255,255,.05)'; });
+			row.addEventListener('mouseenter', () => { row.style.background = 'var(--fm-bg-hover,rgba(255,255,255,.05))'; });
 			row.addEventListener('mouseleave', () => { row.style.background = ''; });
 
 			frag.appendChild(row);
@@ -279,15 +286,21 @@
 		btnEl.style.cssText = [
 			'margin-left:4px',
 			'padding:4px 10px',
-			'border-radius:4px',
-			'border:1px solid rgba(255,255,255,.2)',
-			'background:rgba(255,255,255,.07)',
+			'border-radius:var(--fm-radius-xs,4px)',
+			'border:1px solid var(--fm-border,rgba(255,255,255,.2))',
+			'background:var(--fm-bg-input,rgba(255,255,255,.07))',
 			'color:inherit',
-			'font-size:.8rem',
+			'font-size:var(--fm-font-size-sm,.8rem)',
 			'cursor:pointer',
 			'white-space:nowrap',
+			'touch-action:manipulation',
 		].join(';');
 		btnEl.addEventListener('click', () => {
+			if (isOpen) closeOverlay();
+			else openOverlay();
+		});
+		btnEl.addEventListener('touchend', (e) => {
+			e.preventDefault();
 			if (isOpen) closeOverlay();
 			else openOverlay();
 		});

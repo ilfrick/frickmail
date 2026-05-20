@@ -100,6 +100,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->assertNoConflictingPlugins();
 
 		$this->UseLangs(false);
+		$this->addJs('js/utils.js');
 		$this->addJs('js/Login.js');
 		$this->addJs('js/AccountSwitcher.js');
 		$this->addJs('js/MailAccountsSettings.js');

@@ -42,7 +42,7 @@
 					<button class="switch-mode" type="button" data-fm="switch">Create an account</button>
 				</div>
 				<div style="margin-top:.6em;font-size:90%">
-					<a href="#" data-fm="forgot" style="color:#4a90e2">Forgot password?</a>
+					<a href="#" data-fm="forgot" style="color:var(--fm-accent,#4a90e2)">Forgot password?</a>
 				</div>
 				<div class="status" data-fm="status"></div>
 			</form>`;
@@ -165,8 +165,8 @@
 				? `<label for="fm-rf-password">IMAP password</label><input id="fm-rf-password" data-rf="password" type="password" autocomplete="new-password" />`
 				: `<p>Click below to re-link via OAuth (${type === 'gmail' ? 'Google' : 'Microsoft'}).</p>`}
 			<div style="margin-top:1em;display:flex;gap:.6em;flex-wrap:wrap">
-				<button class="btn" type="button" data-rf="save" style="background:#4a90e2;color:white">Save and open mailbox</button>
-				${type !== 'imap' ? '<button class="btn" type="button" data-rf="relink" style="background:transparent;border:1px solid #4a90e2;color:#4a90e2">Re-link OAuth (renew)</button>' : ''}
+				<button class="btn" type="button" data-rf="save" style="background:var(--fm-accent,#4a90e2);color:var(--fm-text-inverse,white)">Save and open mailbox</button>
+				${type !== 'imap' ? '<button class="btn" type="button" data-rf="relink" style="background:transparent;border:1px solid var(--fm-accent,#4a90e2);color:var(--fm-accent,#4a90e2)">Re-link OAuth (renew)</button>' : ''}
 			</div>
 			<div class="status" data-fm="status"></div>`;
 		wrap.querySelector('form').replaceWith(setup);
@@ -280,7 +280,7 @@
 				<p style="color:#888;margin-top:.6em">Click below; a popup will ask the provider for consent. The refresh token is then linked to your Frickmail account.</p>
 			</div>
 			<div style="margin-top:1em;display:flex;gap:.6em">
-				<button class="btn btn-primary" type="button" data-fa="save" style="background:#4a90e2;color:white">Save and open mailbox</button>
+				<button class="btn btn-primary" type="button" data-fa="save" style="background:var(--fm-accent,#4a90e2);color:var(--fm-text-inverse,white)">Save and open mailbox</button>
 			</div>`;
 		wrap.querySelector('form').replaceWith(setup);
 

@@ -57,13 +57,13 @@
 /* Search wrapper */
 .second-toolbar .search-input-wrp,
 .thm-message-list-top-toolbar .search-input-wrp {
-	background: rgba(255,255,255,.09) !important;
-	border-color: rgba(255,255,255,.2) !important;
+	background: var(--fm-bg-input) !important;
+	border-color: var(--fm-border) !important;
 	border-radius: 24px !important;
 }
 .second-toolbar .search-input-wrp:focus-within,
 .thm-message-list-top-toolbar .search-input-wrp:focus-within {
-	background: rgba(255,255,255,.16) !important;
+	background: var(--fm-bg-input) !important;
 	border-color: var(--fm-accent) !important;
 }
 .second-toolbar .search-input-wrp input,
@@ -82,14 +82,14 @@
 .second-toolbar a.btn,
 .thm-message-list-top-toolbar .btn,
 .thm-message-list-top-toolbar a.btn {
-	background: rgba(255,255,255,.1) !important;
+	background: var(--fm-bg-input) !important;
 	color: var(--fm-text-primary) !important;
-	border: 1px solid rgba(255,255,255,.2) !important;
+	border: 1px solid var(--fm-border) !important;
 	border-radius: 8px !important;
 }
 .second-toolbar .btn:hover,
 .thm-message-list-top-toolbar .btn:hover {
-	background: rgba(255,255,255,.2) !important;
+	background: var(--fm-bg-hover) !important;
 }
 
 /* Light theme override */
@@ -350,13 +350,13 @@ textarea {
 	font-size: 14px !important;
 	transition: border-color .2s, box-shadow .2s !important;
 }
-input::placeholder, textarea::placeholder {
+::placeholder {
 	color: var(--fm-text-placeholder) !important;
 	opacity: 1 !important;
 }
 input:focus, select:focus, textarea:focus {
 	border-color: var(--fm-border-focus) !important;
-	box-shadow: 0 0 0 2px var(--fm-accent-surface) !important;
+	box-shadow: 0 0 0 3px var(--fm-accent-surface) !important;
 	outline: none !important;
 }
 select option {

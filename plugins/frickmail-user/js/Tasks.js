@@ -16,23 +16,22 @@
 	let activeTab  = 'all';    // 'all' | 'pending' | 'completed'
 	let editingId  = null;     // taskId being inline-edited, or null
 
-	// ── Helpers ───────────────────────────────────────────────────────────────
+	// ── Helpers — delegate to FrickmailUtils (utils.js loaded first) ─────────
 
 	function escHtml(s) {
-		return String(s || '')
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;');
+		return window.FrickmailUtils ? FrickmailUtils.escHtml(s) : String(s || '')
+			.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 	}
 
 	function fmToken() {
-		return window.rl?.__frickmail_token || window.rl?.settings?.app?.('token') || '';
+		return window.FrickmailUtils ? FrickmailUtils.fmToken()
+			: (window.rl?.__frickmail_token || window.rl?.settings?.app?.('token') || '');
 	}
 
 	function formatDueDate(s) {
 		if (!s) return '';
-		// s is 'YYYY-MM-DD' (or a Postgres date string); keep it simple.
+		if (window.FrickmailUtils) return FrickmailUtils.formatDate(s);
+		// Fallback: plain 'YYYY-MM-DD'
 		const d = new Date(s + 'T00:00:00');
 		if (isNaN(d)) return s;
 		const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -67,54 +66,58 @@
 		el.style.cssText = [
 			'position:fixed',
 			'top:0','left:0','right:0','bottom:0',
-			'z-index:9999',
+			'z-index:99999',
 			'display:flex',
 			'flex-direction:column',
-			'background:var(--fm-bg-panel,var(--background-color,#1e1e2e))',
-			'color:var(--fm-text,var(--text-color,#cdd6f4))',
+			'background:var(--fm-bg-panel)',
+			'color:var(--fm-text-primary,#cdd6f4)',
 			'font-family:inherit',
 			'overflow:hidden',
 		].join(';');
 
 		el.innerHTML = `
-<div id="fm-tasks-header" style="display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.1);gap:8px;flex-shrink:0;">
-	<span style="font-weight:700;font-size:1.05rem;flex:1">Tasks</span>
-	<button id="fm-tasks-close" title="Close" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.8;-webkit-tap-highlight-color:transparent;">&times;</button>
+<div id="fm-tasks-header" style="display:flex;align-items:center;padding:max(10px,env(safe-area-inset-top)) 16px 10px;border-bottom:1px solid var(--fm-border,rgba(255,255,255,.1));gap:8px;flex-shrink:0;">
+	<span style="font-weight:var(--fm-font-weight-bold,700);font-size:var(--fm-font-size-lg,16px);flex:1">Tasks</span>
+	<button id="fm-tasks-close" title="Close" style="background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.8;touch-action:manipulation;-webkit-tap-highlight-color:transparent;">&times;</button>
 </div>
 
-<div id="fm-tasks-tabs" style="display:flex;gap:0;border-bottom:1px solid rgba(255,255,255,.1);flex-shrink:0;">
-	<button class="fm-tasks-tab fm-tasks-tab-active" data-tab="all"       style="${tabStyle(true)}">All</button>
-	<button class="fm-tasks-tab"                     data-tab="pending"   style="${tabStyle(false)}">Pending</button>
-	<button class="fm-tasks-tab"                     data-tab="completed" style="${tabStyle(false)}">Done</button>
+<div id="fm-tasks-tabs" style="display:flex;gap:0;border-bottom:1px solid var(--fm-border,rgba(255,255,255,.1));flex-shrink:0;">
+	<button class="fm-tasks-tab fm-tasks-tab-active" data-tab="all"       style="${tabStyle(true)}" touch-action="manipulation">All</button>
+	<button class="fm-tasks-tab"                     data-tab="pending"   style="${tabStyle(false)}" touch-action="manipulation">Pending</button>
+	<button class="fm-tasks-tab"                     data-tab="completed" style="${tabStyle(false)}" touch-action="manipulation">Done</button>
 </div>
 
 <div id="fm-tasks-list" style="flex:1;overflow-y:auto;padding:4px 0;"></div>
 
-<div id="fm-tasks-add" style="border-top:1px solid rgba(255,255,255,.1);padding:10px 14px;display:flex;flex-direction:column;gap:8px;flex-shrink:0;">
+<div id="fm-tasks-add" style="border-top:1px solid var(--fm-border,rgba(255,255,255,.1));padding:10px 14px;display:flex;flex-direction:column;gap:8px;flex-shrink:0;">
 	<div style="display:flex;gap:8px;align-items:center;">
 		<input id="fm-tasks-title-input" type="text" placeholder="New task…"
-			style="flex:1;padding:7px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:inherit;font-size:.9rem;outline:none;">
+			style="flex:1;padding:7px 10px;border-radius:var(--fm-radius-xs,6px);border:1px solid var(--fm-border-input,rgba(255,255,255,.15));background:var(--fm-bg-input);color:inherit;font-size:var(--fm-font-size-base,.9rem);outline:none;">
 		<input id="fm-tasks-date-input" type="date"
-			style="padding:7px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:inherit;font-size:.85rem;outline:none;cursor:pointer;">
-		<button id="fm-tasks-add-btn"
-			style="padding:7px 14px;border-radius:6px;border:none;background:var(--fm-accent,#7aa2f7);color:#fff;font-size:.9rem;cursor:pointer;white-space:nowrap;font-weight:600;">Add</button>
+			style="padding:7px 8px;border-radius:var(--fm-radius-xs,6px);border:1px solid var(--fm-border-input,rgba(255,255,255,.15));background:var(--fm-bg-input);color:inherit;font-size:var(--fm-font-size-sm,.85rem);outline:none;cursor:pointer;">
+		<button id="fm-tasks-add-btn" touch-action="manipulation"
+			style="padding:7px 14px;border-radius:var(--fm-radius-xs,6px);border:none;background:var(--fm-accent,#7aa2f7);color:var(--fm-text-inverse,#fff);font-size:var(--fm-font-size-base,.9rem);cursor:pointer;white-space:nowrap;font-weight:var(--fm-font-weight-semi,600);touch-action:manipulation;">Add</button>
 	</div>
 	<textarea id="fm-tasks-notes-input" rows="2" placeholder="Notes (optional)…"
-		style="resize:vertical;padding:7px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:inherit;font-size:.85rem;outline:none;display:none;"></textarea>
+		style="resize:vertical;padding:7px 10px;border-radius:var(--fm-radius-xs,6px);border:1px solid var(--fm-border-input,rgba(255,255,255,.15));background:var(--fm-bg-input);color:inherit;font-size:var(--fm-font-size-sm,.85rem);outline:none;display:none;"></textarea>
 	<a id="fm-tasks-toggle-notes" href="#" style="font-size:.78rem;opacity:.6;align-self:flex-start;color:inherit;">+ notes</a>
 </div>
 `;
 
 		document.body.appendChild(el);
 
-		el.querySelector('#fm-tasks-close').addEventListener('click', closeOverlay);
+		// Close button — click + touchend for iOS reliability
+		const closeBtn = el.querySelector('#fm-tasks-close');
+		closeBtn.addEventListener('click', closeOverlay);
+		closeBtn.addEventListener('touchend', (e) => { e.preventDefault(); closeOverlay(); });
 
 		// Escape key
 		el._keyHandler = (e) => { if (e.key === 'Escape') closeOverlay(); };
 		document.addEventListener('keydown', el._keyHandler);
 
-		// Tabs
+		// Tabs — touch-action on each button
 		el.querySelectorAll('.fm-tasks-tab').forEach(btn => {
+			btn.style.touchAction = 'manipulation';
 			btn.addEventListener('click', () => {
 				activeTab = btn.dataset.tab;
 				el.querySelectorAll('.fm-tasks-tab').forEach(b => {
@@ -142,8 +145,10 @@
 			}
 		});
 
-		// Add button
-		el.querySelector('#fm-tasks-add-btn').addEventListener('click', addTask);
+		// Add button — touch-action already set inline; add touchend too
+		const addBtn = el.querySelector('#fm-tasks-add-btn');
+		addBtn.addEventListener('click', addTask);
+		addBtn.addEventListener('touchend', (e) => { e.preventDefault(); addTask(); });
 		el.querySelector('#fm-tasks-title-input').addEventListener('keydown', (e) => {
 			if (e.key === 'Enter') addTask();
 		});
@@ -159,10 +164,11 @@
 			'cursor:pointer',
 			'padding:9px 20px',
 			'font-size:.88rem',
-			'font-weight:' + (active ? '700' : '400'),
+			'font-weight:' + (active ? 'var(--fm-font-weight-bold,700)' : 'var(--fm-font-weight-normal,400)'),
 			'border-bottom:2px solid ' + (active ? 'var(--fm-accent,#7aa2f7)' : 'transparent'),
 			'opacity:' + (active ? '1' : '.6'),
 			'transition:opacity .15s',
+			'touch-action:manipulation',
 		].join(';');
 	}
 
@@ -242,7 +248,7 @@
 		chk.type = 'checkbox';
 		chk.checked = done;
 		chk.title = done ? 'Mark pending' : 'Mark complete';
-		chk.style.cssText = 'margin-top:3px;width:16px;height:16px;cursor:pointer;accent-color:var(--fm-accent,#7aa2f7);flex-shrink:0;';
+		chk.style.cssText = 'margin-top:3px;width:16px;height:16px;cursor:pointer;accent-color:var(--fm-accent,#7aa2f7);flex-shrink:0;touch-action:manipulation;';
 		chk.addEventListener('change', () => toggleComplete(task.id, chk.checked, row));
 
 		// Content
@@ -250,7 +256,7 @@
 		content.style.cssText = 'flex:1;min-width:0;';
 
 		const titleEl = document.createElement('div');
-		titleEl.style.cssText = 'font-size:.92rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+		titleEl.style.cssText = 'font-size:var(--fm-font-size-base,.92rem);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
 			+ (done ? 'opacity:.45;text-decoration:line-through;' : '');
 		titleEl.textContent = task.title;
 
@@ -289,10 +295,12 @@
 			'padding:2px 6px',
 			'flex-shrink:0',
 			'line-height:1',
+			'touch-action:manipulation',
 		].join(';');
 		del.addEventListener('mouseenter', () => { del.style.opacity = '1'; del.style.color = '#f38ba8'; });
 		del.addEventListener('mouseleave', () => { del.style.opacity = '.35'; del.style.color = ''; });
 		del.addEventListener('click', () => deleteTask(task.id, row));
+		del.addEventListener('touchend', (e) => { e.preventDefault(); deleteTask(task.id, row); });
 
 		row.appendChild(chk);
 		row.appendChild(content);
@@ -401,7 +409,13 @@
 		navItemEl.dataset.tooltip = 'Tasks';
 		navItemEl.textContent = '✓';   // ✓ checkmark
 		navItemEl.href = '#';
+		navItemEl.style.touchAction = 'manipulation';
 		navItemEl.addEventListener('click', (e) => {
+			e.preventDefault();
+			if (isOpen) closeOverlay();
+			else openOverlay();
+		});
+		navItemEl.addEventListener('touchend', (e) => {
 			e.preventDefault();
 			if (isOpen) closeOverlay();
 			else openOverlay();
