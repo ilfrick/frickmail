@@ -69,13 +69,17 @@ if (navigator.registerProtocolHandler) {
 	// ── Icon nav ──────────────────────────────────────────────────
 
 	function buildIconNav() {
-		if (document.getElementById('fm-icon-nav')) return;
 		const NAV = [
 			{ id:'mail',     icon:'✉',  tip:'Mail',     hash:'#/mailbox/INBOX' },
 			{ id:'unified',  icon:'📬', tip:'All accounts inbox', action:'unified' },
 			{ id:'contacts', icon:'👤', tip:'Contacts', action:'contacts' },
 			{ id:'calendar', icon:'📅', tip:'Calendar', hash:'#/settings/calendar' },
 		];
+		// Rebuild if missing OR if item count changed (new icon added after nav was built)
+		const existing = document.getElementById('fm-icon-nav');
+		const expectedItems = NAV.length + 1; // +1 for settings
+		if (existing && existing.querySelectorAll('.fm-nav-item').length === expectedItems) return;
+		existing?.remove();
 
 		const wrap = document.createElement('div');
 		wrap.id = 'fm-icon-nav';
