@@ -24,6 +24,7 @@ require_once __DIR__ . '/lib/AuthHandler.php';
 require_once __DIR__ . '/lib/MailAccountHandler.php';
 require_once __DIR__ . '/lib/ServiceDiscoveryHandler.php';
 require_once __DIR__ . '/lib/TaskHandler.php';
+require_once __DIR__ . '/lib/SmimeHandler.php';
 
 class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
@@ -78,6 +79,13 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		return $this->_tasks ??= new \Frickmail\User\TaskHandler($this->db());
 	}
 
+	private ?\Frickmail\User\SmimeHandler $_smime = null;
+
+	private function smime() : \Frickmail\User\SmimeHandler
+	{
+		return $this->_smime ??= new \Frickmail\User\SmimeHandler($this->db());
+	}
+
 	/* ------------------------------------------------------------------ */
 	/*  Init                                                                 */
 	/* ------------------------------------------------------------------ */
@@ -104,6 +112,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJs('js/IdentitySettings.js');
 		$this->addJs('js/Tasks.js');
 		$this->addJs('js/Rules.js');
+		$this->addJs('js/SmimeSettings.js');
 		$this->addTemplate('templates/FrickmailMailAccountsSettings.html');
 		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
 
@@ -146,6 +155,12 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailDeleteRule',          'JsonDeleteRule');
 		$this->addJsonHook('FrickmailToggleRule',          'JsonToggleRule');
 		$this->addJsonHook('FrickmailApplyRules',          'JsonApplyRules');
+		$this->addJsonHook('FrickmailSmimeListCerts',      'JsonSmimeListCerts');
+		$this->addJsonHook('FrickmailSmimeImportP12',      'JsonSmimeImportP12');
+		$this->addJsonHook('FrickmailSmimeImportCert',     'JsonSmimeImportCert');
+		$this->addJsonHook('FrickmailSmimeDeleteCert',     'JsonSmimeDeleteCert');
+		$this->addJsonHook('FrickmailSmimeSign',           'JsonSmimeSign');
+		$this->addJsonHook('FrickmailSmimeVerify',         'JsonSmimeVerify');
 
 		// Allow Sec-Fetch cross-site navigations to the reset-password landing page,
 		// so the link delivered by email opens correctly from external mail clients.
@@ -689,6 +704,75 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		return $this->dispatch(__FUNCTION__, function () {
 			[$uid, $cryptKey] = $this->auth()->requireSession();
 			return $this->mailAccounts()->applyRules($uid, $cryptKey, (int) $this->jsonParam('account_id'));
+		});
+	}
+
+
+	public function JsonSmimeListCerts() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->smime()->listCerts($uid);
+		});
+	}
+
+	public function JsonSmimeImportP12() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int) $this->jsonParam('account_id');
+			$p12B64    = (string) $this->jsonParam('p12_b64');
+			$password  = (string) ($this->jsonParam('password') ?? '');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $p12B64)  throw new \RuntimeException('p12_b64 required');
+			$p12Data = \base64_decode($p12B64, true);
+			if (false === $p12Data) throw new \RuntimeException('Invalid base64 in p12_b64');
+			return $this->smime()->importP12($uid, $accountId, $p12Data, $password, $cryptKey);
+		});
+	}
+
+	public function JsonSmimeImportCert() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$pemB64    = (string) $this->jsonParam('pem_b64');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $pemB64)  throw new \RuntimeException('pem_b64 required');
+			$pemData = \base64_decode($pemB64, true);
+			if (false === $pemData) throw new \RuntimeException('Invalid base64 in pem_b64');
+			return $this->smime()->importCert($uid, $accountId, $pemData);
+		});
+	}
+
+	public function JsonSmimeDeleteCert() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			return $this->smime()->deleteCert($uid, (int) $this->jsonParam('id'));
+		});
+	}
+
+	public function JsonSmimeSign() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$email = \trim((string) $this->jsonParam('email'));
+			$body  = (string) $this->jsonParam('body');
+			if ('' === $email) throw new \RuntimeException('email required');
+			$signed = $this->smime()->signMessage($uid, $cryptKey, $email, $body);
+			return ['ok' => true, 'signed_b64' => \base64_encode($signed)];
+		});
+	}
+
+	public function JsonSmimeVerify() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			$messageB64 = (string) $this->jsonParam('message_b64');
+			if ('' === $messageB64) throw new \RuntimeException('message_b64 required');
+			$message = \base64_decode($messageB64, true);
+			if (false === $message) throw new \RuntimeException('Invalid base64 in message_b64');
+			return $this->smime()->verifyMessage($message);
 		});
 	}
 

@@ -595,4 +595,89 @@ class Db
 		$st = $this->pdo->prepare('UPDATE frickmail_rules SET last_run = NOW() WHERE id = :i');
 		$st->execute([':i' => $ruleId]);
 	}
+	public function listSmimeCerts(int $userId) : array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT id, user_id, account_id, email, cert_pem, encrypted_key_pem,
+			        fingerprint, subject, not_before, not_after, created_at
+			   FROM frickmail_smime_certs
+			  WHERE user_id = :u
+			  ORDER BY created_at DESC'
+		);
+		$st->execute([':u' => $userId]);
+		return $st->fetchAll();
+	}
+
+	/**
+	 * Insert a new S/MIME certificate row.
+	 *
+	 * $encryptedKeyBlob — binary cipher blob (nonce || ciphertext) produced by
+	 * Crypto::encrypt(), or null if this is a public-only certificate.
+	 *
+	 * @return int The new row id.
+	 */
+	public function addSmimeCert(
+		int $userId,
+		int $accountId,
+		string $email,
+		string $certPem,
+		?string $encryptedKeyBlob,
+		string $fingerprint,
+		?string $subject,
+		?string $notBefore,
+		?string $notAfter
+	) : int {
+		$st = $this->pdo->prepare(
+			"INSERT INTO frickmail_smime_certs
+				(user_id, account_id, email, cert_pem, encrypted_key_pem,
+				 fingerprint, subject, not_before, not_after)
+			 VALUES
+				(:user_id, :account_id, :email, :cert_pem,
+				 CASE WHEN :enc_key_h = '' THEN NULL ELSE decode(:enc_key, 'hex') END,
+				 :fingerprint, :subject, :not_before, :not_after)
+			 RETURNING id"
+		);
+		$st->bindValue(':user_id',    $userId,    \PDO::PARAM_INT);
+		$st->bindValue(':account_id', $accountId, \PDO::PARAM_INT);
+		$st->bindValue(':email',      $email);
+		$st->bindValue(':cert_pem',   $certPem);
+		$st->bindValue(':enc_key',    null !== $encryptedKeyBlob ? \bin2hex($encryptedKeyBlob) : '');
+		$st->bindValue(':enc_key_h',  null !== $encryptedKeyBlob ? \bin2hex($encryptedKeyBlob) : '');
+		$st->bindValue(':fingerprint', $fingerprint);
+		$st->bindValue(':subject',    $subject);
+		$st->bindValue(':not_before', $notBefore);
+		$st->bindValue(':not_after',  $notAfter);
+		$st->execute();
+		return (int) $st->fetchColumn();
+	}
+
+	/**
+	 * Retrieve the most-recent certificate row for $email belonging to $userId.
+	 * Returns null if not found.
+	 */
+	public function getSmimeCertByEmail(int $userId, string $email) : ?array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT * FROM frickmail_smime_certs
+			  WHERE user_id = :u AND email = :e
+			  ORDER BY created_at DESC
+			  LIMIT 1'
+		);
+		$st->execute([':u' => $userId, ':e' => $email]);
+		$row = $st->fetch();
+		return $row ?: null;
+	}
+
+	/**
+	 * Delete a certificate by id, enforcing user ownership.
+	 * Returns true if a row was deleted, false otherwise.
+	 */
+	public function deleteSmimeCert(int $userId, int $certId) : bool
+	{
+		$st = $this->pdo->prepare(
+			'DELETE FROM frickmail_smime_certs WHERE user_id = :u AND id = :i'
+		);
+		$st->execute([':u' => $userId, ':i' => $certId]);
+		return $st->rowCount() > 0;
+	}
 }
