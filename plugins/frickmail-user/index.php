@@ -31,7 +31,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.40',
+		VERSION  = '0.41',
 		RELEASE  = '2026-05-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -124,6 +124,9 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addTemplate('templates/FrickmailMailAccountsSettings.html');
 		$this->addTemplate('templates/FrickmailTwoFactorSettingsTab.html');
 		$this->addTemplate('templates/FrickmailUserPrefsTab.html');
+		$this->addTemplate('templates/FrickmailIdentitySettings.html');
+		$this->addTemplate('templates/FrickmailRulesSettings.html');
+		$this->addTemplate('templates/FrickmailSmimeSettings.html');
 
 		if ($bNotificationsEnabled) {
 			$this->addJs('js/Notifications.js');
