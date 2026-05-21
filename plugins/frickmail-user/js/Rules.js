@@ -188,7 +188,7 @@
 
 	// ── Inline KO template ────────────────────────────────────────────────────
 
-	const TMPL_ID = 'frickmail-rules-tmpl';
+	const TMPL_ID = 'FrickmailRulesSettings';
 	if (!document.getElementById(TMPL_ID)) {
 		const script = document.createElement('script');
 		script.id   = TMPL_ID;

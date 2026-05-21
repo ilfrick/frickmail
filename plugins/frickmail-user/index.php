@@ -31,8 +31,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.38',
-		RELEASE  = '2026-05-16',
+		VERSION  = '0.39',
+		RELEASE  = '2026-05-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
 		DESCRIPTION = 'Frickmail: first-class user identity in Postgres, mail accounts as linked records.';

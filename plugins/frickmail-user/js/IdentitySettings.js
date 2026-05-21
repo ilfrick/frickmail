@@ -132,7 +132,7 @@
 	// SnappyMail's addSettingsViewModel appends the container div to the tab pane,
 	// so both view-models coexist side by side.
 
-	const TMPL_ID = 'frickmail-identity-tmpl';
+	const TMPL_ID = 'FrickmailIdentitySettings';
 	if (!document.getElementById(TMPL_ID)) {
 		const script = document.createElement('script');
 		script.id   = TMPL_ID;

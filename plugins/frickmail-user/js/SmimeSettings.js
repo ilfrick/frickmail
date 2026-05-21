@@ -245,7 +245,7 @@
 
 	// ── Inline KO template ────────────────────────────────────────────────────
 
-	const TMPL_ID = 'frickmail-smime-tmpl';
+	const TMPL_ID = 'FrickmailSmimeSettings';
 	if (!document.getElementById(TMPL_ID)) {
 		const script = document.createElement('script');
 		script.id   = TMPL_ID;
