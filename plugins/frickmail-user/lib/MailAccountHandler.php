@@ -640,6 +640,54 @@ class MailAccountHandler
 	}
 
 	/**
+	 * Fetch the HTML/plain body of a specific message by UID.
+	 * Uses MailSo\Mail\MailClient so we get decoded, sanitised body parts.
+	 */
+	public function getMessageBody(int $uid, string $cryptKey, int $accountId, int $msgUid) : array
+	{
+		$rows = $this->db->listMailAccounts($uid);
+		$row  = null;
+		foreach ($rows as $r) { if ((int)$r['id'] === $accountId) { $row = $r; break; } }
+		if ($row === null) throw new \RuntimeException('Account not found');
+		if ('imap' !== $row['type']) throw new \RuntimeException('Not an IMAP account');
+
+		$account = $this->db->decryptedAccount($row, $cryptKey);
+		if (empty($account['password'])) throw new \RuntimeException('No credentials stored');
+
+		$oMailClient = new \MailSo\Mail\MailClient();
+		$oImap       = $oMailClient->ImapClient();
+
+		$oSettings = \MailSo\Imap\Settings::fromArray([
+			'host'       => $account['imap_host'],
+			'port'       => (int) $account['imap_port'],
+			'type'       => $this->mapSecure($account['imap_secure']),
+			'timeout'    => 15,
+			'shortLogin' => false,
+		]);
+		$oSettings->username   = $account['login'] ?: $account['email'];
+		$oSettings->passphrase = $account['password'];
+
+		$oImap->SetTimeOuts(15);
+		try {
+			$oImap->Connect($oSettings);
+			$oImap->Login($oSettings);
+
+			$oMessage = $oMailClient->Message('INBOX', $msgUid, true);
+			if (null === $oMessage) return ['ok' => false, 'error' => 'Message not found'];
+
+			return [
+				'ok'      => true,
+				'html'    => $oMessage->sHtml  ?: '',
+				'plain'   => $oMessage->sPlain ?: '',
+				'subject' => $oMessage->Subject(),
+			];
+		} finally {
+			try { $oImap->Logout();     } catch (\Throwable $e) {}
+			try { $oImap->Disconnect(); } catch (\Throwable $e) {}
+		}
+	}
+
+	/**
 	 * Open IMAP, SELECT/EXAMINE INBOX, return [uidnext, messages].
 	 */
 	private function fetchInboxStatus(array $account): array

@@ -31,7 +31,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.44',
+		VERSION  = '0.45',
 		RELEASE  = '2026-05-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -182,6 +182,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		if ($bNotificationsEnabled) {
 			$this->addJsonHook('FrickmailCheckNewMail',     'JsonCheckNewMail');
 		$this->addJsonHook('FrickmailLongPollNewMail', 'JsonLongPollNewMail');
+		$this->addJsonHook('FrickmailGetMessageBody',  'JsonGetMessageBody');
 		}
 
 		if ($bAllowExport) {
@@ -550,6 +551,18 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			[$uid, $cryptKey] = $this->auth()->requireSession();
 			$limit = \min(100, \max(1, (int) ($this->jsonParam('limit') ?: 40)));
 			return $this->mailAccounts()->unifiedInbox($uid, $cryptKey, $limit);
+		});
+	}
+
+	public function JsonGetMessageBody() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			return $this->mailAccounts()->getMessageBody(
+				$uid, $cryptKey,
+				(int) $this->jsonParam('account_id'),
+				(int) $this->jsonParam('uid')
+			);
 		});
 	}
 
