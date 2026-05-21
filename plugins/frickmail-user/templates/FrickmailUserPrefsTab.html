@@ -1,0 +1,86 @@
+<div class="form-horizontal">
+	<div class="legend">Frickmail Preferences</div>
+
+	<!-- Loading -->
+	<div data-bind="visible: loading()" style="color:var(--fm-text-secondary,#888);margin-bottom:12px;">
+		Loading preferences…
+	</div>
+
+	<!-- Status message -->
+	<div data-bind="visible: status().length, text: status"
+	     style="margin-bottom:12px;padding:8px 12px;border-radius:4px;
+	            background:rgba(137,180,250,.15);color:#89b4fa;
+	            border:1px solid rgba(137,180,250,.3);">
+	</div>
+
+	<div data-bind="visible: !loading()">
+
+		<!-- Unified Inbox limit (always shown) -->
+		<div class="control-group">
+			<label class="control-label">Unified Inbox — messages per account</label>
+			<div class="controls" style="display:flex;align-items:center;gap:12px;">
+				<input type="range" min="10" max="100" step="5"
+				       data-bind="value: unifiedLimit, valueUpdate: 'input'"
+				       style="flex:1;max-width:180px;accent-color:var(--fm-accent,#89b4fa);" />
+				<span data-bind="text: unifiedLimit()"
+				      style="min-width:30px;color:var(--fm-accent,#89b4fa);font-weight:600;"></span>
+			</div>
+			<p class="help-block">Messages fetched from each account in the Unified Inbox view.</p>
+		</div>
+
+		<!-- Notification poll interval (admin-gated) -->
+		<!-- ko if: notificationsEnabled -->
+		<div class="control-group">
+			<label class="control-label">Notification check interval (seconds)</label>
+			<div class="controls" style="display:flex;align-items:center;gap:12px;">
+				<input type="range" min="30" max="300" step="10"
+				       data-bind="value: pollInterval, valueUpdate: 'input'"
+				       style="flex:1;max-width:180px;accent-color:var(--fm-accent,#89b4fa);" />
+				<span data-bind="text: pollInterval()"
+				      style="min-width:30px;color:var(--fm-accent,#89b4fa);font-weight:600;"></span>
+			</div>
+			<p class="help-block">How often Frickmail checks for new mail in the background (30–300 s).</p>
+		</div>
+		<!-- /ko -->
+
+		<!-- S/MIME auto-sign (admin-gated) -->
+		<!-- ko if: smimeEnabled -->
+		<div class="control-group">
+			<div class="controls">
+				<label>
+					<input type="checkbox" data-bind="checked: smimeAutoSign" />
+					Auto-sign outgoing messages with S/MIME
+				</label>
+			</div>
+			<p class="help-block">Automatically attach your S/MIME signature to every sent message.</p>
+		</div>
+		<!-- /ko -->
+
+		<!-- Tasks default tab (admin-gated) -->
+		<!-- ko if: tasksEnabled -->
+		<div class="control-group">
+			<label class="control-label">Tasks panel default tab</label>
+			<div class="controls">
+				<select data-bind="value: tasksDefaultTab">
+					<option value="all">All tasks</option>
+					<option value="pending">Pending only</option>
+					<option value="completed">Completed only</option>
+				</select>
+			</div>
+			<p class="help-block">The tab shown by default when you open the task panel.</p>
+		</div>
+		<!-- /ko -->
+
+		<!-- Save -->
+		<div class="control-group">
+			<div class="controls">
+				<button class="btn btn-primary"
+				        data-bind="click: save, disable: saving()">
+					<!-- ko if: saving() -->Saving…<!-- /ko -->
+					<!-- ko ifnot: saving() -->Save preferences<!-- /ko -->
+				</button>
+			</div>
+		</div>
+
+	</div>
+</div>
