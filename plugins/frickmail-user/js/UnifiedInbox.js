@@ -116,6 +116,13 @@
 		['pointerdown','click','touchend'].forEach(ev => refreshBtn.addEventListener(ev, function(e){e.stopPropagation();e.preventDefault();loadMessages();}));
 		el.querySelector('#fm-ui-refresh-slot').replaceWith(refreshBtn);
 
+		// Prevent SnappyMail's global pointerdown/click handlers from seeing
+		// events that land inside this overlay — without this the overlay closes
+		// the moment any tap/click reaches the document-level listeners.
+		el.addEventListener('pointerdown', e => e.stopPropagation());
+		el.addEventListener('click',       e => e.stopPropagation());
+		el.addEventListener('touchstart',  e => e.stopPropagation(), { passive: true });
+
 		// Close on Escape key
 		el._keyHandler = (e) => { if (e.key === 'Escape') closeOverlay(); };
 		document.addEventListener('keydown', el._keyHandler);
