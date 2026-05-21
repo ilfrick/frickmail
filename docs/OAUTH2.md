@@ -1,5 +1,37 @@
 # Frickmail OAuth2 — Application Registration Guide
 
+## 0. Why Thunderbird works out-of-the-box but Frickmail needs configuration
+
+Thunderbird and Frickmail implement OAuth2 **the same way** at the protocol
+level. The difference is purely one of pre-registration:
+
+**Thunderbird** — Mozilla registered Thunderbird as an OAuth2 application
+with Google, Microsoft, and Yahoo years ago. Each provider issued Mozilla a
+permanent, publicly-known `client_id` that is hardcoded in Thunderbird's
+source code. When you install Thunderbird and add a Gmail account, it sends
+*Mozilla's* client_id to Google's authorisation server. Google recognises it,
+shows a consent screen branded "Thunderbird", and grants access. Mozilla did
+the admin work once; every Thunderbird user in the world benefits.
+
+**Frickmail (and every other self-hosted web app)** — Google and Microsoft
+refuse OAuth2 requests from an unregistered `client_id` — the request is
+rejected before any popup even opens. There is no shared client_id you can
+borrow; each deployment of Frickmail must register itself. The registration
+is free, takes about five minutes, and only needs to be done once per server.
+
+Once you have completed the registration below, the **user experience is
+identical** to Thunderbird: the user types their email address, a popup
+opens the provider's login and consent screen, the popup closes, and the
+inbox loads. No password is stored in Frickmail.
+
+The one extra requirement that desktop clients like Thunderbird avoid is the
+**redirect URI**: a web app must tell the provider which URL the browser
+should return to after consent, and that URL must be publicly reachable.
+Thunderbird uses `localhost` or a custom URI scheme (`thunderbird://`) that
+works on the user's machine without any server.
+
+---
+
 Frickmail can sign users in to **Gmail** and **Office 365 / Outlook.com**
 mailboxes through OAuth2 — exactly like Thunderbird. The end user only types
 their email address; a popup opens the provider's consent screen and the
