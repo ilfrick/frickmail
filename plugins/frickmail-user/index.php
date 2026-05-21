@@ -31,7 +31,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.41',
+		VERSION  = '0.42',
 		RELEASE  = '2026-05-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -149,6 +149,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailRegister',            'JsonFrickmailRegister');
 		$this->addJsonHook('FrickmailListAccounts',        'JsonListAccounts');
 		$this->addJsonHook('FrickmailAddAccount',          'JsonAddAccount');
+		$this->addJsonHook('FrickmailUpdateAccount',       'JsonUpdateAccount');
 		$this->addJsonHook('FrickmailDeleteAccount',       'JsonDeleteAccount');
 		$this->addJsonHook('FrickmailSetPrimary',          'JsonSetPrimary');
 		$this->addJsonHook('FrickmailSwitchAccount',       'JsonSwitchAccount');
@@ -460,6 +461,26 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 				'is_primary'  => $this->jsonParam('is_primary'),
 			];
 			return $this->mailAccounts()->addAccount($uid, $cryptKey, $params);
+		});
+	}
+
+	public function JsonUpdateAccount() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$params = [
+				'id'          => (int)    $this->jsonParam('id'),
+				'label'       => (string) $this->jsonParam('label'),
+				'login'       => (string) $this->jsonParam('login'),
+				'password'    => (string) $this->jsonParam('password'),
+				'imap_host'   => (string) $this->jsonParam('imap_host'),
+				'imap_port'   => $this->jsonParam('imap_port'),
+				'imap_secure' => (string) $this->jsonParam('imap_secure'),
+				'smtp_host'   => (string) $this->jsonParam('smtp_host'),
+				'smtp_port'   => $this->jsonParam('smtp_port'),
+				'smtp_secure' => (string) $this->jsonParam('smtp_secure'),
+			];
+			return $this->mailAccounts()->updateAccount($uid, $cryptKey, $params);
 		});
 	}
 

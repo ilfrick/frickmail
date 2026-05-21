@@ -165,6 +165,31 @@ class Db
 		return (int) $st->fetchColumn();
 	}
 
+	public function updateMailAccount(int $userId, int $accountId, array $data) : void
+	{
+		if (empty($data)) return;
+		$allowed = ['label','login','imap_host','imap_port','imap_secure',
+		            'smtp_host','smtp_port','smtp_secure','encrypted_password'];
+		$sets = [];
+		$bind = [':u' => $userId, ':i' => $accountId];
+		foreach ($allowed as $col) {
+			if (!\array_key_exists($col, $data)) continue;
+			if ('encrypted_password' === $col) {
+				$sets[] = "encrypted_password = CASE WHEN :enc_pwd_h = '' THEN encrypted_password ELSE decode(:enc_pwd, 'hex') END";
+				$hex = \bin2hex($data[$col]);
+				$bind[':enc_pwd']  = $hex;
+				$bind[':enc_pwd_h'] = $hex;
+			} else {
+				$sets[] = "$col = :$col";
+				$bind[":$col"] = $data[$col];
+			}
+		}
+		if (empty($sets)) return;
+		$sql = 'UPDATE frickmail_mail_accounts SET ' . \implode(', ', $sets)
+			 . ' WHERE user_id = :u AND id = :i';
+		$this->pdo->prepare($sql)->execute($bind);
+	}
+
 	public function deleteMailAccount(int $userId, int $accountId) : bool
 	{
 		$st = $this->pdo->prepare('DELETE FROM frickmail_mail_accounts WHERE user_id = :u AND id = :i');

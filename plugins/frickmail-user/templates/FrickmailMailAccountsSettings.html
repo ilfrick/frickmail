@@ -4,17 +4,118 @@
 		<p>Email accounts linked to your Frickmail user. Add new accounts here; the one marked <em>primary</em> is opened by default at sign-in.</p>
 
 		<div data-bind="foreach: accounts" style="margin: 1em 0">
-			<div style="border:1px solid #ddd; border-radius:6px; padding:.6em .8em; margin-bottom:.5em; display:flex; align-items:center; gap:.6em">
-				<div style="flex:1">
-					<strong data-bind="text: label"></strong>
-					<span style="color:#888" data-bind="text: ' — ' + email"></span>
-					<span data-bind="visible: is_primary" style="margin-left:.4em; padding:1px 6px; background:#4a90e2; color:white; border-radius:3px; font-size:80%">primary</span>
-					<div style="font-size:85%; color:#888" data-bind="text: type.toUpperCase() + (imap_host ? ' · ' + imap_host + ':' + imap_port : '')"></div>
+			<div style="border:1px solid #ddd; border-radius:6px; margin-bottom:.5em; overflow:hidden">
+
+				<!-- Account row -->
+				<div style="padding:.6em .8em; display:flex; align-items:center; gap:.6em">
+					<div style="flex:1">
+						<strong data-bind="text: label"></strong>
+						<span style="color:#888" data-bind="text: ' — ' + email"></span>
+						<span data-bind="visible: is_primary" style="margin-left:.4em; padding:1px 6px; background:#4a90e2; color:white; border-radius:3px; font-size:80%">primary</span>
+						<div style="font-size:85%; color:#888" data-bind="text: type.toUpperCase() + (imap_host ? ' · ' + imap_host + ':' + imap_port : '')"></div>
+					</div>
+					<button class="btn" data-bind="click: $parent.switchTo.bind($parent)" title="Open this mailbox">Open</button>
+					<button class="btn" data-bind="click: $parent.discoverServices.bind($parent, id), attr:{title: 'Find contacts & calendar for ' + email}" style="font-size:90%">🔍 Services</button>
+					<button class="btn" data-bind="click: $parent.startEdit.bind($parent, $data),
+					                               css: { active: $parent.editing() === id }"
+					        title="Edit account settings">⚙ Edit</button>
+					<button class="btn" data-bind="click: $parent.setPrimary.bind($parent), visible: !is_primary">Primary</button>
+					<button class="btn" data-bind="click: $parent.deleteAccount.bind($parent)" style="background:#c33; color:white" title="Remove account">✕</button>
 				</div>
-				<button class="btn" data-bind="click: $parent.switchTo.bind($parent)" title="Open this mailbox">Open</button>
-				<button class="btn" data-bind="click: $parent.discoverServices.bind($parent, id), attr:{title: 'Find contacts & calendar for ' + email}" style="font-size:90%">🔍 Services</button>
-				<button class="btn" data-bind="click: $parent.setPrimary.bind($parent), visible: !is_primary">Primary</button>
-				<button class="btn" data-bind="click: $parent.deleteAccount.bind($parent)" style="background:#c33; color:white" title="Remove account">✕</button>
+
+				<!-- Inline edit form -->
+				<!-- ko if: $parent.editing() === id -->
+				<div style="border-top:1px solid #ddd; padding:.8em 1em; background:rgba(74,144,226,.04)">
+
+					<!-- Display name — always editable -->
+					<div class="control-group">
+						<label class="control-label" style="font-size:88%">Display name</label>
+						<div class="controls">
+							<input type="text" data-bind="value: $parent.editDraft.label"
+							       style="width:100%; max-width:340px" />
+						</div>
+					</div>
+
+					<!-- OAuth notice + greyed read-only fields -->
+					<!-- ko if: type !== 'imap' -->
+					<div style="margin:.4em 0 .6em; padding:.5em .8em; background:rgba(255,160,50,.12); border-left:3px solid #ffb347; border-radius:0 4px 4px 0; font-size:85%; color:#aaa">
+						Connection settings are managed via <strong data-bind="text: type === 'gmail' ? 'Google OAuth2' : 'Microsoft OAuth2'"></strong> and cannot be changed here.
+						Re-authorise the account to update credentials.
+					</div>
+					<fieldset disabled style="opacity:.45; border:none; padding:0; margin:0">
+						<div style="display:flex; gap:.6em; flex-wrap:wrap; margin-bottom:.4em">
+							<div style="flex:2; min-width:160px">
+								<label style="font-size:85%">IMAP host</label>
+								<input type="text" data-bind="value: $parent.editDraft.imap_host" style="width:100%" />
+							</div>
+							<div style="flex:1; min-width:70px">
+								<label style="font-size:85%">Port</label>
+								<input type="number" data-bind="value: $parent.editDraft.imap_port" style="width:100%" />
+							</div>
+						</div>
+					</fieldset>
+					<!-- /ko -->
+
+					<!-- IMAP editable fields -->
+					<!-- ko if: type === 'imap' -->
+					<div class="control-group">
+						<label class="control-label" style="font-size:88%">Login (if different from email)</label>
+						<div class="controls">
+							<input type="text" data-bind="value: $parent.editDraft.login"
+							       style="width:100%; max-width:340px" />
+						</div>
+					</div>
+					<div class="control-group">
+						<label class="control-label" style="font-size:88%">Password</label>
+						<div class="controls">
+							<input type="password" data-bind="value: $parent.editDraft.password"
+							       placeholder="(leave blank to keep current)"
+							       autocomplete="new-password"
+							       style="width:100%; max-width:340px" />
+						</div>
+					</div>
+					<div style="display:flex; gap:.6em; flex-wrap:wrap; margin-bottom:.4em">
+						<div style="flex:2; min-width:160px">
+							<label style="font-size:85%">IMAP host</label>
+							<input type="text" data-bind="value: $parent.editDraft.imap_host" style="width:100%" />
+						</div>
+						<div style="flex:1; min-width:70px">
+							<label style="font-size:85%">Port</label>
+							<input type="number" data-bind="value: $parent.editDraft.imap_port" style="width:100%" />
+						</div>
+						<div style="flex:1; min-width:90px">
+							<label style="font-size:85%">Security</label>
+							<select data-bind="value: $parent.editDraft.imap_secure" style="width:100%">
+								<option>SSL</option><option>STARTTLS</option><option>NONE</option>
+							</select>
+						</div>
+					</div>
+					<div style="display:flex; gap:.6em; flex-wrap:wrap; margin-bottom:.6em">
+						<div style="flex:2; min-width:160px">
+							<label style="font-size:85%">SMTP host</label>
+							<input type="text" data-bind="value: $parent.editDraft.smtp_host" style="width:100%" />
+						</div>
+						<div style="flex:1; min-width:70px">
+							<label style="font-size:85%">Port</label>
+							<input type="number" data-bind="value: $parent.editDraft.smtp_port" style="width:100%" />
+						</div>
+						<div style="flex:1; min-width:90px">
+							<label style="font-size:85%">Security</label>
+							<select data-bind="value: $parent.editDraft.smtp_secure" style="width:100%">
+								<option>SSL</option><option>STARTTLS</option><option>NONE</option>
+							</select>
+						</div>
+					</div>
+					<!-- /ko -->
+
+					<div style="display:flex; gap:.5em; margin-top:.4em">
+						<button class="btn" style="background:#4a90e2; color:white"
+						        data-bind="click: $parent.saveEdit.bind($parent)">Save</button>
+						<button class="btn" data-bind="click: $parent.cancelEdit.bind($parent)">Cancel</button>
+					</div>
+				</div>
+				<!-- /ko -->
+
 			</div>
 		</div>
 

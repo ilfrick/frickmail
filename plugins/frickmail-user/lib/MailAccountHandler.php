@@ -175,6 +175,60 @@ class MailAccountHandler
 	}
 
 	/* ------------------------------------------------------------------ */
+	/*  Update account settings                                            */
+	/* ------------------------------------------------------------------ */
+
+	public function updateAccount(int $uid, string $cryptKey, array $params) : array
+	{
+		$id = (int) ($params['id'] ?? 0);
+		if ($id <= 0) throw new \RuntimeException('Invalid account id');
+
+		// Verify ownership
+		$rows = $this->db->listMailAccounts($uid);
+		$row  = null;
+		foreach ($rows as $r) { if ((int)$r['id'] === $id) { $row = $r; break; } }
+		if ($row === null) throw new \RuntimeException('Account not found');
+
+		$data = [];
+
+		// Label is always updatable
+		$label = \trim($params['label'] ?? '');
+		if ('' !== $label) $data['label'] = $label;
+
+		// IMAP-only fields
+		if ('imap' === $row['type']) {
+			if (!empty($params['imap_host'])) {
+				$imapHost = $params['imap_host'];
+				$smtpHost = $params['smtp_host'] ?? '';
+				foreach (['imap_host' => $imapHost, 'smtp_host' => $smtpHost] as $field => $h) {
+					if ('' === $h) continue;
+					$resolved = \gethostbyname($h);
+					if ($resolved !== $h && !\filter_var($resolved, \FILTER_VALIDATE_IP, \FILTER_FLAG_NO_PRIV_RANGE | \FILTER_FLAG_NO_RES_RANGE)) {
+						throw new \RuntimeException("$field resolves to a reserved IP address");
+					}
+				}
+				$data['imap_host'] = $imapHost;
+				if ('' !== $smtpHost) $data['smtp_host'] = $smtpHost;
+			}
+			if (!empty($params['imap_port']))   $data['imap_port']   = (int) $params['imap_port'];
+			if (!empty($params['imap_secure']))  $data['imap_secure'] = (string) $params['imap_secure'];
+			if (!empty($params['smtp_port']))    $data['smtp_port']   = (int) $params['smtp_port'];
+			if (!empty($params['smtp_secure']))  $data['smtp_secure'] = (string) $params['smtp_secure'];
+			if (!empty($params['login']))        $data['login']       = (string) $params['login'];
+
+			$pwd = (string) ($params['password'] ?? '');
+			if ('' !== $pwd) {
+				$data['encrypted_password'] = Crypto::encrypt($pwd, $cryptKey);
+			}
+		}
+
+		if (empty($data)) return ['ok' => true]; // nothing to update
+
+		$this->db->updateMailAccount($uid, $id, $data);
+		return ['ok' => true];
+	}
+
+	/* ------------------------------------------------------------------ */
 	/*  Delete, setPrimary, setPassword, switchAccount                      */
 	/* ------------------------------------------------------------------ */
 

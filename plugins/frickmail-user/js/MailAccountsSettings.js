@@ -54,6 +54,22 @@
 			};
 			this.providerNote = ko.observable('');
 
+			// Per-account inline editor state
+			this.editing = ko.observable(null); // account id being edited, or null
+			this.editDraft = {
+				id:          ko.observable(null),
+				type:        ko.observable('imap'),
+				label:       ko.observable(''),
+				login:       ko.observable(''),
+				password:    ko.observable(''),
+				imap_host:   ko.observable(''),
+				imap_port:   ko.observable(993),
+				imap_secure: ko.observable('SSL'),
+				smtp_host:   ko.observable(''),
+				smtp_port:   ko.observable(465),
+				smtp_secure: ko.observable('SSL'),
+			};
+
 			// Auto-detect provider when email changes
 			this.draft.email.subscribe(email => {
 				const p = detectProvider(email);
@@ -165,6 +181,55 @@
 				if (!r?.ok) { this.status('Set-primary failed: ' + (r?.error || 'request error')); return; }
 				this.refresh();
 			}, 'FrickmailSetPrimary', { id: account.id }, 30000);
+		}
+
+		startEdit(account) {
+			// Toggle: clicking Edit again closes the form
+			if (this.editing() === account.id) { this.cancelEdit(); return; }
+			const d = this.editDraft;
+			d.id(account.id);
+			d.type(account.type || 'imap');
+			d.label(account.label || account.email);
+			d.login(account.login || account.email);
+			d.password('');
+			d.imap_host(account.imap_host || '');
+			d.imap_port(account.imap_port || 993);
+			d.imap_secure(account.imap_secure || 'SSL');
+			d.smtp_host(account.smtp_host || '');
+			d.smtp_port(account.smtp_port || 465);
+			d.smtp_secure(account.smtp_secure || 'SSL');
+			this.editing(account.id);
+			this.status('');
+		}
+
+		cancelEdit() {
+			this.editing(null);
+			this.editDraft.password('');
+		}
+
+		saveEdit() {
+			const d = this.editDraft;
+			const payload = { id: d.id(), label: d.label().trim() || d.login() };
+			if (d.type() === 'imap') {
+				Object.assign(payload, {
+					login:       d.login(),
+					imap_host:   d.imap_host(),
+					imap_port:   parseInt(d.imap_port(), 10),
+					imap_secure: d.imap_secure(),
+					smtp_host:   d.smtp_host(),
+					smtp_port:   parseInt(d.smtp_port(), 10),
+					smtp_secure: d.smtp_secure(),
+				});
+				if (d.password()) payload.password = d.password();
+			}
+			this.status('Saving…');
+			window.rl.pluginRemoteRequest((iError, oData) => {
+				const r = oData?.Result;
+				if (false === oData?.Result || null == oData?.Result) { this.status('Server: ' + (oData?.messageAdditional || oData?.message || ('error ' + (oData?.code ?? '?')))); return; }
+				if (!r?.ok) { this.status('Save failed: ' + (r?.error || 'request error')); return; }
+				this.cancelEdit();
+				this.refresh();
+			}, 'FrickmailUpdateAccount', payload, 30000);
 		}
 
 		switchTo(account) {
