@@ -125,13 +125,13 @@
 
 	function openOverlay() {
 		if (!overlayEl) overlayEl = createOverlay();
-		overlayEl.hidden = false;
+		overlayEl.style.display = 'flex'; // must use style.display — hidden attr is overridden by inline display:flex
 		isOpen = true;
 		loadMessages();
 	}
 
 	function closeOverlay() {
-		if (overlayEl) overlayEl.hidden = true;
+		if (overlayEl) overlayEl.style.display = 'none';
 		isOpen = false;
 	}
 
@@ -184,7 +184,9 @@
 		if (!container) return;
 
 		if (!msgs.length) {
-			container.innerHTML = '<div style="padding:32px;text-align:center;opacity:.6">No messages found.</div>';
+			container.innerHTML = '<div style="padding:32px;text-align:center;opacity:.6">'
+				+ 'No messages found.<br><small style="font-size:.8rem;opacity:.7;margin-top:8px;display:block;">'
+				+ 'Only IMAP accounts are shown here. Add an IMAP account in Mail Accounts settings.</small></div>';
 			return;
 		}
 

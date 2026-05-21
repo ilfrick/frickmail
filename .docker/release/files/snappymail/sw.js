@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const CACHE    = 'fm-v3';
+const CACHE    = 'fm-v4';
 const MSG_CACHE = 'fm-messages-v1'; // separate TTL-controlled cache for email data
 
 const isVersionedStatic = url =>
