@@ -229,10 +229,8 @@
 	rl.addSettingsViewModel(
 		FrickmailIdentitySettings,
 		'FrickmailIdentitySettings',
-		// Tab label — empty string keeps it on the same tab pane as Mail Accounts
-		'',
-		// Tab hash — same as MailAccountsSettings so it appends to the same panel
-		'mail-accounts'
+		'Identities',
+		'frickmail-identities'
 	);
 
 })(window.rl);

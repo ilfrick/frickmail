@@ -331,9 +331,8 @@
 	rl.addSettingsViewModel(
 		FrickmailRulesSettings,
 		'FrickmailRulesSettings',
-		// Empty label — appends to the same tab pane as Mail Accounts
-		'',
-		'mail-accounts'
+		'Rules',
+		'frickmail-rules'
 	);
 
 })(window.rl);

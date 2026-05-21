@@ -109,8 +109,8 @@
 		// Standard close button via shared utility (consistent style across all panels)
 		const slot = el.querySelector('#fm-tasks-close-slot');
 		const closeBtn = (window.FrickmailUtils?.makeCloseButton || function(id, fn) {
-			var b = document.createElement('button'); b.id = id; b.innerHTML = '&times;';
-			b.style.cssText = 'background:none;border:none;color:inherit;cursor:pointer;font-size:1.4rem;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;opacity:.7;touch-action:manipulation';
+			var b = document.createElement('a'); b.id = id; b.href='#'; b.className='close'; b.innerHTML = '&times;';
+			b.style.cssText = 'float:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent;flex-shrink:0;';
 			['pointerdown','click','touchend'].forEach(ev => b.addEventListener(ev, function(e){e.stopPropagation();e.preventDefault();fn();}));
 			return b;
 		})('fm-tasks-close', closeOverlay);

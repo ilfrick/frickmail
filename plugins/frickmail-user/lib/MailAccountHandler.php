@@ -442,13 +442,17 @@ class MailAccountHandler
 
 	public function unifiedInbox(int $uid, string $cryptKey, int $limit = 40) : array
 	{
-		$rows = $this->db->listMailAccounts($uid);
-		$all  = [];
+		$rows   = $this->db->listMailAccounts($uid);
+		$all    = [];
+		$errors = [];
 
 		foreach ($rows as $row) {
 			if ('imap' !== $row['type']) continue;
 			$account = $this->db->decryptedAccount($row, $cryptKey);
-			if (empty($account['password'])) continue;
+			if (empty($account['password'])) {
+				$errors[] = ($account['email'] ?? '?') . ': no password stored';
+				continue;
+			}
 
 			try {
 				$msgs = $this->fetchInboxHeaders($account, $limit);
@@ -459,14 +463,19 @@ class MailAccountHandler
 				unset($m);
 				$all = \array_merge($all, $msgs);
 			} catch (\Throwable $e) {
-				// Skip silently — one failing account never aborts the whole request.
+				// Collect error but continue — one failing account must not abort the rest.
+				$errors[] = ($account['email'] ?? '?') . ': ' . $e->getMessage();
 			}
 		}
 
 		\usort($all, static fn(array $a, array $b) : int =>
 			($b['date_ts'] ?? 0) <=> ($a['date_ts'] ?? 0));
 
-		return ['ok' => true, 'messages' => \array_slice($all, 0, $limit)];
+		return [
+			'ok'       => true,
+			'messages' => \array_slice($all, 0, $limit),
+			'errors'   => $errors,
+		];
 	}
 
 	private function fetchInboxHeaders(array $account, int $limit) : array

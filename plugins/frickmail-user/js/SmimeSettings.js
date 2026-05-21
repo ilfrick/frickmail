@@ -391,9 +391,8 @@
 	rl.addSettingsViewModel(
 		FrickmailSmimeSettings,
 		'FrickmailSmimeSettings',
-		// Empty label — appends to the same tab pane as Mail Accounts / Rules
-		'',
-		'mail-accounts'
+		'S/MIME',
+		'frickmail-smime'
 	);
 
 })(window.rl);
