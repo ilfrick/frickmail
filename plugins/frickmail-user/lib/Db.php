@@ -731,4 +731,34 @@ class Db
 		$st->execute([':u' => $userId, ':i' => $certId]);
 		return $st->rowCount() > 0;
 	}
+
+	/* ------------------------------------------------------------------ */
+	/*  Web Push subscriptions                                              */
+	/* ------------------------------------------------------------------ */
+
+	public function upsertPushSubscription(int $userId, string $endpoint, string $p256dh, string $authKey) : void
+	{
+		$this->pdo->prepare(
+			'INSERT INTO frickmail_push_subscriptions (user_id, endpoint, p256dh, auth_key)
+			 VALUES (:u, :ep, :p, :a)
+			 ON CONFLICT (user_id, endpoint) DO UPDATE SET p256dh = :p, auth_key = :a'
+		)->execute([':u' => $userId, ':ep' => $endpoint, ':p' => $p256dh, ':a' => $authKey]);
+	}
+
+	public function deletePushSubscription(int $userId, string $endpoint) : void
+	{
+		$this->pdo->prepare(
+			'DELETE FROM frickmail_push_subscriptions WHERE user_id = :u AND endpoint = :ep'
+		)->execute([':u' => $userId, ':ep' => $endpoint]);
+	}
+
+	/** Return all push subscriptions for a user as [{endpoint, p256dh, auth_key}] */
+	public function listPushSubscriptions(int $userId) : array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT endpoint, p256dh, auth_key FROM frickmail_push_subscriptions WHERE user_id = :u'
+		);
+		$st->execute([':u' => $userId]);
+		return $st->fetchAll(\PDO::FETCH_ASSOC);
+	}
 }

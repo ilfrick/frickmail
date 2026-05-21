@@ -26,12 +26,13 @@ require_once __DIR__ . '/lib/ServiceDiscoveryHandler.php';
 require_once __DIR__ . '/lib/TaskHandler.php';
 require_once __DIR__ . '/lib/SmimeHandler.php';
 require_once __DIR__ . '/lib/GraphClient.php';
+require_once __DIR__ . '/lib/VapidPush.php';
 
 class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.45',
+		VERSION  = '0.46',
 		RELEASE  = '2026-05-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -183,6 +184,9 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$this->addJsonHook('FrickmailCheckNewMail',     'JsonCheckNewMail');
 		$this->addJsonHook('FrickmailLongPollNewMail', 'JsonLongPollNewMail');
 		$this->addJsonHook('FrickmailGetMessageBody',  'JsonGetMessageBody');
+		$this->addJsonHook('FrickmailGetVapidKey',     'JsonGetVapidKey');
+		$this->addJsonHook('FrickmailPushSubscribe',   'JsonPushSubscribe');
+		$this->addJsonHook('FrickmailPushUnsubscribe', 'JsonPushUnsubscribe');
 		}
 
 		if ($bAllowExport) {
@@ -554,6 +558,53 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		});
 	}
 
+	// ── VAPID Web Push ────────────────────────────────────────────────────────
+
+	/**
+	 * Return the VAPID public key (applicationServerKey) for pushManager.subscribe().
+	 * Generates the key pair once and stores it in plugin config.
+	 */
+	public function JsonGetVapidKey() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			$this->auth()->requireSession();
+
+			$pub = $this->Config()->Get('plugin', 'vapid_public_b64u', '');
+			if ('' === $pub) {
+				$keys = \Frickmail\User\VapidPush::generateKeys();
+				$this->Config()->Set('plugin', 'vapid_public_b64u',  $keys['public_b64u']);
+				$this->Config()->Set('plugin', 'vapid_private_pem',  $keys['private_pem']);
+				$this->Config()->Save();
+				$pub = $keys['public_b64u'];
+			}
+			return ['ok' => true, 'public_key' => $pub];
+		});
+	}
+
+	public function JsonPushSubscribe() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$endpoint = (string) $this->jsonParam('endpoint');
+			$p256dh   = (string) $this->jsonParam('p256dh');
+			$authKey  = (string) $this->jsonParam('auth');
+			if ('' === $endpoint || '' === $p256dh || '' === $authKey) {
+				throw new \RuntimeException('Missing subscription fields');
+			}
+			$this->db()->upsertPushSubscription($uid, $endpoint, $p256dh, $authKey);
+			return ['ok' => true];
+		});
+	}
+
+	public function JsonPushUnsubscribe() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid] = $this->auth()->requireSession();
+			$this->db()->deletePushSubscription($uid, (string) $this->jsonParam('endpoint'));
+			return ['ok' => true];
+		});
+	}
+
 	public function JsonGetMessageBody() : array
 	{
 		return $this->dispatch(__FUNCTION__, function () {
@@ -573,6 +624,40 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$lastUids = (array) ($this->jsonParam('last_uids') ?: []);
 			return $this->mailAccounts()->checkNewMail($uid, $cryptKey, $lastUids);
 		});
+	}
+
+	/** Send a Web Push notification to every registered subscription for this user. */
+	private function sendWebPushToUser(int $uid, array $accounts) : void
+	{
+		$privatePem = (string) $this->Config()->Get('plugin', 'vapid_private_pem',  '');
+		$publicB64u = (string) $this->Config()->Get('plugin', 'vapid_public_b64u',  '');
+		if ('' === $privatePem || '' === $publicB64u) return;
+
+		$subs = $this->db()->listPushSubscriptions($uid);
+		if (empty($subs)) return;
+
+		$subject  = 'mailto:' . (\RainLoop\Api::Config()->Get('webmail', 'title', 'Frickmail') ?: 'Frickmail');
+		$newAccts = \array_filter($accounts, static fn($a) => ($a['new_count'] ?? 0) > 0);
+		$first    = \reset($newAccts);
+		$total    = \array_sum(\array_column($newAccts, 'new_count'));
+
+		$payload = [
+			'title' => $total === 1 ? '1 new message' : $total . ' new messages',
+			'body'  => $first ? $first['account_email'] : '',
+			'tag'   => 'fm-newmail',
+			'url'   => '/',
+		];
+
+		foreach ($subs as $sub) {
+			try {
+				\Frickmail\User\VapidPush::send(
+					['endpoint' => $sub['endpoint'], 'p256dh' => $sub['p256dh'], 'auth' => $sub['auth_key']],
+					$privatePem, $publicB64u, $subject, $payload
+				);
+			} catch (\Throwable $e) {
+				// Silently skip failed subscriptions (expired, revoked, network issue).
+			}
+		}
 	}
 
 	/**
@@ -604,11 +689,14 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 					}
 				}
 
-				// Any account has new mail → return immediately.
+				// Any account has new mail → fire Web Push to all subscriptions, then return.
+				$hasNew = false;
 				foreach ($result['accounts'] ?? [] as $acc) {
-					if (($acc['new_count'] ?? 0) > 0) {
-						return $result;
-					}
+					if (($acc['new_count'] ?? 0) > 0) { $hasNew = true; break; }
+				}
+				if ($hasNew) {
+					$this->sendWebPushToUser($uid, $result['accounts'] ?? []);
+					return $result;
 				}
 
 				if (\time() >= $deadline) {

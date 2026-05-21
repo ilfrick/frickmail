@@ -53,8 +53,7 @@
 
 	window.addEventListener('rl-logout', clearState);
 
-	// ── Load user preference once ─────────────────────────────────────────────
-	// Called once on startup; updates reconnectDelay for all subsequent cycles.
+	// ── Load user preference + register Web Push subscription ────────────────
 
 	function loadPrefThenStart() {
 		const r = window.rl;
@@ -62,8 +61,56 @@
 		r.pluginRemoteRequest((iErr, oData) => {
 			const interval = +(oData?.Result?.prefs?.notifications_poll_interval || DEFAULT_INTERVAL);
 			reconnectDelay = Math.max(MIN_INTERVAL, Math.min(MAX_INTERVAL, interval)) * 1000;
+			registerWebPush();   // fire-and-forget, doesn't block long-poll
 			startLongPoll();
 		}, 'FrickmailGetPrefs', { XToken: fmToken() }, 10000);
+	}
+
+	// ── Web Push subscription ─────────────────────────────────────────────────
+	//
+	// Fetches the VAPID public key from the server, subscribes the SW to the
+	// browser's push service, then POSTs the PushSubscription to the backend.
+	// If the SW is not active or push is not supported, silently skips.
+
+	function registerWebPush() {
+		if (!navigator.serviceWorker || !('PushManager' in window)) return;
+
+		navigator.serviceWorker.ready.then(reg => {
+			// Check if already subscribed
+			return reg.pushManager.getSubscription().then(existing => {
+				if (existing) {
+					// Re-send to server in case it was lost (idempotent upsert on backend)
+					sendSubscriptionToServer(existing);
+					return;
+				}
+				// Fetch VAPID public key then subscribe
+				window.rl.pluginRemoteRequest((iErr, oData) => {
+					const pubKeyB64u = oData?.Result?.public_key;
+					if (!pubKeyB64u) return;
+					const appServerKey = urlBase64ToUint8Array(pubKeyB64u);
+					reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appServerKey })
+						.then(sub => sendSubscriptionToServer(sub))
+						.catch(() => {});   // push blocked by user or browser
+				}, 'FrickmailGetVapidKey', { XToken: fmToken() }, 10000);
+			});
+		}).catch(() => {});
+	}
+
+	function sendSubscriptionToServer(sub) {
+		const json = sub.toJSON();
+		window.rl.pluginRemoteRequest(() => {}, 'FrickmailPushSubscribe', {
+			endpoint: json.endpoint,
+			p256dh:   json.keys?.p256dh   || '',
+			auth:     json.keys?.auth      || '',
+			XToken:   fmToken(),
+		}, 10000);
+	}
+
+	function urlBase64ToUint8Array(b64u) {
+		const pad = b64u.length % 4 === 0 ? '' : '===='.slice(b64u.length % 4);
+		const b64 = (b64u + pad).replace(/-/g, '+').replace(/_/g, '/');
+		const raw = atob(b64);
+		return Uint8Array.from(raw, c => c.charCodeAt(0));
 	}
 
 	// ── Permission banner ─────────────────────────────────────────────────────

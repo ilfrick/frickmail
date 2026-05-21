@@ -216,6 +216,16 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
         )");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_smime_user  ON frickmail_smime_certs(user_id)");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_smime_email ON frickmail_smime_certs(email)");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_push_subscriptions (
+            id          BIGSERIAL PRIMARY KEY,
+            user_id     BIGINT NOT NULL REFERENCES frickmail_users(id) ON DELETE CASCADE,
+            endpoint    TEXT NOT NULL,
+            p256dh      TEXT NOT NULL,
+            auth_key    TEXT NOT NULL,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(user_id, endpoint)
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_push_user ON frickmail_push_subscriptions(user_id)");
         echo "[OK] Frickmail schema ready" . PHP_EOL;
     ' || echo "[WARN] Frickmail schema migration skipped (DB unreachable)"
 fi
