@@ -31,7 +31,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.43',
+		VERSION  = '0.44',
 		RELEASE  = '2026-05-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -180,7 +180,8 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailApplyRules',          'JsonApplyRules');
 
 		if ($bNotificationsEnabled) {
-			$this->addJsonHook('FrickmailCheckNewMail', 'JsonCheckNewMail');
+			$this->addJsonHook('FrickmailCheckNewMail',     'JsonCheckNewMail');
+		$this->addJsonHook('FrickmailLongPollNewMail', 'JsonLongPollNewMail');
 		}
 
 		if ($bAllowExport) {
@@ -558,6 +559,52 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			[$uid, $cryptKey] = $this->auth()->requireSession();
 			$lastUids = (array) ($this->jsonParam('last_uids') ?: []);
 			return $this->mailAccounts()->checkNewMail($uid, $cryptKey, $lastUids);
+		});
+	}
+
+	/**
+	 * Long-poll variant: holds the HTTP connection open for up to 25 s,
+	 * checking IMAP every 5 s. Returns as soon as new mail is detected or
+	 * on timeout. Reduces browser-side latency from O(poll_interval) to O(5 s)
+	 * without requiring a persistent background worker.
+	 */
+	public function JsonLongPollNewMail() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$lastUids = (array) ($this->jsonParam('last_uids') ?: []);
+
+			@set_time_limit(35);
+			@ini_set('max_execution_time', '35');
+
+			$deadline     = \time() + 25;
+			$checkSeconds = 5;
+
+			while (true) {
+				$result = $this->mailAccounts()->checkNewMail($uid, $cryptKey, $lastUids);
+
+				// Update lastUids for the next inner iteration so we don't fire
+				// on the same uidnext change twice within the same long-poll window.
+				foreach ($result['accounts'] ?? [] as $acc) {
+					if (!empty($acc['uidnext'])) {
+						$lastUids[(string) $acc['account_id']] = $acc['uidnext'];
+					}
+				}
+
+				// Any account has new mail → return immediately.
+				foreach ($result['accounts'] ?? [] as $acc) {
+					if (($acc['new_count'] ?? 0) > 0) {
+						return $result;
+					}
+				}
+
+				if (\time() >= $deadline) {
+					// Timeout — tell the client to reconnect.
+					return ['ok' => true, 'accounts' => $result['accounts'] ?? [], 'timeout' => true];
+				}
+
+				\sleep($checkSeconds);
+			}
 		});
 	}
 
