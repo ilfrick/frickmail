@@ -597,13 +597,13 @@ disabled, `Tasks.js` and task endpoints are not loaded.
 
 ### What it does
 
-Three toolbar buttons added to the SnappyMail message list and message view:
-
-| Button | Location | What it does |
+| Action | Location | What it does |
 |---|---|---|
-| Export .eml | Message view toolbar | Downloads the selected message as an RFC 2822 `.eml` file |
-| Export .mbox | Message list toolbar | Downloads all messages in the current folder as an mbox file |
-| Import .eml | Message list toolbar | Opens a file picker; appends the selected `.eml` to INBOX via IMAP APPEND |
+| Export .eml | **Message view toolbar** | Downloads the open message as an RFC 2822 `.eml` file |
+| Export .mbox | **Settings → Import / Export** | Downloads all messages in the chosen folder as an mbox file |
+| Import .eml | **Settings → Import / Export** | Opens a file picker; appends the `.eml` to the chosen folder via IMAP APPEND |
+
+Export .mbox and Import .eml were moved from the main toolbar (low-frequency, caused overflow on mobile). The Settings tab provides a folder name field and a status line, accessible on all screen sizes.
 
 ### Implementation details
 
