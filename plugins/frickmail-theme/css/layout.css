@@ -237,22 +237,14 @@ search-input-wrp input::placeholder,
 		width: calc(50vw - 56px) !important;
 	}
 
-	/* 2. Message-list toolbar (inside #rl-right on mobile).
-	      Correct SnappyMail selector: #V-MailMessageList .btn-toolbar.
-	      Make it scroll horizontally so injected buttons (All accounts,
-	      Export, Import) are reachable without overflowing. */
-	#V-MailMessageList .btn-toolbar,
-	#V-MailMessageList .b-toolbar,
-	#rl-right .btn-toolbar {
-		overflow-x: auto !important;
-		overflow-y: hidden !important;
-		flex-wrap: nowrap !important;
-		white-space: nowrap !important;
-		-webkit-overflow-scrolling: touch !important;
-		scrollbar-width: none !important;
-	}
-	#V-MailMessageList .btn-toolbar::-webkit-scrollbar,
-	#rl-right .btn-toolbar::-webkit-scrollbar { display: none !important; }
+	/* 2. Message-list toolbar: hide low-priority injected buttons on mobile
+	      so the toolbar fits without scrolling.  Scrollable toolbars clip
+	      absolutely-positioned dropdowns (account switcher etc.) which breaks
+	      them.  Export/Import are still reachable from the Settings menu. */
+	#fm-export-mbox-btn,
+	#fm-import-eml-btn,
+	#fm-export-eml-btn,
+	#fm-search-btn { display: none !important; }
 
 	/* 3. Calendar: stack sidebar below the grid (avoids single-column grid).
 	      The template uses inline display:flex — we override flex-direction only
