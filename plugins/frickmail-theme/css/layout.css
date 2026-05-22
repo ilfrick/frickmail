@@ -222,41 +222,58 @@ search-input-wrp input::placeholder,
 ::-webkit-scrollbar-thumb { background: var(--fm-scroll-thumb); border-radius: 3px; }
 
 /* ═══════════════════════════════════════════════════════════════
-   Mobile overrides  — screens narrower than 680 px
+   Mobile overrides
+   Breakpoint matches SnappyMail's own @maxMobileWidth (799 px).
+   On mobile SnappyMail makes #rl-left position:fixed (folder panel)
+   and #rl-right full-width (message list + reading pane).
    ═══════════════════════════════════════════════════════════════ */
-@media (max-width: 679px) {
+@media screen and (max-width: 799px) {
 
-	/* 1. Toolbar: scroll horizontally instead of overflowing/wrapping.
-	      Hide the scrollbar gutter so it doesn't take extra vertical space. */
-	#rl-left .b-toolbar, rl-left .b-toolbar,
-	.b-mail-message-list .pToolbar,
-	.b-mail-message-list .listActions,
-	.b-toolbar {
+	/* 1. Folder panel (#rl-left): SnappyMail sets position:fixed; left:0.
+	      Push it past our 56 px icon nav so they don't overlap.
+	      Width = 50vw from SnappyMail — keep it, just offset the start. */
+	#rl-left {
+		left: 56px !important;
+		width: calc(50vw - 56px) !important;
+	}
+
+	/* 2. Message-list toolbar (inside #rl-right on mobile).
+	      Correct SnappyMail selector: #V-MailMessageList .btn-toolbar.
+	      Make it scroll horizontally so injected buttons (All accounts,
+	      Export, Import) are reachable without overflowing. */
+	#V-MailMessageList .btn-toolbar,
+	#V-MailMessageList .b-toolbar,
+	#rl-right .btn-toolbar {
 		overflow-x: auto !important;
 		overflow-y: hidden !important;
 		flex-wrap: nowrap !important;
+		white-space: nowrap !important;
 		-webkit-overflow-scrolling: touch !important;
 		scrollbar-width: none !important;
 	}
-	#rl-left .b-toolbar::-webkit-scrollbar,
-	rl-left .b-toolbar::-webkit-scrollbar,
-	.b-toolbar::-webkit-scrollbar { display: none !important; }
+	#V-MailMessageList .btn-toolbar::-webkit-scrollbar,
+	#rl-right .btn-toolbar::-webkit-scrollbar { display: none !important; }
 
-	/* 2. Hide the message reading pane; let the message list fill the screen. */
-	#rl-right, rl-right { display: none !important; }
-	#rl-left, rl-left   { flex: 1 !important; max-width: 100% !important; }
-
-	/* 3. Calendar: stack sidebar below the grid instead of side-by-side. */
+	/* 3. Calendar: stack sidebar below the grid (avoids single-column grid).
+	      The template uses inline display:flex — we override flex-direction only
+	      since !important beats inline for non-set sub-properties. */
 	.frickmail-calendar-wrap {
 		flex-direction: column !important;
-		gap: 12px !important;
+		align-items: stretch !important;
 	}
 	.fm-calendar-panel {
 		width: 100% !important;
-		padding-top: 0 !important;
+		padding-top: 4px !important;
+	}
+	.frickmail-calendar-grid {
+		grid-template-columns: repeat(7, 1fr) !important;
+	}
+	.frickmail-calendar-grid .day {
+		min-height: 3.5em !important;
+		font-size: 80% !important;
 	}
 
-	/* 4. Settings: make sidebar and pane stack vertically. */
+	/* 4. Settings pane: stack menu and pane vertically on narrow screens. */
 	#V-SettingsMenu {
 		width: 100% !important;
 		border-right: none !important;

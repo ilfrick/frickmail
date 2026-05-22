@@ -896,3 +896,96 @@ to `auth.log` in the format:
 |---|---|
 | Entrypoint | `.docker/release/files/entrypoint.sh` |
 | nginx config | `.docker/release/files/etc/nginx/nginx.conf` |
+
+---
+
+## 16. Per-account Settings Editor
+
+Added directly to the Mail Accounts settings page (Settings → Mail Accounts).
+Each account row has a **⚙ Edit** button that expands an inline form.
+
+| Account type | Editable fields |
+|---|---|
+| IMAP | Label, login, password (blank = keep current), IMAP host/port/security, SMTP host/port/security |
+| Gmail / O365 | Label only; IMAP/SMTP fields shown read-only with note explaining OAuth2 manages them |
+
+**Implementation:** `FrickmailUpdateAccount` JSON hook → `MailAccountHandler::updateAccount()` → `Db::updateMailAccount()`. SSRF guard applied to host fields. Frontend: `MailAccountsSettings.js` + `FrickmailMailAccountsSettings.html`.
+
+---
+
+## 17. Web Push Notifications (VAPID)
+
+Real push notifications to the browser even when the Frickmail tab is backgrounded.
+
+### Server-side (`lib/VapidPush.php`)
+
+Pure PHP, no external libraries.
+
+- `generateKeys()` — P-256 EC key pair via `openssl_pkey_new`; public key as base64url-encoded uncompressed point (`0x04 ‖ X ‖ Y`, 65 bytes)
+- `makeAuthHeader()` — ES256 JWT (ECDSA + SHA-256); DER→raw R‖S conversion for RFC 7515
+- `send()` — HTTP POST to push endpoint with `Authorization: vapid ...` + `TTL` headers; JSON payload `{title, body, tag, url}` consumed by existing SW handler
+
+VAPID key pair generated once and stored in plugin config (`vapid_public_b64u`, `vapid_private_pem`).
+
+### Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `FrickmailGetVapidKey` | Returns the application server public key (generates keys on first call) |
+| `FrickmailPushSubscribe` | Stores a `PushSubscription` (endpoint, p256dh, auth) in `frickmail_push_subscriptions` |
+| `FrickmailPushUnsubscribe` | Deletes a subscription |
+
+Push is triggered from `JsonLongPollNewMail` when new mail is detected, so it fires even when the tab is in the background. Requires the browser to still be running (SW active). True offline push (browser fully closed) requires the IMAP IDLE worker (not yet implemented).
+
+### Client-side (`js/Notifications.js`)
+
+After notification permission is granted:
+1. `registerWebPush()` calls `FrickmailGetVapidKey`, then `pushManager.subscribe({ userVisibleOnly: true, applicationServerKey })`
+2. The resulting `PushSubscription` is POSTed to `FrickmailPushSubscribe`
+3. The Service Worker's existing `push` event handler shows the notification
+
+---
+
+## 18. New-mail Detection — Long Poll
+
+Replaces the previous fixed 60-second `setInterval` poll.
+
+`FrickmailLongPollNewMail` holds the HTTP connection open for up to 25 s, checking IMAP `UIDNEXT` every 5 s server-side, and returns immediately when new mail arrives. The browser reconnects immediately on a new-mail response, or after a user-configurable delay on timeout.
+
+| Behaviour | Detail |
+|---|---|
+| Max latency | ≤5 s (server checks every 5 s) |
+| Reconnect delay | User preference `notifications_poll_interval` (30–300 s); set in Settings → Frickmail Preferences |
+| Fallback | After 3 consecutive errors, falls back to single-shot `FrickmailCheckNewMail` |
+| Preference wiring | `Notifications.js` reads `FrickmailGetPrefs` at startup; old 60 s hardcoded constant removed |
+
+---
+
+## 19. Unified Inbox — Split-pane View
+
+The All accounts overlay was redesigned from a simple list into a two-pane inbox.
+
+| Pane | Content |
+|---|---|
+| Left (280 px, desktop) | Scrollable message list with coloured account badges |
+| Right (flex:1) | Message detail: sender header + HTML body in sandboxed `<iframe>` + "Open in account ↗" button |
+
+On narrow screens (<600 px) the panes stack: list → tap → full-screen detail with ← back button.
+
+`FrickmailGetMessageBody` fetches the HTML/plain body by IMAP UID using `MailSo\Mail\MailClient::Message()` (handles MIME, encoding, multipart). The body is rendered in a sandboxed iframe to prevent XSS. Plain-text fallback if no HTML part is available.
+
+The first message is auto-selected on desktop after load.
+
+---
+
+## 20. Contact Deduplication
+
+**Root cause of duplicates:** `contacts-sync` called `ContactSave()` without setting the numeric `id` on the `Contact` object, so every sync run issued `INSERT` instead of `UPDATE`.
+
+**Forward fix:** `savePersonAsContact()` and `saveGraphContact()` now call `GetContactByID($uid, true)` before saving. If a contact with that UID already exists, the existing `id` is copied onto the new object so `ContactSave()` issues `UPDATE`.
+
+**Retroactive fix:** Settings → Contacts Sync → **Remove duplicates** button calls `JsonDeduplicateContacts`, which:
+1. Iterates all contacts in pages of 500
+2. Groups by `IdContactStr` (provider UID: `gmail:people/...`, `o365:AAMk...`)
+3. Keeps the first (lowest numeric id), calls `DeleteContacts()` on all later copies
+4. Reports the number removed
