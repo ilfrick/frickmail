@@ -1,12 +1,8 @@
 // Frickmail Import/Export — EML and MBOX support.
 //
-// Provides three features:
-//   1. Export single message as .eml   — button in the MessageView toolbar
-//   2. Export current folder as .mbox  — button in the MailMessageList toolbar
-//   3. Import .eml file into INBOX     — button in the MailMessageList toolbar
-//
-// All three use the FrickmailExportMessage / FrickmailExportFolder /
-// FrickmailImportEml JSON endpoints provided by frickmail-user's index.php.
+// Export .mbox and Import .eml moved to Settings → Import / Export tab.
+// Export .eml (single message) remains in the MailMessageView toolbar
+// because it is contextual to the open message.
 
 (function () {
 	'use strict';
@@ -17,24 +13,14 @@
 		return window.rl?.__frickmail_token || window.rl?.settings?.app?.('token') || '';
 	}
 
-	/**
-	 * Trigger a browser download from a Blob.
-	 */
 	function downloadBlob(filename, blob) {
 		const url = URL.createObjectURL(blob);
 		const a   = document.createElement('a');
-		a.href     = url;
-		a.download = filename;
-		a.style.display = 'none';
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
+		a.href = url; a.download = filename; a.style.display = 'none';
+		document.body.appendChild(a); a.click(); document.body.removeChild(a);
 		setTimeout(() => URL.revokeObjectURL(url), 1000);
 	}
 
-	/**
-	 * Decode a base64 string to a Blob with the given MIME type.
-	 */
 	function base64ToBlob(b64, mime) {
 		const bin = atob(b64);
 		const arr = new Uint8Array(bin.length);
@@ -42,324 +28,191 @@
 		return new Blob([arr], { type: mime });
 	}
 
-	// ── State resolution ──────────────────────────────────────────────────────
-
-	/**
-	 * Get the currently active Frickmail account_id from localStorage cache.
-	 * Returns null if not available.
-	 */
 	function getActiveAccountId() {
 		try {
 			const cached = JSON.parse(localStorage.getItem('frickmail_accounts_cache') || 'null');
 			if (!Array.isArray(cached) || !cached.length) return null;
-			// Try to match against the SnappyMail current email
 			const currentEmail = window.rl?.settings?.app?.('accountEmail')
-				|| window.rl?.settings?.get?.('accountEmail')
-				|| document.querySelector('[data-email]')?.dataset?.email
-				|| null;
+				|| document.querySelector('[data-email]')?.dataset?.email || null;
 			if (currentEmail) {
 				const match = cached.find(a => a.email === currentEmail);
 				if (match) return match.id;
 			}
-			// Fall back to the primary account
 			const primary = cached.find(a => a.is_primary) || cached[0];
 			return primary ? primary.id : null;
-		} catch (e) {
-			return null;
-		}
+		} catch (e) { return null; }
 	}
 
-	/**
-	 * Try to determine the currently selected folder name.
-	 * SnappyMail stores this on the hash/route or as a data attribute.
-	 */
 	function getCurrentFolder() {
-		// Try hash-based routing: SnappyMail uses #/folder/INBOX/ style URLs
 		const hash = window.location.hash || '';
-		const m    = hash.match(/#\/?(?:folder\/)?([^/?#]+)/);
+		const m = hash.match(/#\/?(?:folder\/)?([^/?#]+)/);
 		if (m && m[1] && m[1] !== 'message') {
 			try { return decodeURIComponent(m[1]); } catch (e) {}
 		}
-		// Try the rl state
 		try {
-			const folder = window.rl?.data?.currentFolder?.()
-				|| window.rl?.data?.currentFolderFullName?.()
-				|| null;
-			if (folder) return folder;
+			return window.rl?.data?.currentFolder?.()
+				|| window.rl?.data?.currentFolderFullName?.() || null;
 		} catch (e) {}
 		return 'INBOX';
 	}
 
-	// ── Export single message ─────────────────────────────────────────────────
+	// ── Export single message (.eml) — stays in MailMessageView toolbar ───────
 
-	/**
-	 * Read UID, folder and account_id from a message view DOM element.
-	 * SnappyMail stores message metadata as data attributes on the view root
-	 * or exposes them via the KO view model.
-	 */
 	function getMsgContext(viewModelDom) {
-		// KO view model binding
 		try {
-			const ko = window.ko;
-			if (ko) {
-				const vm = ko.dataFor(viewModelDom);
-				if (vm) {
-					const uid    = +(vm.uid?.()    ?? vm.Uid?.()    ?? 0);
-					const folder = vm.folder?.()   ?? vm.Folder?.() ?? '';
-					const accId  = getActiveAccountId();
-					const subj   = vm.subject?.()  ?? vm.Subject?.() ?? '';
-					if (uid && folder && accId) return { uid, folder, account_id: accId, subject: subj };
-				}
+			const vm = window.ko?.dataFor(viewModelDom);
+			if (vm) {
+				const uid    = +(vm.uid?.()    ?? vm.Uid?.()    ?? 0);
+				const folder =   vm.folder?.() ?? vm.Folder?.() ?? '';
+				const accId  = getActiveAccountId();
+				const subj   =   vm.subject?.() ?? vm.Subject?.() ?? '';
+				if (uid && folder && accId) return { uid, folder, account_id: accId, subject: subj };
 			}
 		} catch (e) {}
-
-		// DOM data attributes fallback
-		const el = viewModelDom.querySelector('[data-uid]') || viewModelDom;
-		const uid    = +(el.dataset?.uid    ?? 0);
-		const folder = el.dataset?.folder   ?? getCurrentFolder();
+		const el     = viewModelDom.querySelector('[data-uid]') || viewModelDom;
+		const uid    = +(el.dataset?.uid ?? 0);
+		const folder =   el.dataset?.folder ?? getCurrentFolder();
 		const accId  = getActiveAccountId();
-		const subj   = viewModelDom.querySelector('.subject, [data-subject]')?.textContent?.trim() || 'message';
+		const subj   = viewModelDom.querySelector('.subject,[data-subject]')?.textContent?.trim() || 'message';
 		return (uid && accId) ? { uid, folder, account_id: accId, subject: subj } : null;
 	}
 
-	function exportMessage(ctx) {
-		const r = window.rl;
-		if (!r) return;
-
-		const btn = document.getElementById('fm-export-eml-btn');
+	function exportMessage(ctx, btn) {
 		if (btn) { btn.disabled = true; btn.textContent = 'Exporting…'; }
-
-		r.pluginRemoteRequest((iErr, oData) => {
+		window.rl.pluginRemoteRequest((iErr, oData) => {
 			if (btn) { btn.disabled = false; btn.textContent = 'Export .eml'; }
 			const res = oData?.Result;
-			if (!res?.ok) {
-				alert('Frickmail export failed: ' + (res?.error || 'unknown error'));
-				return;
-			}
+			if (!res?.ok) { alert('Export failed: ' + (res?.error || 'unknown error')); return; }
 			downloadBlob(res.filename, base64ToBlob(res.content_b64, 'message/rfc822'));
 		}, 'FrickmailExportMessage', {
-			account_id: ctx.account_id,
-			folder:     ctx.folder,
-			uid:        ctx.uid,
-			subject:    ctx.subject,
-			XToken:     fmToken(),
+			account_id: ctx.account_id, folder: ctx.folder,
+			uid: ctx.uid, subject: ctx.subject, XToken: fmToken(),
 		}, 30000);
 	}
 
 	function injectExportEmlButton(toolbarEl, viewModelDom) {
 		if (document.getElementById('fm-export-eml-btn')) return;
-
 		const btn = document.createElement('button');
-		btn.id    = 'fm-export-eml-btn';
-		btn.type  = 'button';
+		btn.id = 'fm-export-eml-btn'; btn.type = 'button';
 		btn.title = 'Download this message as an .eml file';
 		btn.textContent = 'Export .eml';
-		btn.style.cssText = [
-			'margin-left:4px',
-			'padding:4px 10px',
-			'border-radius:4px',
-			'border:1px solid rgba(255,255,255,.2)',
-			'background:rgba(255,255,255,.07)',
-			'color:inherit',
-			'font-size:.8rem',
-			'cursor:pointer',
-			'white-space:nowrap',
-		].join(';');
-
+		btn.style.cssText = 'margin-left:4px;padding:4px 10px;border-radius:4px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.07);color:inherit;font-size:.8rem;cursor:pointer;white-space:nowrap;';
 		btn.addEventListener('click', () => {
 			const ctx = getMsgContext(viewModelDom);
-			if (!ctx) {
-				alert('Frickmail: cannot determine message UID or account. Is an IMAP account selected?');
-				return;
-			}
-			exportMessage(ctx);
+			if (!ctx) { alert('Cannot determine message UID or account.'); return; }
+			exportMessage(ctx, btn);
 		});
-
-		const btns = toolbarEl.querySelectorAll('button, a.button, .toolbar-button');
+		const btns = toolbarEl.querySelectorAll('button,a.button,.toolbar-button');
 		if (btns.length) btns[btns.length - 1].after(btn);
 		else toolbarEl.appendChild(btn);
 	}
 
-	// ── Export folder ─────────────────────────────────────────────────────────
+	// ── Settings tab view model ───────────────────────────────────────────────
 
-	function exportFolder(folder, accountId) {
-		const r = window.rl;
-		if (!r) return;
+	class FrickmailImportExportSettings {
+		constructor() {
+			this.exportFolder = ko.observable(getCurrentFolder() || 'INBOX');
+			this.importFolder = ko.observable('INBOX');
+			this.exporting    = ko.observable(false);
+			this.importing    = ko.observable(false);
+			this.status       = ko.observable('');
+			this.statusOk     = ko.observable(true);
+		}
 
-		const btn = document.getElementById('fm-export-mbox-btn');
-		if (btn) { btn.disabled = true; btn.textContent = 'Exporting…'; }
+		onBuild() {
+			// Refresh exportFolder when the tab is opened
+			this.exportFolder(getCurrentFolder() || 'INBOX');
+		}
 
-		r.pluginRemoteRequest((iErr, oData) => {
-			if (btn) { btn.disabled = false; btn.textContent = 'Export .mbox'; }
-			const res = oData?.Result;
-			if (!res?.ok) {
-				alert('Frickmail export failed: ' + (res?.error || 'unknown error'));
-				return;
-			}
-			downloadBlob(res.filename, base64ToBlob(res.content_b64, 'application/mbox'));
-		}, 'FrickmailExportFolder', {
-			account_id: accountId,
-			folder:     folder,
-			XToken:     fmToken(),
-		}, 120000); // folders can be large
-	}
+		_setStatus(msg, ok) { this.status(msg); this.statusOk(!!ok); }
 
-	// ── Import EML ────────────────────────────────────────────────────────────
+		doExportFolder() {
+			if (this.exporting()) return;
+			const accId  = getActiveAccountId();
+			const folder = this.exportFolder().trim() || 'INBOX';
+			if (!accId) { this._setStatus('No IMAP account found — add one in Mail Accounts settings.', false); return; }
+			if (!confirm('Export folder "' + folder + '" as .mbox? This may take a while for large folders.')) return;
 
-	function importEml(accountId, targetFolder) {
-		const input = document.createElement('input');
-		input.type   = 'file';
-		input.accept = '.eml,.txt,message/rfc822';
-		input.style.display = 'none';
-		document.body.appendChild(input);
+			this.exporting(true);
+			this._setStatus('', true);
+			window.rl.pluginRemoteRequest((iErr, oData) => {
+				this.exporting(false);
+				const res = oData?.Result;
+				if (!res?.ok) { this._setStatus('Export failed: ' + (res?.error || 'unknown error'), false); return; }
+				downloadBlob(res.filename, base64ToBlob(res.content_b64, 'application/mbox'));
+				this._setStatus('Exported ' + res.filename, true);
+			}, 'FrickmailExportFolder', {
+				account_id: accId, folder, XToken: fmToken(),
+			}, 120000);
+		}
 
-		input.addEventListener('change', () => {
-			const file = input.files?.[0];
-			document.body.removeChild(input);
-			if (!file) return;
+		doImportEml() {
+			if (this.importing()) return;
+			const accId  = getActiveAccountId();
+			const folder = this.importFolder().trim() || 'INBOX';
+			if (!accId) { this._setStatus('No IMAP account found — add one in Mail Accounts settings.', false); return; }
 
-			const btn = document.getElementById('fm-import-eml-btn');
-			if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+			const input = document.createElement('input');
+			input.type = 'file'; input.accept = '.eml,.txt,message/rfc822';
+			input.style.display = 'none';
+			document.body.appendChild(input);
 
-			const reader = new FileReader();
-			reader.onload = (e) => {
-				const raw = e.target.result;
-				// Convert ArrayBuffer to base64
-				const bytes = new Uint8Array(raw);
-				let binary  = '';
-				for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-				const b64 = btoa(binary);
+			input.addEventListener('change', () => {
+				const file = input.files?.[0];
+				document.body.removeChild(input);
+				if (!file) return;
 
-				const r = window.rl;
-				if (!r) { if (btn) { btn.disabled = false; btn.textContent = 'Import .eml'; } return; }
+				this.importing(true);
+				this._setStatus('', true);
 
-				r.pluginRemoteRequest((iErr, oData) => {
-					if (btn) { btn.disabled = false; btn.textContent = 'Import .eml'; }
-					const res = oData?.Result;
-					if (res?.ok) {
-						// Brief visual feedback
-						if (btn) {
-							btn.textContent = 'Imported!';
-							setTimeout(() => { btn.textContent = 'Import .eml'; }, 2000);
+				const reader = new FileReader();
+				reader.onload = (e) => {
+					const bytes = new Uint8Array(e.target.result);
+					let binary = '';
+					for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+
+					window.rl.pluginRemoteRequest((iErr, oData) => {
+						this.importing(false);
+						const res = oData?.Result;
+						if (res?.ok) {
+							this._setStatus('Imported "' + file.name + '" into ' + folder, true);
+						} else {
+							this._setStatus('Import failed: ' + (res?.error || 'unknown error'), false);
 						}
-					} else {
-						alert('Frickmail import failed: ' + (res?.error || 'unknown error'));
-					}
-				}, 'FrickmailImportEml', {
-					account_id: accountId,
-					folder:     targetFolder || 'INBOX',
-					eml_b64:    b64,
-					XToken:     fmToken(),
-				}, 30000);
-			};
-			reader.readAsArrayBuffer(file);
-		});
-
-		input.click();
+					}, 'FrickmailImportEml', {
+						account_id: accId, folder, eml_b64: btoa(binary), XToken: fmToken(),
+					}, 30000);
+				};
+				reader.readAsArrayBuffer(file);
+			});
+			input.click();
+		}
 	}
 
-	// ── Inject list toolbar buttons ───────────────────────────────────────────
-
-	let listToolbarInjected = false;
-
-	function injectListToolbarButtons(toolbarEl) {
-		if (listToolbarInjected
-			&& document.getElementById('fm-export-mbox-btn')
-			&& document.getElementById('fm-import-eml-btn')) return;
-
-		// Export folder button
-		if (!document.getElementById('fm-export-mbox-btn')) {
-			const btnExport = document.createElement('button');
-			btnExport.id    = 'fm-export-mbox-btn';
-			btnExport.type  = 'button';
-			btnExport.title = 'Export current folder as an .mbox file';
-			btnExport.textContent = 'Export .mbox';
-			btnExport.style.cssText = [
-				'margin-left:4px',
-				'padding:4px 10px',
-				'border-radius:4px',
-				'border:1px solid rgba(255,255,255,.2)',
-				'background:rgba(255,255,255,.07)',
-				'color:inherit',
-				'font-size:.8rem',
-				'cursor:pointer',
-				'white-space:nowrap',
-			].join(';');
-			btnExport.addEventListener('click', () => {
-				const accId  = getActiveAccountId();
-				const folder = getCurrentFolder();
-				if (!accId) { alert('Frickmail: no IMAP account found. Please add an account first.'); return; }
-				if (!confirm('Export folder "' + folder + '" as .mbox? This may take a while for large folders.')) return;
-				exportFolder(folder, accId);
-			});
-
-			const btns = toolbarEl.querySelectorAll('button, a.button, .toolbar-button');
-			if (btns.length) btns[btns.length - 1].after(btnExport);
-			else toolbarEl.appendChild(btnExport);
-		}
-
-		// Import EML button
-		if (!document.getElementById('fm-import-eml-btn')) {
-			const btnImport = document.createElement('button');
-			btnImport.id    = 'fm-import-eml-btn';
-			btnImport.type  = 'button';
-			btnImport.title = 'Import an .eml file into INBOX';
-			btnImport.textContent = 'Import .eml';
-			btnImport.style.cssText = [
-				'margin-left:4px',
-				'padding:4px 10px',
-				'border-radius:4px',
-				'border:1px solid rgba(255,255,255,.2)',
-				'background:rgba(255,255,255,.07)',
-				'color:inherit',
-				'font-size:.8rem',
-				'cursor:pointer',
-				'white-space:nowrap',
-			].join(';');
-			btnImport.addEventListener('click', () => {
-				const accId = getActiveAccountId();
-				if (!accId) { alert('Frickmail: no IMAP account found. Please add an account first.'); return; }
-				importEml(accId, 'INBOX');
-			});
-
-			const exportBtn = document.getElementById('fm-export-mbox-btn');
-			if (exportBtn) exportBtn.after(btnImport);
-			else {
-				const btns = toolbarEl.querySelectorAll('button, a.button, .toolbar-button');
-				if (btns.length) btns[btns.length - 1].after(btnImport);
-				else toolbarEl.appendChild(btnImport);
-			}
-		}
-
-		listToolbarInjected = true;
-	}
-
-	// ── rl-view-model hook ────────────────────────────────────────────────────
+	// ── rl-view-model hook — Export .eml in message view only ────────────────
 
 	addEventListener('rl-view-model', e => {
 		const id  = e.detail?.viewModelTemplateID;
 		const dom = e.detail?.viewModelDom;
 		if (!dom) return;
-
-		if (id === 'MailMessageList') {
-			// List toolbar: Export .mbox + Import .eml
-			setTimeout(() => {
-				const toolbar = dom.querySelector('.listActions, .toolbar, [class*="toolbar"]')
-					|| dom.querySelector('div');
-				if (!toolbar) return;
-				injectListToolbarButtons(toolbar);
-			}, 350);
-		}
-
 		if (id === 'MailMessageView' || id === 'MessageView') {
-			// Message view toolbar: Export .eml
 			setTimeout(() => {
-				const toolbar = dom.querySelector('.messageActions, .toolbar, [class*="toolbar"]')
+				const toolbar = dom.querySelector('.messageActions,.toolbar,[class*="toolbar"]')
 					|| dom.querySelector('div');
-				if (!toolbar) return;
-				injectExportEmlButton(toolbar, dom);
+				if (toolbar) injectExportEmlButton(toolbar, dom);
 			}, 350);
 		}
 	});
+
+	// Register settings tab — wait for rl.addSettingsViewModel
+	(function register() {
+		if (!window.rl?.addSettingsViewModel) { setTimeout(register, 200); return; }
+		window.rl.addSettingsViewModel(
+			FrickmailImportExportSettings,
+			'FrickmailImportExportTab',
+			'Import / Export',
+			'frickmail-import-export'
+		);
+	})();
 
 })();

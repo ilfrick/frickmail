@@ -1,0 +1,44 @@
+<div class="form-horizontal">
+	<div class="legend">Export</div>
+
+	<div class="control-group">
+		<label class="control-label">Folder</label>
+		<div class="controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+			<input type="text" data-bind="value: exportFolder" placeholder="INBOX"
+			       style="width:200px" />
+			<button class="btn btn-primary"
+			        data-bind="click: doExportFolder, disable: exporting()">
+				<i data-bind="css: { 'icon-spinner animated': exporting(), 'icon-cloud-download': !exporting() }"></i>
+				&nbsp;
+				<!-- ko if: exporting() -->Exporting…<!-- /ko -->
+				<!-- ko ifnot: exporting() -->Export folder as .mbox<!-- /ko -->
+			</button>
+		</div>
+		<p class="help-block">Downloads all messages in the specified folder as an MBOX file. Large folders may take a minute.</p>
+	</div>
+
+	<div class="legend" style="margin-top:1.5em">Import</div>
+
+	<div class="control-group">
+		<label class="control-label">Target folder</label>
+		<div class="controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+			<input type="text" data-bind="value: importFolder" placeholder="INBOX"
+			       style="width:200px" />
+			<button class="btn"
+			        data-bind="click: doImportEml, disable: importing()">
+				<i data-bind="css: { 'icon-spinner animated': importing(), 'icon-upload': !importing() }"></i>
+				&nbsp;
+				<!-- ko if: importing() -->Importing…<!-- /ko -->
+				<!-- ko ifnot: importing() -->Import .eml file…<!-- /ko -->
+			</button>
+		</div>
+		<p class="help-block">Appends a single .eml file into the target folder via IMAP APPEND.</p>
+	</div>
+
+	<div class="control-group" data-bind="visible: status().length">
+		<div class="controls">
+			<span data-bind="text: status,
+			                 style: { color: statusOk() ? 'var(--fm-success,#2a7)' : 'var(--fm-error,#c55)' }"></span>
+		</div>
+	</div>
+</div>

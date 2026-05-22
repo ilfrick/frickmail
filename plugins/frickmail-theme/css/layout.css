@@ -237,13 +237,9 @@ search-input-wrp input::placeholder,
 		width: calc(50vw - 56px) !important;
 	}
 
-	/* 2. Message-list toolbar: hide low-priority injected buttons on mobile
-	      so the toolbar fits without scrolling.  Scrollable toolbars clip
-	      absolutely-positioned dropdowns (account switcher etc.) which breaks
-	      them.  Export/Import are still reachable from the Settings menu. */
-	#fm-export-mbox-btn,
-	#fm-import-eml-btn,
-	#fm-export-eml-btn,
+	/* 2. Message-list toolbar: hide Frickmail-injected search button on mobile
+	      (Export/Import moved to Settings tab; Export .eml stays in msg view).
+	      Avoids overflow that clips the account-switcher dropdown. */
 	#fm-search-btn { display: none !important; }
 
 	/* 3. Calendar: stack sidebar below the grid (avoids single-column grid).
