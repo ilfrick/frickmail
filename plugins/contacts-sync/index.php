@@ -26,8 +26,9 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJs('js/ContactsSyncSettings.js');
 		$this->addJs('js/ContactsQuickAdd.js');
 		$this->addTemplate('templates/ContactsSyncSettingsTab.html');
-		$this->addJsonHook('JsonContactsSync',  'JsonContactsSync');
-		$this->addJsonHook('JsonAddContact',    'JsonAddContact');
+		$this->addJsonHook('JsonContactsSync',      'JsonContactsSync');
+		$this->addJsonHook('JsonDeduplicateContacts','JsonDeduplicateContacts');
+		$this->addJsonHook('JsonAddContact',        'JsonAddContact');
 	}
 
 	public function configMapping() : array
@@ -75,6 +76,61 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$oActions->Logger()->WriteException($e, \LOG_ERR);
 			return $this->jsonResponse(__FUNCTION__, ['error' => $e->getMessage()]);
 		}
+	}
+
+	/**
+	 * Scan all contacts and delete duplicates that share the same UID
+	 * (IdContactStr). Keeps the contact with the lowest numeric id (the
+	 * first one ever inserted) and deletes all later copies.
+	 *
+	 * Also deduplicates contacts with no UID by grouping on display name.
+	 *
+	 * Returns {'removed': N} so the UI can show a result.
+	 */
+	public function JsonDeduplicateContacts() : array
+	{
+		$oActions = \RainLoop\Api::Actions();
+		$oAccount = $oActions->getMainAccountFromToken(false);
+		if (!$oAccount) {
+			return $this->jsonResponse(__FUNCTION__, ['error' => 'not authenticated']);
+		}
+
+		$oProvider = $oActions->AddressBookProvider($oAccount);
+		if (!$oProvider || !$oProvider->IsActive()) {
+			return $this->jsonResponse(__FUNCTION__, ['error' => 'Address book not active']);
+		}
+
+		// Load all contacts in pages of 500.
+		$seen    = [];   // uid → first numeric id kept
+		$toDelete = [];  // numeric ids to remove
+		$offset  = 0;
+		$pageSize = 500;
+
+		do {
+			$total = 0;
+			$page  = $oProvider->GetContacts($offset, $pageSize, '', $total);
+			foreach ($page as $oContact) {
+				$uid = $oContact->IdContactStr ?: ('__name__' . $oContact->FullName ?? '');
+				if ('' === $uid) continue;
+				if (!isset($seen[$uid])) {
+					$seen[$uid] = $oContact->id;
+				} else {
+					// Duplicate: keep the earlier id, queue this one for deletion.
+					$toDelete[] = $oContact->id;
+				}
+			}
+			$offset += $pageSize;
+		} while (\count($page) === $pageSize);
+
+		$removed = 0;
+		if (!empty($toDelete)) {
+			// DeleteContacts accepts an array of numeric ids.
+			if ($oProvider->DeleteContacts($toDelete)) {
+				$removed = \count($toDelete);
+			}
+		}
+
+		return $this->jsonResponse(__FUNCTION__, ['removed' => $removed, 'ok' => true]);
 	}
 
 	public function JsonContactsSync() : array

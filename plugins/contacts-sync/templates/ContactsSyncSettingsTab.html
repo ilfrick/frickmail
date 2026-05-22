@@ -4,9 +4,14 @@
 		<p>Pull contacts from your linked Gmail or Office 365 account into the local address book.</p>
 		<div class="control-group">
 			<div class="controls">
-				<button class="btn" data-bind="click: runSync, enable: !syncing()">
+				<button class="btn" data-bind="click: runSync, enable: !syncing() && !deduping()">
 					<i data-bind="css: { 'icon-spinner animated': syncing(), 'icon-cloud-download': !syncing() }"></i>
 					&nbsp; Sync now
+				</button>
+				&nbsp;
+				<button class="btn" data-bind="click: runDedup, enable: !syncing() && !deduping()" title="Remove duplicate contacts caused by previous syncs">
+					<i data-bind="css: { 'icon-spinner animated': deduping(), 'icon-filter': !deduping() }"></i>
+					&nbsp; Remove duplicates
 				</button>
 			</div>
 		</div>
