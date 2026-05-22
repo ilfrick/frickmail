@@ -220,3 +220,46 @@ search-input-wrp input::placeholder,
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: var(--fm-scroll-track); }
 ::-webkit-scrollbar-thumb { background: var(--fm-scroll-thumb); border-radius: 3px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   Mobile overrides  — screens narrower than 680 px
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 679px) {
+
+	/* 1. Toolbar: scroll horizontally instead of overflowing/wrapping.
+	      Hide the scrollbar gutter so it doesn't take extra vertical space. */
+	#rl-left .b-toolbar, rl-left .b-toolbar,
+	.b-mail-message-list .pToolbar,
+	.b-mail-message-list .listActions,
+	.b-toolbar {
+		overflow-x: auto !important;
+		overflow-y: hidden !important;
+		flex-wrap: nowrap !important;
+		-webkit-overflow-scrolling: touch !important;
+		scrollbar-width: none !important;
+	}
+	#rl-left .b-toolbar::-webkit-scrollbar,
+	rl-left .b-toolbar::-webkit-scrollbar,
+	.b-toolbar::-webkit-scrollbar { display: none !important; }
+
+	/* 2. Hide the message reading pane; let the message list fill the screen. */
+	#rl-right, rl-right { display: none !important; }
+	#rl-left, rl-left   { flex: 1 !important; max-width: 100% !important; }
+
+	/* 3. Calendar: stack sidebar below the grid instead of side-by-side. */
+	.frickmail-calendar-wrap {
+		flex-direction: column !important;
+		gap: 12px !important;
+	}
+	.fm-calendar-panel {
+		width: 100% !important;
+		padding-top: 0 !important;
+	}
+
+	/* 4. Settings: make sidebar and pane stack vertically. */
+	#V-SettingsMenu {
+		width: 100% !important;
+		border-right: none !important;
+		border-bottom: 1px solid var(--fm-border) !important;
+	}
+}

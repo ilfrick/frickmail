@@ -316,6 +316,10 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 		$oContact = new \RainLoop\Providers\AddressBook\Classes\Contact();
 		$oContact->setVCard($oVCard);
+		// Upsert: if a contact with this UID already exists, copy its numeric id
+		// so ContactSave() issues an UPDATE instead of a duplicate INSERT.
+		$oExisting = $oProvider->GetContactByID($sUid, true);
+		if ($oExisting) $oContact->id = $oExisting->id;
 		return $oProvider->ContactSave($oContact);
 	}
 
@@ -358,6 +362,8 @@ class ContactsSyncPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 		$oContact = new \RainLoop\Providers\AddressBook\Classes\Contact();
 		$oContact->setVCard($oVCard);
+		$oExisting = $oProvider->GetContactByID($sUid, true);
+		if ($oExisting) $oContact->id = $oExisting->id;
 		return $oProvider->ContactSave($oContact);
 	}
 
