@@ -88,10 +88,16 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$oConfig  = \RainLoop\Api::Config();
 			$sCurrent = $oConfig->Get('security', 'secfetch_allow', '');
 			$aParts   = \array_filter(\array_unique(\explode(';', $sCurrent)));
+			// Allow the OIDC provider redirect back (cross-site navigation into the popup).
 			if (!\in_array('site=cross-site', $aParts, true)) {
 				$aParts[] = 'site=cross-site';
-				$oConfig->Set('security', 'secfetch_allow', \implode(';', $aParts));
 			}
+			// Allow the initial popup navigation from within the webmail (same-site,
+			// Dest: empty because it is a new auxiliary browsing context, not a document load).
+			if (!\in_array('dest=empty,mode=navigate,site=same-site', $aParts, true)) {
+				$aParts[] = 'dest=empty,mode=navigate,site=same-site';
+			}
+			$oConfig->Set('security', 'secfetch_allow', \implode(';', $aParts));
 		}
 	}
 
