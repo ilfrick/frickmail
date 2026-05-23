@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FrickMail — Private Webmail</title>
+
+  <!--
+    ════════════════════════════════════════════════════════════════════════
+    GOOGLE SEARCH CONSOLE VERIFICATION
+    Replace the content="" value below with the code Google gives you:
+    Search Console → Add property → https://webmail.housefz.com
+    → choose "HTML tag" verification → copy the meta tag content value here.
+    ════════════════════════════════════════════════════════════════════════
+    <meta name="google-site-verification" content="PASTE_YOUR_CODE_HERE" />
+  -->
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --dark:   #1a1a2e;
+      --accent: #4f46e5;
+      --light:  #f5f5f0;
+      --text:   #2d2d3a;
+      --muted:  #6b7280;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      color: var(--text);
+      background: var(--light);
+    }
+
+    /* ── language bar ── */
+    .lang-bar {
+      background: #12122a;
+      padding: 0.5rem 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+      justify-content: center;
+    }
+    .lang-btn {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #cbd5e0;
+      border-radius: 5px;
+      padding: 0.2rem 0.6rem;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .lang-btn:hover  { background: rgba(255,255,255,0.12); color: #fff; }
+    .lang-btn.active { background: #fff; color: #1a1a2e; font-weight: 700; border-color: #fff; }
+
+    /* ── hero ── */
+    .hero {
+      background: var(--dark);
+      color: #fff;
+      text-align: center;
+      padding: 4rem 1.5rem 3rem;
+    }
+    .hero .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.7rem;
+      margin-bottom: 1.2rem;
+    }
+    .hero .logo svg {
+      width: 52px; height: 52px;
+    }
+    .hero h1 {
+      font-size: 2.4rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+    }
+    .hero .tagline {
+      margin-top: 0.9rem;
+      font-size: 1.1rem;
+      color: #a0aec0;
+      max-width: 540px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .hero .cta {
+      display: inline-block;
+      margin-top: 2rem;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      padding: 0.75rem 2rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 1rem;
+      transition: opacity 0.15s;
+    }
+    .hero .cta:hover { opacity: 0.85; }
+
+    /* ── features grid ── */
+    .features {
+      max-width: 900px;
+      margin: 3rem auto;
+      padding: 0 1.5rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1.2rem;
+    }
+    .feat {
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.6rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+    }
+    .feat .icon { font-size: 1.8rem; margin-bottom: 0.6rem; }
+    .feat h3 { font-size: 1rem; font-weight: 700; margin-bottom: 0.4rem; color: var(--dark); }
+    .feat p  { font-size: 0.92rem; color: var(--muted); margin: 0; }
+
+    /* ── about section ── */
+    .about {
+      max-width: 680px;
+      margin: 0 auto 3rem;
+      padding: 0 1.5rem;
+      text-align: center;
+    }
+    .about h2 { font-size: 1.4rem; font-weight: 700; color: var(--dark); margin-bottom: 0.8rem; }
+    .about p  { color: var(--muted); }
+
+    /* ── footer ── */
+    footer {
+      background: var(--dark);
+      color: #a0aec0;
+      text-align: center;
+      padding: 2rem 1rem;
+      font-size: 0.85rem;
+    }
+    footer a { color: #7b9ac4; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+    footer .links { margin-top: 0.5rem; display: flex; gap: 1.2rem; justify-content: center; flex-wrap: wrap; }
+
+    [hidden] { display: none !important; }
+  </style>
+
+  <script>
+    var LANGS = ['en','fr','de','it','es','el','sv','nl'];
+    function detectLang() {
+      var s = localStorage.getItem('fm-lang');
+      if (s && LANGS.indexOf(s) !== -1) return s;
+      var b = (navigator.language || 'en').slice(0,2).toLowerCase();
+      return LANGS.indexOf(b) !== -1 ? b : 'en';
+    }
+    function setLang(lang) {
+      localStorage.setItem('fm-lang', lang);
+      LANGS.forEach(function(l) {
+        document.querySelectorAll('.ls-' + l).forEach(function(el) {
+          el.hidden = false;
+        });
+        if (l !== lang) {
+          document.querySelectorAll('.ls-' + l).forEach(function(el) {
+            el.hidden = true;
+          });
+        }
+      });
+      document.querySelectorAll('.lang-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.lang === lang);
+      });
+      document.documentElement.lang = lang;
+    }
+    document.addEventListener('DOMContentLoaded', function() { setLang(detectLang()); });
+  </script>
+</head>
+<body>
+
+<nav class="lang-bar">
+  <button class="lang-btn" data-lang="en" onclick="setLang('en')">🇬🇧 English</button>
+  <button class="lang-btn" data-lang="fr" onclick="setLang('fr')">🇫🇷 Français</button>
+  <button class="lang-btn" data-lang="de" onclick="setLang('de')">🇩🇪 Deutsch</button>
+  <button class="lang-btn" data-lang="it" onclick="setLang('it')">🇮🇹 Italiano</button>
+  <button class="lang-btn" data-lang="es" onclick="setLang('es')">🇪🇸 Español</button>
+  <button class="lang-btn" data-lang="el" onclick="setLang('el')">🇬🇷 Ελληνικά</button>
+  <button class="lang-btn" data-lang="sv" onclick="setLang('sv')">🇸🇪 Svenska</button>
+  <button class="lang-btn" data-lang="nl" onclick="setLang('nl')">🇳🇱 Nederlands</button>
+</nav>
+
+<!-- ═══════ HERO ═══════ -->
+<section class="hero">
+  <div class="logo">
+    <!-- envelope icon -->
+    <svg viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="52" height="52" rx="12" fill="#4f46e5"/>
+      <path d="M10 16a2 2 0 0 1 2-2h28a2 2 0 0 1 2 2v20a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V16z" fill="#fff" fill-opacity=".15" stroke="#fff" stroke-width="1.5"/>
+      <path d="M10 17l16 11 16-11" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    <span style="font-size:2rem;font-weight:800;letter-spacing:-0.03em;">FrickMail</span>
+  </div>
+
+  <h1 class="ls-en">Private Webmail for Authorised Users</h1>
+  <h1 class="ls-fr" hidden>Webmail privé pour utilisateurs autorisés</h1>
+  <h1 class="ls-de" hidden>Privates Webmail für autorisierte Nutzer</h1>
+  <h1 class="ls-it" hidden>Webmail privata per utenti autorizzati</h1>
+  <h1 class="ls-es" hidden>Webmail privado para usuarios autorizados</h1>
+  <h1 class="ls-el" hidden>Ιδιωτικό Webmail για Εξουσιοδοτημένους Χρήστες</h1>
+  <h1 class="ls-sv" hidden>Privat webbmail för auktoriserade användare</h1>
+  <h1 class="ls-nl" hidden>Privé webmail voor bevoegde gebruikers</h1>
+
+  <p class="tagline ls-en">FrickMail is a self-hosted webmail application. It lets authorised users read, write and manage their email accounts — including Gmail and Office 365 — securely from any browser, without storing passwords.</p>
+  <p class="tagline ls-fr" hidden>FrickMail est une application webmail auto-hébergée. Elle permet aux utilisateurs autorisés de lire, écrire et gérer leurs comptes e-mail — y compris Gmail et Office 365 — en toute sécurité depuis n'importe quel navigateur, sans stocker de mots de passe.</p>
+  <p class="tagline ls-de" hidden>FrickMail ist eine selbst gehostete Webmail-Anwendung. Sie ermöglicht autorisierten Nutzern das Lesen, Schreiben und Verwalten ihrer E-Mail-Konten — einschließlich Gmail und Office 365 — sicher von jedem Browser aus, ohne Passwörter zu speichern.</p>
+  <p class="tagline ls-it" hidden>FrickMail è un'applicazione webmail self-hosted. Permette agli utenti autorizzati di leggere, scrivere e gestire i propri account e-mail — inclusi Gmail e Office 365 — in modo sicuro da qualsiasi browser, senza memorizzare password.</p>
+  <p class="tagline ls-es" hidden>FrickMail es una aplicación webmail autoalojada. Permite a los usuarios autorizados leer, escribir y gestionar sus cuentas de correo — incluidas Gmail y Office 365 — de forma segura desde cualquier navegador, sin almacenar contraseñas.</p>
+  <p class="tagline ls-el" hidden>Το FrickMail είναι μια αυτο-φιλοξενούμενη εφαρμογή webmail. Επιτρέπει σε εξουσιοδοτημένους χρήστες να διαβάζουν, γράφουν και διαχειρίζονται τους λογαριασμούς email τους — συμπεριλαμβανομένων Gmail και Office 365 — με ασφάλεια από οποιοδήποτε πρόγραμμα περιήγησης, χωρίς αποθήκευση κωδικών πρόσβασης.</p>
+  <p class="tagline ls-sv" hidden>FrickMail är ett självhostat webbmailprogram. Det låter auktoriserade användare läsa, skriva och hantera sina e-postkonton — inklusive Gmail och Office 365 — säkert från valfri webbläsare, utan att lagra lösenord.</p>
+  <p class="tagline ls-nl" hidden>FrickMail is een zelf-gehoste webmailtoepassing. Het stelt bevoegde gebruikers in staat e-mailaccounts te lezen, schrijven en beheren — waaronder Gmail en Office 365 — veilig vanuit elke browser, zonder wachtwoorden op te slaan.</p>
+
+  <a href="https://webmail.housefz.com" class="cta ls-en">Sign in to FrickMail →</a>
+  <a href="https://webmail.housefz.com" class="cta ls-fr" hidden>Se connecter à FrickMail →</a>
+  <a href="https://webmail.housefz.com" class="cta ls-de" hidden>Bei FrickMail anmelden →</a>
+  <a href="https://webmail.housefz.com" class="cta ls-it" hidden>Accedi a FrickMail →</a>
+  <a href="https://webmail.housefz.com" class="cta ls-es" hidden>Iniciar sesión en FrickMail →</a>
+  <a href="https://webmail.housefz.com" class="cta ls-el" hidden>Σύνδεση στο FrickMail →</a>
+  <a href="https://webmail.housefz.com" class="cta ls-sv" hidden>Logga in på FrickMail →</a>
+  <a href="https://webmail.housefz.com" class="cta ls-nl" hidden>Aanmelden bij FrickMail →</a>
+</section>
+
+<!-- ═══════ FEATURES ═══════ -->
+<div class="features">
+
+  <!-- EN -->
+  <div class="feat ls-en">
+    <div class="icon">🔐</div>
+    <h3>OAuth2 Sign-In</h3>
+    <p>Sign in with your Google or Microsoft account. No password is ever stored on the FrickMail server.</p>
+  </div>
+  <div class="feat ls-en">
+    <div class="icon">📬</div>
+    <h3>Full IMAP Access</h3>
+    <p>Read, compose, reply, forward and organise your email with a full-featured web interface.</p>
+  </div>
+  <div class="feat ls-en">
+    <div class="icon">👥</div>
+    <h3>Contacts &amp; Calendar</h3>
+    <p>Sync your Google Contacts and Google Calendar directly within FrickMail.</p>
+  </div>
+  <div class="feat ls-en">
+    <div class="icon">🔒</div>
+    <h3>Privacy First</h3>
+    <p>Messages are never stored on FrickMail's server. All traffic is encrypted with HTTPS (TLS 1.3).</p>
+  </div>
+
+  <!-- FR -->
+  <div class="feat ls-fr" hidden>
+    <div class="icon">🔐</div>
+    <h3>Connexion OAuth2</h3>
+    <p>Connectez-vous avec votre compte Google ou Microsoft. Aucun mot de passe n'est jamais stocké sur le serveur FrickMail.</p>
+  </div>
+  <div class="feat ls-fr" hidden>
+    <div class="icon">📬</div>
+    <h3>Accès IMAP complet</h3>
+    <p>Lisez, rédigez, répondez et organisez vos e-mails avec une interface web complète.</p>
+  </div>
+  <div class="feat ls-fr" hidden>
+    <div class="icon">👥</div>
+    <h3>Contacts &amp; Agenda</h3>
+    <p>Synchronisez vos contacts Google et votre agenda Google directement dans FrickMail.</p>
+  </div>
+  <div class="feat ls-fr" hidden>
+    <div class="icon">🔒</div>
+    <h3>Confidentialité d'abord</h3>
+    <p>Les messages ne sont jamais stockés sur le serveur de FrickMail. Tout le trafic est chiffré en HTTPS (TLS 1.3).</p>
+  </div>
+
+  <!-- DE -->
+  <div class="feat ls-de" hidden>
+    <div class="icon">🔐</div>
+    <h3>OAuth2-Anmeldung</h3>
+    <p>Melden Sie sich mit Ihrem Google- oder Microsoft-Konto an. Kein Passwort wird auf dem FrickMail-Server gespeichert.</p>
+  </div>
+  <div class="feat ls-de" hidden>
+    <div class="icon">📬</div>
+    <h3>Vollständiger IMAP-Zugriff</h3>
+    <p>Lesen, verfassen, antworten und organisieren Sie Ihre E-Mails mit einer voll ausgestatteten Weboberfläche.</p>
+  </div>
+  <div class="feat ls-de" hidden>
+    <div class="icon">👥</div>
+    <h3>Kontakte &amp; Kalender</h3>
+    <p>Synchronisieren Sie Google Kontakte und Google Kalender direkt in FrickMail.</p>
+  </div>
+  <div class="feat ls-de" hidden>
+    <div class="icon">🔒</div>
+    <h3>Datenschutz zuerst</h3>
+    <p>Nachrichten werden nie auf dem FrickMail-Server gespeichert. Der gesamte Datenverkehr ist mit HTTPS (TLS 1.3) verschlüsselt.</p>
+  </div>
+
+  <!-- IT -->
+  <div class="feat ls-it" hidden>
+    <div class="icon">🔐</div>
+    <h3>Accesso OAuth2</h3>
+    <p>Accedi con il tuo account Google o Microsoft. Nessuna password viene mai memorizzata sul server FrickMail.</p>
+  </div>
+  <div class="feat ls-it" hidden>
+    <div class="icon">📬</div>
+    <h3>Accesso IMAP completo</h3>
+    <p>Leggi, scrivi, rispondi e organizza le tue email con un'interfaccia web completa.</p>
+  </div>
+  <div class="feat ls-it" hidden>
+    <div class="icon">👥</div>
+    <h3>Contatti e Calendario</h3>
+    <p>Sincronizza Google Contatti e Google Calendar direttamente in FrickMail.</p>
+  </div>
+  <div class="feat ls-it" hidden>
+    <div class="icon">🔒</div>
+    <h3>Privacy prima di tutto</h3>
+    <p>I messaggi non vengono mai memorizzati sul server di FrickMail. Tutto il traffico è cifrato con HTTPS (TLS 1.3).</p>
+  </div>
+
+  <!-- ES -->
+  <div class="feat ls-es" hidden>
+    <div class="icon">🔐</div>
+    <h3>Inicio de sesión OAuth2</h3>
+    <p>Inicia sesión con tu cuenta de Google o Microsoft. Ninguna contraseña se almacena en el servidor de FrickMail.</p>
+  </div>
+  <div class="feat ls-es" hidden>
+    <div class="icon">📬</div>
+    <h3>Acceso IMAP completo</h3>
+    <p>Lee, redacta, responde y organiza tu correo con una interfaz web completa.</p>
+  </div>
+  <div class="feat ls-es" hidden>
+    <div class="icon">👥</div>
+    <h3>Contactos y Calendario</h3>
+    <p>Sincroniza Google Contactos y Google Calendar directamente en FrickMail.</p>
+  </div>
+  <div class="feat ls-es" hidden>
+    <div class="icon">🔒</div>
+    <h3>Privacidad ante todo</h3>
+    <p>Los mensajes nunca se almacenan en el servidor de FrickMail. Todo el tráfico está cifrado con HTTPS (TLS 1.3).</p>
+  </div>
+
+  <!-- EL -->
+  <div class="feat ls-el" hidden>
+    <div class="icon">🔐</div>
+    <h3>Σύνδεση OAuth2</h3>
+    <p>Συνδεθείτε με τον λογαριασμό Google ή Microsoft. Κανένας κωδικός δεν αποθηκεύεται στον διακομιστή FrickMail.</p>
+  </div>
+  <div class="feat ls-el" hidden>
+    <div class="icon">📬</div>
+    <h3>Πλήρης πρόσβαση IMAP</h3>
+    <p>Διαβάστε, συντάξτε, απαντήστε και οργανώστε τα email σας με πλήρη διεπαφή web.</p>
+  </div>
+  <div class="feat ls-el" hidden>
+    <div class="icon">👥</div>
+    <h3>Επαφές &amp; Ημερολόγιο</h3>
+    <p>Συγχρονίστε Google Επαφές και Google Ημερολόγιο απευθείας στο FrickMail.</p>
+  </div>
+  <div class="feat ls-el" hidden>
+    <div class="icon">🔒</div>
+    <h3>Η Απόρρητο πρώτα</h3>
+    <p>Τα μηνύματα δεν αποθηκεύονται ποτέ στον διακομιστή FrickMail. Όλη η επικοινωνία κρυπτογραφείται με HTTPS (TLS 1.3).</p>
+  </div>
+
+  <!-- SV -->
+  <div class="feat ls-sv" hidden>
+    <div class="icon">🔐</div>
+    <h3>OAuth2-inloggning</h3>
+    <p>Logga in med ditt Google- eller Microsoft-konto. Inget lösenord lagras någonsin på FrickMail-servern.</p>
+  </div>
+  <div class="feat ls-sv" hidden>
+    <div class="icon">📬</div>
+    <h3>Fullständig IMAP-åtkomst</h3>
+    <p>Läs, skriv, svara och organisera din e-post med ett komplett webbgränssnitt.</p>
+  </div>
+  <div class="feat ls-sv" hidden>
+    <div class="icon">👥</div>
+    <h3>Kontakter &amp; Kalender</h3>
+    <p>Synkronisera Google Kontakter och Google Kalender direkt i FrickMail.</p>
+  </div>
+  <div class="feat ls-sv" hidden>
+    <div class="icon">🔒</div>
+    <h3>Integritet i första hand</h3>
+    <p>Meddelanden lagras aldrig på FrickMails server. All trafik krypteras med HTTPS (TLS 1.3).</p>
+  </div>
+
+  <!-- NL -->
+  <div class="feat ls-nl" hidden>
+    <div class="icon">🔐</div>
+    <h3>OAuth2-aanmelding</h3>
+    <p>Meld u aan met uw Google- of Microsoft-account. Er wordt nooit een wachtwoord op de FrickMail-server opgeslagen.</p>
+  </div>
+  <div class="feat ls-nl" hidden>
+    <div class="icon">📬</div>
+    <h3>Volledige IMAP-toegang</h3>
+    <p>Lees, schrijf, beantwoord en organiseer uw e-mail met een volledig webbinterface.</p>
+  </div>
+  <div class="feat ls-nl" hidden>
+    <div class="icon">👥</div>
+    <h3>Contacten &amp; Agenda</h3>
+    <p>Synchroniseer Google Contacten en Google Agenda rechtstreeks in FrickMail.</p>
+  </div>
+  <div class="feat ls-nl" hidden>
+    <div class="icon">🔒</div>
+    <h3>Privacy voorop</h3>
+    <p>Berichten worden nooit opgeslagen op de FrickMail-server. Al het verkeer is versleuteld met HTTPS (TLS 1.3).</p>
+  </div>
+
+</div><!-- /features -->
+
+<!-- ═══════ ABOUT ═══════ -->
+<div class="about">
+  <p class="ls-en">FrickMail is operated by <strong>Nicola Francesconi</strong>. It is a private service — access is granted only to explicitly authorised users.</p>
+  <p class="ls-fr" hidden>FrickMail est exploité par <strong>Nicola Francesconi</strong>. Il s'agit d'un service privé — l'accès est accordé uniquement aux utilisateurs explicitement autorisés.</p>
+  <p class="ls-de" hidden>FrickMail wird von <strong>Nicola Francesconi</strong> betrieben. Es handelt sich um einen privaten Dienst — der Zugang wird nur ausdrücklich autorisierten Nutzern gewährt.</p>
+  <p class="ls-it" hidden>FrickMail è gestito da <strong>Nicola Francesconi</strong>. È un servizio privato — l'accesso è riservato esclusivamente agli utenti autorizzati.</p>
+  <p class="ls-es" hidden>FrickMail está operado por <strong>Nicola Francesconi</strong>. Es un servicio privado — el acceso se concede únicamente a usuarios explícitamente autorizados.</p>
+  <p class="ls-el" hidden>Το FrickMail λειτουργεί από τον <strong>Nicola Francesconi</strong>. Πρόκειται για ιδιωτική υπηρεσία — η πρόσβαση παρέχεται μόνο σε ρητά εξουσιοδοτημένους χρήστες.</p>
+  <p class="ls-sv" hidden>FrickMail drivs av <strong>Nicola Francesconi</strong>. Det är en privat tjänst — åtkomst beviljas endast uttryckligen auktoriserade användare.</p>
+  <p class="ls-nl" hidden>FrickMail wordt beheerd door <strong>Nicola Francesconi</strong>. Het is een privédienst — toegang wordt alleen verleend aan expliciet bevoegde gebruikers.</p>
+</div>
+
+<!-- ═══════ FOOTER ═══════ -->
+<footer>
+  <div><strong style="color:#fff;">FrickMail</strong> — webmail.housefz.com</div>
+  <div class="links">
+    <a href="/privacy"  class="ls-en">Privacy Policy</a>
+    <a href="/terms"    class="ls-en">Terms of Service</a>
+    <a href="/privacy"  class="ls-fr" hidden>Politique de confidentialité</a>
+    <a href="/terms"    class="ls-fr" hidden>Conditions d'utilisation</a>
+    <a href="/privacy"  class="ls-de" hidden>Datenschutzerklärung</a>
+    <a href="/terms"    class="ls-de" hidden>Nutzungsbedingungen</a>
+    <a href="/privacy"  class="ls-it" hidden>Informativa sulla Privacy</a>
+    <a href="/terms"    class="ls-it" hidden>Termini di servizio</a>
+    <a href="/privacy"  class="ls-es" hidden>Política de Privacidad</a>
+    <a href="/terms"    class="ls-es" hidden>Términos de servicio</a>
+    <a href="/privacy"  class="ls-el" hidden>Πολιτική Απορρήτου</a>
+    <a href="/terms"    class="ls-el" hidden>Όροι Χρήσης</a>
+    <a href="/privacy"  class="ls-sv" hidden>Integritetspolicy</a>
+    <a href="/terms"    class="ls-sv" hidden>Användarvillkor</a>
+    <a href="/privacy"  class="ls-nl" hidden>Privacybeleid</a>
+    <a href="/terms"    class="ls-nl" hidden>Gebruiksvoorwaarden</a>
+    <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>
+  </div>
+</footer>
+
+</body>
+</html>
