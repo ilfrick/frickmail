@@ -761,4 +761,75 @@ class Db
 		$st->execute([':u' => $userId]);
 		return $st->fetchAll(\PDO::FETCH_ASSOC);
 	}
+
+	/* ------------------------------------------------------------------ */
+	/*  OIDC identities + escrow key                                        */
+	/* ------------------------------------------------------------------ */
+
+	/** Find a linked OIDC identity by (provider_hash, subject). */
+	public function findOidcIdentity(string $providerHash, string $subject) : ?array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT * FROM frickmail_oidc_identities WHERE provider_hash = :ph AND subject = :s LIMIT 1'
+		);
+		$st->execute([':ph' => $providerHash, ':s' => $subject]);
+		$row = $st->fetch();
+		return $row ?: null;
+	}
+
+	/** Insert or update the OIDC identity for a user (one sub per provider per user). */
+	public function upsertOidcIdentity(int $userId, string $providerHash, string $subject) : void
+	{
+		$this->pdo->prepare(
+			'INSERT INTO frickmail_oidc_identities (user_id, provider_hash, subject)
+			 VALUES (:u, :ph, :s)
+			 ON CONFLICT (provider_hash, subject) DO UPDATE SET user_id = :u2, linked_at = NOW()'
+		)->execute([':u' => $userId, ':ph' => $providerHash, ':s' => $subject, ':u2' => $userId]);
+	}
+
+	/** List all OIDC identities linked to a user. */
+	public function listOidcIdentities(int $userId) : array
+	{
+		$st = $this->pdo->prepare(
+			'SELECT * FROM frickmail_oidc_identities WHERE user_id = :u ORDER BY linked_at DESC'
+		);
+		$st->execute([':u' => $userId]);
+		return $st->fetchAll();
+	}
+
+	/** Remove a specific OIDC identity (by provider hash) for a user. */
+	public function deleteOidcIdentity(int $userId, string $providerHash) : void
+	{
+		$this->pdo->prepare(
+			'DELETE FROM frickmail_oidc_identities WHERE user_id = :u AND provider_hash = :ph'
+		)->execute([':u' => $userId, ':ph' => $providerHash]);
+	}
+
+	/**
+	 * Store the escrow key blob for a user.
+	 * Pass null to clear the escrow key (e.g. after all OIDC identities are removed).
+	 */
+	public function setOidcEscrowKey(int $userId, ?string $blob) : void
+	{
+		if (null === $blob) {
+			$this->pdo->prepare(
+				'UPDATE frickmail_users SET oidc_escrow_key = NULL, updated_at = NOW() WHERE id = :i'
+			)->execute([':i' => $userId]);
+		} else {
+			$this->pdo->prepare(
+				"UPDATE frickmail_users SET oidc_escrow_key = decode(:b, 'hex'), updated_at = NOW() WHERE id = :i"
+			)->execute([':b' => \bin2hex($blob), ':i' => $userId]);
+		}
+	}
+
+	/** Return the raw escrow key blob for a user, or null if not set. */
+	public function getOidcEscrowKey(int $userId) : ?string
+	{
+		$st = $this->pdo->prepare('SELECT oidc_escrow_key FROM frickmail_users WHERE id = :i');
+		$st->execute([':i' => $userId]);
+		$row = $st->fetch();
+		if (!$row || null === $row['oidc_escrow_key']) return null;
+		$raw = $row['oidc_escrow_key'];
+		return \is_resource($raw) ? \stream_get_contents($raw) : $raw;
+	}
 }
