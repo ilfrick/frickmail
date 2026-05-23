@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terms of Service — Frickmail</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      color: #1a1a2e;
+      background: #f5f5f0;
+    }
+    .lang-bar {
+      background: #12122a;
+      padding: 0.6rem 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      justify-content: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .lang-btn {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #cbd5e0;
+      border-radius: 5px;
+      padding: 0.25rem 0.65rem;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .lang-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+    .lang-btn.active { background: #fff; color: #1a1a2e; font-weight: 700; border-color: #fff; }
+    header {
+      background: #1a1a2e;
+      color: #fff;
+      padding: 2rem 1.5rem;
+      text-align: center;
+    }
+    header h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.02em; }
+    header p  { margin-top: 0.4rem; color: #a0aec0; font-size: 0.95rem; }
+    main {
+      max-width: 820px;
+      margin: 2.5rem auto;
+      padding: 0 1.5rem 4rem;
+    }
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      padding: 2rem 2.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    }
+    h2 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #1a1a2e;
+      margin-bottom: 0.8rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 2px solid #e8e8e0;
+    }
+    h2 .num {
+      display: inline-block;
+      background: #1a1a2e;
+      color: #fff;
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+    p { margin-bottom: 0.75rem; }
+    p:last-child { margin-bottom: 0; }
+    ul { margin: 0.5rem 0 0.75rem 1.4rem; }
+    li { margin-bottom: 0.3rem; }
+    .warning {
+      background: #fff5f5;
+      border-left: 4px solid #fc8181;
+      border-radius: 0 6px 6px 0;
+      padding: 0.9rem 1.2rem;
+      margin: 1rem 0;
+    }
+    .warning strong { color: #742a2a; }
+    a { color: #2b6cb0; }
+    a:hover { text-decoration: underline; }
+    footer {
+      text-align: center;
+      font-size: 0.85rem;
+      color: #a0aec0;
+      padding: 2rem 1rem;
+    }
+    footer a { color: #718096; }
+    [hidden] { display: none !important; }
+  </style>
+  <script>
+    var LANGS = ['en','fr','de','it','es','el','sv','nl'];
+    function detectLang() {
+      var s = localStorage.getItem('fm-lang');
+      if (s && LANGS.indexOf(s) !== -1) return s;
+      var b = (navigator.language || 'en').slice(0,2).toLowerCase();
+      return LANGS.indexOf(b) !== -1 ? b : 'en';
+    }
+    function setLang(lang) {
+      localStorage.setItem('fm-lang', lang);
+      LANGS.forEach(function(l) {
+        var el = document.getElementById('lang-' + l);
+        if (el) el.hidden = (l !== lang);
+      });
+      document.querySelectorAll('.lang-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.lang === lang);
+      });
+      document.documentElement.lang = lang;
+    }
+    document.addEventListener('DOMContentLoaded', function() { setLang(detectLang()); });
+  </script>
+</head>
+<body>
+
+<nav class="lang-bar">
+  <button class="lang-btn" data-lang="en"  onclick="setLang('en')">🇬🇧 English</button>
+  <button class="lang-btn" data-lang="fr"  onclick="setLang('fr')">🇫🇷 Français</button>
+  <button class="lang-btn" data-lang="de"  onclick="setLang('de')">🇩🇪 Deutsch</button>
+  <button class="lang-btn" data-lang="it"  onclick="setLang('it')">🇮🇹 Italiano</button>
+  <button class="lang-btn" data-lang="es"  onclick="setLang('es')">🇪🇸 Español</button>
+  <button class="lang-btn" data-lang="el"  onclick="setLang('el')">🇬🇷 Ελληνικά</button>
+  <button class="lang-btn" data-lang="sv"  onclick="setLang('sv')">🇸🇪 Svenska</button>
+  <button class="lang-btn" data-lang="nl"  onclick="setLang('nl')">🇳🇱 Nederlands</button>
+</nav>
+
+<header>
+  <h1>Terms of Service</h1>
+  <p>Frickmail — webmail.housefz.com</p>
+</header>
+
+<!-- ═══════════════════════════════ ENGLISH ═══════════════════════════════ -->
+<div id="lang-en">
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Service Description</h2>
+    <p>Frickmail is a self-hosted webmail application available at <strong>https://webmail.housefz.com</strong>, operated by <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>The service allows authorised users to access their email inbox via browser, with optional OAuth2 authentication for Gmail and Office 365 / Outlook.com accounts.</p>
+    <p>Frickmail is a <strong>private</strong> service: access is reserved exclusively for persons explicitly authorised by the operator.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Acceptance of Terms</h2>
+    <p>By using Frickmail, you confirm that you have read, understood and fully accepted these Terms of Service and the <a href="/privacy">Privacy Policy</a>. If you do not accept these terms, you must immediately stop using the service.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Access Requirements</h2>
+    <ul>
+      <li>You must have been explicitly authorised by the service operator.</li>
+      <li>You must have a valid email account (Gmail, Office 365 or generic IMAP).</li>
+      <li>You must use a modern browser with JavaScript and HTTPS support.</li>
+      <li>You must be at least 16 years old (minimum GDPR age requirement).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Google OAuth2 Authentication</h2>
+    <p>When signing in with your Google account, you are redirected to Google's consent screen. The permissions (scopes) requested by Frickmail are described in the <a href="/privacy">Privacy Policy</a> (section 3).</p>
+    <p>You may revoke these permissions at any time from your <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google account permissions page</a>. Revocation results in immediate disconnection from Frickmail.</p>
+    <p>Use of data obtained through Google APIs complies with the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>User Obligations</h2>
+    <p>You agree to:</p>
+    <ul>
+      <li>keep your credentials confidential and not share them with third parties;</li>
+      <li>not attempt to access data, accounts or features you are not authorised for;</li>
+      <li>not use the service for illegal activities, spam, phishing or malware distribution;</li>
+      <li>not intentionally overload the server with excessive automated requests;</li>
+      <li>immediately notify the operator of any unauthorised access or suspected security breach.</li>
+    </ul>
+    <div class="warning">
+      <strong>Abuse reporting:</strong> Report suspected violations to <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Limitation of Liability</h2>
+    <p>Frickmail is provided <strong>"as is"</strong> without warranties of continuous availability, freedom from errors, or fitness for a particular purpose. The operator is not liable for: loss of messages caused by the user's IMAP/SMTP server; service interruptions for maintenance or force majeure; unauthorised access resulting from compromised user credentials; or indirect damages arising from use or inability to use the service.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Service Availability</h2>
+    <p>The operator endeavours to keep the service available but does not guarantee a minimum uptime (SLA). The service may be suspended or interrupted at any time, with or without notice, for maintenance or other reasons.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Intellectual Property</h2>
+    <p>Frickmail is based on <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (AGPL-3.0 licence) and extended with proprietary plugins developed by the operator. Email content remains the exclusive property of the user.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Account Suspension and Closure</h2>
+    <p>The operator reserves the right to suspend or revoke access to any user at any time, without notice, in case of violation of these terms. Users may request account closure and data deletion by writing to <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Governing Law and Jurisdiction</h2>
+    <p>These terms are governed by Italian law. Any disputes shall be subject to the jurisdiction of the competent court in the operator's place of residence, unless mandatory law provides otherwise.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Changes to These Terms</h2>
+    <p>The operator reserves the right to modify these terms at any time. Changes will be published on this page with an updated date. Continued use of the service after publication constitutes acceptance.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Contact</h2>
+    <p>For questions about these terms: <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Privacy Policy</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ FRANÇAIS ═══════════════════════════════ -->
+<div id="lang-fr" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Description du service</h2>
+    <p>Frickmail est une application webmail auto-hébergée disponible à <strong>https://webmail.housefz.com</strong>, exploitée par <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>Le service permet aux utilisateurs autorisés d'accéder à leur boîte mail via un navigateur, avec authentification OAuth2 optionnelle pour Gmail et Office 365 / Outlook.com.</p>
+    <p>Frickmail est un service <strong>privé</strong> : l'accès est réservé aux personnes explicitement autorisées par l'opérateur.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Acceptation des conditions</h2>
+    <p>En utilisant Frickmail, vous confirmez avoir lu, compris et accepté intégralement les présentes Conditions d'utilisation et la <a href="/privacy">Politique de confidentialité</a>. Si vous n'acceptez pas ces conditions, vous devez cesser immédiatement d'utiliser le service.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Conditions d'accès</h2>
+    <ul>
+      <li>Vous devez avoir été explicitement autorisé par l'opérateur.</li>
+      <li>Vous devez disposer d'un compte e-mail valide (Gmail, Office 365 ou IMAP générique).</li>
+      <li>Vous devez utiliser un navigateur moderne avec JavaScript et HTTPS.</li>
+      <li>Vous devez avoir au moins 16 ans (âge minimum RGPD).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Authentification Google OAuth2</h2>
+    <p>Lors de la connexion avec votre compte Google, vous êtes redirigé vers l'écran de consentement de Google. Les autorisations demandées par Frickmail sont décrites dans la <a href="/privacy">Politique de confidentialité</a> (section 3).</p>
+    <p>Vous pouvez révoquer ces autorisations à tout moment depuis la <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">page des autorisations de votre compte Google</a>. La révocation entraîne une déconnexion immédiate de Frickmail.</p>
+    <p>L'utilisation des données obtenues via les API Google respecte la <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Politique de données utilisateur des services API Google</a>, y compris les exigences d'utilisation limitée.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Obligations de l'utilisateur</h2>
+    <p>Vous vous engagez à :</p>
+    <ul>
+      <li>garder vos identifiants confidentiels et ne pas les partager ;</li>
+      <li>ne pas tenter d'accéder à des données, comptes ou fonctionnalités non autorisés ;</li>
+      <li>ne pas utiliser le service à des fins illégales, spam, phishing ou distribution de logiciels malveillants ;</li>
+      <li>ne pas surcharger intentionnellement le serveur avec des requêtes automatisées excessives ;</li>
+      <li>signaler immédiatement à l'opérateur tout accès non autorisé ou violation de sécurité suspectée.</li>
+    </ul>
+    <div class="warning">
+      <strong>Signalement d'abus :</strong> Signalez les violations suspectées à <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Limitation de responsabilité</h2>
+    <p>Frickmail est fourni <strong>« tel quel »</strong> sans garantie de disponibilité continue, d'absence d'erreurs ni d'adéquation à un usage particulier. L'opérateur n'est pas responsable des pertes de messages dues au serveur IMAP/SMTP de l'utilisateur, des interruptions de service, des accès non autorisés résultant de la compromission des identifiants, ni des dommages indirects.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Disponibilité du service</h2>
+    <p>L'opérateur s'efforce de maintenir le service disponible mais ne garantit pas de niveau minimal de disponibilité (SLA). Le service peut être suspendu ou interrompu à tout moment, avec ou sans préavis.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Propriété intellectuelle</h2>
+    <p>Frickmail est basé sur <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (licence AGPL-3.0) et étendu avec des plugins propriétaires développés par l'opérateur. Le contenu des boîtes mail reste la propriété exclusive de l'utilisateur.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Suspension et fermeture du compte</h2>
+    <p>L'opérateur se réserve le droit de suspendre ou révoquer l'accès à tout moment en cas de violation des présentes conditions. Les utilisateurs peuvent demander la fermeture de leur compte à <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Droit applicable et juridiction</h2>
+    <p>Les présentes conditions sont régies par le droit italien. Tout litige sera soumis à la juridiction compétente du lieu de résidence de l'opérateur, sauf disposition légale contraire impérative.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Modifications des conditions</h2>
+    <p>L'opérateur se réserve le droit de modifier les présentes conditions à tout moment. Les modifications seront publiées sur cette page avec une date mise à jour. L'utilisation continue du service vaut acceptation.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Contact</h2>
+    <p>Pour toute question : <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Politique de confidentialité</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ DEUTSCH ═══════════════════════════════ -->
+<div id="lang-de" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Beschreibung des Dienstes</h2>
+    <p>Frickmail ist eine selbst gehostete Webmail-Anwendung unter <strong>https://webmail.housefz.com</strong>, betrieben von <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>Der Dienst ermöglicht autorisierten Nutzern den Zugriff auf ihr E-Mail-Postfach über den Browser, mit optionaler OAuth2-Authentifizierung für Gmail und Office 365 / Outlook.com.</p>
+    <p>Frickmail ist ein <strong>privater</strong> Dienst: Der Zugang ist ausschließlich Personen vorbehalten, die vom Betreiber ausdrücklich autorisiert wurden.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Akzeptanz der Bedingungen</h2>
+    <p>Durch die Nutzung von Frickmail bestätigen Sie, dass Sie diese Nutzungsbedingungen und die <a href="/privacy">Datenschutzerklärung</a> gelesen, verstanden und vollständig akzeptiert haben. Wenn Sie diese Bedingungen nicht akzeptieren, müssen Sie die Nutzung sofort einstellen.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Zugangvoraussetzungen</h2>
+    <ul>
+      <li>Sie müssen vom Betreiber ausdrücklich autorisiert worden sein.</li>
+      <li>Sie müssen über ein gültiges E-Mail-Konto verfügen (Gmail, Office 365 oder generisches IMAP).</li>
+      <li>Sie müssen einen modernen Browser mit JavaScript und HTTPS-Unterstützung verwenden.</li>
+      <li>Sie müssen mindestens 16 Jahre alt sein (Mindestalter DSGVO).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Google OAuth2-Authentifizierung</h2>
+    <p>Bei der Anmeldung mit Ihrem Google-Konto werden Sie zur Einwilligungsseite von Google weitergeleitet. Die von Frickmail angeforderten Berechtigungen (Scopes) sind in der <a href="/privacy">Datenschutzerklärung</a> (Abschnitt 3) beschrieben.</p>
+    <p>Sie können diese Berechtigungen jederzeit über die <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Berechtigungsseite Ihres Google-Kontos</a> widerrufen. Der Widerruf führt zur sofortigen Abmeldung von Frickmail.</p>
+    <p>Die Nutzung von Daten aus Google APIs entspricht der <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services Nutzer-Datenrichtlinie</a>, einschließlich der Anforderungen zur eingeschränkten Nutzung.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Pflichten des Nutzers</h2>
+    <p>Sie verpflichten sich:</p>
+    <ul>
+      <li>Ihre Zugangsdaten vertraulich zu behandeln und nicht mit Dritten zu teilen;</li>
+      <li>nicht auf nicht autorisierte Daten, Konten oder Funktionen zuzugreifen;</li>
+      <li>den Dienst nicht für illegale Aktivitäten, Spam, Phishing oder Malware-Verbreitung zu nutzen;</li>
+      <li>den Server nicht absichtlich mit übermäßigen automatisierten Anfragen zu überlasten;</li>
+      <li>den Betreiber unverzüglich über unbefugte Zugriffe oder Sicherheitsvorfälle zu informieren.</li>
+    </ul>
+    <div class="warning">
+      <strong>Missbrauchsmeldung:</strong> Bitte melden Sie Verstöße an <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Haftungsbeschränkung</h2>
+    <p>Frickmail wird <strong>„wie besehen"</strong> bereitgestellt, ohne Garantie für ununterbrochene Verfügbarkeit, Fehlerfreiheit oder Eignung für einen bestimmten Zweck. Der Betreiber haftet nicht für Nachrichtenverluste durch den IMAP/SMTP-Server des Nutzers, Dienstunterbrechungen, unbefugte Zugriffe durch kompromittierte Zugangsdaten oder indirekte Schäden.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Dienstverfügbarkeit</h2>
+    <p>Der Betreiber bemüht sich um Verfügbarkeit des Dienstes, garantiert jedoch kein Mindestniveau (SLA). Der Dienst kann jederzeit, mit oder ohne Vorankündigung, für Wartungszwecke oder aus anderen Gründen unterbrochen werden.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Geistiges Eigentum</h2>
+    <p>Frickmail basiert auf <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (AGPL-3.0-Lizenz) und wird durch proprietäre Plugins des Betreibers erweitert. Der Inhalt der Postfächer bleibt ausschließliches Eigentum des Nutzers.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Kontosperrung und -schließung</h2>
+    <p>Der Betreiber behält sich das Recht vor, den Zugang bei Verstößen gegen diese Bedingungen jederzeit zu sperren oder zu entziehen. Nutzer können die Schließung ihres Kontos unter <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a> beantragen.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Anwendbares Recht und Gerichtsstand</h2>
+    <p>Diese Bedingungen unterliegen italienischem Recht. Streitigkeiten unterliegen der Zuständigkeit des Gerichts am Wohnort des Betreibers, sofern nicht zwingendes Recht etwas anderes vorsieht.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Änderungen dieser Bedingungen</h2>
+    <p>Der Betreiber behält sich vor, diese Bedingungen jederzeit zu ändern. Änderungen werden auf dieser Seite mit aktualisiertem Datum veröffentlicht. Die weitere Nutzung des Dienstes gilt als Zustimmung.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Kontakt</h2>
+    <p>Bei Fragen zu diesen Bedingungen: <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Datenschutzerklärung</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ ITALIANO ═══════════════════════════════ -->
+<div id="lang-it" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Descrizione del servizio</h2>
+    <p>Frickmail è un'applicazione webmail self-hosted disponibile su <strong>https://webmail.housefz.com</strong>, gestita da <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>Il servizio consente agli utenti autorizzati di accedere alla propria casella di posta via browser, con autenticazione OAuth2 opzionale per Gmail e Office 365 / Outlook.com.</p>
+    <p>Frickmail è un servizio <strong>privato</strong>: l'accesso è riservato esclusivamente alle persone esplicitamente autorizzate dal gestore.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Accettazione dei termini</h2>
+    <p>Utilizzando Frickmail, dichiari di aver letto, compreso e accettato integralmente i presenti Termini di Servizio e la relativa <a href="/privacy">Informativa sulla Privacy</a>. Se non accetti questi termini, cessa immediatamente l'utilizzo del servizio.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Requisiti per l'accesso</h2>
+    <ul>
+      <li>Essere stati esplicitamente autorizzati dal gestore.</li>
+      <li>Disporre di un account e-mail valido (Gmail, Office 365 o IMAP generico).</li>
+      <li>Utilizzare un browser moderno con supporto a JavaScript e HTTPS.</li>
+      <li>Avere almeno 16 anni di età (requisito minimo GDPR).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Autenticazione Google OAuth2</h2>
+    <p>Accedendo con il tuo account Google, vieni reindirizzato alla pagina di consenso di Google. Le autorizzazioni richieste da Frickmail sono descritte nell'<a href="/privacy">Informativa sulla Privacy</a> (sezione 3).</p>
+    <p>Puoi revocare le autorizzazioni in qualsiasi momento dalla tua <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">pagina di gestione account Google</a>. La revoca comporta la disconnessione immediata da Frickmail.</p>
+    <p>L'uso dei dati ottenuti via API Google è conforme alla <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, incluso il requisito di utilizzo limitato.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Obblighi dell'utente</h2>
+    <p>L'utente si impegna a:</p>
+    <ul>
+      <li>mantenere riservate le proprie credenziali e a non condividerle con terzi;</li>
+      <li>non tentare di accedere a dati, account o funzionalità non autorizzati;</li>
+      <li>non usare il servizio per attività illegali, spam, phishing o distribuzione di malware;</li>
+      <li>non sovraccaricare intenzionalmente il server con richieste automatizzate eccessive;</li>
+      <li>notificare immediatamente al gestore qualsiasi accesso non autorizzato o sospetta violazione della sicurezza.</li>
+    </ul>
+    <div class="warning">
+      <strong>Segnalazione abusi:</strong> Attività sospette vanno segnalate a <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Limitazione di responsabilità</h2>
+    <p>Frickmail è fornito <strong>"così com'è"</strong>, senza garanzie di disponibilità continua, assenza di errori o idoneità a uno scopo specifico. Il gestore non è responsabile per: perdita di messaggi causata dal server IMAP/SMTP dell'utente; interruzioni del servizio per manutenzione o cause di forza maggiore; accessi non autorizzati derivanti dalla compromissione delle credenziali; danni indiretti o consequenziali.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Disponibilità del servizio</h2>
+    <p>Il gestore si adopera per mantenere il servizio disponibile, ma non garantisce un livello minimo di uptime (SLA). Il servizio può essere sospeso in qualsiasi momento, con o senza preavviso.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Proprietà intellettuale</h2>
+    <p>Frickmail è basato su <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (licenza AGPL-3.0) ed esteso con plugin proprietari sviluppati dal gestore. Il contenuto delle caselle di posta resta di esclusiva proprietà dell'utente.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Sospensione e chiusura dell'account</h2>
+    <p>Il gestore si riserva il diritto di sospendere o revocare l'accesso in caso di violazione dei presenti termini. Gli utenti possono richiedere la chiusura del proprio account e la cancellazione dei dati a <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Legge applicabile e foro competente</h2>
+    <p>I presenti termini sono regolati dalla legge italiana. Per qualsiasi controversia è competente il foro del luogo di residenza del gestore, salvo diversa disposizione di legge inderogabile.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Modifiche ai termini</h2>
+    <p>Il gestore si riserva il diritto di modificare i presenti termini in qualsiasi momento. Le modifiche saranno pubblicate su questa pagina con la data aggiornata. L'uso continuato del servizio costituisce accettazione delle modifiche.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Contatti</h2>
+    <p>Per qualsiasi domanda: <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Informativa sulla Privacy</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ ESPAÑOL ═══════════════════════════════ -->
+<div id="lang-es" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Descripción del servicio</h2>
+    <p>Frickmail es una aplicación webmail autoalojada disponible en <strong>https://webmail.housefz.com</strong>, operada por <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>El servicio permite a los usuarios autorizados acceder a su buzón de correo a través del navegador, con autenticación OAuth2 opcional para Gmail y Office 365 / Outlook.com.</p>
+    <p>Frickmail es un servicio <strong>privado</strong>: el acceso está reservado exclusivamente a las personas explícitamente autorizadas por el operador.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Aceptación de los términos</h2>
+    <p>Al usar Frickmail, confirma que ha leído, comprendido y aceptado íntegramente estos Términos de Servicio y la <a href="/privacy">Política de Privacidad</a>. Si no acepta estos términos, debe dejar de usar el servicio de inmediato.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Requisitos de acceso</h2>
+    <ul>
+      <li>Haber sido explícitamente autorizado por el operador.</li>
+      <li>Disponer de una cuenta de correo válida (Gmail, Office 365 o IMAP genérico).</li>
+      <li>Usar un navegador moderno con soporte a JavaScript y HTTPS.</li>
+      <li>Tener al menos 16 años (edad mínima RGPD).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Autenticación Google OAuth2</h2>
+    <p>Al iniciar sesión con su cuenta de Google, se le redirige a la pantalla de consentimiento de Google. Los permisos solicitados por Frickmail se describen en la <a href="/privacy">Política de Privacidad</a> (sección 3).</p>
+    <p>Puede revocar estos permisos en cualquier momento desde la <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">página de permisos de su cuenta Google</a>. La revocación implica la desconexión inmediata de Frickmail.</p>
+    <p>El uso de datos de las API de Google cumple la <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Política de datos de usuario de los servicios API de Google</a>, incluidos los requisitos de uso limitado.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Obligaciones del usuario</h2>
+    <p>Usted se compromete a:</p>
+    <ul>
+      <li>mantener sus credenciales confidenciales y no compartirlas con terceros;</li>
+      <li>no intentar acceder a datos, cuentas o funciones no autorizadas;</li>
+      <li>no usar el servicio para actividades ilegales, spam, phishing o distribución de malware;</li>
+      <li>no sobrecargar intencionalmente el servidor con solicitudes automatizadas excesivas;</li>
+      <li>notificar de inmediato al operador cualquier acceso no autorizado o brecha de seguridad sospechada.</li>
+    </ul>
+    <div class="warning">
+      <strong>Reporte de abusos:</strong> Informe las violaciones a <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Limitación de responsabilidad</h2>
+    <p>Frickmail se proporciona <strong>"tal cual"</strong>, sin garantías de disponibilidad continua, ausencia de errores ni idoneidad para un fin específico. El operador no es responsable de: pérdida de mensajes por el servidor IMAP/SMTP del usuario; interrupciones del servicio; accesos no autorizados por credenciales comprometidas; ni daños indirectos.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Disponibilidad del servicio</h2>
+    <p>El operador procura mantener el servicio disponible, pero no garantiza un nivel mínimo de disponibilidad (SLA). El servicio puede suspenderse en cualquier momento, con o sin previo aviso.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Propiedad intelectual</h2>
+    <p>Frickmail está basado en <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (licencia AGPL-3.0) y ampliado con plugins propietarios del operador. El contenido de los buzones de correo sigue siendo propiedad exclusiva del usuario.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Suspensión y cierre de cuenta</h2>
+    <p>El operador se reserva el derecho de suspender o revocar el acceso en caso de incumplimiento de estos términos. Los usuarios pueden solicitar el cierre de su cuenta a <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Ley aplicable y jurisdicción</h2>
+    <p>Estos términos se rigen por la ley italiana. Cualquier disputa estará sujeta a la jurisdicción del tribunal competente en el lugar de residencia del operador, salvo que la ley imperativa disponga otra cosa.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Cambios en los términos</h2>
+    <p>El operador se reserva el derecho de modificar estos términos en cualquier momento. Los cambios se publicarán en esta página con fecha actualizada. El uso continuado del servicio implica aceptación de los cambios.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Contacto</h2>
+    <p>Para preguntas sobre estos términos: <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Política de Privacidad</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ ΕΛΛΗΝΙΚΑ ═══════════════════════════════ -->
+<div id="lang-el" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Περιγραφή Υπηρεσίας</h2>
+    <p>Το Frickmail είναι μια αυτο-φιλοξενούμενη εφαρμογή webmail στη διεύθυνση <strong>https://webmail.housefz.com</strong>, που λειτουργεί από τον <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>Η υπηρεσία επιτρέπει σε εξουσιοδοτημένους χρήστες να έχουν πρόσβαση στο γραμματοκιβώτιό τους μέσω προγράμματος περιήγησης, με προαιρετική OAuth2 αυθεντικοποίηση για Gmail και Office 365 / Outlook.com.</p>
+    <p>Το Frickmail είναι <strong>ιδιωτική</strong> υπηρεσία: η πρόσβαση είναι αποκλειστικά για άτομα που έχουν ρητά εξουσιοδοτηθεί από τον διαχειριστή.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Αποδοχή Όρων</h2>
+    <p>Χρησιμοποιώντας το Frickmail, επιβεβαιώνετε ότι έχετε διαβάσει, κατανοήσει και αποδεχτεί πλήρως τους παρόντες Όρους Χρήσης και την <a href="/privacy">Πολιτική Απορρήτου</a>. Εάν δεν αποδέχεστε αυτούς τους όρους, πρέπει να σταματήσετε αμέσως τη χρήση της υπηρεσίας.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Προϋποθέσεις Πρόσβασης</h2>
+    <ul>
+      <li>Να έχετε ρητά εξουσιοδοτηθεί από τον διαχειριστή υπηρεσίας.</li>
+      <li>Να διαθέτετε έγκυρο λογαριασμό email (Gmail, Office 365 ή γενικό IMAP).</li>
+      <li>Να χρησιμοποιείτε σύγχρονο πρόγραμμα περιήγησης με υποστήριξη JavaScript και HTTPS.</li>
+      <li>Να είστε τουλάχιστον 16 ετών (ελάχιστη ηλικία ΓΚΠΔ).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Αυθεντικοποίηση Google OAuth2</h2>
+    <p>Κατά τη σύνδεση με τον λογαριασμό Google σας, ανακατευθύνεστε στην οθόνη συγκατάθεσης της Google. Οι άδειες που ζητά το Frickmail περιγράφονται στην <a href="/privacy">Πολιτική Απορρήτου</a> (ενότητα 3).</p>
+    <p>Μπορείτε να ανακαλέσετε αυτές τις άδειες ανά πάσα στιγμή από τη <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">σελίδα αδειών του λογαριασμού Google σας</a>. Η ανάκληση συνεπάγεται άμεση αποσύνδεση από το Frickmail.</p>
+    <p>Η χρήση δεδομένων από τα API Google συμμορφώνεται με την <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Πολιτική Δεδομένων Χρηστών Υπηρεσιών API Google</a>, συμπεριλαμβανομένων των απαιτήσεων περιορισμένης χρήσης.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Υποχρεώσεις Χρήστη</h2>
+    <p>Συμφωνείτε να:</p>
+    <ul>
+      <li>διατηρείτε εμπιστευτικά τα στοιχεία σύνδεσής σας και να μην τα μοιράζεστε με τρίτους·</li>
+      <li>μην επιχειρείτε πρόσβαση σε δεδομένα, λογαριασμούς ή λειτουργίες για τις οποίες δεν έχετε εξουσιοδότηση·</li>
+      <li>μην χρησιμοποιείτε την υπηρεσία για παράνομες δραστηριότητες, spam, phishing ή διανομή κακόβουλου λογισμικού·</li>
+      <li>μην υπερφορτώνετε σκόπιμα τον διακομιστή με υπερβολικά αυτοματοποιημένα αιτήματα·</li>
+      <li>ειδοποιείτε αμέσως τον διαχειριστή για τυχόν μη εξουσιοδοτημένη πρόσβαση ή ύποπτη παραβίαση ασφαλείας.</li>
+    </ul>
+    <div class="warning">
+      <strong>Αναφορά κατάχρησης:</strong> Αναφέρετε ύποπτες παραβιάσεις στο <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Περιορισμός Ευθύνης</h2>
+    <p>Το Frickmail παρέχεται <strong>«ως έχει»</strong>, χωρίς εγγυήσεις συνεχούς διαθεσιμότητας, απουσίας σφαλμάτων ή καταλληλότητας για συγκεκριμένο σκοπό. Ο διαχειριστής δεν ευθύνεται για: απώλεια μηνυμάτων λόγω του διακομιστή IMAP/SMTP του χρήστη· διακοπές υπηρεσίας· μη εξουσιοδοτημένη πρόσβαση λόγω παραβίασης διαπιστευτηρίων· ούτε για έμμεσες ζημίες.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Διαθεσιμότητα Υπηρεσίας</h2>
+    <p>Ο διαχειριστής καταβάλλει προσπάθεια να διατηρεί την υπηρεσία διαθέσιμη, αλλά δεν εγγυάται ελάχιστο επίπεδο λειτουργίας (SLA). Η υπηρεσία μπορεί να ανασταλεί ανά πάσα στιγμή, με ή χωρίς προηγούμενη ειδοποίηση.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Πνευματική Ιδιοκτησία</h2>
+    <p>Το Frickmail βασίζεται στο <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (άδεια AGPL-3.0) και επεκτείνεται με ιδιόκτητα πρόσθετα του διαχειριστή. Το περιεχόμενο των γραμματοκιβωτίων παραμένει αποκλειστική ιδιοκτησία του χρήστη.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Αναστολή και Κλείσιμο Λογαριασμού</h2>
+    <p>Ο διαχειριστής διατηρεί το δικαίωμα να αναστείλει ή ανακαλέσει την πρόσβαση σε περίπτωση παραβίασης των παρόντων όρων. Οι χρήστες μπορούν να ζητήσουν κλείσιμο λογαριασμού γράφοντας στο <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Εφαρμοστέο Δίκαιο και Δικαιοδοσία</h2>
+    <p>Οι παρόντες όροι διέπονται από το ιταλικό δίκαιο. Κάθε διαφορά υπάγεται στη δικαιοδοσία του αρμόδιου δικαστηρίου στον τόπο κατοικίας του διαχειριστή, εκτός εάν αναγκαστικό δίκαιο ορίζει διαφορετικά.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Τροποποιήσεις Όρων</h2>
+    <p>Ο διαχειριστής διατηρεί το δικαίωμα να τροποποιεί τους παρόντες όρους ανά πάσα στιγμή. Οι αλλαγές θα δημοσιεύονται σε αυτή τη σελίδα με ενημερωμένη ημερομηνία. Η συνέχιση χρήσης της υπηρεσίας συνιστά αποδοχή των αλλαγών.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Επικοινωνία</h2>
+    <p>Για ερωτήσεις σχετικά με αυτούς τους όρους: <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Πολιτική Απορρήτου</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ SVENSKA ═══════════════════════════════ -->
+<div id="lang-sv" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Tjänstebeskrivning</h2>
+    <p>Frickmail är ett självhostat webbmailprogram tillgängligt på <strong>https://webmail.housefz.com</strong>, drivet av <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>Tjänsten ger auktoriserade användare tillgång till sin e-postbrevlåda via webbläsare, med valfri OAuth2-autentisering för Gmail och Office 365 / Outlook.com.</p>
+    <p>Frickmail är en <strong>privat</strong> tjänst: åtkomst är förbehållen personer som uttryckligen auktoriserats av operatören.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Godkännande av villkor</h2>
+    <p>Genom att använda Frickmail bekräftar du att du har läst, förstått och fullt ut accepterat dessa användarvillkor och <a href="/privacy">sekretesspolicyn</a>. Om du inte accepterar dessa villkor måste du omedelbart sluta använda tjänsten.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Åtkomstkrav</h2>
+    <ul>
+      <li>Du måste ha blivit uttryckligen auktoriserad av tjänsteoperatören.</li>
+      <li>Du måste ha ett giltigt e-postkonto (Gmail, Office 365 eller generisk IMAP).</li>
+      <li>Du måste använda en modern webbläsare med JavaScript och HTTPS-stöd.</li>
+      <li>Du måste vara minst 16 år gammal (GDPR:s minimumålder).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Google OAuth2-autentisering</h2>
+    <p>När du loggar in med ditt Google-konto omdirigeras du till Googles samtyckessida. De behörigheter (scopes) som Frickmail begär beskrivs i <a href="/privacy">sekretesspolicyn</a> (avsnitt 3).</p>
+    <p>Du kan när som helst återkalla dessa behörigheter från din <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google-kontos behörighetssida</a>. Återkallelse leder till omedelbar utloggning från Frickmail.</p>
+    <p>Användningen av data från Google API:er följer <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services policy för användardata</a>, inklusive kraven på begränsad användning.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Användarens skyldigheter</h2>
+    <p>Du förbinder dig att:</p>
+    <ul>
+      <li>hålla dina inloggningsuppgifter konfidentiella och inte dela dem med tredje parter;</li>
+      <li>inte försöka komma åt data, konton eller funktioner du inte är auktoriserad för;</li>
+      <li>inte använda tjänsten för olagliga aktiviteter, spam, nätfiske eller distribution av skadlig kod;</li>
+      <li>inte avsiktligt överbelasta servern med överdrivna automatiserade förfrågningar;</li>
+      <li>omedelbart meddela operatören om obehörig åtkomst eller misstänkt säkerhetsintrång.</li>
+    </ul>
+    <div class="warning">
+      <strong>Missbruksrapportering:</strong> Rapportera misstänkta överträdelser till <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Ansvarsbegränsning</h2>
+    <p>Frickmail tillhandahålls <strong>"i befintligt skick"</strong> utan garantier för kontinuerlig tillgänglighet, felfrihet eller lämplighet för ett specifikt ändamål. Operatören ansvarar inte för: förlust av meddelanden på grund av användarens IMAP/SMTP-server; tjänstavbrott; obehörig åtkomst till följd av komprometterade uppgifter; eller indirekta skador.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Tjänstetillgänglighet</h2>
+    <p>Operatören strävar efter att hålla tjänsten tillgänglig men garanterar inte en miniminivå av drifttid (SLA). Tjänsten kan avbrytas när som helst, med eller utan förvarning.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Immateriella rättigheter</h2>
+    <p>Frickmail är baserat på <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (AGPL-3.0-licens) och utökat med proprietära plugins av operatören. Innehållet i brevlådorna förblir användarens exklusiva egendom.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Kontostängning och avslutning</h2>
+    <p>Operatören förbehåller sig rätten att stänga av eller återkalla åtkomst vid brott mot dessa villkor. Användare kan begära stängning av sitt konto genom att skriva till <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Tillämplig lag och jurisdiktion</h2>
+    <p>Dessa villkor regleras av italiensk lag. Tvister ska avgöras av behörig domstol på operatörens hemort, om inte tvingande lag föreskriver annat.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Ändringar i villkoren</h2>
+    <p>Operatören förbehåller sig rätten att när som helst ändra dessa villkor. Ändringar publiceras på denna sida med uppdaterat datum. Fortsatt användning av tjänsten innebär godkännande av ändringarna.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Kontakt</h2>
+    <p>Frågor om dessa villkor: <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Integritetspolicy</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ NEDERLANDS ═══════════════════════════════ -->
+<div id="lang-nl" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Beschrijving van de dienst</h2>
+    <p>Frickmail is een zelf-gehoste webmailtoepassing beschikbaar op <strong>https://webmail.housefz.com</strong>, beheerd door <strong>Nicola Francesconi</strong> (<a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>).</p>
+    <p>De dienst stelt bevoegde gebruikers in staat hun e-mailpostvak via de browser te raadplegen, met optionele OAuth2-authenticatie voor Gmail en Office 365 / Outlook.com.</p>
+    <p>Frickmail is een <strong>privédienst</strong>: toegang is uitsluitend voorbehouden aan personen die expliciet door de beheerder zijn gemachtigd.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Aanvaarding van de voorwaarden</h2>
+    <p>Door Frickmail te gebruiken bevestigt u dat u deze Gebruiksvoorwaarden en het <a href="/privacy">Privacybeleid</a> hebt gelezen, begrepen en volledig aanvaard. Als u deze voorwaarden niet aanvaardt, dient u het gebruik van de dienst onmiddellijk te staken.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Toegangsvereisten</h2>
+    <ul>
+      <li>U moet expliciet gemachtigd zijn door de beheerder.</li>
+      <li>U moet over een geldig e-mailaccount beschikken (Gmail, Office 365 of generiek IMAP).</li>
+      <li>U moet een moderne browser met JavaScript en HTTPS-ondersteuning gebruiken.</li>
+      <li>U moet minimaal 16 jaar oud zijn (minimumleeftijd AVG).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Google OAuth2-authenticatie</h2>
+    <p>Bij het aanmelden met uw Google-account wordt u doorgestuurd naar het toestemmingsscherm van Google. De machtigingen die Frickmail aanvraagt, worden beschreven in het <a href="/privacy">Privacybeleid</a> (sectie 3).</p>
+    <p>U kunt deze machtigingen op elk moment intrekken via de <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">machtigingspagina van uw Google-account</a>. Intrekking leidt tot onmiddellijke afmelding bij Frickmail.</p>
+    <p>Het gebruik van gegevens van Google API's voldoet aan het <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Gebruiksgegevensbeleid van Google API Services</a>, inclusief de vereisten voor beperkt gebruik.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Verplichtingen van de gebruiker</h2>
+    <p>U verbindt zich ertoe:</p>
+    <ul>
+      <li>uw inloggegevens vertrouwelijk te houden en niet te delen met derden;</li>
+      <li>niet te proberen toegang te krijgen tot gegevens, accounts of functies waarvoor u niet gemachtigd bent;</li>
+      <li>de dienst niet te gebruiken voor illegale activiteiten, spam, phishing of verspreiding van malware;</li>
+      <li>de server niet opzettelijk te overbelasten met buitensporige geautomatiseerde verzoeken;</li>
+      <li>de beheerder onmiddellijk op de hoogte te stellen van onbevoegde toegang of vermoedelijke beveiligingsinbreuk.</li>
+    </ul>
+    <div class="warning">
+      <strong>Misbruikmelding:</strong> Meld vermoedelijke overtredingen aan <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.
+    </div>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Beperking van aansprakelijkheid</h2>
+    <p>Frickmail wordt aangeboden <strong>"zoals het is"</strong>, zonder garanties voor continue beschikbaarheid, foutloosheid of geschiktheid voor een specifiek doel. De beheerder is niet aansprakelijk voor: verlies van berichten door de IMAP/SMTP-server van de gebruiker; serviceonderbrekingen; onbevoegde toegang door gecompromitteerde gegevens; noch voor indirecte schade.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Beschikbaarheid van de dienst</h2>
+    <p>De beheerder streeft ernaar de dienst beschikbaar te houden, maar garandeert geen minimumdescikbaarheid (SLA). De dienst kan op elk moment worden onderbroken, met of zonder voorafgaande kennisgeving.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Intellectuele eigendom</h2>
+    <p>Frickmail is gebaseerd op <a href="https://snappymail.eu" target="_blank" rel="noopener">SnappyMail</a> (AGPL-3.0-licentie) en uitgebreid met eigen plugins van de beheerder. De inhoud van de postvakken blijft exclusief eigendom van de gebruiker.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Accountopschorting en -sluiting</h2>
+    <p>De beheerder behoudt zich het recht voor de toegang op te schorten of in te trekken bij overtreding van deze voorwaarden. Gebruikers kunnen sluiting van hun account aanvragen via <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Toepasselijk recht en bevoegde rechter</h2>
+    <p>Deze voorwaarden worden beheerst door Italiaans recht. Geschillen worden beslecht door de bevoegde rechter in de woonplaats van de beheerder, tenzij dwingend recht anders bepaalt.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">11</span>Wijzigingen in de voorwaarden</h2>
+    <p>De beheerder behoudt zich het recht voor deze voorwaarden op elk moment te wijzigen. Wijzigingen worden op deze pagina gepubliceerd met een bijgewerkte datum. Voortgezet gebruik van de dienst houdt aanvaarding van de wijzigingen in.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">12</span>Contact</h2>
+    <p>Vragen over deze voorwaarden: <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a></p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/privacy">Privacybeleid</a></p></footer>
+</div>
+
+</body>
+</html>

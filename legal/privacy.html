@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — Frickmail</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      color: #1a1a2e;
+      background: #f5f5f0;
+    }
+    .lang-bar {
+      background: #12122a;
+      padding: 0.6rem 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      justify-content: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .lang-btn {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #cbd5e0;
+      border-radius: 5px;
+      padding: 0.25rem 0.65rem;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .lang-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+    .lang-btn.active { background: #fff; color: #1a1a2e; font-weight: 700; border-color: #fff; }
+    header {
+      background: #1a1a2e;
+      color: #fff;
+      padding: 2rem 1.5rem;
+      text-align: center;
+    }
+    header h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.02em; }
+    header p  { margin-top: 0.4rem; color: #a0aec0; font-size: 0.95rem; }
+    main {
+      max-width: 820px;
+      margin: 2.5rem auto;
+      padding: 0 1.5rem 4rem;
+    }
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      padding: 2rem 2.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    }
+    h2 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #1a1a2e;
+      margin-bottom: 0.8rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 2px solid #e8e8e0;
+    }
+    h2 .num {
+      display: inline-block;
+      background: #1a1a2e;
+      color: #fff;
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+    p { margin-bottom: 0.75rem; }
+    p:last-child { margin-bottom: 0; }
+    ul { margin: 0.5rem 0 0.75rem 1.4rem; }
+    li { margin-bottom: 0.3rem; }
+    .highlight {
+      background: #fff8e1;
+      border-left: 4px solid #f6ad55;
+      border-radius: 0 6px 6px 0;
+      padding: 0.9rem 1.2rem;
+      margin: 1rem 0;
+    }
+    .highlight strong { color: #744210; }
+    a { color: #2b6cb0; }
+    a:hover { text-decoration: underline; }
+    code { background: #eee; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.88em; }
+    footer {
+      text-align: center;
+      font-size: 0.85rem;
+      color: #a0aec0;
+      padding: 2rem 1rem;
+    }
+    footer a { color: #718096; }
+    [hidden] { display: none !important; }
+  </style>
+  <script>
+    var LANGS = ['en','fr','de','it','es','el','sv','nl'];
+    function detectLang() {
+      var s = localStorage.getItem('fm-lang');
+      if (s && LANGS.indexOf(s) !== -1) return s;
+      var b = (navigator.language || 'en').slice(0,2).toLowerCase();
+      return LANGS.indexOf(b) !== -1 ? b : 'en';
+    }
+    function setLang(lang) {
+      localStorage.setItem('fm-lang', lang);
+      LANGS.forEach(function(l) {
+        var el = document.getElementById('lang-' + l);
+        if (el) el.hidden = (l !== lang);
+      });
+      document.querySelectorAll('.lang-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.lang === lang);
+      });
+      document.documentElement.lang = lang;
+    }
+    document.addEventListener('DOMContentLoaded', function() { setLang(detectLang()); });
+  </script>
+</head>
+<body>
+
+<nav class="lang-bar">
+  <button class="lang-btn" data-lang="en"  onclick="setLang('en')">🇬🇧 English</button>
+  <button class="lang-btn" data-lang="fr"  onclick="setLang('fr')">🇫🇷 Français</button>
+  <button class="lang-btn" data-lang="de"  onclick="setLang('de')">🇩🇪 Deutsch</button>
+  <button class="lang-btn" data-lang="it"  onclick="setLang('it')">🇮🇹 Italiano</button>
+  <button class="lang-btn" data-lang="es"  onclick="setLang('es')">🇪🇸 Español</button>
+  <button class="lang-btn" data-lang="el"  onclick="setLang('el')">🇬🇷 Ελληνικά</button>
+  <button class="lang-btn" data-lang="sv"  onclick="setLang('sv')">🇸🇪 Svenska</button>
+  <button class="lang-btn" data-lang="nl"  onclick="setLang('nl')">🇳🇱 Nederlands</button>
+</nav>
+
+<header>
+  <h1 id="page-title">Privacy Policy</h1>
+  <p>Frickmail — webmail.housefz.com</p>
+</header>
+
+<!-- ═══════════════════════════════ ENGLISH ═══════════════════════════════ -->
+<div id="lang-en">
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Data Controller</h2>
+    <p>The data controller is <strong>Nicola Francesconi</strong>, reachable at <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Frickmail is a self-hosted webmail application available at <strong>https://webmail.housefz.com</strong>. It is a private service reserved for authorised users only.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Data Collected</h2>
+    <ul>
+      <li><strong>IMAP/SMTP access credentials:</strong> email address and OAuth2 token (no password is ever stored when using Google or Microsoft sign-in).</li>
+      <li><strong>Mailbox content:</strong> message headers, subjects, bodies and attachments — read directly from the user's IMAP server and never copied to Frickmail's storage.</li>
+      <li><strong>Google Contacts:</strong> name and email address of contacts, synced via the Google People API and stored in the local address book.</li>
+      <li><strong>Google Calendar:</strong> events and appointments, read and written via the Google Calendar API.</li>
+      <li><strong>Session data:</strong> technical session cookies required for the web interface to function.</li>
+      <li><strong>Server logs:</strong> IP address, date/time and request URL, retained for security purposes.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Use of Google API Data</h2>
+    <div class="highlight">
+      <strong>Limited Use Disclosure:</strong> Frickmail's use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.
+    </div>
+    <p>Frickmail requests the following Google scopes:</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — Google account identification.</li>
+      <li><code>https://mail.google.com/</code> — IMAP and SMTP access to the Gmail mailbox.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — reading Google Contacts for the local address book.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — reading and writing Google Calendar events.</li>
+    </ul>
+    <p>Data obtained through Google APIs is <strong>never</strong> used for advertising, profiling, or transferred to third parties for AI training or any other purpose.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Purpose and Legal Basis</h2>
+    <p>Data is processed exclusively to provide the webmail service, synchronise contacts and calendar, and ensure security. The legal basis is the controller's <strong>legitimate interest</strong> and the user's <strong>explicit consent</strong> given via OAuth2 authorisation.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Data Retention</h2>
+    <ul>
+      <li><strong>OAuth2 tokens:</strong> stored encrypted for the duration of the active session. Revoking access via the Google or Microsoft account console immediately invalidates them.</li>
+      <li><strong>Synced contacts:</strong> retained until the user requests deletion or removes the account.</li>
+      <li><strong>Server logs:</strong> retained for a maximum of 30 days, then automatically deleted.</li>
+      <li><strong>Email messages:</strong> not stored on Frickmail; they reside exclusively on the user's IMAP server.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Third-Party Sharing</h2>
+    <p>Frickmail does not sell, rent or share personal data with third parties for commercial purposes. Data is transmitted to Google and Microsoft solely to authenticate the user and access the services they provide, in accordance with their respective policies:</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google Privacy Policy</a></li>
+      <li><a href="https://privacy.microsoft.com/en-us/privacystatement" target="_blank" rel="noopener">Microsoft Privacy Statement</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>User Rights (GDPR)</h2>
+    <p>Under Regulation (EU) 2016/679 (GDPR) you have the right to: <strong>access</strong> your data, request <strong>rectification</strong>, request <strong>erasure</strong> ("right to be forgotten"), <strong>withdraw consent</strong> at any time from your <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google account page</a>, request <strong>data portability</strong>, and <strong>object</strong> to processing.</p>
+    <p>To exercise these rights, contact <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookies</h2>
+    <p>Frickmail uses <strong>only technical session cookies</strong> required for the application to function. No tracking, analytics or advertising cookies from third parties are used.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Security</h2>
+    <p>All communications use encrypted HTTPS connections (TLS 1.2/1.3). OAuth2 tokens are encrypted at rest. Server access is restricted to authorised users; there is no public access to the database or logs.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Changes to This Policy</h2>
+    <p>The controller reserves the right to update this policy at any time. Changes will be published on this page with an updated date. Continued use of the service after publication constitutes acceptance of the changes.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Terms of Service</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ FRANÇAIS ═══════════════════════════════ -->
+<div id="lang-fr" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Responsable du traitement</h2>
+    <p>Le responsable du traitement est <strong>Nicola Francesconi</strong>, joignable à l'adresse <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Frickmail est une application webmail auto-hébergée disponible à l'adresse <strong>https://webmail.housefz.com</strong>. Il s'agit d'un service privé réservé aux utilisateurs autorisés.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Données collectées</h2>
+    <ul>
+      <li><strong>Identifiants IMAP/SMTP :</strong> adresse e-mail et jeton OAuth2 (aucun mot de passe n'est jamais stocké lors de l'utilisation de la connexion Google ou Microsoft).</li>
+      <li><strong>Contenu de la boîte mail :</strong> en-têtes, objets, corps et pièces jointes — lus directement depuis le serveur IMAP de l'utilisateur et jamais copiés sur le stockage de Frickmail.</li>
+      <li><strong>Contacts Google :</strong> nom et adresse e-mail des contacts, synchronisés via l'API Google People et stockés dans le carnet d'adresses local.</li>
+      <li><strong>Agenda Google :</strong> événements et rendez-vous, lus et écrits via l'API Google Calendar.</li>
+      <li><strong>Données de session :</strong> cookies de session techniques nécessaires au fonctionnement de l'interface web.</li>
+      <li><strong>Journaux serveur :</strong> adresse IP, date/heure et URL des requêtes, conservés à des fins de sécurité.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Utilisation des données des API Google</h2>
+    <div class="highlight">
+      <strong>Déclaration d'utilisation limitée :</strong> L'utilisation par Frickmail des informations reçues des API Google est conforme à la <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Politique de données utilisateur des services API Google</a>, y compris les exigences d'utilisation limitée.
+    </div>
+    <p>Frickmail demande les autorisations (scopes) Google suivantes :</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — identification du compte Google.</li>
+      <li><code>https://mail.google.com/</code> — accès IMAP et SMTP à la boîte Gmail.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — lecture des contacts Google pour le carnet d'adresses local.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — lecture et écriture des événements Google Agenda.</li>
+    </ul>
+    <p>Les données obtenues via les API Google ne sont <strong>jamais</strong> utilisées à des fins publicitaires, de profilage, ni transmises à des tiers pour l'entraînement d'IA ou toute autre finalité.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Finalités et base légale</h2>
+    <p>Les données sont traitées exclusivement pour fournir le service webmail, synchroniser les contacts et l'agenda, et assurer la sécurité. La base légale est l'<strong>intérêt légitime</strong> du responsable et le <strong>consentement explicite</strong> de l'utilisateur donné via l'autorisation OAuth2.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Conservation des données</h2>
+    <ul>
+      <li><strong>Jetons OAuth2 :</strong> stockés chiffrés pendant la durée de la session active. La révocation depuis la console Google ou Microsoft les invalide immédiatement.</li>
+      <li><strong>Contacts synchronisés :</strong> conservés jusqu'à ce que l'utilisateur demande la suppression ou supprime son compte.</li>
+      <li><strong>Journaux serveur :</strong> conservés 30 jours maximum, puis supprimés automatiquement.</li>
+      <li><strong>Messages e-mail :</strong> non stockés sur Frickmail ; ils résident exclusivement sur le serveur IMAP de l'utilisateur.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Partage avec des tiers</h2>
+    <p>Frickmail ne vend, ne loue ni ne partage les données personnelles avec des tiers à des fins commerciales. Les données sont transmises à Google et Microsoft uniquement pour authentifier l'utilisateur et accéder aux services qu'ils fournissent, conformément à leurs politiques respectives :</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Politique de confidentialité de Google</a></li>
+      <li><a href="https://privacy.microsoft.com/fr-fr/privacystatement" target="_blank" rel="noopener">Déclaration de confidentialité Microsoft</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Droits de l'utilisateur (RGPD)</h2>
+    <p>En vertu du Règlement (UE) 2016/679 (RGPD), vous disposez des droits d'<strong>accès</strong>, de <strong>rectification</strong>, d'<strong>effacement</strong> (« droit à l'oubli »), de <strong>retrait du consentement</strong> depuis votre <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">compte Google</a>, de <strong>portabilité</strong> et d'<strong>opposition</strong> au traitement.</p>
+    <p>Pour exercer ces droits, écrivez à <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookies</h2>
+    <p>Frickmail utilise <strong>uniquement des cookies techniques de session</strong> nécessaires au fonctionnement de l'application. Aucun cookie de traçage, d'analyse ou de publicité provenant de tiers n'est utilisé.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Sécurité</h2>
+    <p>Toutes les communications utilisent des connexions HTTPS chiffrées (TLS 1.2/1.3). Les jetons OAuth2 sont chiffrés au repos. L'accès au serveur est restreint aux utilisateurs autorisés.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Modifications de cette politique</h2>
+    <p>Le responsable se réserve le droit de modifier cette politique à tout moment. Les modifications seront publiées sur cette page avec une date mise à jour. L'utilisation continue du service après publication constitue une acceptation des modifications.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Conditions d'utilisation</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ DEUTSCH ═══════════════════════════════ -->
+<div id="lang-de" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Verantwortlicher</h2>
+    <p>Verantwortlicher für die Datenverarbeitung ist <strong>Nicola Francesconi</strong>, erreichbar unter <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Frickmail ist eine selbst gehostete Webmail-Anwendung unter <strong>https://webmail.housefz.com</strong>. Es handelt sich um einen privaten Dienst, der ausschließlich autorisierten Nutzern vorbehalten ist.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Erhobene Daten</h2>
+    <ul>
+      <li><strong>IMAP/SMTP-Zugangsdaten:</strong> E-Mail-Adresse und OAuth2-Token (bei Anmeldung mit Google oder Microsoft wird kein Passwort gespeichert).</li>
+      <li><strong>Postfachinhalt:</strong> Kopfzeilen, Betreff, Nachrichtentext und Anhänge — direkt vom IMAP-Server des Nutzers gelesen, nie auf Frickmail-Speicher kopiert.</li>
+      <li><strong>Google-Kontakte:</strong> Name und E-Mail-Adresse der Kontakte, synchronisiert über die Google People API und im lokalen Adressbuch gespeichert.</li>
+      <li><strong>Google Kalender:</strong> Termine und Ereignisse, gelesen und geschrieben über die Google Calendar API.</li>
+      <li><strong>Sitzungsdaten:</strong> technische Sitzungs-Cookies, die für die Weboberfläche erforderlich sind.</li>
+      <li><strong>Server-Protokolle:</strong> IP-Adresse, Datum/Uhrzeit und Anfrage-URL, aus Sicherheitsgründen gespeichert.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Nutzung von Google API-Daten</h2>
+    <div class="highlight">
+      <strong>Erklärung zur eingeschränkten Nutzung:</strong> Die Nutzung von Informationen aus Google APIs durch Frickmail entspricht der <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services Nutzer-Datenrichtlinie</a>, einschließlich der Anforderungen zur eingeschränkten Nutzung.
+    </div>
+    <p>Frickmail fordert folgende Google-Berechtigungen (Scopes) an:</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — Identifizierung des Google-Kontos.</li>
+      <li><code>https://mail.google.com/</code> — IMAP- und SMTP-Zugriff auf das Gmail-Postfach.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — Lesen der Google-Kontakte für das lokale Adressbuch.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — Lesen und Schreiben von Google-Kalendereinträgen.</li>
+    </ul>
+    <p>Über Google APIs erhaltene Daten werden <strong>niemals</strong> für Werbung, Profiling oder die KI-Ausbildung verwendet oder an Dritte weitergegeben.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Zweck und Rechtsgrundlage</h2>
+    <p>Daten werden ausschließlich zur Bereitstellung des Webmail-Dienstes, zur Synchronisierung von Kontakten und Kalender sowie zur Sicherstellung der Sicherheit verarbeitet. Rechtsgrundlage sind das <strong>berechtigte Interesse</strong> des Verantwortlichen und die <strong>ausdrückliche Einwilligung</strong> des Nutzers über die OAuth2-Autorisierung.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Datenspeicherung</h2>
+    <ul>
+      <li><strong>OAuth2-Token:</strong> verschlüsselt für die Dauer der aktiven Sitzung gespeichert. Der Widerruf über die Google- oder Microsoft-Konsole macht sie sofort ungültig.</li>
+      <li><strong>Synchronisierte Kontakte:</strong> bis zur Löschanfrage des Nutzers oder Kontoentfernung gespeichert.</li>
+      <li><strong>Server-Protokolle:</strong> maximal 30 Tage gespeichert, dann automatisch gelöscht.</li>
+      <li><strong>E-Mail-Nachrichten:</strong> nicht auf Frickmail gespeichert; sie verbleiben ausschließlich auf dem IMAP-Server des Nutzers.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Weitergabe an Dritte</h2>
+    <p>Frickmail verkauft, vermietet oder teilt keine personenbezogenen Daten zu kommerziellen Zwecken. Daten werden ausschließlich an Google und Microsoft übermittelt, um den Nutzer zu authentifizieren und auf deren Dienste zuzugreifen:</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google Datenschutzerklärung</a></li>
+      <li><a href="https://privacy.microsoft.com/de-de/privacystatement" target="_blank" rel="noopener">Microsoft Datenschutzerklärung</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Betroffenenrechte (DSGVO)</h2>
+    <p>Gemäß Verordnung (EU) 2016/679 (DSGVO) haben Sie das Recht auf <strong>Auskunft</strong>, <strong>Berichtigung</strong>, <strong>Löschung</strong> („Recht auf Vergessenwerden"), <strong>Widerruf der Einwilligung</strong> über Ihre <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google-Kontoverwaltung</a>, <strong>Datenübertragbarkeit</strong> und <strong>Widerspruch</strong> gegen die Verarbeitung.</p>
+    <p>Zur Ausübung dieser Rechte wenden Sie sich an <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookies</h2>
+    <p>Frickmail verwendet <strong>ausschließlich technische Sitzungs-Cookies</strong>, die für den Betrieb der Anwendung erforderlich sind. Tracking-, Analyse- oder Werbe-Cookies von Drittanbietern werden nicht eingesetzt.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Sicherheit</h2>
+    <p>Alle Verbindungen sind HTTPS-verschlüsselt (TLS 1.2/1.3). OAuth2-Token werden verschlüsselt gespeichert. Der Serverzugang ist auf autorisierte Nutzer beschränkt.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Änderungen dieser Datenschutzerklärung</h2>
+    <p>Der Verantwortliche behält sich vor, diese Erklärung jederzeit zu ändern. Änderungen werden auf dieser Seite mit aktualisiertem Datum veröffentlicht. Die weitere Nutzung des Dienstes nach Veröffentlichung gilt als Zustimmung zu den Änderungen.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Nutzungsbedingungen</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ ITALIANO ═══════════════════════════════ -->
+<div id="lang-it" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Titolare del trattamento</h2>
+    <p>Il titolare del trattamento è <strong>Nicola Francesconi</strong>, raggiungibile a <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Frickmail è un'applicazione webmail self-hosted disponibile su <strong>https://webmail.housefz.com</strong>. È un servizio privato riservato agli utenti autorizzati.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Dati raccolti</h2>
+    <ul>
+      <li><strong>Credenziali IMAP/SMTP:</strong> indirizzo e-mail e token OAuth2 (nessuna password è mai memorizzata con Google o Microsoft).</li>
+      <li><strong>Contenuto della casella:</strong> intestazioni, oggetti, corpi e allegati — letti direttamente dal server IMAP dell'utente e mai copiati su Frickmail.</li>
+      <li><strong>Contatti Google:</strong> nome e indirizzo e-mail, sincronizzati via Google People API e memorizzati nella rubrica locale.</li>
+      <li><strong>Calendario Google:</strong> eventi e appuntamenti, letti e scritti via Google Calendar API.</li>
+      <li><strong>Dati di sessione:</strong> cookie tecnici di sessione necessari al funzionamento dell'interfaccia web.</li>
+      <li><strong>Log del server:</strong> IP, data/ora e URL della richiesta, conservati per finalità di sicurezza.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Uso dei dati Google API</h2>
+    <div class="highlight">
+      <strong>Dichiarazione di utilizzo limitato:</strong> L'uso da parte di Frickmail delle informazioni ricevute dalle API Google rispetta la <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, incluso il requisito di utilizzo limitato.
+    </div>
+    <p>Frickmail richiede le seguenti autorizzazioni Google:</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — identificazione account Google.</li>
+      <li><code>https://mail.google.com/</code> — accesso IMAP e SMTP alla casella Gmail.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — lettura dei contatti Google per la rubrica locale.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — lettura e scrittura degli eventi del calendario Google.</li>
+    </ul>
+    <p>I dati ottenuti tramite le API Google <strong>non vengono mai</strong> usati per pubblicità, profilazione o ceduti a terzi per l'addestramento di AI.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Finalità e base giuridica</h2>
+    <p>I dati sono trattati esclusivamente per erogare il servizio webmail, sincronizzare rubrica e calendario, e garantire la sicurezza. La base giuridica è il <strong>legittimo interesse</strong> del titolare e il <strong>consenso esplicito</strong> dell'utente espresso tramite OAuth2.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Conservazione dei dati</h2>
+    <ul>
+      <li><strong>Token OAuth2:</strong> conservati cifrati per la durata della sessione attiva. La revoca da Google o Microsoft li invalida immediatamente.</li>
+      <li><strong>Contatti sincronizzati:</strong> conservati fino alla richiesta di cancellazione da parte dell'utente.</li>
+      <li><strong>Log del server:</strong> conservati al massimo 30 giorni, poi eliminati automaticamente.</li>
+      <li><strong>Messaggi e-mail:</strong> non conservati su Frickmail; risiedono esclusivamente sul server IMAP dell'utente.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Condivisione con terze parti</h2>
+    <p>Frickmail non vende, affitta né condivide i dati personali con terze parti a fini commerciali. I dati sono trasmessi a Google e Microsoft unicamente per autenticare l'utente e accedere ai loro servizi:</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Informativa sulla privacy di Google</a></li>
+      <li><a href="https://privacy.microsoft.com/it-it/privacystatement" target="_blank" rel="noopener">Informativa sulla privacy di Microsoft</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Diritti dell'utente (GDPR)</h2>
+    <p>Ai sensi del Regolamento (UE) 2016/679 hai il diritto di: <strong>accesso</strong> ai tuoi dati, <strong>rettifica</strong>, <strong>cancellazione</strong> («diritto all'oblio»), <strong>revoca del consenso</strong> dalla tua <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">pagina account Google</a>, <strong>portabilità</strong> e <strong>opposizione</strong> al trattamento.</p>
+    <p>Per esercitare questi diritti scrivi a <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookie</h2>
+    <p>Frickmail usa <strong>esclusivamente cookie tecnici di sessione</strong> necessari al funzionamento. Non vengono usati cookie di tracciamento, analytics o pubblicità di terze parti.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Sicurezza</h2>
+    <p>Tutte le comunicazioni avvengono su HTTPS cifrato (TLS 1.2/1.3). I token OAuth2 sono cifrati a riposo. L'accesso al server è limitato agli utenti autorizzati.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Modifiche a questa informativa</h2>
+    <p>Il titolare si riserva il diritto di modificare questa informativa in qualunque momento. Le modifiche saranno pubblicate su questa pagina con la data aggiornata. L'uso continuato del servizio costituisce accettazione delle modifiche.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Termini di servizio</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ ESPAÑOL ═══════════════════════════════ -->
+<div id="lang-es" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Responsable del tratamiento</h2>
+    <p>El responsable del tratamiento es <strong>Nicola Francesconi</strong>, contactable en <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Frickmail es una aplicación webmail autoalojada disponible en <strong>https://webmail.housefz.com</strong>. Es un servicio privado reservado a usuarios autorizados.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Datos recopilados</h2>
+    <ul>
+      <li><strong>Credenciales IMAP/SMTP:</strong> dirección de correo y token OAuth2 (nunca se almacena contraseña al usar Google o Microsoft).</li>
+      <li><strong>Contenido del buzón:</strong> cabeceras, asuntos, cuerpos y adjuntos — leídos directamente desde el servidor IMAP del usuario, nunca copiados en Frickmail.</li>
+      <li><strong>Contactos de Google:</strong> nombre y dirección de correo, sincronizados vía Google People API y almacenados en la libreta local.</li>
+      <li><strong>Google Calendar:</strong> eventos y citas, leídos y escritos vía Google Calendar API.</li>
+      <li><strong>Datos de sesión:</strong> cookies técnicas de sesión necesarias para el funcionamiento de la interfaz web.</li>
+      <li><strong>Registros del servidor:</strong> IP, fecha/hora y URL de la petición, conservados por seguridad.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Uso de datos de la API de Google</h2>
+    <div class="highlight">
+      <strong>Declaración de uso limitado:</strong> El uso por parte de Frickmail de la información recibida de las API de Google cumple la <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Política de datos de usuario de los servicios API de Google</a>, incluidos los requisitos de uso limitado.
+    </div>
+    <p>Frickmail solicita los siguientes permisos (scopes) de Google:</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — identificación de la cuenta Google.</li>
+      <li><code>https://mail.google.com/</code> — acceso IMAP y SMTP al buzón Gmail.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — lectura de contactos Google para la libreta local.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — lectura y escritura de eventos de Google Calendar.</li>
+    </ul>
+    <p>Los datos de las API de Google <strong>nunca</strong> se usan para publicidad, perfilado, ni se transfieren a terceros para entrenar IA.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Finalidad y base legal</h2>
+    <p>Los datos se tratan exclusivamente para prestar el servicio webmail, sincronizar contactos y calendario, y garantizar la seguridad. La base legal es el <strong>interés legítimo</strong> del responsable y el <strong>consentimiento explícito</strong> del usuario otorgado mediante autorización OAuth2.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Conservación de datos</h2>
+    <ul>
+      <li><strong>Tokens OAuth2:</strong> almacenados cifrados durante la sesión activa. La revocación desde Google o Microsoft los invalida de inmediato.</li>
+      <li><strong>Contactos sincronizados:</strong> conservados hasta que el usuario solicite su eliminación.</li>
+      <li><strong>Registros del servidor:</strong> máximo 30 días, eliminados automáticamente.</li>
+      <li><strong>Mensajes de correo:</strong> no almacenados en Frickmail; residen exclusivamente en el servidor IMAP del usuario.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Compartir con terceros</h2>
+    <p>Frickmail no vende, alquila ni comparte datos personales con terceros con fines comerciales. Los datos se transmiten a Google y Microsoft únicamente para autenticar al usuario:</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Política de privacidad de Google</a></li>
+      <li><a href="https://privacy.microsoft.com/es-es/privacystatement" target="_blank" rel="noopener">Declaración de privacidad de Microsoft</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Derechos del usuario (RGPD)</h2>
+    <p>En virtud del Reglamento (UE) 2016/679 tiene derecho de <strong>acceso</strong>, <strong>rectificación</strong>, <strong>supresión</strong> («derecho al olvido»), <strong>retirada del consentimiento</strong> desde su <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">cuenta Google</a>, <strong>portabilidad</strong> y <strong>oposición</strong> al tratamiento.</p>
+    <p>Para ejercer estos derechos, escriba a <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookies</h2>
+    <p>Frickmail utiliza <strong>únicamente cookies técnicas de sesión</strong> necesarias para el funcionamiento. No se usan cookies de rastreo, analítica o publicidad de terceros.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Seguridad</h2>
+    <p>Todas las comunicaciones usan conexiones HTTPS cifradas (TLS 1.2/1.3). Los tokens OAuth2 se almacenan cifrados. El acceso al servidor está restringido a usuarios autorizados.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Cambios en esta política</h2>
+    <p>El responsable se reserva el derecho a actualizar esta política en cualquier momento. Los cambios se publicarán en esta página con fecha actualizada. El uso continuado del servicio implica aceptación de los cambios.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Términos de servicio</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ ΕΛΛΗΝΙΚΑ ═══════════════════════════════ -->
+<div id="lang-el" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Υπεύθυνος Επεξεργασίας</h2>
+    <p>Υπεύθυνος επεξεργασίας δεδομένων είναι ο <strong>Nicola Francesconi</strong>, στη διεύθυνση <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Το Frickmail είναι μια αυτο-φιλοξενούμενη εφαρμογή webmail στη διεύθυνση <strong>https://webmail.housefz.com</strong>. Πρόκειται για ιδιωτική υπηρεσία αποκλειστικά για εξουσιοδοτημένους χρήστες.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Δεδομένα που Συλλέγονται</h2>
+    <ul>
+      <li><strong>Στοιχεία πρόσβασης IMAP/SMTP:</strong> διεύθυνση email και token OAuth2 (δεν αποθηκεύεται κωδικός πρόσβασης κατά τη χρήση σύνδεσης Google ή Microsoft).</li>
+      <li><strong>Περιεχόμενο γραμματοκιβωτίου:</strong> επικεφαλίδες, θέματα, σώματα και συνημμένα — διαβάζονται απευθείας από τον διακομιστή IMAP του χρήστη, χωρίς να αντιγράφονται στο Frickmail.</li>
+      <li><strong>Επαφές Google:</strong> όνομα και διεύθυνση email επαφών, συγχρονισμένες μέσω Google People API και αποθηκευμένες στο τοπικό βιβλίο διευθύνσεων.</li>
+      <li><strong>Google Ημερολόγιο:</strong> γεγονότα και ραντεβού, ανάγνωση και εγγραφή μέσω Google Calendar API.</li>
+      <li><strong>Δεδομένα συνεδρίας:</strong> τεχνικά cookies συνεδρίας για τη λειτουργία της διεπαφής web.</li>
+      <li><strong>Αρχεία καταγραφής διακομιστή:</strong> διεύθυνση IP, ημερομηνία/ώρα και URL αιτήματος, για λόγους ασφαλείας.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Χρήση Δεδομένων Google API</h2>
+    <div class="highlight">
+      <strong>Δήλωση Περιορισμένης Χρήσης:</strong> Η χρήση από το Frickmail πληροφοριών που λαμβάνονται από τα API Google συμμορφώνεται με την <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Πολιτική Δεδομένων Χρηστών Υπηρεσιών API Google</a>, συμπεριλαμβανομένων των απαιτήσεων περιορισμένης χρήσης.
+    </div>
+    <p>Το Frickmail ζητά τις παρακάτω άδειες (scopes) Google:</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — αναγνώριση λογαριασμού Google.</li>
+      <li><code>https://mail.google.com/</code> — πρόσβαση IMAP και SMTP στο γραμματοκιβώτιο Gmail.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — ανάγνωση επαφών Google για το τοπικό βιβλίο διευθύνσεων.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — ανάγνωση και εγγραφή γεγονότων Google Ημερολογίου.</li>
+    </ul>
+    <p>Τα δεδομένα από τα API Google <strong>δεν χρησιμοποιούνται ποτέ</strong> για διαφήμιση, κατάρτιση προφίλ ή μεταβίβαση σε τρίτους για εκπαίδευση AI.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Σκοπός και Νομική Βάση</h2>
+    <p>Τα δεδομένα υπόκεινται σε επεξεργασία αποκλειστικά για την παροχή της υπηρεσίας webmail, τον συγχρονισμό επαφών και ημερολογίου, και τη διασφάλιση της ασφάλειας. Η νομική βάση είναι το <strong>έννομο συμφέρον</strong> του υπευθύνου και η <strong>ρητή συγκατάθεση</strong> του χρήστη μέσω OAuth2.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Διατήρηση Δεδομένων</h2>
+    <ul>
+      <li><strong>Token OAuth2:</strong> αποθηκεύονται κρυπτογραφημένα για τη διάρκεια της ενεργής συνεδρίας. Η ανάκληση από το λογαριασμό Google ή Microsoft τα ακυρώνει αμέσως.</li>
+      <li><strong>Συγχρονισμένες επαφές:</strong> διατηρούνται έως ότου ο χρήστης ζητήσει διαγραφή.</li>
+      <li><strong>Αρχεία καταγραφής:</strong> μέγιστο 30 ημέρες, στη συνέχεια διαγράφονται αυτόματα.</li>
+      <li><strong>Μηνύματα email:</strong> δεν αποθηκεύονται στο Frickmail· βρίσκονται αποκλειστικά στον διακομιστή IMAP του χρήστη.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Κοινοποίηση σε Τρίτους</h2>
+    <p>Το Frickmail δεν πωλεί, ενοικιάζει ή κοινοποιεί προσωπικά δεδομένα σε τρίτους για εμπορικούς σκοπούς. Δεδομένα διαβιβάζονται στην Google και τη Microsoft μόνο για ταυτοποίηση του χρήστη:</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Πολιτική Απορρήτου Google</a></li>
+      <li><a href="https://privacy.microsoft.com/el-gr/privacystatement" target="_blank" rel="noopener">Δήλωση Απορρήτου Microsoft</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Δικαιώματα Χρήστη (ΓΚΠΔ)</h2>
+    <p>Βάσει του Κανονισμού (ΕΕ) 2016/679 (ΓΚΠΔ) έχετε δικαίωμα <strong>πρόσβασης</strong>, <strong>διόρθωσης</strong>, <strong>διαγραφής</strong> («δικαίωμα στη λήθη»), <strong>ανάκλησης συγκατάθεσης</strong> από τη <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">σελίδα λογαριασμού Google</a>, <strong>φορητότητας δεδομένων</strong> και <strong>εναντίωσης</strong> στην επεξεργασία.</p>
+    <p>Για άσκηση αυτών των δικαιωμάτων επικοινωνήστε στο <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookies</h2>
+    <p>Το Frickmail χρησιμοποιεί <strong>αποκλειστικά τεχνικά cookies συνεδρίας</strong> απαραίτητα για τη λειτουργία της εφαρμογής. Δεν χρησιμοποιούνται cookies παρακολούθησης, ανάλυσης ή διαφήμισης τρίτων.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Ασφάλεια</h2>
+    <p>Όλες οι επικοινωνίες χρησιμοποιούν κρυπτογραφημένες συνδέσεις HTTPS (TLS 1.2/1.3). Τα token OAuth2 αποθηκεύονται κρυπτογραφημένα. Η πρόσβαση στον διακομιστή περιορίζεται σε εξουσιοδοτημένους χρήστες.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Αλλαγές στην Πολιτική</h2>
+    <p>Ο υπεύθυνος διατηρεί το δικαίωμα να τροποποιεί αυτήν την πολιτική ανά πάσα στιγμή. Οι αλλαγές θα δημοσιεύονται σε αυτή τη σελίδα με ενημερωμένη ημερομηνία. Η συνέχιση χρήσης της υπηρεσίας συνιστά αποδοχή των αλλαγών.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Όροι Χρήσης</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ SVENSKA ═══════════════════════════════ -->
+<div id="lang-sv" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Personuppgiftsansvarig</h2>
+    <p>Personuppgiftsansvarig är <strong>Nicola Francesconi</strong>, nåbar på <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Frickmail är ett självhostat webbmailprogram tillgängligt på <strong>https://webmail.housefz.com</strong>. Det är en privat tjänst reserverad för auktoriserade användare.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Insamlade uppgifter</h2>
+    <ul>
+      <li><strong>IMAP/SMTP-inloggningsuppgifter:</strong> e-postadress och OAuth2-token (inget lösenord lagras vid inloggning med Google eller Microsoft).</li>
+      <li><strong>Brevlådeinnehåll:</strong> rubriker, ämnen, meddelandetext och bilagor — läses direkt från användarens IMAP-server och kopieras aldrig till Frickmail.</li>
+      <li><strong>Google Kontakter:</strong> namn och e-postadress, synkroniserade via Google People API och lagrade i den lokala adressboken.</li>
+      <li><strong>Google Kalender:</strong> händelser och möten, lästa och skrivna via Google Calendar API.</li>
+      <li><strong>Sessionsdata:</strong> tekniska sessionscookies som krävs för webbgränssnittet.</li>
+      <li><strong>Serverloggar:</strong> IP-adress, datum/tid och begärda URL:er, sparade i säkerhetssyfte.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Användning av Google API-data</h2>
+    <div class="highlight">
+      <strong>Deklaration om begränsad användning:</strong> Frickmails användning av information från Google API:er följer <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services policy för användardata</a>, inklusive kraven på begränsad användning.
+    </div>
+    <p>Frickmail begär följande Google-behörigheter (scopes):</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — identifiering av Google-kontot.</li>
+      <li><code>https://mail.google.com/</code> — IMAP- och SMTP-åtkomst till Gmail-brevlådan.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — läsning av Google Kontakter för den lokala adressboken.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — läsning och skrivning av Google Kalender-händelser.</li>
+    </ul>
+    <p>Data från Google API:er används <strong>aldrig</strong> för reklam, profilering eller överföring till tredje part för AI-träning.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Ändamål och rättslig grund</h2>
+    <p>Data behandlas uteslutande för att tillhandahålla webmailtjänsten, synkronisera kontakter och kalender samt säkerställa säkerheten. Den rättsliga grunden är den personuppgiftsansvariges <strong>berättigade intresse</strong> och användarens <strong>uttryckliga samtycke</strong> via OAuth2.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Datalagring</h2>
+    <ul>
+      <li><strong>OAuth2-token:</strong> lagras krypterade under den aktiva sessionens varaktighet. Återkallelse via Google eller Microsoft ogiltigförklarar dem omedelbart.</li>
+      <li><strong>Synkroniserade kontakter:</strong> behålls tills användaren begär radering.</li>
+      <li><strong>Serverloggar:</strong> maximalt 30 dagar, raderas sedan automatiskt.</li>
+      <li><strong>E-postmeddelanden:</strong> lagras inte på Frickmail; de finns enbart på användarens IMAP-server.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Delning med tredje parter</h2>
+    <p>Frickmail säljer, hyr ut eller delar inte personuppgifter med tredje parter i kommersiellt syfte. Data överförs till Google och Microsoft enbart för autentisering:</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Googles sekretesspolicy</a></li>
+      <li><a href="https://privacy.microsoft.com/sv-se/privacystatement" target="_blank" rel="noopener">Microsofts sekretesspolicy</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Användarens rättigheter (GDPR)</h2>
+    <p>Enligt förordning (EU) 2016/679 (GDPR) har du rätt till <strong>tillgång</strong> till dina uppgifter, <strong>rättelse</strong>, <strong>radering</strong> («rätten att bli glömd»), <strong>återkallelse av samtycke</strong> via ditt <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google-konto</a>, <strong>dataportabilitet</strong> och <strong>invändning</strong> mot behandling.</p>
+    <p>Kontakta <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a> för att utöva dessa rättigheter.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookies</h2>
+    <p>Frickmail använder <strong>enbart tekniska sessionscookies</strong> som krävs för att applikationen ska fungera. Inga spårnings-, analys- eller reklamcookies från tredje part används.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Säkerhet</h2>
+    <p>All kommunikation sker via krypterade HTTPS-anslutningar (TLS 1.2/1.3). OAuth2-token lagras krypterade. Serveråtkomsten är begränsad till auktoriserade användare.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Ändringar i denna policy</h2>
+    <p>Den personuppgiftsansvarige förbehåller sig rätten att när som helst uppdatera denna policy. Ändringar publiceras på denna sida med uppdaterat datum. Fortsatt användning av tjänsten innebär godkännande av ändringarna.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Användarvillkor</a></p></footer>
+</div>
+
+<!-- ═══════════════════════════════ NEDERLANDS ═══════════════════════════════ -->
+<div id="lang-nl" hidden>
+<main>
+  <div class="card">
+    <h2><span class="num">1</span>Verwerkingsverantwoordelijke</h2>
+    <p>De verwerkingsverantwoordelijke is <strong>Nicola Francesconi</strong>, bereikbaar op <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a>.</p>
+    <p>Frickmail is een zelf-gehoste webmailtoepassing beschikbaar op <strong>https://webmail.housefz.com</strong>. Het is een privédienst voorbehouden aan bevoegde gebruikers.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">2</span>Verzamelde gegevens</h2>
+    <ul>
+      <li><strong>IMAP/SMTP-inloggegevens:</strong> e-mailadres en OAuth2-token (er wordt nooit een wachtwoord opgeslagen bij gebruik van Google- of Microsoft-aanmelding).</li>
+      <li><strong>Postvakinhoud:</strong> headers, onderwerpen, berichttekst en bijlagen — rechtstreeks gelezen van de IMAP-server van de gebruiker, nooit gekopieerd naar Frickmail.</li>
+      <li><strong>Google Contacten:</strong> naam en e-mailadres van contacten, gesynchroniseerd via Google People API en opgeslagen in het lokale adresboek.</li>
+      <li><strong>Google Agenda:</strong> afspraken en evenementen, gelezen en geschreven via de Google Calendar API.</li>
+      <li><strong>Sessiegegevens:</strong> technische sessiecookies vereist voor de webinterface.</li>
+      <li><strong>Serverlogboeken:</strong> IP-adres, datum/tijd en verzoek-URL, bewaard voor beveiligingsdoeleinden.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">3</span>Gebruik van Google API-gegevens</h2>
+    <div class="highlight">
+      <strong>Verklaring beperkt gebruik:</strong> Het gebruik door Frickmail van informatie ontvangen van Google API's voldoet aan het <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Gebruiksgegevensbeleid van Google API Services</a>, inclusief de vereisten voor beperkt gebruik.
+    </div>
+    <p>Frickmail vraagt de volgende Google-machtigingen (scopes) aan:</p>
+    <ul>
+      <li><code>openid</code>, <code>email</code>, <code>profile</code> — identificatie van het Google-account.</li>
+      <li><code>https://mail.google.com/</code> — IMAP- en SMTP-toegang tot het Gmail-postvak.</li>
+      <li><code>https://www.googleapis.com/auth/contacts.readonly</code> — lezen van Google Contacten voor het lokale adresboek.</li>
+      <li><code>https://www.googleapis.com/auth/calendar</code> — lezen en schrijven van Google Agenda-evenementen.</li>
+    </ul>
+    <p>Gegevens van Google API's worden <strong>nooit</strong> gebruikt voor advertenties, profilering of overgedragen aan derden voor AI-training.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">4</span>Doel en rechtsgrondslag</h2>
+    <p>Gegevens worden uitsluitend verwerkt om de webmaildienst te leveren, contacten en agenda te synchroniseren en de beveiliging te waarborgen. De rechtsgrondslag is het <strong>gerechtvaardigd belang</strong> van de verantwoordelijke en de <strong>uitdrukkelijke toestemming</strong> van de gebruiker via OAuth2.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">5</span>Bewaartermijn</h2>
+    <ul>
+      <li><strong>OAuth2-tokens:</strong> versleuteld opgeslagen voor de duur van de actieve sessie. Intrekking via Google of Microsoft maakt ze onmiddellijk ongeldig.</li>
+      <li><strong>Gesynchroniseerde contacten:</strong> bewaard totdat de gebruiker verwijdering verzoekt.</li>
+      <li><strong>Serverlogboeken:</strong> maximaal 30 dagen, daarna automatisch verwijderd.</li>
+      <li><strong>E-mailberichten:</strong> niet opgeslagen op Frickmail; ze bevinden zich uitsluitend op de IMAP-server van de gebruiker.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">6</span>Delen met derden</h2>
+    <p>Frickmail verkoopt, verhuurt of deelt geen persoonsgegevens met derden voor commerciële doeleinden. Gegevens worden uitsluitend aan Google en Microsoft doorgegeven voor authenticatie:</p>
+    <ul>
+      <li><a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Privacybeleid van Google</a></li>
+      <li><a href="https://privacy.microsoft.com/nl-nl/privacystatement" target="_blank" rel="noopener">Privacyverklaring van Microsoft</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2><span class="num">7</span>Rechten van de gebruiker (AVG)</h2>
+    <p>Op grond van Verordening (EU) 2016/679 (AVG) hebt u het recht op <strong>inzage</strong>, <strong>rectificatie</strong>, <strong>verwijdering</strong> («recht om vergeten te worden»), <strong>intrekking van toestemming</strong> via uw <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google-accountpagina</a>, <strong>gegevensoverdraagbaarheid</strong> en <strong>bezwaar</strong> tegen verwerking.</p>
+    <p>Neem contact op via <a href="mailto:nicola.francesconi@gmail.com">nicola.francesconi@gmail.com</a> om deze rechten uit te oefenen.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">8</span>Cookies</h2>
+    <p>Frickmail gebruikt <strong>uitsluitend technische sessiecookies</strong> die vereist zijn voor de werking van de applicatie. Er worden geen tracking-, analyse- of advertentiecookies van derden gebruikt.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">9</span>Beveiliging</h2>
+    <p>Alle communicatie verloopt via versleutelde HTTPS-verbindingen (TLS 1.2/1.3). OAuth2-tokens worden versleuteld opgeslagen. Servertoegang is beperkt tot bevoegde gebruikers.</p>
+  </div>
+  <div class="card">
+    <h2><span class="num">10</span>Wijzigingen in dit beleid</h2>
+    <p>De verwerkingsverantwoordelijke behoudt zich het recht voor dit beleid op elk moment te wijzigen. Wijzigingen worden op deze pagina gepubliceerd met een bijgewerkte datum. Voortgezet gebruik van de dienst na publicatie houdt aanvaarding van de wijzigingen in.</p>
+  </div>
+</main>
+<footer><p>Frickmail — <a href="https://webmail.housefz.com">webmail.housefz.com</a> &nbsp;|&nbsp; <a href="/terms">Gebruiksvoorwaarden</a></p></footer>
+</div>
+
+</body>
+</html>
