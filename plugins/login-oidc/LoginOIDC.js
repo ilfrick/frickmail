@@ -21,14 +21,16 @@
 			const t = setInterval(() => {
 				if (!popupRef || popupRef.closed) {
 					clearInterval(t);
+					console.log('[frickmail-oidc] popup closed detected, waiting for postMessage…');
 					// Grace period: cross-window postMessage travels via IPC and may
-					// arrive slightly after the popup.closed flag is set.
+					// arrive after the popup.closed flag is visible.
 					setTimeout(() => {
 						if (pendingResolve) {
+							console.log('[frickmail-oidc] no postMessage received — resolving cancelled');
 							const r = pendingResolve; pendingResolve = null;
 							r({ status: 'cancelled' });
 						}
-					}, 300);
+					}, 1500);
 				}
 			}, 500);
 		});
@@ -38,6 +40,7 @@
 		if (e.origin !== location.origin) return;
 		const d = e.data;
 		if (!d || d.type !== 'frickmail-oidc') return;
+		console.log('[frickmail-oidc] postMessage received', d);
 		if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(d); }
 		try { popupRef && popupRef.close(); } catch (_) {}
 	});
@@ -45,6 +48,7 @@
 	const launch = async mode => {
 		const url = baseUrl() + '/?StartLoginOIDC' + (mode === 'link' ? '&mode=link' : '');
 		const result = await openPopup(url);
+		console.log('[frickmail-oidc] popup result', result);
 		if (!result || result.status === 'cancelled') return;
 		if (result.status === 'ok') {
 			if (mode === 'link') {
@@ -65,12 +69,14 @@
 						}}));
 						return;
 					}
-					document.location.reload();
+					console.log('[frickmail-oidc] navigating after reauth bridge');
+					document.location.href = baseUrl();
 				}, 'FrickmailBridgeSession', {});
 			} else {
 				// bridge() succeeded in the popup — SnappyMail auth cookie is
-				// already set in the popup response, just reload.
-				document.location.reload();
+				// already set in the popup response, navigate to inbox.
+				console.log('[frickmail-oidc] navigating after successful bridge');
+				document.location.href = baseUrl();
 			}
 		} else {
 			alert((mode === 'link' ? 'Link' : 'Sign-in') + ' failed: ' + (result.error || 'unknown error'));
