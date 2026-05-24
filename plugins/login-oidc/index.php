@@ -33,7 +33,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME        = 'Login OIDC',
-		VERSION     = '1.1',
+		VERSION     = '1.2',
 		RELEASE     = '2026-05-23',
 		REQUIRED    = '2.36.1',
 		CATEGORY    = 'Login',
@@ -269,24 +269,13 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 				}
 
 				// Establish the Frickmail PHP session.
+				// The SnappyMail/IMAP bridge is done from the main window via
+				// FrickmailBridgeSession after the popup closes, so that the
+				// auth cookie is set in a same-origin JSON request context.
 				\Frickmail\User\Bridge::startSession();
 				\session_regenerate_id(true);
 				$_SESSION[\Frickmail\User\Bridge::SESSION_KEY_USER] = $uid;
 				$_SESSION[\Frickmail\User\Bridge::SESSION_KEY_KEY]  = \base64_encode($cryptKey);
-
-				// Bridge to SnappyMail / IMAP — best-effort; failure leaves the
-				// Frickmail session intact, user can re-enter IMAP creds from Settings.
-				$primary = $db->getPrimaryMailAccount($uid);
-				if ($primary) {
-					$account = $db->decryptedAccount($primary, $cryptKey);
-					require_once \APP_PLUGINS_PATH . 'frickmail-user/lib/MailAccountHandler.php';
-					$handler = new \Frickmail\User\MailAccountHandler($db);
-					try {
-						$handler->bridge($account);
-					} catch (\Throwable $eBridge) {
-						$oActions->Logger()->WriteException($eBridge, \LOG_WARNING);
-					}
-				}
 				$bOk = true;
 			}
 		} catch (\Throwable $e) {

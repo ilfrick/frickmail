@@ -455,4 +455,17 @@
 		}, 0);
 	});
 
+	// After OIDC login establishes the Frickmail session but IMAP bridge needs
+	// re-authorization, show the reauth form in the already-rendered login page.
+	addEventListener('frickmail-bridge-reauth', e => {
+		const { account_id, email, type, message } = e.detail;
+		const wrap = document.querySelector('.frickmail-login');
+		if (wrap) {
+			showReauthForm(wrap, account_id, email, type);
+		} else {
+			alert(message || 'Please re-authenticate your mail account.');
+			document.location.reload();
+		}
+	});
+
 })(window.rl);

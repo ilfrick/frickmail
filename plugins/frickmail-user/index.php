@@ -32,7 +32,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME     = 'Frickmail User',
-		VERSION  = '0.48',
+		VERSION  = '0.49',
 		RELEASE  = '2026-05-21',
 		REQUIRED = '2.36.1',
 		CATEGORY = 'Login',
@@ -148,6 +148,7 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		}
 
 		$this->addJsonHook('FrickmailLogin',               'JsonFrickmailLogin');
+		$this->addJsonHook('FrickmailBridgeSession',       'JsonFrickmailBridgeSession');
 		$this->addJsonHook('FrickmailRegister',            'JsonFrickmailRegister');
 		$this->addJsonHook('FrickmailListAccounts',        'JsonListAccounts');
 		$this->addJsonHook('FrickmailAddAccount',          'JsonAddAccount');
@@ -370,6 +371,58 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 			unset($result['status'], $result['account']);
 			return $this->jsonResponse(__FUNCTION__, $result);
 
+		} catch (\Throwable $e) {
+			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
+			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);
+		}
+	}
+
+	/**
+	 * Called from the main window after an OIDC popup establishes the Frickmail
+	 * PHP session. Bridges the session to SnappyMail/IMAP in the correct
+	 * (same-origin, JSON) request context so cookies are set reliably.
+	 */
+	public function JsonFrickmailBridgeSession() : array
+	{
+		try {
+			require_once \APP_PLUGINS_PATH . 'frickmail-user/lib/Bridge.php';
+			$uid      = \Frickmail\User\Bridge::currentUserId();
+			$cryptKey = \Frickmail\User\Bridge::currentCryptKey();
+			if (!$uid || null === $cryptKey) {
+				return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => 'No active Frickmail session']);
+			}
+			$db      = $this->db();
+			$primary = $db->getPrimaryMailAccount($uid);
+			if (!$primary) {
+				return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'no_primary' => true]);
+			}
+			$account = $db->decryptedAccount($primary, $cryptKey);
+			try {
+				$this->mailAccounts()->bridge($account);
+			} catch (\RainLoop\Exceptions\ClientException $e) {
+				if ($e->getCode() === \RainLoop\Notifications::AuthError) {
+					return $this->jsonResponse(__FUNCTION__, [
+						'ok'                   => true,
+						'reauth_required'      => true,
+						'reauth_account_id'    => (int)    $account['id'],
+						'reauth_account_email' => (string) $account['email'],
+						'reauth_account_type'  => (string) $account['type'],
+						'message'              => 'IMAP authentication failed — re-enter the password.',
+					]);
+				}
+				throw $e;
+			} catch (\RuntimeException $e) {
+				\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_WARNING);
+				return $this->jsonResponse(__FUNCTION__, [
+					'ok'                   => true,
+					'reauth_required'      => true,
+					'reauth_account_id'    => (int)    $account['id'],
+					'reauth_account_email' => (string) $account['email'],
+					'reauth_account_type'  => (string) $account['type'],
+					'message'              => $e->getMessage() . ' — please re-authorise this account.',
+				]);
+			}
+			return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'email' => $account['email']]);
 		} catch (\Throwable $e) {
 			\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_ERR);
 			return $this->jsonResponse(__FUNCTION__, ['ok' => false, 'error' => $e->getMessage()]);

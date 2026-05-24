@@ -47,7 +47,26 @@
 				alert(providerName + ' account linked successfully.');
 				refreshOidcSection();
 			} else {
-				document.location.reload();
+				// Popup only established the Frickmail PHP session.
+				// Bridge to SnappyMail/IMAP from the main window so the auth
+				// cookie is set in a same-origin request.
+				rl.pluginRemoteRequest((iError, oData) => {
+					const r = oData?.Result;
+					if (!r || !r.ok) {
+						alert('SSO login failed: ' + (r?.error || 'network error'));
+						return;
+					}
+					if (r.reauth_required) {
+						dispatchEvent(new CustomEvent('frickmail-bridge-reauth', { detail: {
+							account_id: r.reauth_account_id,
+							email:      r.reauth_account_email,
+							type:       r.reauth_account_type,
+							message:    r.message,
+						}}));
+						return;
+					}
+					document.location.reload();
+				}, 'FrickmailBridgeSession', {});
 			}
 		} else {
 			alert((mode === 'link' ? 'Link' : 'Sign-in') + ' failed: ' + (result.error || 'unknown error'));
