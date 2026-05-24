@@ -21,10 +21,14 @@
 			const t = setInterval(() => {
 				if (!popupRef || popupRef.closed) {
 					clearInterval(t);
-					if (pendingResolve) {
-						const r = pendingResolve; pendingResolve = null;
-						r({ status: 'cancelled' });
-					}
+					// Grace period: cross-window postMessage travels via IPC and may
+					// arrive slightly after the popup.closed flag is set.
+					setTimeout(() => {
+						if (pendingResolve) {
+							const r = pendingResolve; pendingResolve = null;
+							r({ status: 'cancelled' });
+						}
+					}, 300);
 				}
 			}, 500);
 		});
@@ -46,16 +50,12 @@
 			if (mode === 'link') {
 				alert(providerName + ' account linked successfully.');
 				refreshOidcSection();
-			} else {
-				// Popup only established the Frickmail PHP session.
-				// Bridge to SnappyMail/IMAP from the main window so the auth
-				// cookie is set in a same-origin request.
+			} else if (result.reauth_required) {
+				// bridge() failed in the popup (IMAP auth error); use the main-window
+				// JSON path to get account details and show the reauth form.
 				rl.pluginRemoteRequest((iError, oData) => {
 					const r = oData?.Result;
-					if (!r || !r.ok) {
-						alert('SSO login failed: ' + (r?.error || 'network error'));
-						return;
-					}
+					if (!r) { alert('SSO login failed: network error'); return; }
 					if (r.reauth_required) {
 						dispatchEvent(new CustomEvent('frickmail-bridge-reauth', { detail: {
 							account_id: r.reauth_account_id,
@@ -67,6 +67,10 @@
 					}
 					document.location.reload();
 				}, 'FrickmailBridgeSession', {});
+			} else {
+				// bridge() succeeded in the popup — SnappyMail auth cookie is
+				// already set in the popup response, just reload.
+				document.location.reload();
 			}
 		} else {
 			alert((mode === 'link' ? 'Link' : 'Sign-in') + ' failed: ' + (result.error || 'unknown error'));

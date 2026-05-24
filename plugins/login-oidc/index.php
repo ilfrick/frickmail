@@ -33,7 +33,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME        = 'Login OIDC',
-		VERSION     = '1.2',
+		VERSION     = '1.3',
 		RELEASE     = '2026-05-23',
 		REQUIRED    = '2.36.1',
 		CATEGORY    = 'Login',
@@ -269,13 +269,33 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 				}
 
 				// Establish the Frickmail PHP session.
-				// The SnappyMail/IMAP bridge is done from the main window via
-				// FrickmailBridgeSession after the popup closes, so that the
-				// auth cookie is set in a same-origin JSON request context.
 				\Frickmail\User\Bridge::startSession();
 				\session_regenerate_id(true);
 				$_SESSION[\Frickmail\User\Bridge::SESSION_KEY_USER] = $uid;
 				$_SESSION[\Frickmail\User\Bridge::SESSION_KEY_KEY]  = \base64_encode($cryptKey);
+
+				// Bridge IMAP here in the popup response. LoginProcess() sets the
+				// SnappyMail auth cookie in this HTTP response; the browser stores
+				// it domain-wide so the main window picks it up on reload.
+				$bReauthRequired = false;
+				$oPrimary = $db->getPrimaryMailAccount($uid);
+				if ($oPrimary) {
+					require_once \APP_PLUGINS_PATH . 'frickmail-user/lib/MailAccountHandler.php';
+					$aAccount = $db->decryptedAccount($oPrimary, $cryptKey);
+					$oHandler = new \Frickmail\User\MailAccountHandler($db);
+					try {
+						$oHandler->bridge($aAccount);
+					} catch (\RainLoop\Exceptions\ClientException $e) {
+						if ($e->getCode() === \RainLoop\Notifications::AuthError) {
+							$bReauthRequired = true;
+						} else {
+							throw $e;
+						}
+					} catch (\RuntimeException $e) {
+						$oActions->Logger()->WriteException($e, \LOG_WARNING);
+						$bReauthRequired = true;
+					}
+				}
 				$bOk = true;
 			}
 		} catch (\Throwable $e) {
@@ -283,7 +303,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 			$sError = $e->getMessage();
 		}
 
-		$this->renderCallback($bOk, $sEmail, $sError, $sUri, $sMode);
+		$this->renderCallback($bOk, $sEmail, $sError, $sUri, $sMode, $bReauthRequired ?? false);
 		exit;
 	}
 
@@ -453,15 +473,16 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 		return \rtrim(\strtr(\base64_encode(\hash('sha256', $v, true)), '+/', '-_'), '=');
 	}
 
-	private function renderCallback(bool $bOk, string $sEmail, string $sError, string $sFallback, string $sMode = 'login') : void
+	private function renderCallback(bool $bOk, string $sEmail, string $sError, string $sFallback, string $sMode = 'login', bool $bReauthRequired = false) : void
 	{
 		\header('Content-Type: text/html; charset=utf-8');
 		$payload = \json_encode([
-			'type'   => 'frickmail-oidc',
-			'status' => $bOk ? 'ok' : 'error',
-			'mode'   => $sMode,
-			'email'  => $sEmail,
-			'error'  => $sError,
+			'type'            => 'frickmail-oidc',
+			'status'          => $bOk ? 'ok' : 'error',
+			'mode'            => $sMode,
+			'email'           => $sEmail,
+			'error'           => $sError,
+			'reauth_required' => $bReauthRequired,
 		]);
 		echo '<!doctype html><meta charset="utf-8"><title>Frickmail</title><body><script>'
 			. '(function(){var m=' . $payload . ';'
