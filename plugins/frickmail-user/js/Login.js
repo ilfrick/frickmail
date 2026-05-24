@@ -450,6 +450,8 @@
 			}
 			const openSignup = !!rl.pluginSettingsGet('frickmail-user', 'open_signup');
 			buildForm(host, openSignup);
+			// Let other plugins (e.g. login-oidc) inject buttons into the rendered form.
+			dispatchEvent(new CustomEvent('frickmail-login-ready', { detail: host }));
 		}, 0);
 	});
 

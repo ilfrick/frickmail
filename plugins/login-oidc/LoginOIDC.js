@@ -56,6 +56,26 @@
 
 	// ── Login view: SSO button ────────────────────────────────────────────────
 
+	// frickmail-user/Login.js replaces the entire login form DOM and fires this
+	// event afterward so plugins can inject into the actual rendered form.
+	addEventListener('frickmail-login-ready', e => {
+		const host = e.detail;
+		const actions = host.querySelector('.actions');
+		if (!actions) return;
+		const sep = document.createElement('div');
+		sep.style.cssText = 'margin:.7em 0 .3em;text-align:center;font-size:90%;opacity:.6';
+		sep.textContent = '— or —';
+		const btn = document.createElement('button');
+		btn.type = 'button';
+		btn.className = 'btn';
+		btn.style.cssText = 'width:100%;margin-top:.3em';
+		btn.textContent = buttonLabel;
+		btn.onclick = () => launch('login');
+		actions.after(sep, btn);
+	});
+
+	// Fallback for environments without frickmail-user (uses the stock SnappyMail
+	// login form which has #plugin-Login-BottomControlGroup).
 	addEventListener('rl-view-model', e => {
 		if ('Login' === e.detail.viewModelTemplateID) {
 			const container = e.detail.viewModelDom.querySelector('#plugin-Login-BottomControlGroup');
