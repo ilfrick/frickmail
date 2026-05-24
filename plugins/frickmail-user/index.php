@@ -336,9 +336,6 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 					$this->mailAccounts()->bridge($account);
 				} catch (\RainLoop\Exceptions\ClientException $e) {
 					if ($e->getCode() === \RainLoop\Notifications::AuthError) {
-						// Stored credentials are wrong (e.g. wrong password re-entered during
-						// a previous re-auth attempt). Treat as reauth_required so the user
-						// can correct the password rather than seeing a cryptic login error.
 						return $this->jsonResponse(__FUNCTION__, [
 							'ok'                   => true,
 							'no_primary'           => true,
@@ -350,6 +347,20 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 						]);
 					}
 					throw $e;
+				} catch (\RuntimeException $e) {
+					// OAuth token refresh failed (expired/revoked). The Frickmail session
+					// is already established; surface as reauth_required so the user can
+					// re-authorise from the login screen instead of being locked out.
+					\RainLoop\Api::Actions()->Logger()->WriteException($e, \LOG_WARNING);
+					return $this->jsonResponse(__FUNCTION__, [
+						'ok'                   => true,
+						'no_primary'           => true,
+						'reauth_required'      => true,
+						'reauth_account_id'    => (int)    $account['id'],
+						'reauth_account_email' => (string) $account['email'],
+						'reauth_account_type'  => (string) $account['type'],
+						'message'              => $e->getMessage() . ' — please re-authorise this account.',
+					]);
 				}
 				return $this->jsonResponse(__FUNCTION__, ['ok' => true, 'email' => $account['email']]);
 			}
