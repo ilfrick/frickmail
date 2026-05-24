@@ -82,9 +82,23 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	// ── Sec-Fetch whitelist ───────────────────────────────────────────────────
 
-	public function httpPaths(array $aPaths) : void
+	public function httpPaths(array &$aPaths) : void
 	{
-		if (!empty($aPaths[0]) && \in_array($aPaths[0], ['LoginOIDC', 'StartLoginOIDC'], true)) {
+		$sPath     = $aPaths[0] ?? '';
+		$bOidcPath = \in_array($sPath, ['LoginOIDC', 'StartLoginOIDC'], true);
+
+		// Some OIDC providers strip the first query key from the redirect_uri,
+		// redirecting to /?code=xxx&state=yyy instead of /?LoginOIDC&code=xxx&state=yyy.
+		// Detect this by decrypting the state and routing to LoginOIDC explicitly.
+		if (!$bOidcPath && isset($_GET['code'], $_GET['state'])) {
+			$aState = \SnappyMail\Crypt::DecryptUrlSafe((string) $_GET['state'], \APP_SALT);
+			if (\is_array($aState) && ($aState['p'] ?? '') === 'oidc') {
+				$aPaths[0] = 'LoginOIDC';
+				$bOidcPath = true;
+			}
+		}
+
+		if ($bOidcPath) {
 			$oConfig  = \RainLoop\Api::Config();
 			$sCurrent = $oConfig->Get('security', 'secfetch_allow', '');
 			$aParts   = \array_filter(\array_unique(\explode(';', $sCurrent)));
@@ -158,7 +172,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$oHttp    = $oActions->Http();
 		$oHttp->ServerNoCache();
 
-		$sUri   = \preg_replace('/.LoginOIDC.*$/D', '', $_SERVER['REQUEST_URI']);
+		$sUri   = \preg_replace('/[?](?:LoginOIDC|code).*$/D', '', $_SERVER['REQUEST_URI']) ?: '/';
 		$bOk    = false;
 		$sError = '';
 		$sEmail = '';
