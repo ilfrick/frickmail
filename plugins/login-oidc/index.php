@@ -33,7 +33,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME        = 'Login OIDC',
-		VERSION     = '1.6',
+		VERSION     = '1.7',
 		RELEASE     = '2026-05-23',
 		REQUIRED    = '2.36.1',
 		CATEGORY    = 'Login',

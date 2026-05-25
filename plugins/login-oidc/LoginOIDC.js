@@ -3,13 +3,14 @@
 	const providerName = rl.pluginSettingsGet(PLUGIN, 'provider_name') || 'SSO';
 	const buttonLabel  = rl.pluginSettingsGet(PLUGIN, 'button_label')  || 'Sign in with SSO';
 
-	let popupRef = null, pendingResolve = null, _bc = null;
+	let popupRef = null, pendingResolve = null, _bc = null, _storageHandler = null;
 
 	const baseUrl = () =>
 		document.location.href.replace(/[#?].*$/, '').replace(/\/+$/, '');
 
 	const resolvePopup = d => {
 		if (_bc) { try { _bc.close(); } catch(_) {} _bc = null; }
+		if (_storageHandler) { removeEventListener('storage', _storageHandler); _storageHandler = null; }
 		if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(d); }
 		try { popupRef && popupRef.close(); } catch (_) {}
 	};
@@ -26,9 +27,8 @@
 		if (!popupRef) { document.location = url; return null; }
 		return new Promise(resolve => {
 			pendingResolve = resolve;
-			// BroadcastChannel is same-origin and survives cross-origin popup navigation
-			// (unlike postMessage via window.opener which can silently drop after Authentik
-			// navigates the popup cross-origin and back).
+
+			// BroadcastChannel: same-origin, survives cross-origin popup navigation.
 			try {
 				_bc = new BroadcastChannel('frickmail-oidc');
 				_bc.onmessage = e => {
@@ -38,9 +38,24 @@
 					resolvePopup(d);
 				};
 			} catch(_) {}
+
+			// storage event fires immediately in other same-origin windows when
+			// localStorage changes — no polling delay, most reliable channel.
+			_storageHandler = e => {
+				if (e.key !== 'frickmail-oidc-result' || !e.newValue) return;
+				try {
+					const d = JSON.parse(e.newValue);
+					if (!d || d.type !== 'frickmail-oidc') return;
+					try { localStorage.removeItem('frickmail-oidc-result'); } catch(_) {}
+					console.log('[frickmail-oidc] storage event received', d);
+					resolvePopup(d);
+				} catch(_) {}
+			};
+			addEventListener('storage', _storageHandler);
+
+			// Polling fallback: also catches the case where the storage event is
+			// missed (e.g. browser quirks) or the item was written before we registered.
 			const t = setInterval(() => {
-				// localStorage is the most reliable channel — immune to cross-origin
-				// popup navigation that silently breaks postMessage and BroadcastChannel.
 				try {
 					const raw = localStorage.getItem('frickmail-oidc-result');
 					if (raw) {
@@ -48,7 +63,7 @@
 						if (d && d.type === 'frickmail-oidc') {
 							localStorage.removeItem('frickmail-oidc-result');
 							clearInterval(t);
-							console.log('[frickmail-oidc] localStorage received', d);
+							console.log('[frickmail-oidc] localStorage poll received', d);
 							resolvePopup(d);
 							return;
 						}
@@ -56,10 +71,10 @@
 				} catch(_) {}
 				if (!popupRef || popupRef.closed) {
 					clearInterval(t);
-					console.log('[frickmail-oidc] popup closed, waiting for channel message…');
+					console.log('[frickmail-oidc] popup closed, waiting for any pending message…');
 					setTimeout(() => {
 						if (pendingResolve) {
-							console.log('[frickmail-oidc] no message received — resolving cancelled');
+							console.log('[frickmail-oidc] no result received — resolving cancelled');
 							resolvePopup({ status: 'cancelled' });
 						}
 					}, 1000);
@@ -101,14 +116,13 @@
 						}}));
 						return;
 					}
-					console.log('[frickmail-oidc] navigating after reauth bridge');
-					document.location.href = baseUrl();
+					console.log('[frickmail-oidc] reloading after reauth bridge');
+					document.location.reload();
 				}, 'FrickmailBridgeSession', {});
 			} else {
-				// bridge() succeeded in the popup — SnappyMail auth cookie is
-				// already set in the popup response, navigate to inbox.
-				console.log('[frickmail-oidc] navigating after successful bridge');
-				document.location.href = baseUrl();
+				// bridge() succeeded — auth cookie already set, reload to enter inbox.
+				console.log('[frickmail-oidc] reloading after successful bridge');
+				document.location.reload();
 			}
 		} else {
 			alert((mode === 'link' ? 'Link' : 'Sign-in') + ' failed: ' + (result.error || 'unknown error'));
