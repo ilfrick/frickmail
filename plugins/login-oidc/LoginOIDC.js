@@ -3,46 +3,62 @@
 	const providerName = rl.pluginSettingsGet(PLUGIN, 'provider_name') || 'SSO';
 	const buttonLabel  = rl.pluginSettingsGet(PLUGIN, 'button_label')  || 'Sign in with SSO';
 
-	let popupRef = null, pendingResolve = null;
+	let popupRef = null, pendingResolve = null, _bc = null;
 
 	const baseUrl = () =>
 		document.location.href.replace(/[#?].*$/, '').replace(/\/+$/, '');
+
+	const resolvePopup = d => {
+		if (_bc) { try { _bc.close(); } catch(_) {} _bc = null; }
+		if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(d); }
+		try { popupRef && popupRef.close(); } catch (_) {}
+	};
 
 	const openPopup = url => {
 		const w = 520, h = 640,
 			y = Math.round((screen.availHeight - h) / 2),
 			x = Math.round((screen.availWidth  - w) / 2);
 		try { popupRef && popupRef.close(); } catch (_) {}
+		if (_bc) { try { _bc.close(); } catch(_) {} _bc = null; }
 		popupRef = window.open(url, 'frickmail-oidc',
 			`popup=yes,width=${w},height=${h},left=${x},top=${y}`);
 		if (!popupRef) { document.location = url; return null; }
 		return new Promise(resolve => {
 			pendingResolve = resolve;
+			// BroadcastChannel is same-origin and survives cross-origin popup navigation
+			// (unlike postMessage via window.opener which can silently drop after Authentik
+			// navigates the popup cross-origin and back).
+			try {
+				_bc = new BroadcastChannel('frickmail-oidc');
+				_bc.onmessage = e => {
+					const d = e.data;
+					if (!d || d.type !== 'frickmail-oidc') return;
+					console.log('[frickmail-oidc] BroadcastChannel received', d);
+					resolvePopup(d);
+				};
+			} catch(_) {}
 			const t = setInterval(() => {
 				if (!popupRef || popupRef.closed) {
 					clearInterval(t);
-					console.log('[frickmail-oidc] popup closed detected, waiting for postMessage…');
-					// Grace period: cross-window postMessage travels via IPC and may
-					// arrive after the popup.closed flag is visible.
+					console.log('[frickmail-oidc] popup closed, waiting for channel message…');
 					setTimeout(() => {
 						if (pendingResolve) {
-							console.log('[frickmail-oidc] no postMessage received — resolving cancelled');
-							const r = pendingResolve; pendingResolve = null;
-							r({ status: 'cancelled' });
+							console.log('[frickmail-oidc] no message received — resolving cancelled');
+							resolvePopup({ status: 'cancelled' });
 						}
-					}, 1500);
+					}, 1000);
 				}
 			}, 500);
 		});
 	};
 
+	// Keep postMessage listener as fallback for browsers without BroadcastChannel.
 	addEventListener('message', e => {
 		if (e.origin !== location.origin) return;
 		const d = e.data;
 		if (!d || d.type !== 'frickmail-oidc') return;
 		console.log('[frickmail-oidc] postMessage received', d);
-		if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(d); }
-		try { popupRef && popupRef.close(); } catch (_) {}
+		resolvePopup(d);
 	});
 
 	const launch = async mode => {
