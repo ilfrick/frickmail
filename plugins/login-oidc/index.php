@@ -33,7 +33,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME        = 'Login OIDC',
-		VERSION     = '1.5',
+		VERSION     = '1.6',
 		RELEASE     = '2026-05-23',
 		REQUIRED    = '2.36.1',
 		CATEGORY    = 'Login',
@@ -486,6 +486,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 		]);
 		echo '<!doctype html><meta charset="utf-8"><title>Frickmail</title><body><script>'
 			. '(function(){var m=' . $payload . ';'
+			. 'try{localStorage.setItem("frickmail-oidc-result",JSON.stringify(m));}catch(e){}'
 			. 'try{var bc=new BroadcastChannel("frickmail-oidc");bc.postMessage(m);bc.close();setTimeout(function(){window.close();},100);return;}catch(e){}'
 			. 'try{if(window.opener&&!window.opener.closed){window.opener.postMessage(m,window.location.origin);window.close();return;}}catch(e){}'
 			. 'window.location.replace(' . \json_encode($sFallback ?: '/') . ');'

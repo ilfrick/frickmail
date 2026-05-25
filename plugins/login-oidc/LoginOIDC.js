@@ -20,6 +20,7 @@
 			x = Math.round((screen.availWidth  - w) / 2);
 		try { popupRef && popupRef.close(); } catch (_) {}
 		if (_bc) { try { _bc.close(); } catch(_) {} _bc = null; }
+		try { localStorage.removeItem('frickmail-oidc-result'); } catch(_) {}
 		popupRef = window.open(url, 'frickmail-oidc',
 			`popup=yes,width=${w},height=${h},left=${x},top=${y}`);
 		if (!popupRef) { document.location = url; return null; }
@@ -38,6 +39,21 @@
 				};
 			} catch(_) {}
 			const t = setInterval(() => {
+				// localStorage is the most reliable channel — immune to cross-origin
+				// popup navigation that silently breaks postMessage and BroadcastChannel.
+				try {
+					const raw = localStorage.getItem('frickmail-oidc-result');
+					if (raw) {
+						const d = JSON.parse(raw);
+						if (d && d.type === 'frickmail-oidc') {
+							localStorage.removeItem('frickmail-oidc-result');
+							clearInterval(t);
+							console.log('[frickmail-oidc] localStorage received', d);
+							resolvePopup(d);
+							return;
+						}
+					}
+				} catch(_) {}
 				if (!popupRef || popupRef.closed) {
 					clearInterval(t);
 					console.log('[frickmail-oidc] popup closed, waiting for channel message…');
