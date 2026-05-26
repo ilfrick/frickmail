@@ -33,7 +33,7 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 {
 	const
 		NAME        = 'Login OIDC',
-		VERSION     = '1.7',
+		VERSION     = '1.8',
 		RELEASE     = '2026-05-23',
 		REQUIRED    = '2.36.1',
 		CATEGORY    = 'Login',
@@ -486,10 +486,16 @@ class LoginOIDCPlugin extends \RainLoop\Plugins\AbstractPlugin
 		]);
 		echo '<!doctype html><meta charset="utf-8"><title>Frickmail</title><body><script>'
 			. '(function(){var m=' . $payload . ';'
+			// localStorage → triggers storage event in main window (immediate, no polling)
 			. 'try{localStorage.setItem("frickmail-oidc-result",JSON.stringify(m));}catch(e){}'
-			. 'try{var bc=new BroadcastChannel("frickmail-oidc");bc.postMessage(m);bc.close();setTimeout(function(){window.close();},100);return;}catch(e){}'
-			. 'try{if(window.opener&&!window.opener.closed){window.opener.postMessage(m,window.location.origin);window.close();return;}}catch(e){}'
-			. 'window.location.replace(' . \json_encode($sFallback ?: '/') . ');'
+			// Direct opener reload — popup is same-origin at this point, so window.opener
+			// is accessible regardless of whether BC/postMessage survive cross-origin nav.
+			. 'if(m.status==="ok"){try{if(window.opener&&!window.opener.closed){window.opener.location.reload();}}catch(e){}}'
+			// BroadcastChannel and postMessage as additional signals
+			. 'try{var bc=new BroadcastChannel("frickmail-oidc");bc.postMessage(m);bc.close();}catch(e){}'
+			. 'try{if(window.opener&&!window.opener.closed){window.opener.postMessage(m,window.location.origin);}}catch(e){}'
+			// Close popup after a short delay so the above can execute
+			. 'setTimeout(function(){window.close();},200);'
 			. '})();</script>'
 			. '<p>' . ($bOk ? 'Authentication succeeded.' : 'Authentication failed: ' . \htmlspecialchars($sError, \ENT_QUOTES, 'UTF-8')) . ' You can close this window.</p>'
 			. '</body>';
