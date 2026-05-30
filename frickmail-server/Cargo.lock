@@ -707,9 +707,11 @@ dependencies = [
  "fm-core",
  "fm-plugin-compat",
  "fm-session",
+ "fm-user",
  "reqwest",
  "serde_json",
  "serde_urlencoded",
+ "sqlx",
  "tokio",
  "tower",
  "tower-http",
@@ -772,6 +774,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fm-user"
+version = "0.1.0"
+dependencies = [
+ "fm-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -793,6 +806,7 @@ dependencies = [
  "anyhow",
  "axum",
  "fm-core",
+ "fm-db",
  "fm-http",
  "tokio",
  "tracing",

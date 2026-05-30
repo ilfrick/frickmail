@@ -1,3 +1,5 @@
+use std::env;
+
 use serde::Deserialize;
 use url::Url;
 
@@ -65,12 +67,16 @@ impl FrickmailConfig {
                 source: Box::new(source),
             })?;
 
-        let config = cfg
-            .try_deserialize::<Self>()
-            .map_err(|source| FrickmailError::Config {
-                message: "failed to deserialize Frickmail config".to_string(),
-                source: Box::new(source),
-            })?;
+        let mut config =
+            cfg.try_deserialize::<Self>()
+                .map_err(|source| FrickmailError::Config {
+                    message: "failed to deserialize Frickmail config".to_string(),
+                    source: Box::new(source),
+                })?;
+
+        if config.database_url.is_none() {
+            config.database_url = legacy_frickmail_database_url();
+        }
 
         config.validate()?;
         Ok(config)
@@ -107,6 +113,43 @@ fn default_static_root() -> String {
 
 fn default_database_url() -> Option<String> {
     None
+}
+
+fn legacy_frickmail_database_url() -> Option<String> {
+    // The current release entrypoint provisions PostgreSQL from these legacy
+    // variables. MySQL/SQLite installs should set FRICKMAIL__DATABASE_URL.
+    let password = env::var("FRICKMAIL_DB_PASSWORD")
+        .ok()
+        .filter(|password| !password.is_empty())?;
+    let host = env::var("FRICKMAIL_DB_HOST").unwrap_or_else(|_| "db".to_string());
+    let port = env::var("FRICKMAIL_DB_PORT").unwrap_or_else(|_| "5432".to_string());
+    let name = env::var("FRICKMAIL_DB_NAME").unwrap_or_else(|_| "frickmail".to_string());
+    let user = env::var("FRICKMAIL_DB_USER").unwrap_or_else(|_| "frickmail".to_string());
+
+    Some(format!(
+        "postgres://{}:{}@{}:{}/{}",
+        url_encode(&user),
+        url_encode(&password),
+        host,
+        port,
+        url_encode_path_segment(&name)
+    ))
+}
+
+fn url_encode(input: &str) -> String {
+    url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
+}
+
+fn url_encode_path_segment(input: &str) -> String {
+    input
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                vec![byte as char]
+            }
+            byte => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 fn default_redis_url() -> String {

@@ -11,9 +11,11 @@ axum.workspace = true
 fm-core = { path = "../fm-core" }
 fm-plugin-compat = { path = "../fm-plugin-compat" }
 fm-session = { path = "../fm-session" }
+fm-user = { path = "../fm-user" }
 reqwest.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true

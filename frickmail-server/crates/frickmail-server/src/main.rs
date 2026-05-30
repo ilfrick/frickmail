@@ -16,12 +16,26 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = FrickmailConfig::from_env().context("load configuration")?;
+    let db_pool = match fm_db::connect_lazy(&config).context("configure database")? {
+        Some(pool) => {
+            fm_db::verify_connection(&pool)
+                .await
+                .context("verify database connection")?;
+            info!("verified Frickmail database connection");
+            Some(pool)
+        }
+        None => {
+            info!("starting without a configured Frickmail database");
+            None
+        }
+    };
+
     let addr: SocketAddr = config
         .bind_addr
         .parse()
         .with_context(|| format!("parse bind address {}", config.bind_addr))?;
 
-    let app = build_router(AppState::new(config));
+    let app = build_router(AppState::with_db_pool(config, db_pool));
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "starting Frickmail Rust server");
 

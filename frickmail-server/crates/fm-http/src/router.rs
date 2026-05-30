@@ -18,6 +18,7 @@ use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, Hea
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
+use fm_user::{FrickmailMe, SqlxUserRepository};
 use serde_json::{json, Map, Value};
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
@@ -86,11 +87,12 @@ async fn shell() -> Response {
 
 async fn root_get(
     State(state): State<AppState>,
+    session: fm_session::Session,
     OriginalUri(uri): OriginalUri,
     request: AxumRequest,
 ) -> Response {
     if is_legacy_json_request(&uri) {
-        return json_api_request(state, uri, request).await;
+        return json_api_request(state, uri, request, session).await;
     }
 
     shell().await
@@ -98,13 +100,19 @@ async fn root_get(
 
 async fn json_api(
     State(state): State<AppState>,
+    session: fm_session::Session,
     OriginalUri(uri): OriginalUri,
     request: AxumRequest,
 ) -> Response {
-    json_api_request(state, uri, request).await
+    json_api_request(state, uri, request, session).await
 }
 
-async fn json_api_request(state: AppState, uri: Uri, request: AxumRequest) -> Response {
+async fn json_api_request(
+    state: AppState,
+    uri: Uri,
+    request: AxumRequest,
+    session: fm_session::Session,
+) -> Response {
     let (parts, body) = request.into_parts();
     let method = parts.method;
     let headers = parts.headers;
@@ -155,6 +163,12 @@ async fn json_api_request(state: AppState, uri: Uri, request: AxumRequest) -> Re
     };
 
     if is_compat_hook(&action) {
+        if let Some(response) =
+            native_compat_response(&state, &action, &request.action, &session).await
+        {
+            return response;
+        }
+
         let response = bridge_unimplemented(PluginRequest {
             action: action.clone(),
             payload: request.payload,
@@ -292,6 +306,85 @@ async fn bridge_json_request(
                     compat_error(UNKNOWN_ERROR, format!("PHP bridge response failed: {err}")),
                 )
             }),
+    )
+}
+
+async fn native_compat_response(
+    state: &AppState,
+    action: &str,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Option<Response> {
+    match action {
+        "FrickmailMe" => Some(native_frickmail_me(state, original_action, session).await),
+        _ => None,
+    }
+}
+
+async fn native_frickmail_me(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match session
+        .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(user) => user,
+        Err(err) => {
+            return json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                compat_error(
+                    UNKNOWN_ERROR,
+                    format!("Frickmail session read failed: {err}"),
+                ),
+            )
+        }
+    };
+
+    let result = match user {
+        Some(user_session) => {
+            if let Some(pool) = state.db_pool() {
+                match SqlxUserRepository::find_by_id(pool, user_session.user_id).await {
+                    Ok(Some(user)) => FrickmailMe::from_user(&user),
+                    Ok(None) => {
+                        if let Err(err) = session
+                            .remove::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+                            .await
+                        {
+                            return json_value_envelope(
+                                StatusCode::OK,
+                                original_action,
+                                compat_error(
+                                    UNKNOWN_ERROR,
+                                    format!("Frickmail stale session cleanup failed: {err}"),
+                                ),
+                            );
+                        }
+                        FrickmailMe::anonymous()
+                    }
+                    Err(err) => {
+                        return json_value_envelope(
+                            StatusCode::OK,
+                            original_action,
+                            compat_error(UNKNOWN_ERROR, err.public_message()),
+                        )
+                    }
+                }
+            } else {
+                FrickmailMe::from_session(&user_session)
+            }
+        }
+        None => FrickmailMe::anonymous(),
+    };
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": result
+        }),
     )
 }
 
@@ -528,8 +621,10 @@ mod tests {
         routing::any,
         Json, Router,
     };
-    use fm_core::FrickmailConfig;
+    use fm_core::{FrickmailConfig, UserSession};
+    use fm_session::{MemoryStore, Session, USER_SESSION_KEY};
     use serde_json::{json, Value};
+    use sqlx::{any::AnyPoolOptions, AnyPool};
     use tokio::net::TcpListener;
     use tower::ServiceExt;
 
@@ -580,9 +675,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
-        assert_eq!(body["Result"], false);
-        assert_eq!(body["code"], 501);
-        assert!(body["message"].as_str().unwrap().contains("FrickmailMe"));
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["authenticated"], false);
         assert_eq!(body["Action"], "PluginFrickmailMe");
         assert!(body["epoch"].as_u64().is_some());
     }
@@ -641,9 +735,84 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
-        assert_eq!(body["Result"], false);
-        assert_eq!(body["code"], 501);
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["authenticated"], false);
         assert_eq!(body["Action"], "FrickmailMe");
+    }
+
+    #[tokio::test]
+    async fn json_api_serves_native_frickmail_me_without_bridge() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailMe"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["authenticated"], false);
+        assert_eq!(body["Action"], "PluginFrickmailMe");
+        assert!(body["epoch"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_me_reloads_session_user_from_db() {
+        let pool = user_db_pool().await;
+        seed_user(&pool, 42, "fresh", Some("fresh@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = test_session();
+        session
+            .insert(
+                USER_SESSION_KEY,
+                UserSession {
+                    user_id: 42,
+                    username: "stale".to_string(),
+                    email: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let response = super::native_frickmail_me(&state, "FrickmailMe", &session).await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["authenticated"], true);
+        assert_eq!(body["Result"]["username"], "fresh");
+        assert_eq!(body["Result"]["email"], "fresh@example.com");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_me_clears_session_when_db_user_is_deleted() {
+        let pool = user_db_pool().await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = test_session();
+        session
+            .insert(
+                USER_SESSION_KEY,
+                UserSession {
+                    user_id: 404,
+                    username: "deleted".to_string(),
+                    email: Some("deleted@example.com".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let response = super::native_frickmail_me(&state, "FrickmailMe", &session).await;
+        let body = read_json(response).await;
+        let session_user = session.get::<UserSession>(USER_SESSION_KEY).await.unwrap();
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["authenticated"], false);
+        assert!(session_user.is_none());
     }
 
     #[tokio::test]
@@ -932,7 +1101,11 @@ mod tests {
     }
 
     fn app_with_bridge(php_bridge_url: Option<String>) -> axum::Router {
-        let config = FrickmailConfig {
+        build_router(AppState::new(test_config(php_bridge_url)))
+    }
+
+    fn test_config(php_bridge_url: Option<String>) -> FrickmailConfig {
+        FrickmailConfig {
             bind_addr: "127.0.0.1:0".to_string(),
             base_url: "http://localhost:8888".to_string(),
             static_root: "/workspace/frickmail-static".to_string(),
@@ -941,8 +1114,57 @@ mod tests {
             redis_url: "redis://redis:6379/0".to_string(),
             oidc: Default::default(),
             mail: Default::default(),
-        };
-        build_router(AppState::new(config))
+        }
+    }
+
+    fn test_session() -> Session {
+        Session::new(None, Arc::new(MemoryStore::default()), None)
+    }
+
+    async fn user_db_pool() -> AnyPool {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE frickmail_users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                email TEXT,
+                password_hash TEXT NOT NULL,
+                kdf_salt BLOB NOT NULL,
+                settings TEXT NOT NULL,
+                totp_secret TEXT,
+                oidc_escrow_key BLOB
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO frickmail_users
+                (id, username, email, password_hash, kdf_salt, settings, totp_secret, oidc_escrow_key)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(username)
+        .bind(email.map(ToOwned::to_owned))
+        .bind("$argon2id$v=19$m=65536,t=3,p=1$placeholder")
+        .bind(vec![1_u8, 2, 3, 4])
+        .bind("{}")
+        .bind(None::<String>)
+        .bind(None::<Vec<u8>>)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn spawn_bridge() -> (Option<String>, Arc<Mutex<BridgeCapture>>) {
