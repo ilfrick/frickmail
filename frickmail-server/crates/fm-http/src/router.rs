@@ -18,7 +18,7 @@ use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, Hea
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
-use fm_user::{FrickmailMe, SqlxUserRepository};
+use fm_user::{FrickmailMe, NewMailIdentity, SqlxUserRepository};
 use serde_json::{json, Map, Value};
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
@@ -331,6 +331,15 @@ async fn native_compat_response(
         "FrickmailListIdentities" => {
             Some(native_frickmail_list_identities(state, original_action, payload, session).await)
         }
+        "FrickmailAddIdentity" => {
+            Some(native_frickmail_add_identity(state, original_action, payload, session).await)
+        }
+        "FrickmailDeleteIdentity" => {
+            Some(native_frickmail_delete_identity(state, original_action, payload, session).await)
+        }
+        "FrickmailSetDefaultIdentity" => Some(
+            native_frickmail_set_default_identity(state, original_action, payload, session).await,
+        ),
         _ => None,
     }
 }
@@ -498,6 +507,116 @@ async fn native_frickmail_list_identities(
             original_action,
             compat_error(UNKNOWN_ERROR, err.public_message()),
         ),
+    }
+}
+
+async fn native_frickmail_add_identity(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let identity = NewMailIdentity {
+        account_id: payload_i64(payload, "account_id"),
+        name: payload_string(payload, "name").unwrap_or_default(),
+        email: payload_string(payload, "email").unwrap_or_default(),
+        reply_to: payload_optional_string(payload, "reply_to"),
+        is_default: payload_bool(payload, "is_default"),
+    };
+
+    match SqlxUserRepository::add_mail_identity(pool, user.user_id, identity).await {
+        Ok(id) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "id": id
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_delete_identity(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::delete_mail_identity(pool, user.user_id, payload_i64(payload, "id"))
+        .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_set_default_identity(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::set_default_mail_identity(
+        pool,
+        user.user_id,
+        payload_i64(payload, "id"),
+    )
+    .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
 
@@ -775,6 +894,32 @@ fn payload_i64(payload: &Value, key: &str) -> i64 {
         Some(Value::Bool(value)) => i64::from(*value),
         Some(Value::String(value)) => value.trim().parse::<i64>().unwrap_or_default(),
         _ => 0,
+    }
+}
+
+fn payload_string(payload: &Value, key: &str) -> Option<String> {
+    match payload.get(key) {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        Some(Value::Bool(value)) => Some(if *value { "1" } else { "" }.to_string()),
+        _ => None,
+    }
+}
+
+fn payload_optional_string(payload: &Value, key: &str) -> Option<String> {
+    payload_string(payload, key).and_then(|value| if value.is_empty() { None } else { Some(value) })
+}
+
+fn payload_bool(payload: &Value, key: &str) -> bool {
+    match payload.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Null) | None => false,
+        Some(Value::Number(number)) => number.as_i64().unwrap_or_default() != 0,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            !value.is_empty() && value != "0"
+        }
+        _ => true,
     }
 }
 
@@ -1151,6 +1296,90 @@ mod tests {
         assert_eq!(body["Result"]["identities"][0]["is_default"], true);
         assert_eq!(body["Result"]["identities"][1]["id"], 411);
         assert_eq!(body["Action"], "FrickmailListIdentities");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_identity_mutations_match_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            47,
+            "identity-writes",
+            Some("identity-writes@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 320, 47, "Primary", true).await;
+        seed_identity(&pool, 420, 47, 320, "Default", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(47, "identity-writes", None).await;
+
+        let response = super::native_frickmail_add_identity(
+            &state,
+            "FrickmailAddIdentity",
+            &json!({
+                "account_id": 320,
+                "name": " Alias ",
+                "email": "alias@example.com",
+                "reply_to": " reply@example.com ",
+                "is_default": true
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        let id = body["Result"]["id"].as_i64().unwrap();
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_list_identities(
+            &state,
+            "FrickmailListIdentities",
+            &json!({"account_id": 320}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["identities"][0]["id"], id);
+        assert_eq!(body["Result"]["identities"][0]["name"], "Alias");
+        assert_eq!(
+            body["Result"]["identities"][0]["reply_to"],
+            "reply@example.com"
+        );
+        assert_eq!(body["Result"]["identities"][0]["is_default"], true);
+        assert_eq!(body["Result"]["identities"][1]["id"], 420);
+        assert_eq!(body["Result"]["identities"][1]["is_default"], false);
+
+        let response = super::native_frickmail_set_default_identity(
+            &state,
+            "FrickmailSetDefaultIdentity",
+            &json!({"id": 420}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_delete_identity(
+            &state,
+            "FrickmailDeleteIdentity",
+            &json!({"id": id}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_list_identities(
+            &state,
+            "FrickmailListIdentities",
+            &json!({"account_id": 320}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["identities"].as_array().unwrap().len(), 1);
+        assert_eq!(body["Result"]["identities"][0]["id"], 420);
+        assert_eq!(body["Result"]["identities"][0]["is_default"], true);
     }
 
     #[tokio::test]

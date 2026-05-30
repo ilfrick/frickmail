@@ -65,6 +65,15 @@ pub struct MailAccount {
     pub identities: Vec<MailIdentity>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMailIdentity {
+    pub account_id: i64,
+    pub name: String,
+    pub email: String,
+    pub reply_to: Option<String>,
+    pub is_default: bool,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -166,6 +175,30 @@ impl SqlxUserRepository {
         account_id: i64,
     ) -> Result<Vec<MailIdentity>> {
         fetch_mail_identities_for_account(pool, user_id, account_id).await
+    }
+
+    pub async fn add_mail_identity(
+        pool: &AnyPool,
+        user_id: i64,
+        input: NewMailIdentity,
+    ) -> Result<i64> {
+        add_mail_identity(pool, user_id, input).await
+    }
+
+    pub async fn delete_mail_identity(
+        pool: &AnyPool,
+        user_id: i64,
+        identity_id: i64,
+    ) -> Result<()> {
+        delete_mail_identity(pool, user_id, identity_id).await
+    }
+
+    pub async fn set_default_mail_identity(
+        pool: &AnyPool,
+        user_id: i64,
+        identity_id: i64,
+    ) -> Result<()> {
+        set_default_mail_identity(pool, user_id, identity_id).await
     }
 }
 
@@ -366,6 +399,243 @@ async fn fetch_mail_identities_for_account(
         .collect()
 }
 
+async fn add_mail_identity(pool: &AnyPool, user_id: i64, input: NewMailIdentity) -> Result<i64> {
+    let name = input.name.trim().to_string();
+    let email = input.email.trim().to_string();
+    let reply_to = input.reply_to.and_then(|value| {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    });
+
+    if name.is_empty() {
+        return Err(FrickmailError::BadRequest("Name is required".to_string()));
+    }
+    if email.is_empty() {
+        return Err(FrickmailError::BadRequest("Email is required".to_string()));
+    }
+    if !looks_like_email_address(&email) {
+        return Err(FrickmailError::BadRequest(
+            "Invalid email address".to_string(),
+        ));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        if !mail_account_exists_on_conn(&mut conn, &backend, user_id, input.account_id).await? {
+            return Err(FrickmailError::BadRequest("Account not found".to_string()));
+        }
+
+        let mut is_default = input.is_default;
+        let mut set_default_after_insert = false;
+        if is_default
+            && mail_identity_default_exists_on_conn(&mut conn, &backend, user_id, input.account_id)
+                .await?
+        {
+            is_default = false;
+            set_default_after_insert = true;
+        }
+
+        let id = insert_mail_identity_on_conn(
+            &mut conn,
+            &backend,
+            user_id,
+            input.account_id,
+            &name,
+            &email,
+            reply_to.as_deref(),
+            is_default,
+        )
+        .await?;
+
+        if set_default_after_insert {
+            set_default_mail_identity_values_on_conn(&mut conn, &backend, user_id, id).await?;
+        }
+
+        Ok(id)
+    }
+    .await;
+
+    match result {
+        Ok(id) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| id)
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
+async fn delete_mail_identity(pool: &AnyPool, user_id: i64, identity_id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = delete_mail_identity_query(&backend);
+
+    sqlx::query(query)
+        .bind(user_id)
+        .bind(identity_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn set_default_mail_identity(pool: &AnyPool, user_id: i64, identity_id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    set_default_mail_identity_on_conn(&mut conn, &backend, user_id, identity_id).await
+}
+
+async fn mail_account_exists_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    account_id: i64,
+) -> Result<bool> {
+    let count: i64 = sqlx::query(mail_account_exists_query(backend))
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_one(&mut **conn)
+        .await
+        .and_then(|row| row.try_get("count"))
+        .map_err(db_error)?;
+
+    Ok(count > 0)
+}
+
+async fn mail_identity_default_exists_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    account_id: i64,
+) -> Result<bool> {
+    let count: i64 = sqlx::query(mail_identity_default_exists_query(backend))
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_one(&mut **conn)
+        .await
+        .and_then(|row| row.try_get("count"))
+        .map_err(db_error)?;
+
+    Ok(count > 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_mail_identity_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    account_id: i64,
+    name: &str,
+    email: &str,
+    reply_to: Option<&str>,
+    is_default: bool,
+) -> Result<i64> {
+    if matches!(backend, "PostgreSQL" | "SQLite") {
+        return sqlx::query(insert_mail_identity_returning_query(backend))
+            .bind(account_id)
+            .bind(user_id)
+            .bind(name)
+            .bind(email)
+            .bind(reply_to)
+            .bind(is_default)
+            .fetch_one(&mut **conn)
+            .await
+            .and_then(|row| row.try_get("id"))
+            .map_err(db_error);
+    }
+
+    sqlx::query(insert_mail_identity_query(backend))
+        .bind(account_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(email)
+        .bind(reply_to)
+        .bind(is_default)
+        .execute(&mut **conn)
+        .await
+        .map_err(db_error)?
+        .last_insert_id()
+        .ok_or_else(|| {
+            FrickmailError::Upstream(
+                "frickmail user database error: inserted identity id is unavailable".to_string(),
+            )
+        })
+}
+
+async fn set_default_mail_identity_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    identity_id: i64,
+) -> Result<()> {
+    sqlx::query("BEGIN")
+        .execute(&mut **conn)
+        .await
+        .map_err(db_error)?;
+
+    let result =
+        set_default_mail_identity_values_on_conn(conn, backend, user_id, identity_id).await;
+
+    match result {
+        Ok(()) => sqlx::query("COMMIT")
+            .execute(&mut **conn)
+            .await
+            .map(|_| ())
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut **conn).await;
+            Err(err)
+        }
+    }
+}
+
+async fn set_default_mail_identity_values_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    identity_id: i64,
+) -> Result<()> {
+    let account_id: Option<i64> = sqlx::query(mail_identity_account_query(backend))
+        .bind(identity_id)
+        .bind(user_id)
+        .fetch_optional(&mut **conn)
+        .await
+        .map_err(db_error)?
+        .map(|row| row.try_get("account_id").map_err(db_error))
+        .transpose()?;
+    let Some(account_id) = account_id else {
+        return Err(FrickmailError::BadRequest("Identity not found".to_string()));
+    };
+
+    sqlx::query(clear_default_identities_query(backend))
+        .bind(account_id)
+        .bind(user_id)
+        .execute(&mut **conn)
+        .await
+        .map_err(db_error)?;
+
+    sqlx::query(set_default_identity_query(backend))
+        .bind(identity_id)
+        .bind(user_id)
+        .execute(&mut **conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
 fn user_select_query(backend: &str, column: &str) -> String {
     let placeholder = match backend {
         "PostgreSQL" => "$1",
@@ -427,6 +697,86 @@ fn mail_identities_for_account_query(backend: &str) -> &'static str {
     }
 }
 
+fn mail_account_exists_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT COUNT(*) AS count FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2"
+        }
+        _ => "SELECT COUNT(*) AS count FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?",
+    }
+}
+
+fn mail_identity_default_exists_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT COUNT(*) AS count FROM frickmail_identities WHERE user_id = $1 AND account_id = $2 AND is_default = TRUE"
+        }
+        _ => {
+            "SELECT COUNT(*) AS count FROM frickmail_identities WHERE user_id = ? AND account_id = ? AND is_default = 1"
+        }
+    }
+}
+
+fn insert_mail_identity_returning_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_identities (account_id, user_id, name, email, reply_to, is_default) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"
+        }
+        _ => {
+            "INSERT INTO frickmail_identities (account_id, user_id, name, email, reply_to, is_default) \
+             VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
+        }
+    }
+}
+
+fn insert_mail_identity_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_identities (account_id, user_id, name, email, reply_to, is_default) \
+             VALUES ($1, $2, $3, $4, $5, $6)"
+        }
+        _ => {
+            "INSERT INTO frickmail_identities (account_id, user_id, name, email, reply_to, is_default) \
+             VALUES (?, ?, ?, ?, ?, ?)"
+        }
+    }
+}
+
+fn delete_mail_identity_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_identities WHERE user_id = $1 AND id = $2",
+        _ => "DELETE FROM frickmail_identities WHERE user_id = ? AND id = ?",
+    }
+}
+
+fn mail_identity_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT account_id FROM frickmail_identities WHERE id = $1 AND user_id = $2"
+        }
+        _ => "SELECT account_id FROM frickmail_identities WHERE id = ? AND user_id = ?",
+    }
+}
+
+fn clear_default_identities_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_identities SET is_default = FALSE WHERE account_id = $1 AND user_id = $2"
+        }
+        _ => "UPDATE frickmail_identities SET is_default = 0 WHERE account_id = ? AND user_id = ?",
+    }
+}
+
+fn set_default_identity_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_identities SET is_default = TRUE WHERE id = $1 AND user_id = $2"
+        }
+        _ => "UPDATE frickmail_identities SET is_default = 1 WHERE id = ? AND user_id = ?",
+    }
+}
+
 fn update_settings_patch_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -473,6 +823,22 @@ fn row_to_mail_identity(row: sqlx::any::AnyRow) -> Result<MailIdentity> {
 fn int_flag(row: &sqlx::any::AnyRow, column: &str) -> Result<bool> {
     let value: i64 = row.try_get(column).map_err(db_error)?;
     Ok(value != 0)
+}
+
+fn looks_like_email_address(email: &str) -> bool {
+    if email.is_empty()
+        || email
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace())
+    {
+        return false;
+    }
+
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+
+    !local.is_empty() && !domain.is_empty() && !domain.contains('@')
 }
 
 fn row_to_user(row: sqlx::any::AnyRow) -> Result<FrickmailUser> {
@@ -862,6 +1228,78 @@ mod tests {
         assert!(identities[0].is_default);
         assert_eq!(identities[1].id, 211);
         assert_eq!(identities[1].account_id, 110);
+    }
+
+    #[tokio::test]
+    async fn repository_mutates_mail_identities_with_account_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 13, json!({})).await;
+        insert_user(&pool, 14, json!({})).await;
+        insert_mail_account(&pool, 120, 13, "Work", true).await;
+        insert_mail_account(&pool, 121, 14, "OtherUser", true).await;
+        insert_identity(&pool, 220, 13, 120, "Default", true).await;
+
+        let id = SqlxUserRepository::add_mail_identity(
+            &pool,
+            13,
+            super::NewMailIdentity {
+                account_id: 120,
+                name: " Alias ".to_string(),
+                email: "alias@example.com".to_string(),
+                reply_to: Some(" reply@example.com ".to_string()),
+                is_default: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let identities = SqlxUserRepository::list_mail_identities(&pool, 13, 120)
+            .await
+            .unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].id, id);
+        assert!(identities[0].is_default);
+        assert_eq!(identities[0].name, "Alias");
+        assert_eq!(identities[0].reply_to.as_deref(), Some("reply@example.com"));
+        assert_eq!(identities[1].id, 220);
+        assert!(!identities[1].is_default);
+
+        SqlxUserRepository::delete_mail_identity(&pool, 14, id)
+            .await
+            .unwrap();
+        assert_eq!(
+            SqlxUserRepository::list_mail_identities(&pool, 13, 120)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        SqlxUserRepository::delete_mail_identity(&pool, 13, id)
+            .await
+            .unwrap();
+        let identities = SqlxUserRepository::list_mail_identities(&pool, 13, 120)
+            .await
+            .unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].id, 220);
+
+        let err = SqlxUserRepository::add_mail_identity(
+            &pool,
+            13,
+            super::NewMailIdentity {
+                account_id: 121,
+                name: "Cross".to_string(),
+                email: "cross@example.com".to_string(),
+                reply_to: None,
+                is_default: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Account not found");
     }
 
     async fn sqlite_pool() -> AnyPool {
