@@ -707,12 +707,14 @@ dependencies = [
  "fm-core",
  "fm-plugin-compat",
  "fm-session",
+ "reqwest",
  "serde_json",
  "serde_urlencoded",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
+ "url",
 ]
 
 [[package]]

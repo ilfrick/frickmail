@@ -4,9 +4,12 @@ use std::{
 };
 
 use axum::{
-    body::Bytes,
-    extract::State,
-    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
+    body::{to_bytes, Bytes},
+    extract::{OriginalUri, Request as AxumRequest, State},
+    http::{
+        header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE, USER_AGENT},
+        HeaderMap, Method, StatusCode, Uri,
+    },
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -23,12 +26,13 @@ use crate::AppState;
 
 const INVALID_INPUT_ARGUMENT: u16 = 903;
 const UNKNOWN_ERROR: u16 = 999;
+const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn build_router(state: AppState) -> Router {
     let static_root = state.config().static_root.clone();
 
     Router::new()
-        .route("/", get(shell).post(json_api))
+        .route("/", get(root_get).post(json_api))
         .route("/health", get(health))
         .route("/version", get(version))
         .nest_service("/static", ServeDir::new(static_root))
@@ -58,13 +62,7 @@ async fn version() -> Json<ApiEnvelope<serde_json::Value>> {
     })))
 }
 
-async fn shell(State(state): State<AppState>) -> Response {
-    if state.config().php_bridge_url.is_some() {
-        return error_response(not_implemented(
-            "PHP bridge proxy is declared but not implemented in this slice",
-        ));
-    }
-
+async fn shell() -> Response {
     (
         StatusCode::OK,
         [("content-type", "text/html; charset=utf-8")],
@@ -86,13 +84,62 @@ async fn shell(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-async fn json_api(
-    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    body: Bytes,
+async fn root_get(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    request: AxumRequest,
 ) -> Response {
-    let request = match plugin_request_from_http(&query, &headers, &body) {
-        Ok(request) => request,
+    if is_legacy_json_request(&uri) {
+        return json_api_request(state, uri, request).await;
+    }
+
+    shell().await
+}
+
+async fn json_api(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    request: AxumRequest,
+) -> Response {
+    json_api_request(state, uri, request).await
+}
+
+async fn json_api_request(state: AppState, uri: Uri, request: AxumRequest) -> Response {
+    let (parts, body) = request.into_parts();
+    let method = parts.method;
+    let headers = parts.headers;
+    let query = query_map(&uri);
+    let body = match to_bytes(body, JSON_BODY_LIMIT_BYTES).await {
+        Ok(body) => body,
+        Err(err) => {
+            return json_value_envelope(
+                StatusCode::OK,
+                "",
+                compat_error(
+                    INVALID_INPUT_ARGUMENT,
+                    format!("Invalid or oversized request body: {err}"),
+                ),
+            )
+        }
+    };
+
+    let request = match plugin_request_from_http(&query, &headers, &body, legacy_json_action(&uri))
+    {
+        Ok(request) => {
+            if let Some(response) = bridge_json_request(
+                &state,
+                &method,
+                &uri,
+                &headers,
+                body.clone(),
+                &request.action,
+            )
+            .await
+            {
+                return response;
+            }
+            request
+        }
         Err(error) => return json_value_envelope(StatusCode::OK, "", error),
     };
 
@@ -125,12 +172,39 @@ async fn json_api(
     )
 }
 
-async fn fallback() -> Response {
-    error_response(FrickmailError::NotFound("route".to_string()))
+fn is_legacy_json_request(uri: &Uri) -> bool {
+    uri.query()
+        .is_some_and(|query| query.starts_with("/Json/") || query.starts_with("?/Json/"))
 }
 
-fn not_implemented(feature: &'static str) -> FrickmailError {
-    FrickmailError::NotImplemented(feature)
+fn query_map(uri: &Uri) -> HashMap<String, String> {
+    uri.query()
+        .and_then(|query| serde_urlencoded::from_str(query).ok())
+        .unwrap_or_default()
+}
+
+fn legacy_json_action(uri: &Uri) -> Option<String> {
+    let query = uri.query()?;
+    if !is_legacy_json_request(uri) {
+        return None;
+    }
+
+    let action = query
+        .split_once("/0/")
+        .map(|(_, tail)| tail)
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    let action = action.split(['/', '&']).next().unwrap_or_default().trim();
+
+    if action.is_empty() {
+        None
+    } else {
+        Some(action.to_string())
+    }
+}
+
+async fn fallback() -> Response {
+    error_response(FrickmailError::NotFound("route".to_string()))
 }
 
 fn error_response(error: FrickmailError) -> Response {
@@ -142,10 +216,115 @@ fn error_response(error: FrickmailError) -> Response {
     (status, Json(body)).into_response()
 }
 
+async fn bridge_json_request(
+    state: &AppState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Bytes,
+    action: &str,
+) -> Option<Response> {
+    let bridge_url = state.config().php_bridge_url.as_deref()?;
+    let target = match bridge_target_url(bridge_url, uri) {
+        Ok(target) => target,
+        Err(err) => {
+            return Some(json_value_envelope(
+                StatusCode::OK,
+                action,
+                compat_error(UNKNOWN_ERROR, format!("Invalid PHP bridge URL: {err}")),
+            ))
+        }
+    };
+
+    let response = state
+        .bridge_client()
+        .request(method.clone(), target)
+        .headers(forward_headers(headers))
+        .body(body)
+        .send()
+        .await;
+
+    let response = match response {
+        Ok(response) => response,
+        Err(err) => {
+            return Some(json_value_envelope(
+                StatusCode::OK,
+                action,
+                compat_error(UNKNOWN_ERROR, format!("PHP bridge request failed: {err}")),
+            ))
+        }
+    };
+
+    let status = response.status();
+    let content_type = response.headers().get(CONTENT_TYPE).cloned();
+    let set_cookies = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(err) => {
+            return Some(json_value_envelope(
+                StatusCode::OK,
+                action,
+                compat_error(UNKNOWN_ERROR, format!("PHP bridge response failed: {err}")),
+            ))
+        }
+    };
+
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(CONTENT_TYPE, content_type);
+    }
+    for cookie in set_cookies {
+        builder = builder.header(SET_COOKIE, cookie);
+    }
+
+    Some(
+        builder
+            .body(axum::body::Body::from(body))
+            .unwrap_or_else(|err| {
+                json_value_envelope(
+                    StatusCode::OK,
+                    action,
+                    compat_error(UNKNOWN_ERROR, format!("PHP bridge response failed: {err}")),
+                )
+            }),
+    )
+}
+
+fn bridge_target_url(bridge_url: &str, uri: &Uri) -> Result<String, url::ParseError> {
+    let mut target = url::Url::parse(bridge_url)?;
+    target.set_query(uri.query());
+    Ok(target.to_string())
+}
+
+fn forward_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut forwarded = HeaderMap::new();
+    for name in [CONTENT_TYPE, COOKIE, AUTHORIZATION, ACCEPT, USER_AGENT] {
+        if let Some(value) = headers.get(&name) {
+            forwarded.insert(name, value.clone());
+        }
+    }
+    if let Some(value) = headers.get("x-requested-with") {
+        forwarded.insert("x-requested-with", value.clone());
+    }
+    if let Some(value) = headers.get("x-sm-token") {
+        forwarded.insert("x-sm-token", value.clone());
+    }
+    if let Some(value) = headers.get("x-frickmail-session") {
+        forwarded.insert("x-frickmail-session", value.clone());
+    }
+    forwarded
+}
+
 fn plugin_request_from_http(
     query: &HashMap<String, String>,
     headers: &HeaderMap,
     body: &[u8],
+    legacy_action: Option<String>,
 ) -> Result<PluginRequest, Value> {
     let mut payload = map_to_value(query);
     let mut action = query
@@ -191,6 +370,10 @@ fn plugin_request_from_http(
             }
             payload = merge_payload(payload, body_payload);
         }
+    }
+
+    if action.is_empty() {
+        action = legacy_action.unwrap_or_default();
     }
 
     if action.is_empty() {
@@ -332,15 +515,54 @@ fn current_epoch() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
     use axum::{
         body::{to_bytes, Body},
-        http::{Method, Request, StatusCode},
+        extract::{Request as AxumRequest, State},
+        http::{Method, Request, StatusCode, Uri},
+        response::IntoResponse,
+        routing::any,
+        Json, Router,
     };
     use fm_core::FrickmailConfig;
-    use serde_json::Value;
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
     use tower::ServiceExt;
 
+    use super::{legacy_json_action, JSON_BODY_LIMIT_BYTES};
     use crate::{build_router, AppState};
+
+    #[derive(Debug, Clone, Default)]
+    struct BridgeCapture {
+        method: String,
+        uri: String,
+        content_type: Option<String>,
+        cookie: Option<String>,
+        x_sm_token: Option<String>,
+        body: String,
+    }
+
+    #[tokio::test]
+    async fn root_get_serves_shell_for_non_json_requests() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Frickmail Rust migration server"));
+    }
 
     #[tokio::test]
     async fn json_api_accepts_plugin_form_action() {
@@ -402,6 +624,26 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["code"], 501);
         assert_eq!(body["Action"], "PluginFrickmailGetPrefs");
+    }
+
+    #[tokio::test]
+    async fn json_api_extracts_legacy_get_action_without_bridge() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/Json/&q[]=/0/FrickmailMe/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 501);
+        assert_eq!(body["Action"], "FrickmailMe");
     }
 
     #[tokio::test]
@@ -510,18 +752,263 @@ mod tests {
         assert_eq!(body["message"], "Action unknown");
     }
 
+    #[tokio::test]
+    async fn json_api_forwards_to_php_bridge_when_configured() {
+        let (bridge_url, capture) = spawn_bridge().await;
+
+        let response = app_with_bridge(bridge_url)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/?/Json/&q[]=/0/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "FrickmailAuth=abc")
+                    .header("x-sm-token", "csrf-token")
+                    .body(Body::from("Action=PluginFrickmailMe&XToken=test"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok()),
+            Some("FrickmailAuth=bridge; Path=/; HttpOnly")
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["bridge"], true);
+        assert_eq!(body["Action"], "PluginFrickmailMe");
+
+        let capture = capture.lock().unwrap().clone();
+        assert_eq!(capture.method, "POST");
+        assert_eq!(capture.uri, "/?/Json/&q[]=/0/");
+        assert_eq!(
+            capture.content_type.as_deref(),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(capture.cookie.as_deref(), Some("FrickmailAuth=abc"));
+        assert_eq!(capture.x_sm_token.as_deref(), Some("csrf-token"));
+        assert_eq!(capture.body, "Action=PluginFrickmailMe&XToken=test");
+    }
+
+    #[tokio::test]
+    async fn json_api_forwards_legacy_get_to_php_bridge_when_configured() {
+        let (bridge_url, capture) = spawn_bridge().await;
+
+        let response = app_with_bridge(bridge_url)
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/Json/&q[]=/0/MessageList/&q[]=/payload")
+                    .header("x-sm-token", "csrf-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["bridge"], true);
+        assert_eq!(body["Action"], "MessageList");
+
+        let capture = capture.lock().unwrap().clone();
+        assert_eq!(capture.method, "GET");
+        assert_eq!(capture.uri, "/?/Json/&q[]=/0/MessageList/&q[]=/payload");
+        assert_eq!(capture.x_sm_token.as_deref(), Some("csrf-token"));
+    }
+
+    #[tokio::test]
+    async fn json_api_forwards_multipart_to_php_bridge_when_configured() {
+        let (bridge_url, capture) = spawn_bridge().await;
+        let body = "--frickmail\r\n\
+                    Content-Disposition: form-data; name=\"Action\"\r\n\
+                    \r\n\
+                    PluginJsonAdminRestoreData\r\n\
+                    --frickmail\r\n\
+                    Content-Disposition: form-data; name=\"backup\"; filename=\"backup.json\"\r\n\
+                    Content-Type: application/json\r\n\
+                    \r\n\
+                    {}\r\n\
+                    --frickmail--\r\n";
+
+        let response = app_with_bridge(bridge_url)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "multipart/form-data; boundary=frickmail")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["bridge"], true);
+        assert_eq!(body["Action"], "PluginJsonAdminRestoreData");
+
+        let capture = capture.lock().unwrap().clone();
+        assert_eq!(
+            capture.content_type.as_deref(),
+            Some("multipart/form-data; boundary=frickmail")
+        );
+        assert!(capture.body.contains("PluginJsonAdminRestoreData"));
+    }
+
+    #[tokio::test]
+    async fn json_api_forwards_large_multipart_to_php_bridge() {
+        let (bridge_url, capture) = spawn_bridge().await;
+        let large_payload = "x".repeat(2 * 1024 * 1024 + 1);
+        let body = format!(
+            "--frickmail\r\n\
+             Content-Disposition: form-data; name=\"Action\"\r\n\
+             \r\n\
+             PluginJsonAdminRestoreData\r\n\
+             --frickmail\r\n\
+             Content-Disposition: form-data; name=\"backup\"; filename=\"large.json\"\r\n\
+             Content-Type: application/json\r\n\
+             \r\n\
+             {large_payload}\r\n\
+             --frickmail--\r\n"
+        );
+
+        let response = app_with_bridge(bridge_url)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "multipart/form-data; boundary=frickmail")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["bridge"], true);
+        assert_eq!(body["Action"], "PluginJsonAdminRestoreData");
+
+        let capture = capture.lock().unwrap().clone();
+        assert!(capture.body.len() > 2 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn json_api_reports_php_bridge_connection_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bridge_url = format!("http://{}/", listener.local_addr().unwrap());
+        drop(listener);
+
+        let response = app_with_bridge(Some(bridge_url))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailMe"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 999);
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("PHP bridge request failed"));
+        assert_eq!(body["Action"], "PluginFrickmailMe");
+    }
+
     fn app() -> axum::Router {
+        app_with_bridge(None)
+    }
+
+    fn app_with_bridge(php_bridge_url: Option<String>) -> axum::Router {
         let config = FrickmailConfig {
             bind_addr: "127.0.0.1:0".to_string(),
             base_url: "http://localhost:8888".to_string(),
             static_root: "/workspace/frickmail-static".to_string(),
-            php_bridge_url: None,
+            php_bridge_url,
             database_url: None,
             redis_url: "redis://redis:6379/0".to_string(),
             oidc: Default::default(),
             mail: Default::default(),
         };
         build_router(AppState::new(config))
+    }
+
+    async fn spawn_bridge() -> (Option<String>, Arc<Mutex<BridgeCapture>>) {
+        let capture = Arc::new(Mutex::new(BridgeCapture::default()));
+        let app = Router::new()
+            .route("/", any(capture_bridge_request))
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (Some(format!("http://{addr}/")), capture)
+    }
+
+    async fn capture_bridge_request(
+        State(capture): State<Arc<Mutex<BridgeCapture>>>,
+        uri: Uri,
+        request: AxumRequest,
+    ) -> impl IntoResponse {
+        let (parts, body) = request.into_parts();
+        let headers = parts.headers;
+        let body = to_bytes(body, JSON_BODY_LIMIT_BYTES).await.unwrap();
+
+        *capture.lock().unwrap() = BridgeCapture {
+            method: parts.method.to_string(),
+            uri: uri.to_string(),
+            content_type: headers
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            cookie: headers
+                .get("cookie")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            x_sm_token: headers
+                .get("x-sm-token")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            body: String::from_utf8_lossy(&body).to_string(),
+        };
+
+        (
+            [("set-cookie", "FrickmailAuth=bridge; Path=/; HttpOnly")],
+            Json(json!({
+                "Result": {
+                    "bridge": true
+                },
+                "Action": form_action(&body)
+                    .or_else(|| legacy_json_action(&uri))
+                    .unwrap_or_default()
+            })),
+        )
+    }
+
+    fn form_action(body: &[u8]) -> Option<String> {
+        serde_urlencoded::from_bytes::<HashMap<String, String>>(body)
+            .ok()
+            .and_then(|form| form.get("Action").cloned())
+            .or_else(|| {
+                String::from_utf8_lossy(body)
+                    .lines()
+                    .find(|line| line.trim_start().starts_with("Plugin"))
+                    .map(|line| line.trim().to_string())
+            })
     }
 
     async fn read_json(response: axum::response::Response) -> Value {
