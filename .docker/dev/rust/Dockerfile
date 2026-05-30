@@ -8,7 +8,7 @@ RUN apt-get update \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup component add clippy
+RUN rustup component add clippy rustfmt
 
 WORKDIR /workspace/frickmail-server
 

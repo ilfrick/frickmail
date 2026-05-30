@@ -1,0 +1,51 @@
+name: rust-ci
+
+on:
+  push:
+    branches:
+      - master
+      - rust-full-migration
+    paths:
+      - ".docker/dev/rust/**"
+      - ".github/workflows/rust.yml"
+      - "docker-compose.rust.yml"
+      - "frickmail-server/**"
+  pull_request:
+    paths:
+      - ".docker/dev/rust/**"
+      - ".github/workflows/rust.yml"
+      - "docker-compose.rust.yml"
+      - "frickmail-server/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Docker Rust workspace
+    runs-on: ubuntu-latest
+    env:
+      UID: "0"
+      GID: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Rust dev image
+        run: docker compose -f docker-compose.rust.yml build rust-dev
+
+      - name: Check formatting
+        run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo check --workspace
+
+      - name: Test workspace
+        run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo test --workspace
+
+      - name: Lint workspace
+        run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo clippy --workspace -- -D warnings

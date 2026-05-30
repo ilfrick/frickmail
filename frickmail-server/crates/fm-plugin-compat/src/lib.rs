@@ -2,6 +2,12 @@ use fm_core::plugin::{PluginRequest, PluginResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionNameError {
+    Empty,
+    DoublePluginPrefix,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CompatHookKind {
     Json,
@@ -119,11 +125,27 @@ pub fn is_compat_hook(action: &str) -> bool {
         .any(|hook| hook.action.eq_ignore_ascii_case(action))
 }
 
+pub fn normalize_plugin_action(action: &str) -> Result<&str, ActionNameError> {
+    let action = action.trim();
+    if action.is_empty() {
+        return Err(ActionNameError::Empty);
+    }
+
+    if let Some(canonical) = action.strip_prefix("Plugin") {
+        if canonical.starts_with("Plugin") {
+            return Err(ActionNameError::DoublePluginPrefix);
+        }
+        Ok(canonical)
+    } else {
+        Ok(action)
+    }
+}
+
 pub fn bridge_unimplemented(request: PluginRequest) -> PluginResponse {
     json!({
         "Result": false,
-        "ErrorCode": 501,
-        "ErrorMessage": format!(
+        "code": 501,
+        "message": format!(
             "Frickmail compatibility hook '{}' is not migrated yet",
             request.action
         )
@@ -149,7 +171,10 @@ mod tests {
     use fm_core::plugin::PluginRequest;
     use serde_json::Value;
 
-    use super::{bridge_unimplemented, is_compat_hook, CompatHookKind, FRICKMAIL_COMPAT_HOOKS};
+    use super::{
+        bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
+        CompatHookKind, FRICKMAIL_COMPAT_HOOKS,
+    };
 
     #[test]
     fn frickmail_user_hook_inventory_is_complete_for_current_plugin() {
@@ -235,8 +260,28 @@ mod tests {
         });
 
         assert_eq!(response["Result"], false);
-        assert_eq!(response["ErrorCode"], 501);
+        assert_eq!(response["code"], 501);
+        assert!(response["message"]
+            .as_str()
+            .unwrap()
+            .contains("FrickmailMe"));
         assert!(response.get("ok").is_none());
         assert!(response.get("data").is_none());
+    }
+
+    #[test]
+    fn plugin_prefixed_actions_normalize_once() {
+        assert_eq!(
+            normalize_plugin_action("PluginFrickmailMe").unwrap(),
+            "FrickmailMe"
+        );
+        assert_eq!(
+            normalize_plugin_action("FrickmailMe").unwrap(),
+            "FrickmailMe"
+        );
+        assert_eq!(
+            normalize_plugin_action("PluginPluginFrickmailMe"),
+            Err(ActionNameError::DoublePluginPrefix)
+        );
     }
 }
