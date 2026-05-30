@@ -1,7 +1,18 @@
+use argon2::{
+    password_hash::{PasswordHash, PasswordVerifier},
+    Algorithm, Argon2, Params, Version,
+};
 use fm_core::{FrickmailError, Result, UserSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
 use sqlx::{AnyPool, Row};
+
+pub const KDF_SALT_BYTES: usize = 16;
+pub const CREDENTIAL_KEY_BYTES: usize = 32;
+pub const KDF_OPSLIMIT: u32 = 3;
+pub const KDF_MEMLIMIT_KIB: u32 = 65_536;
+pub const DUMMY_PASSWORD_HASH: &str =
+    "$argon2id$v=19$m=65536,t=4,p=1$TTJYNUVsNlE5Q1RwTzZacQ$AnMUliGcTz3HHGhxmAib/d0fPagGYhpUa1uQxLPgyeg";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrickmailUser {
@@ -103,6 +114,48 @@ impl SqlxUserRepository {
 
 pub fn normalize_username(username: &str) -> String {
     username.trim().to_ascii_lowercase()
+}
+
+pub fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
+    let parsed_hash = PasswordHash::new(password_hash).map_err(|err| {
+        FrickmailError::Upstream(format!("frickmail password hash is invalid: {err}"))
+    })?;
+
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok())
+}
+
+pub fn verify_login_password(password: &str, user: Option<&FrickmailUser>) -> Result<bool> {
+    let hash = user
+        .map(|user| user.password_hash.as_str())
+        .unwrap_or(DUMMY_PASSWORD_HASH);
+
+    let verified = verify_password(password, hash).unwrap_or(false);
+    Ok(user.is_some() && verified)
+}
+
+pub fn derive_credential_key(password: &str, salt: &[u8]) -> Result<[u8; CREDENTIAL_KEY_BYTES]> {
+    if salt.len() != KDF_SALT_BYTES {
+        return Err(FrickmailError::BadRequest(format!(
+            "invalid Frickmail KDF salt length: expected {KDF_SALT_BYTES}, got {}",
+            salt.len()
+        )));
+    }
+
+    let params = Params::new(
+        KDF_MEMLIMIT_KIB,
+        KDF_OPSLIMIT,
+        1,
+        Some(CREDENTIAL_KEY_BYTES),
+    )
+    .map_err(|err| FrickmailError::Upstream(format!("invalid Argon2id KDF params: {err}")))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0_u8; CREDENTIAL_KEY_BYTES];
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|err| FrickmailError::Upstream(format!("Frickmail KDF failed: {err}")))?;
+    Ok(key)
 }
 
 pub fn preferences_from_settings(settings: &Value) -> Value {
@@ -351,18 +404,66 @@ fn value_to_php_string(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use argon2::{
+        password_hash::{PasswordHasher, SaltString},
+        Argon2,
+    };
     use serde_json::{json, Value};
     use sqlx::{any::AnyPoolOptions, AnyPool};
 
     use super::{
-        clean_preferences_patch, normalize_username, preferences_from_settings, FrickmailMe,
-        SqlxUserRepository,
+        clean_preferences_patch, derive_credential_key, normalize_username,
+        preferences_from_settings, verify_login_password, verify_password, FrickmailMe,
+        SqlxUserRepository, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
     };
     use fm_core::UserSession;
 
     #[test]
     fn username_normalization_matches_php_login_flow() {
         assert_eq!(normalize_username("  Nicola.EXAMPLE  "), "nicola.example");
+    }
+
+    #[test]
+    fn password_verifier_accepts_argon2id_phc_hashes() {
+        let salt = SaltString::encode_b64(b"frickmail-test-salt").unwrap();
+        let hash = Argon2::default()
+            .hash_password(b"correct horse battery staple", &salt)
+            .unwrap()
+            .to_string();
+
+        assert!(verify_password("correct horse battery staple", &hash).unwrap());
+        assert!(!verify_password("wrong", &hash).unwrap());
+    }
+
+    #[test]
+    fn login_password_verification_uses_dummy_hash_for_missing_users() {
+        assert!(!verify_login_password("anything", None).unwrap());
+        assert!(!verify_password("anything", DUMMY_PASSWORD_HASH).unwrap());
+    }
+
+    #[test]
+    fn login_password_verification_treats_malformed_hashes_as_invalid() {
+        let mut user = test_user(42, json!({}));
+        user.password_hash = "not-a-phc-hash".to_string();
+
+        assert!(!verify_login_password("anything", Some(&user)).unwrap());
+    }
+
+    #[test]
+    fn credential_key_derivation_matches_frickmail_sodium_shape() {
+        let salt = [7_u8; KDF_SALT_BYTES];
+        let key = derive_credential_key("secret", &salt).unwrap();
+        let same = derive_credential_key("secret", &salt).unwrap();
+        let other = derive_credential_key("secret", &[8_u8; KDF_SALT_BYTES]).unwrap();
+
+        assert_eq!(key.len(), CREDENTIAL_KEY_BYTES);
+        assert_eq!(key, same);
+        assert_ne!(key, other);
+    }
+
+    #[test]
+    fn credential_key_derivation_rejects_invalid_salt_lengths() {
+        assert!(derive_credential_key("secret", b"short").is_err());
     }
 
     #[test]
@@ -530,6 +631,19 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap()
+    }
+
+    fn test_user(id: i64, settings: Value) -> super::FrickmailUser {
+        super::FrickmailUser {
+            id,
+            username: format!("user{id}"),
+            email: Some(format!("user{id}@example.com")),
+            password_hash: "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$BKy6gHf7a1YF9iq3VbwpiV6FyboHjrVmgMu+wf8tBY4".to_string(),
+            kdf_salt: vec![1_u8; KDF_SALT_BYTES],
+            settings,
+            totp_secret: None,
+            oidc_escrow_key: None,
+        }
     }
 
     async fn create_users_table(pool: &AnyPool, settings_type: &str) {

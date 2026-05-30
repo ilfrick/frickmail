@@ -22,6 +22,7 @@ repository = "https://github.com/ilfrick/frickmail"
 
 [workspace.dependencies]
 anyhow = "1.0"
+argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
