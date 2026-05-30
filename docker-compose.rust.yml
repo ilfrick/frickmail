@@ -1,0 +1,21 @@
+services:
+  rust-dev:
+    build:
+      context: .
+      dockerfile: .docker/dev/rust/Dockerfile
+    working_dir: /workspace/frickmail-server
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      CARGO_HOME: /workspace/.docker/dev/.cache/cargo
+      CARGO_TARGET_DIR: /workspace/.docker/dev/.cache/rust-target
+      RUST_BACKTRACE: "1"
+      FRICKMAIL__BIND_ADDR: "0.0.0.0:8888"
+      FRICKMAIL__BASE_URL: "http://localhost:8888"
+      FRICKMAIL__STATIC_ROOT: "/workspace/frickmail-static"
+      # Set this to the same database URL used by the current Frickmail runtime.
+      # Supported schemes are provided by SQLx Any: postgres://, mysql://, sqlite://.
+      FRICKMAIL__DATABASE_URL: ""
+      FRICKMAIL__REDIS_URL: "redis://redis:6379/0"
+    volumes:
+      - .:/workspace
+    command: ["cargo", "check", "--workspace"]

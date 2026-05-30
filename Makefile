@@ -31,6 +31,15 @@ console-php:
 	@docker compose exec php sh
 console: console-node
 
+rust-dev:
+	@docker compose -f docker-compose.rust.yml run --rm rust-dev bash
+rust-check:
+	@docker compose -f docker-compose.rust.yml run --rm rust-dev cargo check --workspace
+rust-test:
+	@docker compose -f docker-compose.rust.yml run --rm rust-dev cargo test --workspace
+rust-clippy:
+	@docker compose -f docker-compose.rust.yml run --rm rust-dev cargo clippy --workspace -- -D warnings
+
 logs:
 	@docker compose logs --tail=100 -f
 logs-db:

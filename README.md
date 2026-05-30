@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/frickmail-icon.png" alt="Frickmail" width="120" height="120">
   <h1>Frickmail</h1>
-  <p>Self-hosted webmail with Thunderbird-style OAuth2 for Gmail and Office 365, plus contacts &amp; calendar sync.</p>
+  <p>Self-hosted webmail, now migrating to a full Rust backend and Frickmail-owned runtime.</p>
   <p>
     <a href="docs/OAUTH2.md">OAuth2 setup</a> •
     <a href="SECURITY.md">Security policy</a> •
@@ -11,19 +11,16 @@
 
 ---
 
-## Fork notice
+## Rust rewrite
 
-Frickmail is a fork of [**SnappyMail**](https://github.com/the-djmaze/snappymail).
-All credit for the underlying webmail engine goes to the SnappyMail team.
+Frickmail is moving to a full Rust backend. The existing PHP runtime is a
+temporary compatibility bridge while the Rust server takes over Frickmail
+identity, account management, OIDC/OAuth, IMAP/SMTP, MIME, search, tasks,
+calendar, contacts, notifications, and S/MIME.
 
-This repository tracks upstream `master` and adds Frickmail-specific
-features without altering the upstream namespaces or core data formats,
-so a fresh data directory created by SnappyMail can be reused with
-Frickmail and vice versa.
+See [docs/RUST_MIGRATION.md](docs/RUST_MIGRATION.md) for the active plan.
 
-Last upstream sync point: commit `c154d23` (2026-03-11).
-
-## What Frickmail adds on top of SnappyMail
+## Current Frickmail features
 
 | Plugin / change      | Adds                                                                                  |
 | -------------------- | ------------------------------------------------------------------------------------- |
@@ -51,7 +48,7 @@ docker compose -f docker-compose.frickmail.yml up -d
 - Admin:   <http://localhost:8888/?admin>
 - Admin password (created on first boot):
   ```bash
-  docker exec frickmail cat /var/lib/snappymail/_data_/_default_/admin_password.txt
+  docker exec frickmail sh -lc 'find /var/lib -name admin_password.txt -print -quit | xargs cat'
   ```
 
 For OAuth2 you need a public HTTPS URL. Put Frickmail behind Caddy /
@@ -59,10 +56,19 @@ Traefik / nginx with Let's Encrypt and register
 `https://your-domain/?LoginGMail` and `https://your-domain/?LoginO365` as
 the redirect URIs in your Google Cloud / Azure registrations.
 
-## Building from source
+## Rust development
 
-The Docker image is a multi-stage build that runs `release.php` over
-the upstream SnappyMail source and bundles our plugins on top:
+Rust development must run through the Docker dev container, not host tooling:
+
+```bash
+docker compose -f docker-compose.rust.yml run --rm rust-dev cargo check --workspace
+docker compose -f docker-compose.rust.yml run --rm rust-dev cargo test --workspace
+```
+
+## Building the current compatibility image
+
+The current Docker image is still the compatibility runtime used while the Rust
+rewrite progresses:
 
 ```bash
 docker build -f .docker/release/Dockerfile -t frickmail:latest .
@@ -70,24 +76,13 @@ docker build -f .docker/release/Dockerfile -t frickmail:latest .
 
 ## License
 
-Frickmail keeps the upstream license: **GNU AGPL v3**.
+Frickmail is licensed under **GNU AGPL v3**.
 
 - Copyright © 2026 Frickmail (Frickmail-specific code)
-- Copyright © 2020 - 2024 SnappyMail
-- Copyright © 2013 - 2022 RainLoop
 
-See [LICENSE](LICENSE) for full text.
-
-## Acknowledgements
-
-- The [SnappyMail](https://github.com/the-djmaze/snappymail) team for
-  building and maintaining the engine this fork rests on.
-- The original [RainLoop](https://github.com/RainLoop/rainloop-webmail)
-  authors.
-- [Sabre/VObject](https://github.com/sabre-io/vobject) for VCard support.
+See [LICENSE](LICENSE) and retained source-file notices for compatibility
+runtime attribution.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for the policy. Short version: upstream
-issues go to `security@snappymail.eu`, Frickmail-only issues to
-[GitHub security advisories](https://github.com/ilfrick/frickmail/security/advisories/new).
+See [SECURITY.md](SECURITY.md) for the policy.
