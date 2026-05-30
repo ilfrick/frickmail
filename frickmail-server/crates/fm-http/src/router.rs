@@ -325,6 +325,9 @@ async fn native_compat_response(
         "FrickmailSetPrefs" => {
             Some(native_frickmail_set_prefs(state, original_action, payload, session).await)
         }
+        "FrickmailListAccounts" => {
+            Some(native_frickmail_list_accounts(state, original_action, session).await)
+        }
         _ => None,
     }
 }
@@ -415,6 +418,41 @@ async fn native_frickmail_set_prefs(
             }),
         ),
         Ok(None) => json_result_error(original_action, "Not authenticated"),
+        Err(err) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            compat_error(UNKNOWN_ERROR, err.public_message()),
+        ),
+    }
+}
+
+async fn native_frickmail_list_accounts(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::list_mail_accounts(pool, user.user_id).await {
+        Ok(accounts) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "accounts": accounts
+                }
+            }),
+        ),
         Err(err) => json_value_envelope(
             StatusCode::OK,
             original_action,
@@ -801,7 +839,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
-        assert_eq!(body["code"], 501);
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
         assert_eq!(body["Action"], "FrickmailListAccounts");
     }
 
@@ -990,6 +1029,40 @@ mod tests {
         );
         assert_eq!(user.settings["custom"], "preserve");
         assert!(user.settings.get("unknown").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_list_accounts_returns_safe_account_metadata() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 45, "accounts", Some("accounts@example.com")).await;
+        seed_mail_account(&pool, 300, 45, "Primary", true).await;
+        seed_mail_account(&pool, 301, 45, "Secondary", false).await;
+        seed_identity(&pool, 400, 45, 300, "Sender", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(45, "accounts", None).await;
+
+        let response =
+            super::native_frickmail_list_accounts(&state, "FrickmailListAccounts", &session).await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(body["Result"]["accounts"][0]["id"], 300);
+        assert_eq!(body["Result"]["accounts"][0]["label"], "Primary");
+        assert_eq!(
+            body["Result"]["accounts"][0]["email"],
+            "primary@example.com"
+        );
+        assert_eq!(body["Result"]["accounts"][0]["type"], "imap");
+        assert_eq!(body["Result"]["accounts"][0]["is_primary"], true);
+        assert_eq!(body["Result"]["accounts"][0]["identities"][0]["id"], 400);
+        assert!(body["Result"]["accounts"][0]
+            .get("encrypted_password")
+            .is_none());
+        assert!(body["Result"]["accounts"][0]
+            .get("encrypted_oauth_refresh_token")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1342,6 +1415,50 @@ mod tests {
         pool
     }
 
+    async fn create_mail_account_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_mail_accounts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                email TEXT NOT NULL,
+                type TEXT NOT NULL,
+                imap_host TEXT,
+                imap_port INTEGER,
+                imap_secure TEXT,
+                smtp_host TEXT,
+                smtp_port INTEGER,
+                smtp_secure TEXT,
+                login TEXT,
+                encrypted_password BLOB,
+                encrypted_oauth_refresh_token BLOB,
+                oauth_tenant TEXT,
+                is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE frickmail_identities (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                reply_to TEXT,
+                is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
         seed_user_with_settings(pool, id, username, email, json!({})).await;
     }
@@ -1366,6 +1483,67 @@ mod tests {
         .bind(settings.to_string())
         .bind(None::<String>)
         .bind(None::<Vec<u8>>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_mail_account(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        label: &str,
+        is_primary: bool,
+    ) {
+        let local = label.to_ascii_lowercase();
+        sqlx::query(
+            "INSERT INTO frickmail_mail_accounts
+                (id, user_id, label, email, type, imap_host, imap_port, imap_secure,
+                 smtp_host, smtp_port, smtp_secure, login, encrypted_password,
+                 encrypted_oauth_refresh_token, oauth_tenant, is_primary, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(label)
+        .bind(format!("{local}@example.com"))
+        .bind("imap")
+        .bind("imap.example.com")
+        .bind(993_i64)
+        .bind("SSL")
+        .bind("smtp.example.com")
+        .bind(465_i64)
+        .bind("SSL")
+        .bind(format!("{local}@example.com"))
+        .bind(vec![1_u8, 2, 3])
+        .bind(None::<Vec<u8>>)
+        .bind(None::<String>)
+        .bind(is_primary)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_identity(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+        is_default: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_identities
+                (id, account_id, user_id, name, email, reply_to, is_default, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(format!("{}@example.com", name.to_ascii_lowercase()))
+        .bind(None::<String>)
+        .bind(is_default)
         .execute(pool)
         .await
         .unwrap();

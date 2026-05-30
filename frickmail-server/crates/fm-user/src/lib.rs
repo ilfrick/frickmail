@@ -6,6 +6,7 @@ use fm_core::{FrickmailError, Result, UserSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
 use sqlx::{AnyPool, Row};
+use std::collections::HashMap;
 
 pub const KDF_SALT_BYTES: usize = 16;
 pub const CREDENTIAL_KEY_BYTES: usize = 32;
@@ -34,6 +35,34 @@ pub struct FrickmailMe {
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailIdentity {
+    pub id: i64,
+    pub account_id: i64,
+    pub name: String,
+    pub email: String,
+    pub reply_to: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailAccount {
+    pub id: i64,
+    pub label: String,
+    pub email: String,
+    #[serde(rename = "type")]
+    pub account_type: String,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<i64>,
+    pub imap_secure: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i64>,
+    pub smtp_secure: Option<String>,
+    pub login: Option<String>,
+    pub is_primary: bool,
+    pub identities: Vec<MailIdentity>,
 }
 
 impl FrickmailMe {
@@ -109,6 +138,26 @@ impl SqlxUserRepository {
 
         update_settings_patch(pool, user_id, &Value::Object(clean)).await?;
         Self::preferences(pool, user_id).await
+    }
+
+    pub async fn list_mail_accounts(pool: &AnyPool, user_id: i64) -> Result<Vec<MailAccount>> {
+        let mut accounts = fetch_mail_accounts(pool, user_id).await?;
+        let identities = fetch_mail_identities(pool, user_id).await?;
+        let mut identities_by_account = HashMap::<i64, Vec<MailIdentity>>::new();
+        for identity in identities {
+            identities_by_account
+                .entry(identity.account_id)
+                .or_default()
+                .push(identity);
+        }
+
+        for account in &mut accounts {
+            account.identities = identities_by_account
+                .remove(&account.id)
+                .unwrap_or_default();
+        }
+
+        Ok(accounts)
     }
 }
 
@@ -259,6 +308,36 @@ where
     row.map(row_to_user).transpose()
 }
 
+async fn fetch_mail_accounts(pool: &AnyPool, user_id: i64) -> Result<Vec<MailAccount>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = mail_accounts_query(&backend);
+
+    sqlx::query(query)
+        .bind(user_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_mail_account)
+        .collect()
+}
+
+async fn fetch_mail_identities(pool: &AnyPool, user_id: i64) -> Result<Vec<MailIdentity>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = mail_identities_query(&backend);
+
+    sqlx::query(query)
+        .bind(user_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_mail_identity)
+        .collect()
+}
+
 fn user_select_query(backend: &str, column: &str) -> String {
     let placeholder = match backend {
         "PostgreSQL" => "$1",
@@ -275,6 +354,36 @@ fn user_select_query(backend: &str, column: &str) -> String {
     )
 }
 
+fn mail_accounts_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
+             FROM frickmail_mail_accounts WHERE user_id = $1 ORDER BY is_primary DESC, id ASC"
+        }
+        _ => {
+            "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
+             FROM frickmail_mail_accounts WHERE user_id = ? ORDER BY is_primary DESC, id ASC"
+        }
+    }
+}
+
+fn mail_identities_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, account_id, name, email, reply_to, \
+                CASE WHEN is_default THEN 1 ELSE 0 END AS is_default \
+             FROM frickmail_identities WHERE user_id = $1 ORDER BY account_id ASC, is_default DESC, id ASC"
+        }
+        _ => {
+            "SELECT id, account_id, name, email, reply_to, \
+                CASE WHEN is_default THEN 1 ELSE 0 END AS is_default \
+             FROM frickmail_identities WHERE user_id = ? ORDER BY account_id ASC, is_default DESC, id ASC"
+        }
+    }
+}
+
 fn update_settings_patch_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -287,6 +396,40 @@ fn update_settings_patch_query(backend: &str) -> &'static str {
             "UPDATE frickmail_users SET settings = json_patch(COALESCE(settings, '{}'), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?"
         }
     }
+}
+
+fn row_to_mail_account(row: sqlx::any::AnyRow) -> Result<MailAccount> {
+    Ok(MailAccount {
+        id: row.try_get("id").map_err(db_error)?,
+        label: row.try_get("label").map_err(db_error)?,
+        email: row.try_get("email").map_err(db_error)?,
+        account_type: row.try_get("type").map_err(db_error)?,
+        imap_host: row.try_get("imap_host").map_err(db_error)?,
+        imap_port: row.try_get("imap_port").map_err(db_error)?,
+        imap_secure: row.try_get("imap_secure").map_err(db_error)?,
+        smtp_host: row.try_get("smtp_host").map_err(db_error)?,
+        smtp_port: row.try_get("smtp_port").map_err(db_error)?,
+        smtp_secure: row.try_get("smtp_secure").map_err(db_error)?,
+        login: row.try_get("login").map_err(db_error)?,
+        is_primary: int_flag(&row, "is_primary")?,
+        identities: Vec::new(),
+    })
+}
+
+fn row_to_mail_identity(row: sqlx::any::AnyRow) -> Result<MailIdentity> {
+    Ok(MailIdentity {
+        id: row.try_get("id").map_err(db_error)?,
+        account_id: row.try_get("account_id").map_err(db_error)?,
+        name: row.try_get("name").map_err(db_error)?,
+        email: row.try_get("email").map_err(db_error)?,
+        reply_to: row.try_get("reply_to").map_err(db_error)?,
+        is_default: int_flag(&row, "is_default")?,
+    })
+}
+
+fn int_flag(row: &sqlx::any::AnyRow, column: &str) -> Result<bool> {
+    let value: i64 = row.try_get(column).map_err(db_error)?;
+    Ok(value != 0)
 }
 
 fn row_to_user(row: sqlx::any::AnyRow) -> Result<FrickmailUser> {
@@ -624,6 +767,36 @@ mod tests {
         assert_eq!(user.settings["custom"], "preserve");
     }
 
+    #[tokio::test]
+    async fn repository_lists_mail_accounts_without_secret_columns() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 11, json!({})).await;
+        insert_mail_account(&pool, 100, 11, "Work", true).await;
+        insert_mail_account(&pool, 101, 11, "Personal", false).await;
+        insert_identity(&pool, 200, 11, 100, "Default", true).await;
+        insert_identity(&pool, 201, 11, 100, "Alias", false).await;
+
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 11)
+            .await
+            .unwrap();
+
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].id, 100);
+        assert_eq!(accounts[0].label, "Work");
+        assert_eq!(accounts[0].email, "work@example.com");
+        assert_eq!(accounts[0].account_type, "imap");
+        assert_eq!(accounts[0].imap_host.as_deref(), Some("imap.example.com"));
+        assert_eq!(accounts[0].imap_port, Some(993));
+        assert!(accounts[0].is_primary);
+        assert_eq!(accounts[0].identities.len(), 2);
+        assert_eq!(accounts[0].identities[0].id, 200);
+        assert!(accounts[0].identities[0].is_default);
+        assert_eq!(accounts[1].id, 101);
+        assert!(accounts[1].identities.is_empty());
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -663,6 +836,50 @@ mod tests {
         sqlx::query(&sql).execute(pool).await.unwrap();
     }
 
+    async fn create_mail_account_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_mail_accounts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                email TEXT NOT NULL,
+                type TEXT NOT NULL,
+                imap_host TEXT,
+                imap_port INTEGER,
+                imap_secure TEXT,
+                smtp_host TEXT,
+                smtp_port INTEGER,
+                smtp_secure TEXT,
+                login TEXT,
+                encrypted_password BLOB,
+                encrypted_oauth_refresh_token BLOB,
+                oauth_tenant TEXT,
+                is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE frickmail_identities (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                reply_to TEXT,
+                is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn insert_user(pool: &AnyPool, id: i64, settings: Value) {
         sqlx::query(
             "INSERT INTO frickmail_users
@@ -677,6 +894,67 @@ mod tests {
         .bind(settings.to_string())
         .bind(None::<String>)
         .bind(None::<Vec<u8>>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_mail_account(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        label: &str,
+        is_primary: bool,
+    ) {
+        let local = label.to_ascii_lowercase();
+        sqlx::query(
+            "INSERT INTO frickmail_mail_accounts
+                (id, user_id, label, email, type, imap_host, imap_port, imap_secure,
+                 smtp_host, smtp_port, smtp_secure, login, encrypted_password,
+                 encrypted_oauth_refresh_token, oauth_tenant, is_primary, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(label)
+        .bind(format!("{local}@example.com"))
+        .bind("imap")
+        .bind("imap.example.com")
+        .bind(993_i64)
+        .bind("SSL")
+        .bind("smtp.example.com")
+        .bind(465_i64)
+        .bind("SSL")
+        .bind(format!("{local}@example.com"))
+        .bind(vec![1_u8, 2, 3])
+        .bind(None::<Vec<u8>>)
+        .bind(None::<String>)
+        .bind(is_primary)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_identity(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+        is_default: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_identities
+                (id, account_id, user_id, name, email, reply_to, is_default, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(format!("{}@example.com", name.to_ascii_lowercase()))
+        .bind(None::<String>)
+        .bind(is_default)
         .execute(pool)
         .await
         .unwrap();
