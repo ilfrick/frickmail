@@ -164,7 +164,8 @@ async fn json_api_request(
 
     if is_compat_hook(&action) {
         if let Some(response) =
-            native_compat_response(&state, &action, &request.action, &session).await
+            native_compat_response(&state, &action, &request.action, &request.payload, &session)
+                .await
         {
             return response;
         }
@@ -313,10 +314,17 @@ async fn native_compat_response(
     state: &AppState,
     action: &str,
     original_action: &str,
+    payload: &Value,
     session: &fm_session::Session,
 ) -> Option<Response> {
     match action {
         "FrickmailMe" => Some(native_frickmail_me(state, original_action, session).await),
+        "FrickmailGetPrefs" => {
+            Some(native_frickmail_get_prefs(state, original_action, session).await)
+        }
+        "FrickmailSetPrefs" => {
+            Some(native_frickmail_set_prefs(state, original_action, payload, session).await)
+        }
         _ => None,
     }
 }
@@ -326,57 +334,10 @@ async fn native_frickmail_me(
     original_action: &str,
     session: &fm_session::Session,
 ) -> Response {
-    let user = match session
-        .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
-        .await
-    {
-        Ok(user) => user,
-        Err(err) => {
-            return json_value_envelope(
-                StatusCode::OK,
-                original_action,
-                compat_error(
-                    UNKNOWN_ERROR,
-                    format!("Frickmail session read failed: {err}"),
-                ),
-            )
-        }
-    };
-
-    let result = match user {
-        Some(user_session) => {
-            if let Some(pool) = state.db_pool() {
-                match SqlxUserRepository::find_by_id(pool, user_session.user_id).await {
-                    Ok(Some(user)) => FrickmailMe::from_user(&user),
-                    Ok(None) => {
-                        if let Err(err) = session
-                            .remove::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
-                            .await
-                        {
-                            return json_value_envelope(
-                                StatusCode::OK,
-                                original_action,
-                                compat_error(
-                                    UNKNOWN_ERROR,
-                                    format!("Frickmail stale session cleanup failed: {err}"),
-                                ),
-                            );
-                        }
-                        FrickmailMe::anonymous()
-                    }
-                    Err(err) => {
-                        return json_value_envelope(
-                            StatusCode::OK,
-                            original_action,
-                            compat_error(UNKNOWN_ERROR, err.public_message()),
-                        )
-                    }
-                }
-            } else {
-                FrickmailMe::from_session(&user_session)
-            }
-        }
-        None => FrickmailMe::anonymous(),
+    let result = match load_session_user(state, original_action, session).await {
+        Ok(Some(user_session)) => FrickmailMe::from_session(&user_session),
+        Ok(None) => FrickmailMe::anonymous(),
+        Err(response) => return response,
     };
 
     json_value_envelope(
@@ -384,6 +345,150 @@ async fn native_frickmail_me(
         original_action,
         json!({
             "Result": result
+        }),
+    )
+}
+
+async fn native_frickmail_get_prefs(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::preferences(pool, user.user_id).await {
+        Ok(Some(prefs)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "prefs": prefs
+                }
+            }),
+        ),
+        Ok(None) => json_result_error(original_action, "Not authenticated"),
+        Err(err) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            compat_error(UNKNOWN_ERROR, err.public_message()),
+        ),
+    }
+}
+
+async fn native_frickmail_set_prefs(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let patch = payload.get("prefs").unwrap_or(&Value::Null);
+    match SqlxUserRepository::update_preferences(pool, user.user_id, patch).await {
+        Ok(Some(prefs)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "prefs": prefs
+                }
+            }),
+        ),
+        Ok(None) => json_result_error(original_action, "Not authenticated"),
+        Err(err) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            compat_error(UNKNOWN_ERROR, err.public_message()),
+        ),
+    }
+}
+
+async fn load_session_user(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> std::result::Result<Option<fm_core::UserSession>, Response> {
+    let user = session
+        .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+        .map_err(|err| {
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                compat_error(
+                    UNKNOWN_ERROR,
+                    format!("Frickmail session read failed: {err}"),
+                ),
+            )
+        })?;
+
+    let Some(user_session) = user else {
+        return Ok(None);
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return Ok(Some(user_session));
+    };
+
+    match SqlxUserRepository::find_by_id(pool, user_session.user_id).await {
+        Ok(Some(user)) => Ok(Some(fm_core::UserSession {
+            user_id: user.id,
+            username: user.username,
+            email: user.email,
+        })),
+        Ok(None) => {
+            session
+                .remove::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+                .await
+                .map_err(|err| {
+                    json_value_envelope(
+                        StatusCode::OK,
+                        original_action,
+                        compat_error(
+                            UNKNOWN_ERROR,
+                            format!("Frickmail stale session cleanup failed: {err}"),
+                        ),
+                    )
+                })?;
+            Ok(None)
+        }
+        Err(err) => Err(json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            compat_error(UNKNOWN_ERROR, err.public_message()),
+        )),
+    }
+}
+
+fn json_result_error(action: &str, error: &str) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({
+            "Result": {
+                "ok": false,
+                "error": error
+            }
         }),
     )
 }
@@ -628,7 +733,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tower::ServiceExt;
 
-    use super::{legacy_json_action, JSON_BODY_LIMIT_BYTES};
+    use super::{legacy_json_action, SqlxUserRepository, JSON_BODY_LIMIT_BYTES};
     use crate::{build_router, AppState};
 
     #[derive(Debug, Clone, Default)]
@@ -716,7 +821,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
-        assert_eq!(body["code"], 501);
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
         assert_eq!(body["Action"], "PluginFrickmailGetPrefs");
     }
 
@@ -813,6 +919,77 @@ mod tests {
         assert_eq!(body["Result"]["ok"], true);
         assert_eq!(body["Result"]["authenticated"], false);
         assert!(session_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_get_prefs_reads_existing_settings() {
+        let pool = user_db_pool().await;
+        seed_user_with_settings(
+            &pool,
+            43,
+            "prefs",
+            Some("prefs@example.com"),
+            json!({"tasks_default_tab":"pending","unified_inbox_limit":80}),
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(43, "stale", None).await;
+
+        let response =
+            super::native_frickmail_get_prefs(&state, "FrickmailGetPrefs", &session).await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["prefs"]["tasks_default_tab"], "pending");
+        assert_eq!(body["Result"]["prefs"]["unified_inbox_limit"], 80);
+        assert_eq!(body["Result"]["prefs"]["notifications_poll_interval"], 60);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_set_prefs_validates_and_persists_patch() {
+        let pool = user_db_pool().await;
+        seed_user_with_settings(
+            &pool,
+            44,
+            "prefs-set",
+            Some("prefs-set@example.com"),
+            json!({"tasks_default_tab":"pending","custom":"preserve"}),
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(44, "prefs-set", None).await;
+
+        let response = super::native_frickmail_set_prefs(
+            &state,
+            "FrickmailSetPrefs",
+            &json!({
+                "prefs": {
+                    "notifications_poll_interval": 5,
+                    "smime_auto_sign": "0",
+                    "tasks_default_tab": "invalid",
+                    "notifications_accounts": ["1", "bad", 3],
+                    "unknown": true
+                }
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        let user = SqlxUserRepository::find_by_id(&pool, 44)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["prefs"]["notifications_poll_interval"], 30);
+        assert_eq!(body["Result"]["prefs"]["smime_auto_sign"], false);
+        assert_eq!(body["Result"]["prefs"]["tasks_default_tab"], "pending");
+        assert_eq!(
+            body["Result"]["prefs"]["notifications_accounts"],
+            json!([1, 0, 3])
+        );
+        assert_eq!(user.settings["custom"], "preserve");
+        assert!(user.settings.get("unknown").is_none());
     }
 
     #[tokio::test]
@@ -1121,6 +1298,22 @@ mod tests {
         Session::new(None, Arc::new(MemoryStore::default()), None)
     }
 
+    async fn authenticated_session(user_id: i64, username: &str, email: Option<&str>) -> Session {
+        let session = test_session();
+        session
+            .insert(
+                USER_SESSION_KEY,
+                UserSession {
+                    user_id,
+                    username: username.to_string(),
+                    email: email.map(ToOwned::to_owned),
+                },
+            )
+            .await
+            .unwrap();
+        session
+    }
+
     async fn user_db_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         let pool = AnyPoolOptions::new()
@@ -1138,7 +1331,8 @@ mod tests {
                 kdf_salt BLOB NOT NULL,
                 settings TEXT NOT NULL,
                 totp_secret TEXT,
-                oidc_escrow_key BLOB
+                oidc_escrow_key BLOB,
+                updated_at TEXT
             )",
         )
         .execute(&pool)
@@ -1149,17 +1343,27 @@ mod tests {
     }
 
     async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
+        seed_user_with_settings(pool, id, username, email, json!({})).await;
+    }
+
+    async fn seed_user_with_settings(
+        pool: &AnyPool,
+        id: i64,
+        username: &str,
+        email: Option<&str>,
+        settings: Value,
+    ) {
         sqlx::query(
             "INSERT INTO frickmail_users
-                (id, username, email, password_hash, kdf_salt, settings, totp_secret, oidc_escrow_key)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (id, username, email, password_hash, kdf_salt, settings, totp_secret, oidc_escrow_key, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
         )
         .bind(id)
         .bind(username)
         .bind(email.map(ToOwned::to_owned))
         .bind("$argon2id$v=19$m=65536,t=3,p=1$placeholder")
         .bind(vec![1_u8, 2, 3, 4])
-        .bind("{}")
+        .bind(settings.to_string())
         .bind(None::<String>)
         .bind(None::<Vec<u8>>)
         .execute(pool)

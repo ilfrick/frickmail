@@ -1,6 +1,6 @@
 use fm_core::{FrickmailError, Result, UserSession};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Map, Number, Value};
 use sqlx::{AnyPool, Row};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -73,10 +73,116 @@ impl SqlxUserRepository {
             .and_then(|row| row.try_get::<i64, _>("count"))
             .map_err(db_error)
     }
+
+    pub async fn preferences(pool: &AnyPool, user_id: i64) -> Result<Option<Value>> {
+        let Some(user) = Self::find_by_id(pool, user_id).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(preferences_from_settings(&user.settings)))
+    }
+
+    pub async fn update_preferences(
+        pool: &AnyPool,
+        user_id: i64,
+        patch: &Value,
+    ) -> Result<Option<Value>> {
+        let Some(user) = Self::find_by_id(pool, user_id).await? else {
+            return Ok(None);
+        };
+
+        let clean = clean_preferences_patch(patch);
+        if clean.is_empty() {
+            return Ok(Some(preferences_from_settings(&user.settings)));
+        }
+
+        update_settings_patch(pool, user_id, &Value::Object(clean)).await?;
+        Self::preferences(pool, user_id).await
+    }
 }
 
 pub fn normalize_username(username: &str) -> String {
     username.trim().to_ascii_lowercase()
+}
+
+pub fn preferences_from_settings(settings: &Value) -> Value {
+    let stored = settings.as_object();
+    let prefs = preference_schema()
+        .iter()
+        .map(|spec| {
+            (
+                spec.key.to_string(),
+                stored
+                    .and_then(|settings| settings.get(spec.key))
+                    .cloned()
+                    .unwrap_or_else(|| spec.default.clone()),
+            )
+        })
+        .collect();
+
+    Value::Object(prefs)
+}
+
+pub fn clean_preferences_patch(patch: &Value) -> Map<String, Value> {
+    let Some(patch) = patch.as_object() else {
+        return Map::new();
+    };
+
+    let mut clean = Map::new();
+    for spec in preference_schema() {
+        let Some(value) = patch.get(spec.key) else {
+            continue;
+        };
+
+        if value.is_null() && spec.default.is_null() {
+            clean.insert(spec.key.to_string(), Value::Null);
+            continue;
+        }
+
+        let value = match spec.kind {
+            PreferenceKind::Int { min, max } => {
+                let value = value_to_i64(value).clamp(min, max);
+                Value::Number(Number::from(value))
+            }
+            PreferenceKind::Bool => Value::Bool(value_to_php_bool(value)),
+            PreferenceKind::String { allowed } => {
+                let value = value_to_php_string(value);
+                if !allowed.contains(&value.as_str()) {
+                    continue;
+                }
+                Value::String(value)
+            }
+            PreferenceKind::ArrayInt => {
+                let Some(values) = value.as_array() else {
+                    continue;
+                };
+                Value::Array(
+                    values
+                        .iter()
+                        .map(|value| Value::Number(Number::from(value_to_i64(value))))
+                        .collect(),
+                )
+            }
+        };
+
+        clean.insert(spec.key.to_string(), value);
+    }
+
+    clean
+}
+
+async fn update_settings_patch(pool: &AnyPool, user_id: i64, patch: &Value) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = update_settings_patch_query(&backend);
+
+    sqlx::query(query)
+        .bind(patch.to_string())
+        .bind(user_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
 }
 
 async fn fetch_optional_user_by<T>(
@@ -116,6 +222,20 @@ fn user_select_query(backend: &str, column: &str) -> String {
     )
 }
 
+fn update_settings_patch_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_users SET settings = settings || $1::jsonb, updated_at = NOW() WHERE id = $2"
+        }
+        "MySQL" => {
+            "UPDATE frickmail_users SET settings = JSON_MERGE_PATCH(COALESCE(settings, JSON_OBJECT()), CAST(? AS JSON)), updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        }
+        _ => {
+            "UPDATE frickmail_users SET settings = json_patch(COALESCE(settings, '{}'), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        }
+    }
+}
+
 fn row_to_user(row: sqlx::any::AnyRow) -> Result<FrickmailUser> {
     let settings_json: String = row.try_get("settings_json").map_err(db_error)?;
     let settings = serde_json::from_str(&settings_json).map_err(|err| {
@@ -138,12 +258,106 @@ fn db_error(err: sqlx::Error) -> FrickmailError {
     FrickmailError::Upstream(format!("frickmail user database error: {err}"))
 }
 
+#[derive(Debug, Clone)]
+struct PreferenceSpec {
+    key: &'static str,
+    default: Value,
+    kind: PreferenceKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreferenceKind {
+    Int { min: i64, max: i64 },
+    Bool,
+    String { allowed: &'static [&'static str] },
+    ArrayInt,
+}
+
+fn preference_schema() -> Vec<PreferenceSpec> {
+    vec![
+        PreferenceSpec {
+            key: "notifications_poll_interval",
+            default: json!(60),
+            kind: PreferenceKind::Int { min: 30, max: 300 },
+        },
+        PreferenceSpec {
+            key: "notifications_accounts",
+            default: Value::Null,
+            kind: PreferenceKind::ArrayInt,
+        },
+        PreferenceSpec {
+            key: "smime_auto_sign",
+            default: json!(false),
+            kind: PreferenceKind::Bool,
+        },
+        PreferenceSpec {
+            key: "unified_inbox_limit",
+            default: json!(40),
+            kind: PreferenceKind::Int { min: 10, max: 100 },
+        },
+        PreferenceSpec {
+            key: "tasks_default_tab",
+            default: json!("all"),
+            kind: PreferenceKind::String {
+                allowed: &["all", "pending", "completed"],
+            },
+        },
+    ]
+}
+
+fn value_to_i64(value: &Value) -> i64 {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_u64()
+                    .map(|value| value.min(i64::MAX as u64) as i64)
+            })
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .unwrap_or_default(),
+        Value::Bool(value) => i64::from(*value),
+        Value::String(value) => value.trim().parse::<i64>().unwrap_or_default(),
+        _ => 0,
+    }
+}
+
+fn value_to_php_bool(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::Null => false,
+        Value::Number(number) => number
+            .as_i64()
+            .map(|value| value != 0)
+            .or_else(|| number.as_u64().map(|value| value != 0))
+            .or_else(|| number.as_f64().map(|value| value != 0.0))
+            .unwrap_or(false),
+        Value::String(value) => !value.is_empty() && value != "0",
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+    }
+}
+
+fn value_to_php_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Bool(true) => "1".to_string(),
+        Value::Bool(false) | Value::Null => String::new(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(_) => "Array".to_string(),
+        Value::Object(_) => "Object".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
     use sqlx::{any::AnyPoolOptions, AnyPool};
 
-    use super::{normalize_username, FrickmailMe, SqlxUserRepository};
+    use super::{
+        clean_preferences_patch, normalize_username, preferences_from_settings, FrickmailMe,
+        SqlxUserRepository,
+    };
     use fm_core::UserSession;
 
     #[test]
@@ -238,6 +452,77 @@ mod tests {
         assert_eq!(SqlxUserRepository::user_count(&pool).await.unwrap(), 1);
     }
 
+    #[test]
+    fn preferences_merge_defaults_and_stored_settings() {
+        let prefs = preferences_from_settings(&json!({
+            "notifications_poll_interval": 120,
+            "tasks_default_tab": "pending",
+            "unrelated": true
+        }));
+
+        assert_eq!(prefs["notifications_poll_interval"], 120);
+        assert_eq!(prefs["tasks_default_tab"], "pending");
+        assert_eq!(prefs["smime_auto_sign"], false);
+        assert_eq!(prefs["unified_inbox_limit"], 40);
+        assert_eq!(prefs["notifications_accounts"], Value::Null);
+        assert!(prefs.get("unrelated").is_none());
+    }
+
+    #[test]
+    fn preferences_patch_matches_legacy_validation_rules() {
+        let clean = clean_preferences_patch(&json!({
+            "notifications_poll_interval": 5,
+            "unified_inbox_limit": 500,
+            "smime_auto_sign": "0",
+            "tasks_default_tab": "completed",
+            "notifications_accounts": ["1", "bad", 3],
+            "ignored": true
+        }));
+
+        assert_eq!(clean["notifications_poll_interval"], 30);
+        assert_eq!(clean["unified_inbox_limit"], 100);
+        assert_eq!(clean["smime_auto_sign"], false);
+        assert_eq!(clean["tasks_default_tab"], "completed");
+        assert_eq!(clean["notifications_accounts"], json!([1, 0, 3]));
+        assert!(clean.get("ignored").is_none());
+    }
+
+    #[tokio::test]
+    async fn repository_updates_preferences_in_existing_settings_column() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        insert_user(
+            &pool,
+            9,
+            json!({"tasks_default_tab":"pending","custom":"preserve"}),
+        )
+        .await;
+
+        let prefs = SqlxUserRepository::update_preferences(
+            &pool,
+            9,
+            &json!({
+                "notifications_poll_interval": 5,
+                "smime_auto_sign": true,
+                "tasks_default_tab": "invalid",
+                "notifications_accounts": null
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let user = SqlxUserRepository::find_by_id(&pool, 9)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(prefs["notifications_poll_interval"], 30);
+        assert_eq!(prefs["smime_auto_sign"], true);
+        assert_eq!(prefs["tasks_default_tab"], "pending");
+        assert_eq!(prefs["notifications_accounts"], Value::Null);
+        assert_eq!(user.settings["custom"], "preserve");
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -245,5 +530,41 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap()
+    }
+
+    async fn create_users_table(pool: &AnyPool, settings_type: &str) {
+        let sql = format!(
+            "CREATE TABLE frickmail_users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                email TEXT,
+                password_hash TEXT NOT NULL,
+                kdf_salt BLOB NOT NULL,
+                settings {settings_type} NOT NULL,
+                totp_secret TEXT,
+                oidc_escrow_key BLOB,
+                updated_at TEXT
+            )"
+        );
+        sqlx::query(&sql).execute(pool).await.unwrap();
+    }
+
+    async fn insert_user(pool: &AnyPool, id: i64, settings: Value) {
+        sqlx::query(
+            "INSERT INTO frickmail_users
+                (id, username, email, password_hash, kdf_salt, settings, totp_secret, oidc_escrow_key, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(format!("user{id}"))
+        .bind(format!("user{id}@example.com"))
+        .bind("$argon2id$v=19$m=65536,t=3,p=1$placeholder")
+        .bind(vec![1_u8, 2, 3, 4])
+        .bind(settings.to_string())
+        .bind(None::<String>)
+        .bind(None::<Vec<u8>>)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 }
