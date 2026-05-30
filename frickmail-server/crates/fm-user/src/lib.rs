@@ -159,6 +159,14 @@ impl SqlxUserRepository {
 
         Ok(accounts)
     }
+
+    pub async fn list_mail_identities(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+    ) -> Result<Vec<MailIdentity>> {
+        fetch_mail_identities_for_account(pool, user_id, account_id).await
+    }
 }
 
 pub fn normalize_username(username: &str) -> String {
@@ -338,6 +346,26 @@ async fn fetch_mail_identities(pool: &AnyPool, user_id: i64) -> Result<Vec<MailI
         .collect()
 }
 
+async fn fetch_mail_identities_for_account(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+) -> Result<Vec<MailIdentity>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = mail_identities_for_account_query(&backend);
+
+    sqlx::query(query)
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_mail_identity)
+        .collect()
+}
+
 fn user_select_query(backend: &str, column: &str) -> String {
     let placeholder = match backend {
         "PostgreSQL" => "$1",
@@ -380,6 +408,21 @@ fn mail_identities_query(backend: &str) -> &'static str {
             "SELECT id, account_id, name, email, reply_to, \
                 CASE WHEN is_default THEN 1 ELSE 0 END AS is_default \
              FROM frickmail_identities WHERE user_id = ? ORDER BY account_id ASC, is_default DESC, id ASC"
+        }
+    }
+}
+
+fn mail_identities_for_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, account_id, name, email, reply_to, \
+                CASE WHEN is_default THEN 1 ELSE 0 END AS is_default \
+             FROM frickmail_identities WHERE user_id = $1 AND account_id = $2 ORDER BY is_default DESC, id ASC"
+        }
+        _ => {
+            "SELECT id, account_id, name, email, reply_to, \
+                CASE WHEN is_default THEN 1 ELSE 0 END AS is_default \
+             FROM frickmail_identities WHERE user_id = ? AND account_id = ? ORDER BY is_default DESC, id ASC"
         }
     }
 }
@@ -795,6 +838,30 @@ mod tests {
         assert!(accounts[0].identities[0].is_default);
         assert_eq!(accounts[1].id, 101);
         assert!(accounts[1].identities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_lists_mail_identities_for_one_account() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 12, json!({})).await;
+        insert_mail_account(&pool, 110, 12, "Work", true).await;
+        insert_mail_account(&pool, 111, 12, "Personal", false).await;
+        insert_identity(&pool, 210, 12, 110, "Default", true).await;
+        insert_identity(&pool, 211, 12, 110, "Alias", false).await;
+        insert_identity(&pool, 212, 12, 111, "Other", true).await;
+
+        let identities = SqlxUserRepository::list_mail_identities(&pool, 12, 110)
+            .await
+            .unwrap();
+
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].id, 210);
+        assert_eq!(identities[0].account_id, 110);
+        assert!(identities[0].is_default);
+        assert_eq!(identities[1].id, 211);
+        assert_eq!(identities[1].account_id, 110);
     }
 
     async fn sqlite_pool() -> AnyPool {

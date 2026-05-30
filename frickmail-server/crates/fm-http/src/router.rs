@@ -328,6 +328,9 @@ async fn native_compat_response(
         "FrickmailListAccounts" => {
             Some(native_frickmail_list_accounts(state, original_action, session).await)
         }
+        "FrickmailListIdentities" => {
+            Some(native_frickmail_list_identities(state, original_action, payload, session).await)
+        }
         _ => None,
     }
 }
@@ -450,6 +453,43 @@ async fn native_frickmail_list_accounts(
                 "Result": {
                     "ok": true,
                     "accounts": accounts
+                }
+            }),
+        ),
+        Err(err) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            compat_error(UNKNOWN_ERROR, err.public_message()),
+        ),
+    }
+}
+
+async fn native_frickmail_list_identities(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let account_id = payload_i64(payload, "account_id");
+    match SqlxUserRepository::list_mail_identities(pool, user.user_id, account_id).await {
+        Ok(identities) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "identities": identities
                 }
             }),
         ),
@@ -719,6 +759,23 @@ fn compat_error(code: u16, message: impl Into<String>) -> Value {
         "code": code,
         "message": message.into()
     })
+}
+
+fn payload_i64(payload: &Value, key: &str) -> i64 {
+    match payload.get(key) {
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_u64()
+                    .map(|value| value.min(i64::MAX as u64) as i64)
+            })
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .unwrap_or_default(),
+        Some(Value::Bool(value)) => i64::from(*value),
+        Some(Value::String(value)) => value.trim().parse::<i64>().unwrap_or_default(),
+        _ => 0,
+    }
 }
 
 fn action_error_message(error: ActionNameError) -> &'static str {
@@ -1063,6 +1120,37 @@ mod tests {
         assert!(body["Result"]["accounts"][0]
             .get("encrypted_oauth_refresh_token")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_list_identities_returns_account_scoped_identities() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 46, "identities", Some("identities@example.com")).await;
+        seed_mail_account(&pool, 310, 46, "Primary", true).await;
+        seed_mail_account(&pool, 311, 46, "Secondary", false).await;
+        seed_identity(&pool, 410, 46, 310, "Default", true).await;
+        seed_identity(&pool, 411, 46, 310, "Alias", false).await;
+        seed_identity(&pool, 412, 46, 311, "Other", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(46, "identities", None).await;
+
+        let response = super::native_frickmail_list_identities(
+            &state,
+            "FrickmailListIdentities",
+            &json!({"account_id": 310}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["identities"].as_array().unwrap().len(), 2);
+        assert_eq!(body["Result"]["identities"][0]["id"], 410);
+        assert_eq!(body["Result"]["identities"][0]["account_id"], 310);
+        assert_eq!(body["Result"]["identities"][0]["is_default"], true);
+        assert_eq!(body["Result"]["identities"][1]["id"], 411);
+        assert_eq!(body["Action"], "FrickmailListIdentities");
     }
 
     #[tokio::test]
