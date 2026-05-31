@@ -382,6 +382,12 @@ async fn native_compat_response(
         "FrickmailUnlinkOidc" => {
             Some(native_frickmail_unlink_oidc(state, original_action, payload, session).await)
         }
+        "FrickmailSmimeListCerts" => {
+            Some(native_frickmail_smime_list_certs(state, original_action, session).await)
+        }
+        "FrickmailSmimeDeleteCert" => {
+            Some(native_frickmail_smime_delete_cert(state, original_action, payload, session).await)
+        }
         _ => None,
     }
 }
@@ -1131,6 +1137,71 @@ async fn native_frickmail_unlink_oidc(
                 }
             }),
         ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_smime_list_certs(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::list_smime_certs(pool, user.user_id).await {
+        Ok(certs) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "certs": certs
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_smime_delete_cert(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::delete_smime_cert(pool, user.user_id, payload_i64(payload, "id"))
+        .await
+    {
+        Ok(true) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Ok(false) => json_result_error(original_action, "Certificate not found or already deleted"),
         Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
@@ -2246,6 +2317,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_smime_list_and_delete_match_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_smime_cert_tables(&pool).await;
+        seed_user(&pool, 61, "smime", Some("smime@example.com")).await;
+        seed_user(&pool, 62, "other", Some("other@example.com")).await;
+        seed_smime_cert(
+            &pool,
+            201,
+            61,
+            401,
+            "signer@example.com",
+            "fp-new",
+            Some("CN=Signer"),
+            Some(vec![1, 2, 3]),
+            "2026-06-02 10:00:00",
+        )
+        .await;
+        seed_smime_cert(
+            &pool,
+            202,
+            61,
+            402,
+            "public@example.com",
+            "fp-old",
+            None,
+            None,
+            "2026-06-01 10:00:00",
+        )
+        .await;
+        seed_smime_cert(
+            &pool,
+            204,
+            61,
+            404,
+            "empty-key@example.com",
+            "fp-empty",
+            Some("CN=Empty"),
+            Some(Vec::new()),
+            "2026-05-31 10:00:00",
+        )
+        .await;
+        seed_smime_cert(
+            &pool,
+            203,
+            62,
+            403,
+            "other@example.com",
+            "fp-other",
+            Some("CN=Other"),
+            Some(vec![9]),
+            "2026-06-03 10:00:00",
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(61, "smime", None).await;
+
+        let response =
+            super::native_frickmail_smime_list_certs(&state, "FrickmailSmimeListCerts", &session)
+                .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["certs"].as_array().unwrap().len(), 3);
+        assert_eq!(body["Result"]["certs"][0]["id"], 201);
+        assert_eq!(body["Result"]["certs"][0]["account_id"], 401);
+        assert_eq!(body["Result"]["certs"][0]["email"], "signer@example.com");
+        assert_eq!(body["Result"]["certs"][0]["fingerprint"], "fp-new");
+        assert_eq!(body["Result"]["certs"][0]["subject"], "CN=Signer");
+        assert_eq!(body["Result"]["certs"][0]["has_key"], true);
+        assert_eq!(body["Result"]["certs"][0]["cert_pem"], Value::Null);
+        assert_eq!(body["Result"]["certs"][0]["encrypted_key_pem"], Value::Null);
+        assert_eq!(body["Result"]["certs"][1]["id"], 202);
+        assert_eq!(body["Result"]["certs"][1]["subject"], "");
+        assert_eq!(body["Result"]["certs"][1]["has_key"], false);
+        assert_eq!(body["Result"]["certs"][2]["id"], 204);
+        assert_eq!(body["Result"]["certs"][2]["has_key"], false);
+
+        let response = super::native_frickmail_smime_delete_cert(
+            &state,
+            "FrickmailSmimeDeleteCert",
+            &json!({"id": 203}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Certificate not found or already deleted"
+        );
+        assert_eq!(smime_cert_count(&pool, 62).await, 1);
+
+        let response = super::native_frickmail_smime_delete_cert(
+            &state,
+            "FrickmailSmimeDeleteCert",
+            &json!({"id": 202}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(smime_cert_count(&pool, 61).await, 2);
+    }
+
+    #[tokio::test]
     async fn json_api_reports_unknown_action_without_transport_failure() {
         let response = app()
             .oneshot(
@@ -2711,6 +2886,27 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_smime_cert_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_smime_certs (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                cert_pem TEXT NOT NULL,
+                encrypted_key_pem BLOB,
+                fingerprint TEXT NOT NULL,
+                subject TEXT,
+                not_before TEXT,
+                not_after TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
         seed_user_with_settings(pool, id, username, email, json!({})).await;
     }
@@ -2920,6 +3116,49 @@ mod tests {
 
     async fn oidc_identity_count(pool: &AnyPool, user_id: i64) -> i64 {
         sqlx::query("SELECT COUNT(*) AS count FROM frickmail_oidc_identities WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_smime_cert(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        email: &str,
+        fingerprint: &str,
+        subject: Option<&str>,
+        encrypted_key_pem: Option<Vec<u8>>,
+        created_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_smime_certs
+                (id, user_id, account_id, email, cert_pem, encrypted_key_pem,
+                 fingerprint, subject, not_before, not_after, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(account_id)
+        .bind(email)
+        .bind("-----BEGIN CERTIFICATE-----\nredacted\n-----END CERTIFICATE-----")
+        .bind(encrypted_key_pem)
+        .bind(fingerprint)
+        .bind(subject)
+        .bind(Some("2026-01-01 00:00:00"))
+        .bind(Some("2027-01-01 00:00:00"))
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn smime_cert_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_smime_certs WHERE user_id = ?")
             .bind(user_id)
             .fetch_one(pool)
             .await

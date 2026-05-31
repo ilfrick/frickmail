@@ -144,6 +144,19 @@ pub struct OidcLink {
     pub linked_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SmimeCertificate {
+    pub id: i64,
+    pub account_id: i64,
+    pub email: String,
+    pub fingerprint: String,
+    pub subject: String,
+    pub not_before: Option<String>,
+    pub not_after: Option<String>,
+    pub has_key: bool,
+    pub created_at: Option<String>,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -355,6 +368,14 @@ impl SqlxUserRepository {
         provider_hash: String,
     ) -> Result<()> {
         unlink_oidc_identity(pool, user_id, provider_hash).await
+    }
+
+    pub async fn list_smime_certs(pool: &AnyPool, user_id: i64) -> Result<Vec<SmimeCertificate>> {
+        list_smime_certs(pool, user_id).await
+    }
+
+    pub async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result<bool> {
+        delete_smime_cert(pool, user_id, cert_id).await
     }
 }
 
@@ -1091,6 +1112,33 @@ async fn unlink_oidc_identity(pool: &AnyPool, user_id: i64, provider_hash: Strin
     }
 }
 
+async fn list_smime_certs(pool: &AnyPool, user_id: i64) -> Result<Vec<SmimeCertificate>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(smime_certs_query(&backend))
+        .bind(user_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_smime_certificate)
+        .collect()
+}
+
+async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result<bool> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(delete_smime_cert_query(&backend))
+        .bind(user_id)
+        .bind(cert_id)
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(db_error)
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -1541,6 +1589,39 @@ fn clear_oidc_escrow_key_query(backend: &str) -> &'static str {
     }
 }
 
+fn smime_certs_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, account_id, email, fingerprint, COALESCE(subject, '') AS subject, \
+                not_before::text AS not_before, not_after::text AS not_after, \
+                CASE WHEN encrypted_key_pem IS NULL OR octet_length(encrypted_key_pem) = 0 THEN 0 ELSE 1 END AS has_key, \
+                created_at::text AS created_at \
+             FROM frickmail_smime_certs WHERE user_id = $1 ORDER BY created_at DESC"
+        }
+        "MySQL" => {
+            "SELECT id, account_id, email, fingerprint, COALESCE(subject, '') AS subject, \
+                CAST(not_before AS CHAR) AS not_before, CAST(not_after AS CHAR) AS not_after, \
+                CASE WHEN encrypted_key_pem IS NULL OR LENGTH(encrypted_key_pem) = 0 THEN 0 ELSE 1 END AS has_key, \
+                CAST(created_at AS CHAR) AS created_at \
+             FROM frickmail_smime_certs WHERE user_id = ? ORDER BY created_at DESC"
+        }
+        _ => {
+            "SELECT id, account_id, email, fingerprint, COALESCE(subject, '') AS subject, \
+                CAST(not_before AS TEXT) AS not_before, CAST(not_after AS TEXT) AS not_after, \
+                CASE WHEN encrypted_key_pem IS NULL OR length(encrypted_key_pem) = 0 THEN 0 ELSE 1 END AS has_key, \
+                CAST(created_at AS TEXT) AS created_at \
+             FROM frickmail_smime_certs WHERE user_id = ? ORDER BY created_at DESC"
+        }
+    }
+}
+
+fn delete_smime_cert_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_smime_certs WHERE user_id = $1 AND id = $2",
+        _ => "DELETE FROM frickmail_smime_certs WHERE user_id = ? AND id = ?",
+    }
+}
+
 fn insert_mail_rule_returning_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -1669,6 +1750,20 @@ fn row_to_oidc_link(row: sqlx::any::AnyRow, provider_name: &str) -> Result<OidcL
         provider_hash: row.try_get("provider_hash").map_err(db_error)?,
         provider_name: provider_name.to_string(),
         linked_at: row.try_get("linked_at").map_err(db_error)?,
+    })
+}
+
+fn row_to_smime_certificate(row: sqlx::any::AnyRow) -> Result<SmimeCertificate> {
+    Ok(SmimeCertificate {
+        id: row.try_get("id").map_err(db_error)?,
+        account_id: row.try_get("account_id").map_err(db_error)?,
+        email: row.try_get("email").map_err(db_error)?,
+        fingerprint: row.try_get("fingerprint").map_err(db_error)?,
+        subject: row.try_get("subject").map_err(db_error)?,
+        not_before: row.try_get("not_before").map_err(db_error)?,
+        not_after: row.try_get("not_after").map_err(db_error)?,
+        has_key: int_flag(&row, "has_key")?,
+        created_at: row.try_get("created_at").map_err(db_error)?,
     })
 }
 
@@ -2606,6 +2701,88 @@ mod tests {
         assert_eq!(err.public_message(), "provider_hash required");
     }
 
+    #[tokio::test]
+    async fn repository_lists_and_deletes_smime_certs_without_secret_material() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_smime_cert_tables(&pool).await;
+        insert_user(&pool, 31, json!({})).await;
+        insert_user(&pool, 32, json!({})).await;
+        insert_smime_cert(
+            &pool,
+            101,
+            31,
+            301,
+            "signer@example.com",
+            "fp-new",
+            Some("CN=Signer"),
+            Some(vec![1, 2, 3]),
+            "2026-06-02 10:00:00",
+        )
+        .await;
+        insert_smime_cert(
+            &pool,
+            102,
+            31,
+            302,
+            "public@example.com",
+            "fp-old",
+            None,
+            None,
+            "2026-06-01 10:00:00",
+        )
+        .await;
+        insert_smime_cert(
+            &pool,
+            104,
+            31,
+            304,
+            "empty-key@example.com",
+            "fp-empty",
+            Some("CN=Empty"),
+            Some(Vec::new()),
+            "2026-05-31 10:00:00",
+        )
+        .await;
+        insert_smime_cert(
+            &pool,
+            103,
+            32,
+            303,
+            "other@example.com",
+            "fp-other",
+            Some("CN=Other"),
+            Some(vec![9]),
+            "2026-06-03 10:00:00",
+        )
+        .await;
+
+        let certs = SqlxUserRepository::list_smime_certs(&pool, 31)
+            .await
+            .unwrap();
+        assert_eq!(certs.len(), 3);
+        assert_eq!(certs[0].id, 101);
+        assert_eq!(certs[0].account_id, 301);
+        assert_eq!(certs[0].email, "signer@example.com");
+        assert_eq!(certs[0].fingerprint, "fp-new");
+        assert_eq!(certs[0].subject, "CN=Signer");
+        assert!(certs[0].has_key);
+        assert_eq!(certs[1].id, 102);
+        assert_eq!(certs[1].subject, "");
+        assert!(!certs[1].has_key);
+        assert_eq!(certs[2].id, 104);
+        assert!(!certs[2].has_key);
+
+        assert!(!SqlxUserRepository::delete_smime_cert(&pool, 31, 103)
+            .await
+            .unwrap());
+        assert_eq!(smime_cert_count(&pool, 32).await, 1);
+        assert!(SqlxUserRepository::delete_smime_cert(&pool, 31, 102)
+            .await
+            .unwrap());
+        assert_eq!(smime_cert_count(&pool, 31).await, 2);
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -2754,6 +2931,27 @@ mod tests {
                 subject TEXT NOT NULL,
                 linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(provider_hash, subject)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_smime_cert_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_smime_certs (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                cert_pem TEXT NOT NULL,
+                encrypted_key_pem BLOB,
+                fingerprint TEXT NOT NULL,
+                subject TEXT,
+                not_before TEXT,
+                not_after TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
         )
         .execute(pool)
@@ -3010,6 +3208,49 @@ mod tests {
 
     async fn oidc_identity_count(pool: &AnyPool, user_id: i64) -> i64 {
         sqlx::query("SELECT COUNT(*) AS count FROM frickmail_oidc_identities WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_smime_cert(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        email: &str,
+        fingerprint: &str,
+        subject: Option<&str>,
+        encrypted_key_pem: Option<Vec<u8>>,
+        created_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_smime_certs
+                (id, user_id, account_id, email, cert_pem, encrypted_key_pem,
+                 fingerprint, subject, not_before, not_after, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(account_id)
+        .bind(email)
+        .bind("-----BEGIN CERTIFICATE-----\nredacted\n-----END CERTIFICATE-----")
+        .bind(encrypted_key_pem)
+        .bind(fingerprint)
+        .bind(subject)
+        .bind(Some("2026-01-01 00:00:00"))
+        .bind(Some("2027-01-01 00:00:00"))
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn smime_cert_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_smime_certs WHERE user_id = ?")
             .bind(user_id)
             .fetch_one(pool)
             .await
