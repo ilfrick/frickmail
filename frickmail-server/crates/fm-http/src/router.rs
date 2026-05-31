@@ -340,6 +340,9 @@ async fn native_compat_response(
         "FrickmailSetPrimary" => {
             Some(native_frickmail_set_primary(state, original_action, payload, session).await)
         }
+        "FrickmailSearch" => {
+            Some(native_frickmail_search(state, original_action, payload, session).await)
+        }
         "FrickmailListIdentities" => {
             Some(native_frickmail_list_identities(state, original_action, payload, session).await)
         }
@@ -624,6 +627,48 @@ async fn native_frickmail_set_primary(
             json!({
                 "Result": {
                     "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_search(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let query = payload_string(payload, "q").unwrap_or_default();
+    let trimmed_query = query.trim().to_string();
+    match SqlxUserRepository::search_messages(
+        pool,
+        user.user_id,
+        trimmed_query.clone(),
+        payload_search_limit(payload),
+    )
+    .await
+    {
+        Ok(results) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "query": trimmed_query,
+                    "results": results
                 }
             }),
         ),
@@ -1593,6 +1638,20 @@ fn payload_i64(payload: &Value, key: &str) -> i64 {
     }
 }
 
+fn payload_search_limit(payload: &Value) -> i64 {
+    let Some(value) = payload.get("limit") else {
+        return 50;
+    };
+    let raw = match value {
+        Value::Null => 50,
+        Value::Bool(false) => 50,
+        Value::Number(number) if number.as_f64() == Some(0.0) => 50,
+        Value::String(text) if text.is_empty() || text == "0" => 50,
+        _ => payload_i64(payload, "limit"),
+    };
+    raw.clamp(1, 100)
+}
+
 fn payload_string(payload: &Value, key: &str) -> Option<String> {
     match payload.get(key) {
         Some(Value::String(value)) => Some(value.clone()),
@@ -2115,6 +2174,142 @@ mod tests {
             .await
             .unwrap();
         assert!(other_accounts[0].is_primary);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_search_matches_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        seed_user(&pool, 149, "search", Some("search@example.com")).await;
+        seed_user(&pool, 150, "other-search", Some("other-search@example.com")).await;
+        seed_mail_account(&pool, 1310, 149, "Work", true).await;
+        seed_mail_account(&pool, 1311, 150, "Other", true).await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 1,
+                user_id: 149,
+                account_id: 1310,
+                folder: "INBOX",
+                imap_uid: 31,
+                message_id: Some("search-1"),
+                subject: Some("Invoice"),
+                from_addr: Some("billing@example.com"),
+                from_name: Some("Billing"),
+                date_ts: Some("2026-06-01 10:00:00"),
+                snippet: Some("First invoice"),
+            },
+        )
+        .await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 2,
+                user_id: 149,
+                account_id: 1310,
+                folder: "Archive",
+                imap_uid: 32,
+                message_id: Some("search-2"),
+                subject: Some("Invoice reminder"),
+                from_addr: Some("boss@example.com"),
+                from_name: Some("Boss"),
+                date_ts: Some("2026-06-02 10:00:00"),
+                snippet: Some("Second invoice"),
+            },
+        )
+        .await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 3,
+                user_id: 150,
+                account_id: 1311,
+                folder: "INBOX",
+                imap_uid: 33,
+                message_id: Some("search-3"),
+                subject: Some("Invoice from other user"),
+                from_addr: Some("other@example.com"),
+                from_name: Some("Other"),
+                date_ts: Some("2026-06-03 10:00:00"),
+                snippet: Some("Must not leak"),
+            },
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(149, "search", None).await;
+
+        let response = super::native_frickmail_search(
+            &state,
+            "FrickmailSearch",
+            &json!({"q": " invoice ", "limit": 1}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FrickmailSearch");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["query"], "invoice");
+        let results = body["Result"]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["id"], 2);
+        assert_eq!(results[0]["account_id"], 1310);
+        assert_eq!(results[0]["folder"], "Archive");
+        assert_eq!(results[0]["imap_uid"], 32);
+        assert_eq!(results[0]["message_id"], "search-2");
+        assert_eq!(results[0]["subject"], "Invoice reminder");
+        assert_eq!(results[0]["from_addr"], "boss@example.com");
+        assert_eq!(results[0]["from_name"], "Boss");
+        assert_eq!(results[0]["date_ts"], "2026-06-02 10:00:00");
+        assert_eq!(results[0]["snippet"], "Second invoice");
+        assert_eq!(results[0]["account_email"], "work@example.com");
+
+        let response =
+            super::native_frickmail_search(&state, "FrickmailSearch", &json!({"q": "i"}), &session)
+                .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Query too short");
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_search_action() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailSearch&q=invoice"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailSearch");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[test]
+    fn search_limit_parsing_matches_php_defaults_and_clamps() {
+        assert_eq!(super::payload_search_limit(&json!({})), 50);
+        assert_eq!(super::payload_search_limit(&json!({"limit": null})), 50);
+        assert_eq!(super::payload_search_limit(&json!({"limit": false})), 50);
+        assert_eq!(super::payload_search_limit(&json!({"limit": 0})), 50);
+        assert_eq!(super::payload_search_limit(&json!({"limit": 0.0})), 50);
+        assert_eq!(super::payload_search_limit(&json!({"limit": ""})), 50);
+        assert_eq!(super::payload_search_limit(&json!({"limit": "0"})), 50);
+        assert_eq!(super::payload_search_limit(&json!({"limit": " 0 "})), 1);
+        assert_eq!(super::payload_search_limit(&json!({"limit": -5})), 1);
+        assert_eq!(super::payload_search_limit(&json!({"limit": 250})), 100);
     }
 
     #[tokio::test]
@@ -3090,7 +3285,12 @@ mod tests {
                 account_id INTEGER NOT NULL,
                 folder TEXT NOT NULL,
                 imap_uid INTEGER NOT NULL,
-                subject TEXT
+                message_id TEXT,
+                subject TEXT,
+                from_addr TEXT,
+                from_name TEXT,
+                date_ts TEXT,
+                snippet TEXT
             )",
         )
         .execute(pool)
@@ -3278,6 +3478,43 @@ mod tests {
         .bind(folder)
         .bind(imap_uid)
         .bind("Indexed message")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    struct SearchMessageSeed<'a> {
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        folder: &'a str,
+        imap_uid: i64,
+        message_id: Option<&'a str>,
+        subject: Option<&'a str>,
+        from_addr: Option<&'a str>,
+        from_name: Option<&'a str>,
+        date_ts: Option<&'a str>,
+        snippet: Option<&'a str>,
+    }
+
+    async fn seed_search_message(pool: &AnyPool, message: SearchMessageSeed<'_>) {
+        sqlx::query(
+            "INSERT INTO frickmail_message_index
+                (id, user_id, account_id, folder, imap_uid, message_id, subject,
+                 from_addr, from_name, date_ts, snippet)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(message.id)
+        .bind(message.user_id)
+        .bind(message.account_id)
+        .bind(message.folder)
+        .bind(message.imap_uid)
+        .bind(message.message_id)
+        .bind(message.subject)
+        .bind(message.from_addr)
+        .bind(message.from_name)
+        .bind(message.date_ts)
+        .bind(message.snippet)
         .execute(pool)
         .await
         .unwrap();

@@ -157,6 +157,21 @@ pub struct SmimeCertificate {
     pub created_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageSearchResult {
+    pub id: i64,
+    pub account_id: i64,
+    pub folder: String,
+    pub imap_uid: i64,
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub from_name: Option<String>,
+    pub date_ts: Option<String>,
+    pub snippet: Option<String>,
+    pub account_email: String,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -395,6 +410,15 @@ impl SqlxUserRepository {
         account_id: i64,
     ) -> Result<()> {
         set_primary_mail_account(pool, user_id, account_id).await
+    }
+
+    pub async fn search_messages(
+        pool: &AnyPool,
+        user_id: i64,
+        query: String,
+        limit: i64,
+    ) -> Result<Vec<MessageSearchResult>> {
+        search_messages(pool, user_id, query, limit).await
     }
 }
 
@@ -1237,6 +1261,31 @@ async fn set_primary_mail_account(pool: &AnyPool, user_id: i64, account_id: i64)
     }
 }
 
+async fn search_messages(
+    pool: &AnyPool,
+    user_id: i64,
+    query: String,
+    limit: i64,
+) -> Result<Vec<MessageSearchResult>> {
+    let query = query.trim().to_string();
+    if query.len() < 2 {
+        return Err(FrickmailError::BadRequest("Query too short".to_string()));
+    }
+    let limit = limit.clamp(1, 100);
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let mut sql = sqlx::query(search_messages_query(&backend)).bind(user_id);
+    sql = sql.bind(&query).bind(limit);
+
+    sql.fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_message_search_result)
+        .collect()
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -1752,6 +1801,40 @@ fn set_primary_mail_account_query(backend: &str) -> &'static str {
     }
 }
 
+fn search_messages_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT mi.id, mi.account_id, mi.folder, mi.imap_uid, mi.message_id, \
+                mi.subject, mi.from_addr, mi.from_name, mi.date_ts::text AS date_ts, \
+                mi.snippet, ma.email AS account_email \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = $1 AND mi.tsv @@ plainto_tsquery('simple', $2) \
+             ORDER BY mi.date_ts DESC NULLS LAST LIMIT $3"
+        }
+        "MySQL" => {
+            "SELECT mi.id, mi.account_id, mi.folder, mi.imap_uid, mi.message_id, \
+                mi.subject, mi.from_addr, mi.from_name, CAST(mi.date_ts AS CHAR) AS date_ts, \
+                mi.snippet, ma.email AS account_email \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = ? \
+               AND LOCATE(LOWER(?), LOWER(CONCAT_WS(' ', COALESCE(mi.subject, ''), COALESCE(mi.from_name, ''), COALESCE(mi.from_addr, ''), COALESCE(mi.snippet, '')))) > 0 \
+             ORDER BY mi.date_ts IS NULL ASC, mi.date_ts DESC LIMIT ?"
+        }
+        _ => {
+            "SELECT mi.id, mi.account_id, mi.folder, mi.imap_uid, mi.message_id, \
+                mi.subject, mi.from_addr, mi.from_name, CAST(mi.date_ts AS TEXT) AS date_ts, \
+                mi.snippet, ma.email AS account_email \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = ? \
+               AND instr(lower(COALESCE(mi.subject, '') || ' ' || COALESCE(mi.from_name, '') || ' ' || COALESCE(mi.from_addr, '') || ' ' || COALESCE(mi.snippet, '')), lower(?)) > 0 \
+             ORDER BY mi.date_ts IS NULL ASC, mi.date_ts DESC LIMIT ?"
+        }
+    }
+}
+
 fn insert_mail_rule_returning_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -1894,6 +1977,22 @@ fn row_to_smime_certificate(row: sqlx::any::AnyRow) -> Result<SmimeCertificate> 
         not_after: row.try_get("not_after").map_err(db_error)?,
         has_key: int_flag(&row, "has_key")?,
         created_at: row.try_get("created_at").map_err(db_error)?,
+    })
+}
+
+fn row_to_message_search_result(row: sqlx::any::AnyRow) -> Result<MessageSearchResult> {
+    Ok(MessageSearchResult {
+        id: row.try_get("id").map_err(db_error)?,
+        account_id: row.try_get("account_id").map_err(db_error)?,
+        folder: row.try_get("folder").map_err(db_error)?,
+        imap_uid: row.try_get("imap_uid").map_err(db_error)?,
+        message_id: row.try_get("message_id").map_err(db_error)?,
+        subject: row.try_get("subject").map_err(db_error)?,
+        from_addr: row.try_get("from_addr").map_err(db_error)?,
+        from_name: row.try_get("from_name").map_err(db_error)?,
+        date_ts: row.try_get("date_ts").map_err(db_error)?,
+        snippet: row.try_get("snippet").map_err(db_error)?,
+        account_email: row.try_get("account_email").map_err(db_error)?,
     })
 }
 
@@ -2331,6 +2430,91 @@ mod tests {
         assert_eq!(message_index_count(&pool, 15, 130).await, 0);
         assert_eq!(mail_account_count(&pool, 16).await, 1);
         assert_eq!(message_index_count(&pool, 16, 131).await, 1);
+    }
+
+    #[tokio::test]
+    async fn repository_searches_message_index_with_user_scope_and_limit() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        insert_user(&pool, 27, json!({})).await;
+        insert_user(&pool, 28, json!({})).await;
+        insert_mail_account(&pool, 150, 27, "Work", true).await;
+        insert_mail_account(&pool, 151, 28, "OtherUser", true).await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 1,
+                user_id: 27,
+                account_id: 150,
+                folder: "INBOX",
+                imap_uid: 10,
+                message_id: Some("msg-1"),
+                subject: Some("Quarterly Invoice"),
+                from_addr: Some("billing@example.com"),
+                from_name: Some("Billing"),
+                date_ts: Some("2026-06-02 10:00:00"),
+                snippet: Some("Please pay this invoice"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 2,
+                user_id: 27,
+                account_id: 150,
+                folder: "Archive",
+                imap_uid: 11,
+                message_id: Some("msg-2"),
+                subject: Some("Invoice reminder"),
+                from_addr: Some("boss@example.com"),
+                from_name: Some("Boss"),
+                date_ts: Some("2026-06-03 10:00:00"),
+                snippet: Some("Second invoice"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 3,
+                user_id: 28,
+                account_id: 151,
+                folder: "INBOX",
+                imap_uid: 12,
+                message_id: Some("msg-3"),
+                subject: Some("Invoice other"),
+                from_addr: Some("other@example.com"),
+                from_name: Some("Other"),
+                date_ts: Some("2026-06-04 10:00:00"),
+                snippet: Some("Should not leak"),
+            },
+        )
+        .await;
+
+        let results = SqlxUserRepository::search_messages(&pool, 27, " invoice ".to_string(), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, 2);
+        assert_eq!(results[0].account_id, 150);
+        assert_eq!(results[0].folder, "Archive");
+        assert_eq!(results[0].imap_uid, 11);
+        assert_eq!(results[0].message_id.as_deref(), Some("msg-2"));
+        assert_eq!(results[0].subject.as_deref(), Some("Invoice reminder"));
+        assert_eq!(results[0].from_addr.as_deref(), Some("boss@example.com"));
+        assert_eq!(results[0].from_name.as_deref(), Some("Boss"));
+        assert_eq!(results[0].date_ts.as_deref(), Some("2026-06-03 10:00:00"));
+        assert_eq!(results[0].snippet.as_deref(), Some("Second invoice"));
+        assert_eq!(results[0].account_email, "work@example.com");
+
+        let err = SqlxUserRepository::search_messages(&pool, 27, "i".to_string(), 50)
+            .await
+            .unwrap_err();
+        assert_eq!(err.public_message(), "Query too short");
     }
 
     #[tokio::test]
@@ -3108,7 +3292,12 @@ mod tests {
                 account_id INTEGER NOT NULL,
                 folder TEXT NOT NULL,
                 imap_uid INTEGER NOT NULL,
-                subject TEXT
+                message_id TEXT,
+                subject TEXT,
+                from_addr TEXT,
+                from_name TEXT,
+                date_ts TEXT,
+                snippet TEXT
             )",
         )
         .execute(pool)
@@ -3286,6 +3475,43 @@ mod tests {
         .bind(folder)
         .bind(imap_uid)
         .bind("Indexed message")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    struct SearchMessageSeed<'a> {
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        folder: &'a str,
+        imap_uid: i64,
+        message_id: Option<&'a str>,
+        subject: Option<&'a str>,
+        from_addr: Option<&'a str>,
+        from_name: Option<&'a str>,
+        date_ts: Option<&'a str>,
+        snippet: Option<&'a str>,
+    }
+
+    async fn insert_search_message(pool: &AnyPool, message: SearchMessageSeed<'_>) {
+        sqlx::query(
+            "INSERT INTO frickmail_message_index
+                (id, user_id, account_id, folder, imap_uid, message_id, subject,
+                 from_addr, from_name, date_ts, snippet)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(message.id)
+        .bind(message.user_id)
+        .bind(message.account_id)
+        .bind(message.folder)
+        .bind(message.imap_uid)
+        .bind(message.message_id)
+        .bind(message.subject)
+        .bind(message.from_addr)
+        .bind(message.from_name)
+        .bind(message.date_ts)
+        .bind(message.snippet)
         .execute(pool)
         .await
         .unwrap();
