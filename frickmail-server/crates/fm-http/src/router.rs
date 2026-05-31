@@ -18,7 +18,10 @@ use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, Hea
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
-use fm_user::{FrickmailMe, NewMailIdentity, NewMailRule, SqlxUserRepository};
+use fm_user::{
+    FrickmailMe, NewMailIdentity, NewMailRule, NewMailTask, SqlxUserRepository, TaskFilter,
+    UpdateMailTask,
+};
 use serde_json::{json, Map, Value};
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
@@ -351,6 +354,21 @@ async fn native_compat_response(
         }
         "FrickmailToggleRule" => {
             Some(native_frickmail_toggle_rule(state, original_action, payload, session).await)
+        }
+        "FrickmailListTasks" => {
+            Some(native_frickmail_list_tasks(state, original_action, payload, session).await)
+        }
+        "FrickmailAddTask" => {
+            Some(native_frickmail_add_task(state, original_action, payload, session).await)
+        }
+        "FrickmailCompleteTask" => {
+            Some(native_frickmail_complete_task(state, original_action, payload, session).await)
+        }
+        "FrickmailDeleteTask" => {
+            Some(native_frickmail_delete_task(state, original_action, payload, session).await)
+        }
+        "FrickmailUpdateTask" => {
+            Some(native_frickmail_update_task(state, original_action, payload, session).await)
         }
         _ => None,
     }
@@ -781,6 +799,181 @@ async fn native_frickmail_toggle_rule(
     }
 }
 
+async fn native_frickmail_list_tasks(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::list_tasks(pool, user.user_id, payload_task_filter(payload)).await {
+        Ok(tasks) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "tasks": tasks
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_add_task(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let task = NewMailTask {
+        title: payload_string(payload, "title").unwrap_or_default(),
+        notes: payload_optional_string(payload, "notes"),
+        due_date: payload_optional_string(payload, "due_date"),
+    };
+    match SqlxUserRepository::add_task(pool, user.user_id, task).await {
+        Ok(id) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "id": id
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_complete_task(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::complete_task(
+        pool,
+        user.user_id,
+        payload_i64(payload, "id"),
+        payload_bool(payload, "completed"),
+    )
+    .await
+    {
+        Ok(ok) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": ok
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_delete_task(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::delete_task(pool, user.user_id, payload_i64(payload, "id")).await {
+        Ok(ok) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": ok
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_update_task(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let task = UpdateMailTask {
+        id: payload_i64(payload, "id"),
+        title: payload_string(payload, "title").unwrap_or_default(),
+        notes: payload_optional_string(payload, "notes"),
+        due_date: payload_optional_string(payload, "due_date"),
+    };
+    match SqlxUserRepository::update_task(pool, user.user_id, task).await {
+        Ok(ok) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": ok
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
 async fn load_session_user(
     state: &AppState,
     original_action: &str,
@@ -1076,6 +1269,14 @@ fn payload_array(payload: &Value, key: &str) -> Vec<Value> {
         Some(Value::Array(values)) => values.clone(),
         Some(Value::Null) | None => Vec::new(),
         Some(value) => vec![value.clone()],
+    }
+}
+
+fn payload_task_filter(payload: &Value) -> TaskFilter {
+    match payload_string(payload, "filter").as_deref() {
+        Some("pending") => TaskFilter::Pending,
+        Some("completed") => TaskFilter::Completed,
+        _ => TaskFilter::All,
     }
 }
 
@@ -1661,6 +1862,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_task_crud_matches_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_task_tables(&pool).await;
+        seed_user(&pool, 49, "tasks", Some("tasks@example.com")).await;
+        seed_task(&pool, 530, 49, "Soon", Some("2026-06-01"), false).await;
+        seed_task(&pool, 531, 49, "Done", None, true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(49, "tasks", None).await;
+
+        let response = super::native_frickmail_list_tasks(
+            &state,
+            "FrickmailListTasks",
+            &json!({"filter": ""}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(body["Result"]["tasks"][0]["id"], 530);
+        assert_eq!(body["Result"]["tasks"][0]["completed"], false);
+
+        let response = super::native_frickmail_add_task(
+            &state,
+            "FrickmailAddTask",
+            &json!({"title": "  Call accountant  ", "notes": "", "due_date": "2026-06-05"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        let id = body["Result"]["id"].as_i64().unwrap();
+        assert!(id > 0);
+
+        let response = super::native_frickmail_complete_task(
+            &state,
+            "FrickmailCompleteTask",
+            &json!({"id": id, "completed": "1"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_update_task(
+            &state,
+            "FrickmailUpdateTask",
+            &json!({"id": id, "title": " Updated task ", "notes": "notes", "due_date": ""}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_list_tasks(
+            &state,
+            "FrickmailListTasks",
+            &json!({"filter": "completed"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        let tasks = body["Result"]["tasks"].as_array().unwrap();
+        let updated = tasks.iter().find(|task| task["id"] == id).unwrap();
+        assert_eq!(updated["title"], "Updated task");
+        assert_eq!(updated["notes"], "notes");
+        assert_eq!(updated["due_date"], Value::Null);
+
+        let response = super::native_frickmail_delete_task(
+            &state,
+            "FrickmailDeleteTask",
+            &json!({"id": id}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_delete_task(
+            &state,
+            "FrickmailDeleteTask",
+            &json!({"id": id}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+    }
+
+    #[tokio::test]
     async fn json_api_reports_unknown_action_without_transport_failure() {
         let response = app()
             .oneshot(
@@ -2074,6 +2365,25 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_task_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_tasks (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                notes TEXT,
+                due_date TEXT,
+                completed BOOLEAN NOT NULL DEFAULT FALSE,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
         seed_user_with_settings(pool, id, username, email, json!({})).await;
     }
@@ -2192,6 +2502,35 @@ mod tests {
         ]).to_string())
         .bind(enabled)
         .bind(None::<String>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_task(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        title: &str,
+        due_date: Option<&str>,
+        completed: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_tasks
+                (id, user_id, title, notes, due_date, completed, completed_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(title)
+        .bind(None::<String>)
+        .bind(due_date)
+        .bind(completed)
+        .bind(if completed {
+            Some("2026-06-01 10:00:00")
+        } else {
+            None
+        })
         .execute(pool)
         .await
         .unwrap();

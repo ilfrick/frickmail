@@ -95,6 +95,41 @@ pub struct NewMailRule {
     pub actions: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailTask {
+    pub id: i64,
+    pub user_id: i64,
+    pub title: String,
+    pub notes: Option<String>,
+    pub due_date: Option<String>,
+    pub completed: bool,
+    pub completed_at: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMailTask {
+    pub title: String,
+    pub notes: Option<String>,
+    pub due_date: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateMailTask {
+    pub id: i64,
+    pub title: String,
+    pub notes: Option<String>,
+    pub due_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskFilter {
+    All,
+    Pending,
+    Completed,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -245,6 +280,35 @@ impl SqlxUserRepository {
         enabled: bool,
     ) -> Result<()> {
         toggle_mail_rule(pool, user_id, rule_id, enabled).await
+    }
+
+    pub async fn list_tasks(
+        pool: &AnyPool,
+        user_id: i64,
+        filter: TaskFilter,
+    ) -> Result<Vec<MailTask>> {
+        list_tasks(pool, user_id, filter).await
+    }
+
+    pub async fn add_task(pool: &AnyPool, user_id: i64, input: NewMailTask) -> Result<i64> {
+        add_task(pool, user_id, input).await
+    }
+
+    pub async fn complete_task(
+        pool: &AnyPool,
+        user_id: i64,
+        task_id: i64,
+        completed: bool,
+    ) -> Result<bool> {
+        complete_task(pool, user_id, task_id, completed).await
+    }
+
+    pub async fn delete_task(pool: &AnyPool, user_id: i64, task_id: i64) -> Result<bool> {
+        delete_task(pool, user_id, task_id).await
+    }
+
+    pub async fn update_task(pool: &AnyPool, user_id: i64, input: UpdateMailTask) -> Result<bool> {
+        update_task(pool, user_id, input).await
     }
 }
 
@@ -761,6 +825,117 @@ async fn toggle_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64, enabled: b
         .map_err(db_error)
 }
 
+async fn list_tasks(pool: &AnyPool, user_id: i64, filter: TaskFilter) -> Result<Vec<MailTask>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = tasks_query(&backend, filter);
+    let mut sql = sqlx::query(query).bind(user_id);
+    if !matches!(filter, TaskFilter::All) {
+        sql = sql.bind(matches!(filter, TaskFilter::Completed) as i64);
+    }
+    sql.bind(200_i64)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_mail_task)
+        .collect()
+}
+
+async fn add_task(pool: &AnyPool, user_id: i64, input: NewMailTask) -> Result<i64> {
+    let title = input.title.trim().to_string();
+    if title.is_empty() {
+        return Err(FrickmailError::BadRequest("title is required".to_string()));
+    }
+    let notes = optional_non_empty_string(input.notes);
+    let due_date = optional_non_empty_string(input.due_date);
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    if matches!(backend.as_str(), "PostgreSQL" | "SQLite") {
+        return sqlx::query(insert_task_returning_query(&backend))
+            .bind(user_id)
+            .bind(&title)
+            .bind(notes.as_deref())
+            .bind(due_date.as_deref())
+            .fetch_one(&mut *conn)
+            .await
+            .and_then(|row| row.try_get("id"))
+            .map_err(db_error);
+    }
+
+    sqlx::query(insert_task_query(&backend))
+        .bind(user_id)
+        .bind(&title)
+        .bind(notes.as_deref())
+        .bind(due_date.as_deref())
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .last_insert_id()
+        .ok_or_else(|| {
+            FrickmailError::Upstream(
+                "frickmail user database error: inserted task id is unavailable".to_string(),
+            )
+        })
+}
+
+async fn complete_task(
+    pool: &AnyPool,
+    user_id: i64,
+    task_id: i64,
+    completed: bool,
+) -> Result<bool> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(complete_task_query(&backend))
+        .bind(if completed { 1_i64 } else { 0_i64 })
+        .bind(if completed { 1_i64 } else { 0_i64 })
+        .bind(user_id)
+        .bind(task_id)
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(db_error)
+}
+
+async fn delete_task(pool: &AnyPool, user_id: i64, task_id: i64) -> Result<bool> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(delete_task_query(&backend))
+        .bind(user_id)
+        .bind(task_id)
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(db_error)
+}
+
+async fn update_task(pool: &AnyPool, user_id: i64, input: UpdateMailTask) -> Result<bool> {
+    let title = input.title.trim().to_string();
+    if title.is_empty() {
+        return Err(FrickmailError::BadRequest("title is required".to_string()));
+    }
+    let notes = optional_non_empty_string(input.notes);
+    let due_date = optional_non_empty_string(input.due_date);
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(update_task_query(&backend))
+        .bind(&title)
+        .bind(notes.as_deref())
+        .bind(due_date.as_deref())
+        .bind(user_id)
+        .bind(input.id)
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(db_error)
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -813,6 +988,10 @@ fn validate_rule_actions(actions: &[Value]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn optional_non_empty_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| if value.is_empty() { None } else { Some(value) })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1024,6 +1203,114 @@ fn mail_rules_query(backend: &str) -> &'static str {
     }
 }
 
+fn tasks_query(backend: &str, filter: TaskFilter) -> &'static str {
+    match (backend, filter) {
+        ("PostgreSQL", TaskFilter::All) => {
+            "SELECT id, user_id, title, notes, due_date::text AS due_date, \
+                CASE WHEN completed THEN 1 ELSE 0 END AS completed, completed_at::text AS completed_at, \
+                created_at::text AS created_at, updated_at::text AS updated_at \
+             FROM frickmail_tasks WHERE user_id = $1 \
+             ORDER BY completed ASC, due_date ASC NULLS LAST, created_at ASC LIMIT $2"
+        }
+        ("PostgreSQL", _) => {
+            "SELECT id, user_id, title, notes, due_date::text AS due_date, \
+                CASE WHEN completed THEN 1 ELSE 0 END AS completed, completed_at::text AS completed_at, \
+                created_at::text AS created_at, updated_at::text AS updated_at \
+             FROM frickmail_tasks WHERE user_id = $1 AND completed = ($2 <> 0) \
+             ORDER BY due_date ASC NULLS LAST, created_at ASC LIMIT $3"
+        }
+        ("MySQL", TaskFilter::All) => {
+            "SELECT id, user_id, title, notes, CAST(due_date AS CHAR) AS due_date, \
+                CASE WHEN completed THEN 1 ELSE 0 END AS completed, CAST(completed_at AS CHAR) AS completed_at, \
+                CAST(created_at AS CHAR) AS created_at, CAST(updated_at AS CHAR) AS updated_at \
+             FROM frickmail_tasks WHERE user_id = ? \
+             ORDER BY completed ASC, due_date IS NULL ASC, due_date ASC, created_at ASC LIMIT ?"
+        }
+        ("MySQL", _) => {
+            "SELECT id, user_id, title, notes, CAST(due_date AS CHAR) AS due_date, \
+                CASE WHEN completed THEN 1 ELSE 0 END AS completed, CAST(completed_at AS CHAR) AS completed_at, \
+                CAST(created_at AS CHAR) AS created_at, CAST(updated_at AS CHAR) AS updated_at \
+             FROM frickmail_tasks WHERE user_id = ? AND completed = ? \
+             ORDER BY due_date IS NULL ASC, due_date ASC, created_at ASC LIMIT ?"
+        }
+        (_, TaskFilter::All) => {
+            "SELECT id, user_id, title, notes, CAST(due_date AS TEXT) AS due_date, \
+                CASE WHEN completed THEN 1 ELSE 0 END AS completed, CAST(completed_at AS TEXT) AS completed_at, \
+                CAST(created_at AS TEXT) AS created_at, CAST(updated_at AS TEXT) AS updated_at \
+             FROM frickmail_tasks WHERE user_id = ? \
+             ORDER BY completed ASC, due_date IS NULL ASC, due_date ASC, created_at ASC LIMIT ?"
+        }
+        (_, _) => {
+            "SELECT id, user_id, title, notes, CAST(due_date AS TEXT) AS due_date, \
+                CASE WHEN completed THEN 1 ELSE 0 END AS completed, CAST(completed_at AS TEXT) AS completed_at, \
+                CAST(created_at AS TEXT) AS created_at, CAST(updated_at AS TEXT) AS updated_at \
+             FROM frickmail_tasks WHERE user_id = ? AND completed = ? \
+             ORDER BY due_date IS NULL ASC, due_date ASC, created_at ASC LIMIT ?"
+        }
+    }
+}
+
+fn insert_task_returning_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_tasks (user_id, title, notes, due_date) \
+             VALUES ($1, $2, $3, $4::date) RETURNING id"
+        }
+        _ => {
+            "INSERT INTO frickmail_tasks (user_id, title, notes, due_date) \
+             VALUES (?, ?, ?, ?) RETURNING id"
+        }
+    }
+}
+
+fn insert_task_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_tasks (user_id, title, notes, due_date) \
+             VALUES ($1, $2, $3, $4::date)"
+        }
+        _ => {
+            "INSERT INTO frickmail_tasks (user_id, title, notes, due_date) \
+             VALUES (?, ?, ?, ?)"
+        }
+    }
+}
+
+fn complete_task_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_tasks \
+                SET completed = ($1 <> 0), completed_at = CASE WHEN $2 <> 0 THEN NOW() ELSE NULL END, updated_at = NOW() \
+              WHERE user_id = $3 AND id = $4"
+        }
+        _ => {
+            "UPDATE frickmail_tasks \
+                SET completed = ?, completed_at = CASE WHEN ? <> 0 THEN CURRENT_TIMESTAMP ELSE NULL END, updated_at = CURRENT_TIMESTAMP \
+              WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
+fn delete_task_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_tasks WHERE user_id = $1 AND id = $2",
+        _ => "DELETE FROM frickmail_tasks WHERE user_id = ? AND id = ?",
+    }
+}
+
+fn update_task_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_tasks SET title = $1, notes = $2, due_date = $3::date, updated_at = NOW() \
+              WHERE user_id = $4 AND id = $5"
+        }
+        _ => {
+            "UPDATE frickmail_tasks SET title = ?, notes = ?, due_date = ?, updated_at = CURRENT_TIMESTAMP \
+              WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
 fn insert_mail_rule_returning_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -1130,6 +1417,20 @@ fn row_to_mail_rule(row: sqlx::any::AnyRow) -> Result<MailRule> {
             .to_string(),
         actions: json_or_empty_array(actions_json.as_deref()),
         last_run: row.try_get("last_run").map_err(db_error)?,
+    })
+}
+
+fn row_to_mail_task(row: sqlx::any::AnyRow) -> Result<MailTask> {
+    Ok(MailTask {
+        id: row.try_get("id").map_err(db_error)?,
+        user_id: row.try_get("user_id").map_err(db_error)?,
+        title: row.try_get("title").map_err(db_error)?,
+        notes: row.try_get("notes").map_err(db_error)?,
+        due_date: row.try_get("due_date").map_err(db_error)?,
+        completed: int_flag(&row, "completed")?,
+        completed_at: row.try_get("completed_at").map_err(db_error)?,
+        created_at: row.try_get("created_at").map_err(db_error)?,
+        updated_at: row.try_get("updated_at").map_err(db_error)?,
     })
 }
 
@@ -1291,7 +1592,8 @@ mod tests {
     use super::{
         clean_preferences_patch, derive_credential_key, normalize_username,
         preferences_from_settings, verify_login_password, verify_password, FrickmailMe,
-        NewMailRule, SqlxUserRepository, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
+        NewMailRule, NewMailTask, SqlxUserRepository, TaskFilter, UpdateMailTask,
+        CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
     };
     use fm_core::UserSession;
 
@@ -1819,6 +2121,109 @@ mod tests {
         assert_eq!(err.public_message(), "Account not found");
     }
 
+    #[tokio::test]
+    async fn repository_lists_and_mutates_tasks_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_task_tables(&pool).await;
+        insert_user(&pool, 19, json!({})).await;
+        insert_user(&pool, 20, json!({})).await;
+        insert_task(&pool, 400, 19, "Later", Some("2026-06-10"), false).await;
+        insert_task(&pool, 401, 19, "Soon", Some("2026-06-01"), false).await;
+        insert_task(&pool, 402, 19, "Done", None, true).await;
+        insert_task(&pool, 403, 20, "Other user", Some("2026-06-01"), false).await;
+
+        let tasks = SqlxUserRepository::list_tasks(&pool, 19, TaskFilter::All)
+            .await
+            .unwrap();
+        assert_eq!(
+            tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+            vec![401, 400, 402]
+        );
+        assert!(!tasks[0].completed);
+        assert_eq!(tasks[0].due_date.as_deref(), Some("2026-06-01"));
+
+        let tasks = SqlxUserRepository::list_tasks(&pool, 19, TaskFilter::Pending)
+            .await
+            .unwrap();
+        assert_eq!(
+            tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+            vec![401, 400]
+        );
+
+        let id = SqlxUserRepository::add_task(
+            &pool,
+            19,
+            NewMailTask {
+                title: "  New task  ".to_string(),
+                notes: Some(String::new()),
+                due_date: Some("2026-06-05".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(id > 0);
+
+        let tasks = SqlxUserRepository::list_tasks(&pool, 19, TaskFilter::Pending)
+            .await
+            .unwrap();
+        let added = tasks.iter().find(|task| task.id == id).unwrap();
+        assert_eq!(added.title, "New task");
+        assert_eq!(added.notes, None);
+        assert_eq!(added.due_date.as_deref(), Some("2026-06-05"));
+
+        assert!(SqlxUserRepository::complete_task(&pool, 19, id, true)
+            .await
+            .unwrap());
+        let tasks = SqlxUserRepository::list_tasks(&pool, 19, TaskFilter::Completed)
+            .await
+            .unwrap();
+        assert!(tasks.iter().any(|task| task.id == id && task.completed));
+
+        assert!(SqlxUserRepository::update_task(
+            &pool,
+            19,
+            UpdateMailTask {
+                id,
+                title: " Updated ".to_string(),
+                notes: Some("notes".to_string()),
+                due_date: Some(String::new()),
+            },
+        )
+        .await
+        .unwrap());
+        let tasks = SqlxUserRepository::list_tasks(&pool, 19, TaskFilter::Completed)
+            .await
+            .unwrap();
+        let updated = tasks.iter().find(|task| task.id == id).unwrap();
+        assert_eq!(updated.title, "Updated");
+        assert_eq!(updated.notes.as_deref(), Some("notes"));
+        assert_eq!(updated.due_date, None);
+
+        assert!(!SqlxUserRepository::delete_task(&pool, 20, id)
+            .await
+            .unwrap());
+        assert!(SqlxUserRepository::delete_task(&pool, 19, id)
+            .await
+            .unwrap());
+        assert!(!SqlxUserRepository::complete_task(&pool, 20, 401, true)
+            .await
+            .unwrap());
+
+        let err = SqlxUserRepository::add_task(
+            &pool,
+            19,
+            NewMailTask {
+                title: "  ".to_string(),
+                notes: None,
+                due_date: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "title is required");
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -1915,6 +2320,25 @@ mod tests {
                 last_run TEXT,
                 created_at TEXT,
                 updated_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_task_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_tasks (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                notes TEXT,
+                due_date TEXT,
+                completed BOOLEAN NOT NULL DEFAULT FALSE,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
         )
         .execute(pool)
@@ -2080,6 +2504,35 @@ mod tests {
         .bind("null")
         .bind(true)
         .bind(None::<String>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_task(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        title: &str,
+        due_date: Option<&str>,
+        completed: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_tasks
+                (id, user_id, title, notes, due_date, completed, completed_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(title)
+        .bind(None::<String>)
+        .bind(due_date)
+        .bind(completed)
+        .bind(if completed {
+            Some("2026-06-01 10:00:00")
+        } else {
+            None
+        })
         .execute(pool)
         .await
         .unwrap();
