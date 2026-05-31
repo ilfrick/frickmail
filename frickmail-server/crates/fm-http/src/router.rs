@@ -18,7 +18,7 @@ use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, Hea
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
-use fm_user::{FrickmailMe, NewMailIdentity, SqlxUserRepository};
+use fm_user::{FrickmailMe, NewMailIdentity, NewMailRule, SqlxUserRepository};
 use serde_json::{json, Map, Value};
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
@@ -343,6 +343,9 @@ async fn native_compat_response(
         "FrickmailListRules" => {
             Some(native_frickmail_list_rules(state, original_action, payload, session).await)
         }
+        "FrickmailAddRule" => {
+            Some(native_frickmail_add_rule(state, original_action, payload, session).await)
+        }
         "FrickmailDeleteRule" => {
             Some(native_frickmail_delete_rule(state, original_action, payload, session).await)
         }
@@ -660,6 +663,47 @@ async fn native_frickmail_list_rules(
                 "Result": {
                     "ok": true,
                     "rules": rules
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_add_rule(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let rule = NewMailRule {
+        account_id: payload_i64(payload, "account_id"),
+        name: payload_string(payload, "name").unwrap_or_default(),
+        conditions: payload_array(payload, "conditions"),
+        conditions_logic: payload_string(payload, "conditions_logic")
+            .unwrap_or_else(|| "all".to_string()),
+        actions: payload_array(payload, "actions"),
+    };
+
+    match SqlxUserRepository::add_mail_rule(pool, user.user_id, rule).await {
+        Ok(id) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "id": id
                 }
             }),
         ),
@@ -1025,6 +1069,14 @@ fn payload_string(payload: &Value, key: &str) -> Option<String> {
 
 fn payload_optional_string(payload: &Value, key: &str) -> Option<String> {
     payload_string(payload, key).and_then(|value| if value.is_empty() { None } else { Some(value) })
+}
+
+fn payload_array(payload: &Value, key: &str) -> Vec<Value> {
+    match payload.get(key) {
+        Some(Value::Array(values)) => values.clone(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(value) => vec![value.clone()],
+    }
 }
 
 fn payload_bool(payload: &Value, key: &str) -> bool {
@@ -1565,6 +1617,47 @@ mod tests {
         .await;
         let body = read_json(response).await;
         assert!(body["Result"]["rules"].as_array().unwrap().is_empty());
+
+        let response = super::native_frickmail_add_rule(
+            &state,
+            "FrickmailAddRule",
+            &json!({
+                "account_id": 330,
+                "name": "Archive alerts",
+                "conditions": [
+                    {"field": "subject", "op": "contains", "value": "alert"}
+                ],
+                "conditions_logic": "any",
+                "actions": [
+                    {"type": "move", "params": {"folder": "Alerts"}}
+                ]
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert!(body["Result"]["id"].as_i64().unwrap() > 0);
+
+        let response = super::native_frickmail_list_rules(
+            &state,
+            "FrickmailListRules",
+            &json!({"account_id": 330}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(body["Result"]["rules"][0]["name"], "Archive alerts");
+        assert_eq!(body["Result"]["rules"][0]["conditions_logic"], "any");
+        assert_eq!(
+            body["Result"]["rules"][0]["conditions"][0]["field"],
+            "subject"
+        );
+        assert_eq!(
+            body["Result"]["rules"][0]["actions"][0]["params"]["folder"],
+            "Alerts"
+        );
     }
 
     #[tokio::test]

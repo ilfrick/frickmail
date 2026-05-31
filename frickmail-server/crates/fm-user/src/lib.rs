@@ -86,6 +86,15 @@ pub struct MailRule {
     pub last_run: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewMailRule {
+    pub account_id: i64,
+    pub name: String,
+    pub conditions: Vec<Value>,
+    pub conditions_logic: String,
+    pub actions: Vec<Value>,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -219,6 +228,10 @@ impl SqlxUserRepository {
         account_id: i64,
     ) -> Result<Vec<MailRule>> {
         list_mail_rules(pool, user_id, account_id).await
+    }
+
+    pub async fn add_mail_rule(pool: &AnyPool, user_id: i64, input: NewMailRule) -> Result<i64> {
+        add_mail_rule(pool, user_id, input).await
     }
 
     pub async fn delete_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<()> {
@@ -687,6 +700,40 @@ async fn list_mail_rules(pool: &AnyPool, user_id: i64, account_id: i64) -> Resul
         .collect()
 }
 
+async fn add_mail_rule(pool: &AnyPool, user_id: i64, input: NewMailRule) -> Result<i64> {
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "Rule name is required".to_string(),
+        ));
+    }
+
+    let conditions_logic = match input.conditions_logic.as_str() {
+        "all" | "any" => input.conditions_logic,
+        _ => "all".to_string(),
+    };
+    validate_rule_conditions(&input.conditions)?;
+    validate_rule_actions(&input.actions)?;
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    if !mail_account_exists_on_conn(&mut conn, &backend, user_id, input.account_id).await? {
+        return Err(FrickmailError::BadRequest("Account not found".to_string()));
+    }
+
+    insert_mail_rule_on_conn(
+        &mut conn,
+        &backend,
+        user_id,
+        input.account_id,
+        &name,
+        &input.conditions,
+        &conditions_logic,
+        &input.actions,
+    )
+    .await
+}
+
 async fn delete_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<()> {
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
@@ -712,6 +759,108 @@ async fn toggle_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64, enabled: b
         .await
         .map(|_| ())
         .map_err(db_error)
+}
+
+fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
+    for condition in conditions {
+        let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
+        if !matches!(field, "from" | "subject" | "to") {
+            return Err(FrickmailError::BadRequest(
+                "Invalid condition field".to_string(),
+            ));
+        }
+
+        let op = condition.get("op").and_then(Value::as_str).unwrap_or("");
+        if !matches!(op, "contains" | "not_contains" | "equals") {
+            return Err(FrickmailError::BadRequest(
+                "Invalid condition operator".to_string(),
+            ));
+        }
+
+        let value = condition
+            .get("value")
+            .map(value_to_php_string)
+            .unwrap_or_default();
+        if value.trim().is_empty() {
+            return Err(FrickmailError::BadRequest(
+                "Condition value is required".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_rule_actions(actions: &[Value]) -> Result<()> {
+    for action in actions {
+        let action_type = action.get("type").and_then(Value::as_str).unwrap_or("");
+        if !matches!(action_type, "move" | "read" | "flag" | "delete") {
+            return Err(FrickmailError::BadRequest(
+                "Invalid action type".to_string(),
+            ));
+        }
+
+        let folder = action
+            .get("params")
+            .and_then(|params| params.get("folder"))
+            .map(value_to_php_string)
+            .unwrap_or_default();
+        if action_type == "move" && (folder.is_empty() || folder == "0") {
+            return Err(FrickmailError::BadRequest(
+                "Move action requires a target folder".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_mail_rule_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    account_id: i64,
+    name: &str,
+    conditions: &[Value],
+    conditions_logic: &str,
+    actions: &[Value],
+) -> Result<i64> {
+    let conditions_payload = json!({
+        "conditions": conditions,
+        "conditions_logic": conditions_logic,
+    })
+    .to_string();
+    let actions_payload = Value::Array(actions.to_vec()).to_string();
+
+    if matches!(backend, "PostgreSQL" | "SQLite") {
+        return sqlx::query(insert_mail_rule_returning_query(backend))
+            .bind(user_id)
+            .bind(account_id)
+            .bind(name)
+            .bind(&conditions_payload)
+            .bind(&actions_payload)
+            .fetch_one(&mut **conn)
+            .await
+            .and_then(|row| row.try_get("id"))
+            .map_err(db_error);
+    }
+
+    sqlx::query(insert_mail_rule_query(backend))
+        .bind(user_id)
+        .bind(account_id)
+        .bind(name)
+        .bind(&conditions_payload)
+        .bind(&actions_payload)
+        .execute(&mut **conn)
+        .await
+        .map_err(db_error)?
+        .last_insert_id()
+        .ok_or_else(|| {
+            FrickmailError::Upstream(
+                "frickmail user database error: inserted rule id is unavailable".to_string(),
+            )
+        })
 }
 
 fn user_select_query(backend: &str, column: &str) -> String {
@@ -871,6 +1020,32 @@ fn mail_rules_query(backend: &str) -> &'static str {
             "SELECT id, account_id, name, CAST(conditions AS TEXT) AS conditions_json, CAST(actions AS TEXT) AS actions_json, \
                 CASE WHEN enabled THEN 1 ELSE 0 END AS enabled, CAST(last_run AS TEXT) AS last_run \
              FROM frickmail_rules WHERE user_id = ? AND account_id = ? ORDER BY id ASC"
+        }
+    }
+}
+
+fn insert_mail_rule_returning_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_rules (user_id, account_id, name, conditions, actions) \
+             VALUES ($1, $2, $3, $4::jsonb, $5::jsonb) RETURNING id"
+        }
+        _ => {
+            "INSERT INTO frickmail_rules (user_id, account_id, name, conditions, actions) \
+             VALUES (?, ?, ?, ?, ?) RETURNING id"
+        }
+    }
+}
+
+fn insert_mail_rule_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_rules (user_id, account_id, name, conditions, actions) \
+             VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)"
+        }
+        _ => {
+            "INSERT INTO frickmail_rules (user_id, account_id, name, conditions, actions) \
+             VALUES (?, ?, ?, ?, ?)"
         }
     }
 }
@@ -1116,7 +1291,7 @@ mod tests {
     use super::{
         clean_preferences_patch, derive_credential_key, normalize_username,
         preferences_from_settings, verify_login_password, verify_password, FrickmailMe,
-        SqlxUserRepository, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
+        NewMailRule, SqlxUserRepository, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
     };
     use fm_core::UserSession;
 
@@ -1522,6 +1697,125 @@ mod tests {
         let err = SqlxUserRepository::list_mail_rules(&pool, 15, 131)
             .await
             .unwrap_err();
+        assert_eq!(err.public_message(), "Account not found");
+    }
+
+    #[tokio::test]
+    async fn repository_adds_mail_rules_with_php_compatible_validation() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_mail_rule_tables(&pool).await;
+        insert_user(&pool, 17, json!({})).await;
+        insert_user(&pool, 18, json!({})).await;
+        insert_mail_account(&pool, 140, 17, "Work", true).await;
+        insert_mail_account(&pool, 141, 18, "OtherUser", true).await;
+
+        let id = SqlxUserRepository::add_mail_rule(
+            &pool,
+            17,
+            NewMailRule {
+                account_id: 140,
+                name: "  Flag invoices  ".to_string(),
+                conditions: vec![json!({
+                    "field": "subject",
+                    "op": "contains",
+                    "value": "invoice",
+                })],
+                conditions_logic: "bogus".to_string(),
+                actions: vec![json!({"type": "flag"})],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(id > 0);
+
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 17, 140)
+            .await
+            .unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "Flag invoices");
+        assert_eq!(rules[0].conditions_logic, "all");
+        assert_eq!(rules[0].conditions[0]["field"], "subject");
+        assert_eq!(rules[0].actions[0]["type"], "flag");
+
+        let err = SqlxUserRepository::add_mail_rule(
+            &pool,
+            17,
+            NewMailRule {
+                account_id: 140,
+                name: "Bad condition".to_string(),
+                conditions: vec![json!({
+                    "field": "cc",
+                    "op": "contains",
+                    "value": "invoice",
+                })],
+                conditions_logic: "all".to_string(),
+                actions: vec![json!({"type": "flag"})],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Invalid condition field");
+
+        let err = SqlxUserRepository::add_mail_rule(
+            &pool,
+            17,
+            NewMailRule {
+                account_id: 140,
+                name: "Bad move".to_string(),
+                conditions: vec![json!({
+                    "field": "from",
+                    "op": "contains",
+                    "value": "boss",
+                })],
+                conditions_logic: "all".to_string(),
+                actions: vec![json!({"type": "move"})],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Move action requires a target folder");
+
+        let err = SqlxUserRepository::add_mail_rule(
+            &pool,
+            17,
+            NewMailRule {
+                account_id: 140,
+                name: "Bad move folder".to_string(),
+                conditions: vec![json!({
+                    "field": "from",
+                    "op": "contains",
+                    "value": "boss",
+                })],
+                conditions_logic: "all".to_string(),
+                actions: vec![json!({
+                    "type": "move",
+                    "params": {"folder": "0"},
+                })],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Move action requires a target folder");
+
+        let err = SqlxUserRepository::add_mail_rule(
+            &pool,
+            17,
+            NewMailRule {
+                account_id: 141,
+                name: "Cross account".to_string(),
+                conditions: vec![json!({
+                    "field": "from",
+                    "op": "contains",
+                    "value": "boss",
+                })],
+                conditions_logic: "all".to_string(),
+                actions: vec![json!({"type": "flag"})],
+            },
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.public_message(), "Account not found");
     }
 
