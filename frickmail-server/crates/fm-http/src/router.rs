@@ -334,6 +334,9 @@ async fn native_compat_response(
         "FrickmailDeleteAccount" => {
             Some(native_frickmail_delete_account(state, original_action, payload, session).await)
         }
+        "FrickmailSetPrimary" => {
+            Some(native_frickmail_set_primary(state, original_action, payload, session).await)
+        }
         "FrickmailListIdentities" => {
             Some(native_frickmail_list_identities(state, original_action, payload, session).await)
         }
@@ -543,6 +546,43 @@ async fn native_frickmail_delete_account(
 
     match SqlxUserRepository::delete_mail_account(pool, user.user_id, payload_i64(payload, "id"))
         .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_set_primary(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::set_primary_mail_account(
+        pool,
+        user.user_id,
+        payload_i64(payload, "id"),
+    )
+    .await
     {
         Ok(()) => json_value_envelope(
             StatusCode::OK,
@@ -1942,6 +1982,52 @@ mod tests {
         assert_eq!(body["Result"]["ok"], true);
         assert_eq!(mail_account_count(&pool, 145).await, 0);
         assert_eq!(message_index_count(&pool, 145, 1300).await, 0);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_set_primary_matches_account_scope() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 147, "accounts", Some("accounts@example.com")).await;
+        seed_user(&pool, 148, "other", Some("other@example.com")).await;
+        seed_mail_account(&pool, 1302, 147, "Primary", true).await;
+        seed_mail_account(&pool, 1303, 147, "Secondary", false).await;
+        seed_mail_account(&pool, 1304, 148, "Other", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(147, "accounts", None).await;
+
+        let response = super::native_frickmail_set_primary(
+            &state,
+            "FrickmailSetPrimary",
+            &json!({"id": 1303}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 147)
+            .await
+            .unwrap();
+        assert_eq!(accounts[0].id, 1303);
+        assert!(accounts[0].is_primary);
+
+        let response = super::native_frickmail_set_primary(
+            &state,
+            "FrickmailSetPrimary",
+            &json!({"id": 1304}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 147)
+            .await
+            .unwrap();
+        assert!(accounts.iter().all(|account| !account.is_primary));
+        let other_accounts = SqlxUserRepository::list_mail_accounts(&pool, 148)
+            .await
+            .unwrap();
+        assert!(other_accounts[0].is_primary);
     }
 
     #[tokio::test]

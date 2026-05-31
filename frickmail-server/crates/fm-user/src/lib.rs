@@ -381,6 +381,14 @@ impl SqlxUserRepository {
     pub async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
         delete_mail_account(pool, user_id, account_id).await
     }
+
+    pub async fn set_primary_mail_account(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+    ) -> Result<()> {
+        set_primary_mail_account(pool, user_id, account_id).await
+    }
 }
 
 pub fn normalize_username(username: &str) -> String {
@@ -1183,6 +1191,45 @@ async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> R
     }
 }
 
+async fn set_primary_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        sqlx::query(clear_primary_mail_accounts_query(&backend))
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        sqlx::query(set_primary_mail_account_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -1679,6 +1726,22 @@ fn delete_mail_account_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => "DELETE FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2",
         _ => "DELETE FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?",
+    }
+}
+
+fn clear_primary_mail_accounts_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "UPDATE frickmail_mail_accounts SET is_primary = FALSE WHERE user_id = $1",
+        _ => "UPDATE frickmail_mail_accounts SET is_primary = 0 WHERE user_id = ?",
+    }
+}
+
+fn set_primary_mail_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts SET is_primary = TRUE WHERE user_id = $1 AND id = $2"
+        }
+        _ => "UPDATE frickmail_mail_accounts SET is_primary = 1 WHERE user_id = ? AND id = ?",
     }
 }
 
@@ -2261,6 +2324,46 @@ mod tests {
         assert_eq!(message_index_count(&pool, 15, 130).await, 0);
         assert_eq!(mail_account_count(&pool, 16).await, 1);
         assert_eq!(message_index_count(&pool, 16, 131).await, 1);
+    }
+
+    #[tokio::test]
+    async fn repository_sets_primary_mail_account_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 17, json!({})).await;
+        insert_user(&pool, 18, json!({})).await;
+        insert_mail_account(&pool, 140, 17, "Work", true).await;
+        insert_mail_account(&pool, 141, 17, "Personal", false).await;
+        insert_mail_account(&pool, 142, 18, "OtherUser", true).await;
+
+        SqlxUserRepository::set_primary_mail_account(&pool, 17, 141)
+            .await
+            .unwrap();
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 17)
+            .await
+            .unwrap();
+        assert_eq!(accounts[0].id, 141);
+        assert!(accounts[0].is_primary);
+        assert!(
+            !accounts
+                .iter()
+                .find(|account| account.id == 140)
+                .unwrap()
+                .is_primary
+        );
+
+        SqlxUserRepository::set_primary_mail_account(&pool, 17, 142)
+            .await
+            .unwrap();
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 17)
+            .await
+            .unwrap();
+        assert!(accounts.iter().all(|account| !account.is_primary));
+        let other_user_accounts = SqlxUserRepository::list_mail_accounts(&pool, 18)
+            .await
+            .unwrap();
+        assert!(other_user_accounts[0].is_primary);
     }
 
     #[tokio::test]
