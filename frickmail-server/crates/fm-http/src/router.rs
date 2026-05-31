@@ -19,8 +19,8 @@ use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
 use fm_user::{
-    FrickmailMe, NewMailIdentity, NewMailRule, NewMailTask, SqlxUserRepository, TaskFilter,
-    UpdateMailTask,
+    FrickmailMe, NewMailIdentity, NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository,
+    TaskFilter, UpdateMailTask,
 };
 use serde_json::{json, Map, Value};
 use tower::ServiceBuilder;
@@ -369,6 +369,12 @@ async fn native_compat_response(
         }
         "FrickmailUpdateTask" => {
             Some(native_frickmail_update_task(state, original_action, payload, session).await)
+        }
+        "FrickmailPushSubscribe" => {
+            Some(native_frickmail_push_subscribe(state, original_action, payload, session).await)
+        }
+        "FrickmailPushUnsubscribe" => {
+            Some(native_frickmail_push_unsubscribe(state, original_action, payload, session).await)
         }
         _ => None,
     }
@@ -974,6 +980,80 @@ async fn native_frickmail_update_task(
     }
 }
 
+async fn native_frickmail_push_subscribe(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let subscription = PushSubscription {
+        endpoint: payload_string(payload, "endpoint").unwrap_or_default(),
+        p256dh: payload_string(payload, "p256dh").unwrap_or_default(),
+        auth_key: payload_string(payload, "auth").unwrap_or_default(),
+    };
+
+    match SqlxUserRepository::upsert_push_subscription(pool, user.user_id, subscription).await {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_push_unsubscribe(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::delete_push_subscription(
+        pool,
+        user.user_id,
+        payload_string(payload, "endpoint").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
 async fn load_session_user(
     state: &AppState,
     original_action: &str,
@@ -1339,7 +1419,7 @@ mod tests {
     use fm_core::{FrickmailConfig, UserSession};
     use fm_session::{MemoryStore, Session, USER_SESSION_KEY};
     use serde_json::{json, Value};
-    use sqlx::{any::AnyPoolOptions, AnyPool};
+    use sqlx::{any::AnyPoolOptions, AnyPool, Row};
     use tokio::net::TcpListener;
     use tower::ServiceExt;
 
@@ -1952,6 +2032,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_push_subscription_mutations_match_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_push_subscription_tables(&pool).await;
+        seed_user(&pool, 50, "push", Some("push@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(50, "push", None).await;
+
+        let response = super::native_frickmail_push_subscribe(
+            &state,
+            "FrickmailPushSubscribe",
+            &json!({
+                "endpoint": "https://push.example/sub",
+                "p256dh": "key-1",
+                "auth": "auth-1"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_push_subscribe(
+            &state,
+            "FrickmailPushSubscribe",
+            &json!({
+                "endpoint": "https://push.example/sub",
+                "p256dh": "key-2",
+                "auth": "auth-2"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(push_subscription_count(&pool, 50).await, 1);
+        assert_eq!(
+            push_subscription_auth(&pool, 50, "https://push.example/sub")
+                .await
+                .as_deref(),
+            Some("auth-2")
+        );
+
+        let response = super::native_frickmail_push_unsubscribe(
+            &state,
+            "FrickmailPushUnsubscribe",
+            &json!({"endpoint": "https://push.example/sub"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(push_subscription_count(&pool, 50).await, 0);
+
+        let response = super::native_frickmail_push_subscribe(
+            &state,
+            "FrickmailPushSubscribe",
+            &json!({"endpoint": "", "p256dh": "key", "auth": "auth"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Missing subscription fields");
+    }
+
+    #[tokio::test]
     async fn json_api_reports_unknown_action_without_transport_failure() {
         let response = app()
             .oneshot(
@@ -2384,6 +2530,23 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_push_subscription_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_push_subscriptions (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                endpoint TEXT NOT NULL,
+                p256dh TEXT NOT NULL,
+                auth_key TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, endpoint)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
         seed_user_with_settings(pool, id, username, email, json!({})).await;
     }
@@ -2534,6 +2697,31 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn push_subscription_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_push_subscriptions WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
+    }
+
+    async fn push_subscription_auth(
+        pool: &AnyPool,
+        user_id: i64,
+        endpoint: &str,
+    ) -> Option<String> {
+        sqlx::query(
+            "SELECT auth_key FROM frickmail_push_subscriptions WHERE user_id = ? AND endpoint = ?",
+        )
+        .bind(user_id)
+        .bind(endpoint)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .map(|row| row.try_get("auth_key").unwrap())
     }
 
     async fn spawn_bridge() -> (Option<String>, Arc<Mutex<BridgeCapture>>) {

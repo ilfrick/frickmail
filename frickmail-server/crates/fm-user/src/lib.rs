@@ -130,6 +130,13 @@ pub enum TaskFilter {
     Completed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSubscription {
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth_key: String,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -309,6 +316,22 @@ impl SqlxUserRepository {
 
     pub async fn update_task(pool: &AnyPool, user_id: i64, input: UpdateMailTask) -> Result<bool> {
         update_task(pool, user_id, input).await
+    }
+
+    pub async fn upsert_push_subscription(
+        pool: &AnyPool,
+        user_id: i64,
+        input: PushSubscription,
+    ) -> Result<()> {
+        upsert_push_subscription(pool, user_id, input).await
+    }
+
+    pub async fn delete_push_subscription(
+        pool: &AnyPool,
+        user_id: i64,
+        endpoint: String,
+    ) -> Result<()> {
+        delete_push_subscription(pool, user_id, endpoint).await
     }
 }
 
@@ -936,6 +959,42 @@ async fn update_task(pool: &AnyPool, user_id: i64, input: UpdateMailTask) -> Res
         .map_err(db_error)
 }
 
+async fn upsert_push_subscription(
+    pool: &AnyPool,
+    user_id: i64,
+    input: PushSubscription,
+) -> Result<()> {
+    if input.endpoint.is_empty() || input.p256dh.is_empty() || input.auth_key.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "Missing subscription fields".to_string(),
+        ));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(upsert_push_subscription_query(&backend))
+        .bind(user_id)
+        .bind(input.endpoint)
+        .bind(input.p256dh)
+        .bind(input.auth_key)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn delete_push_subscription(pool: &AnyPool, user_id: i64, endpoint: String) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(delete_push_subscription_query(&backend))
+        .bind(user_id)
+        .bind(endpoint)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -1311,6 +1370,35 @@ fn update_task_query(backend: &str) -> &'static str {
     }
 }
 
+fn upsert_push_subscription_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_push_subscriptions (user_id, endpoint, p256dh, auth_key) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (user_id, endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth_key = EXCLUDED.auth_key"
+        }
+        "MySQL" => {
+            "INSERT INTO frickmail_push_subscriptions (user_id, endpoint, p256dh, auth_key) \
+             VALUES (?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE p256dh = VALUES(p256dh), auth_key = VALUES(auth_key)"
+        }
+        _ => {
+            "INSERT INTO frickmail_push_subscriptions (user_id, endpoint, p256dh, auth_key) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT (user_id, endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth_key = excluded.auth_key"
+        }
+    }
+}
+
+fn delete_push_subscription_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "DELETE FROM frickmail_push_subscriptions WHERE user_id = $1 AND endpoint = $2"
+        }
+        _ => "DELETE FROM frickmail_push_subscriptions WHERE user_id = ? AND endpoint = ?",
+    }
+}
+
 fn insert_mail_rule_returning_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -1587,12 +1675,12 @@ mod tests {
         Argon2,
     };
     use serde_json::{json, Value};
-    use sqlx::{any::AnyPoolOptions, AnyPool};
+    use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 
     use super::{
         clean_preferences_patch, derive_credential_key, normalize_username,
         preferences_from_settings, verify_login_password, verify_password, FrickmailMe,
-        NewMailRule, NewMailTask, SqlxUserRepository, TaskFilter, UpdateMailTask,
+        NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailTask,
         CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
     };
     use fm_core::UserSession;
@@ -2224,6 +2312,80 @@ mod tests {
         assert_eq!(err.public_message(), "title is required");
     }
 
+    #[tokio::test]
+    async fn repository_upserts_and_deletes_push_subscriptions_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_push_subscription_tables(&pool).await;
+        insert_user(&pool, 21, json!({})).await;
+        insert_user(&pool, 22, json!({})).await;
+
+        SqlxUserRepository::upsert_push_subscription(
+            &pool,
+            21,
+            PushSubscription {
+                endpoint: "https://push.example/sub".to_string(),
+                p256dh: "key-1".to_string(),
+                auth_key: "auth-1".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        SqlxUserRepository::upsert_push_subscription(
+            &pool,
+            21,
+            PushSubscription {
+                endpoint: "https://push.example/sub".to_string(),
+                p256dh: "key-2".to_string(),
+                auth_key: "auth-2".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        SqlxUserRepository::upsert_push_subscription(
+            &pool,
+            22,
+            PushSubscription {
+                endpoint: "https://push.example/sub".to_string(),
+                p256dh: "other-key".to_string(),
+                auth_key: "other-auth".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(push_subscription_count(&pool, 21).await, 1);
+        assert_eq!(
+            push_subscription_auth(&pool, 21, "https://push.example/sub")
+                .await
+                .as_deref(),
+            Some("auth-2")
+        );
+
+        SqlxUserRepository::delete_push_subscription(
+            &pool,
+            21,
+            "https://push.example/sub".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(push_subscription_count(&pool, 21).await, 0);
+        assert_eq!(push_subscription_count(&pool, 22).await, 1);
+
+        let err = SqlxUserRepository::upsert_push_subscription(
+            &pool,
+            21,
+            PushSubscription {
+                endpoint: String::new(),
+                p256dh: "key".to_string(),
+                auth_key: "auth".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Missing subscription fields");
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -2339,6 +2501,23 @@ mod tests {
                 completed_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_push_subscription_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_push_subscriptions (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                endpoint TEXT NOT NULL,
+                p256dh TEXT NOT NULL,
+                auth_key TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, endpoint)
             )",
         )
         .execute(pool)
@@ -2536,5 +2715,30 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn push_subscription_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_push_subscriptions WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
+    }
+
+    async fn push_subscription_auth(
+        pool: &AnyPool,
+        user_id: i64,
+        endpoint: &str,
+    ) -> Option<String> {
+        sqlx::query(
+            "SELECT auth_key FROM frickmail_push_subscriptions WHERE user_id = ? AND endpoint = ?",
+        )
+        .bind(user_id)
+        .bind(endpoint)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .map(|row| row.try_get("auth_key").unwrap())
     }
 }
