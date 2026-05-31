@@ -74,6 +74,18 @@ pub struct NewMailIdentity {
     pub is_default: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MailRule {
+    pub id: i64,
+    pub account_id: i64,
+    pub name: String,
+    pub enabled: bool,
+    pub conditions: Value,
+    pub conditions_logic: String,
+    pub actions: Value,
+    pub last_run: Option<String>,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -199,6 +211,27 @@ impl SqlxUserRepository {
         identity_id: i64,
     ) -> Result<()> {
         set_default_mail_identity(pool, user_id, identity_id).await
+    }
+
+    pub async fn list_mail_rules(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+    ) -> Result<Vec<MailRule>> {
+        list_mail_rules(pool, user_id, account_id).await
+    }
+
+    pub async fn delete_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<()> {
+        delete_mail_rule(pool, user_id, rule_id).await
+    }
+
+    pub async fn toggle_mail_rule(
+        pool: &AnyPool,
+        user_id: i64,
+        rule_id: i64,
+        enabled: bool,
+    ) -> Result<()> {
+        toggle_mail_rule(pool, user_id, rule_id, enabled).await
     }
 }
 
@@ -636,6 +669,51 @@ async fn set_default_mail_identity_values_on_conn(
         .map_err(db_error)
 }
 
+async fn list_mail_rules(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<Vec<MailRule>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    if !mail_account_exists_on_conn(&mut conn, &backend, user_id, account_id).await? {
+        return Err(FrickmailError::BadRequest("Account not found".to_string()));
+    }
+
+    sqlx::query(mail_rules_query(&backend))
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_mail_rule)
+        .collect()
+}
+
+async fn delete_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(delete_mail_rule_query(&backend))
+        .bind(user_id)
+        .bind(rule_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn toggle_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64, enabled: bool) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(toggle_mail_rule_query(&backend))
+        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(user_id)
+        .bind(rule_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
 fn user_select_query(backend: &str, column: &str) -> String {
     let placeholder = match backend {
         "PostgreSQL" => "$1",
@@ -777,6 +855,42 @@ fn set_default_identity_query(backend: &str) -> &'static str {
     }
 }
 
+fn mail_rules_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, account_id, name, conditions::text AS conditions_json, actions::text AS actions_json, \
+                CASE WHEN enabled THEN 1 ELSE 0 END AS enabled, last_run::text AS last_run \
+             FROM frickmail_rules WHERE user_id = $1 AND account_id = $2 ORDER BY id ASC"
+        }
+        "MySQL" => {
+            "SELECT id, account_id, name, CAST(conditions AS CHAR) AS conditions_json, CAST(actions AS CHAR) AS actions_json, \
+                CASE WHEN enabled THEN 1 ELSE 0 END AS enabled, CAST(last_run AS CHAR) AS last_run \
+             FROM frickmail_rules WHERE user_id = ? AND account_id = ? ORDER BY id ASC"
+        }
+        _ => {
+            "SELECT id, account_id, name, CAST(conditions AS TEXT) AS conditions_json, CAST(actions AS TEXT) AS actions_json, \
+                CASE WHEN enabled THEN 1 ELSE 0 END AS enabled, CAST(last_run AS TEXT) AS last_run \
+             FROM frickmail_rules WHERE user_id = ? AND account_id = ? ORDER BY id ASC"
+        }
+    }
+}
+
+fn delete_mail_rule_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_rules WHERE user_id = $1 AND id = $2",
+        _ => "DELETE FROM frickmail_rules WHERE user_id = ? AND id = ?",
+    }
+}
+
+fn toggle_mail_rule_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_rules SET enabled = ($1 <> 0) WHERE user_id = $2 AND id = $3"
+        }
+        _ => "UPDATE frickmail_rules SET enabled = ? WHERE user_id = ? AND id = ?",
+    }
+}
+
 fn update_settings_patch_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -820,9 +934,45 @@ fn row_to_mail_identity(row: sqlx::any::AnyRow) -> Result<MailIdentity> {
     })
 }
 
+fn row_to_mail_rule(row: sqlx::any::AnyRow) -> Result<MailRule> {
+    let conditions_json: Option<String> = row.try_get("conditions_json").map_err(db_error)?;
+    let actions_json: Option<String> = row.try_get("actions_json").map_err(db_error)?;
+    let conditions_payload = json_or_empty_object(conditions_json.as_deref());
+
+    Ok(MailRule {
+        id: row.try_get("id").map_err(db_error)?,
+        account_id: row.try_get("account_id").map_err(db_error)?,
+        name: row.try_get("name").map_err(db_error)?,
+        enabled: int_flag(&row, "enabled")?,
+        conditions: conditions_payload
+            .get("conditions")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        conditions_logic: conditions_payload
+            .get("conditions_logic")
+            .and_then(Value::as_str)
+            .unwrap_or("all")
+            .to_string(),
+        actions: json_or_empty_array(actions_json.as_deref()),
+        last_run: row.try_get("last_run").map_err(db_error)?,
+    })
+}
+
 fn int_flag(row: &sqlx::any::AnyRow, column: &str) -> Result<bool> {
     let value: i64 = row.try_get(column).map_err(db_error)?;
     Ok(value != 0)
+}
+
+fn json_or_empty_array(raw: Option<&str>) -> Value {
+    raw.and_then(|raw| serde_json::from_str(raw).ok())
+        .filter(Value::is_array)
+        .unwrap_or_else(|| json!([]))
+}
+
+fn json_or_empty_object(raw: Option<&str>) -> Value {
+    raw.and_then(|raw| serde_json::from_str(raw).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
 }
 
 fn looks_like_email_address(email: &str) -> bool {
@@ -1302,6 +1452,79 @@ mod tests {
         assert_eq!(err.public_message(), "Account not found");
     }
 
+    #[tokio::test]
+    async fn repository_lists_and_mutates_mail_rules_with_account_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_mail_rule_tables(&pool).await;
+        insert_user(&pool, 15, json!({})).await;
+        insert_user(&pool, 16, json!({})).await;
+        insert_mail_account(&pool, 130, 15, "Work", true).await;
+        insert_mail_account(&pool, 131, 16, "OtherUser", true).await;
+        insert_mail_rule(&pool, 300, 15, 130, "Move newsletters", true).await;
+        insert_mail_rule(&pool, 301, 16, 131, "Other rule", true).await;
+
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+            .await
+            .unwrap();
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, 300);
+        assert_eq!(rules[0].conditions_logic, "all");
+        assert_eq!(rules[0].conditions[0]["field"], "from");
+        assert_eq!(rules[0].actions[0]["type"], "move");
+        assert!(rules[0].enabled);
+
+        SqlxUserRepository::toggle_mail_rule(&pool, 15, 300, false)
+            .await
+            .unwrap();
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+            .await
+            .unwrap();
+        assert!(!rules[0].enabled);
+
+        SqlxUserRepository::delete_mail_rule(&pool, 16, 300)
+            .await
+            .unwrap();
+        assert_eq!(
+            SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        SqlxUserRepository::delete_mail_rule(&pool, 15, 300)
+            .await
+            .unwrap();
+        assert!(SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+            .await
+            .unwrap()
+            .is_empty());
+
+        insert_mail_rule_with_null_json(&pool, 302, 15, 130, "Legacy nulls").await;
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+            .await
+            .unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].conditions, json!([]));
+        assert_eq!(rules[0].conditions_logic, "all");
+        assert_eq!(rules[0].actions, json!([]));
+
+        insert_mail_rule_with_literal_null_json(&pool, 303, 15, 130, "Literal nulls").await;
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+            .await
+            .unwrap();
+        assert_eq!(rules[1].conditions, json!([]));
+        assert_eq!(rules[1].actions, json!([]));
+
+        let err = SqlxUserRepository::list_mail_rules(&pool, 15, 131)
+            .await
+            .unwrap_err();
+        assert_eq!(err.public_message(), "Account not found");
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -1385,6 +1608,26 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_mail_rule_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_rules (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                conditions TEXT,
+                actions TEXT,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                last_run TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn insert_user(pool: &AnyPool, id: i64, settings: Value) {
         sqlx::query(
             "INSERT INTO frickmail_users
@@ -1460,6 +1703,89 @@ mod tests {
         .bind(format!("{}@example.com", name.to_ascii_lowercase()))
         .bind(None::<String>)
         .bind(is_default)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_mail_rule(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+        enabled: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_rules
+                (id, user_id, account_id, name, conditions, actions, enabled, last_run, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(account_id)
+        .bind(name)
+        .bind(json!({
+            "conditions": [
+                {"field": "from", "op": "contains", "value": "newsletter"}
+            ],
+            "conditions_logic": "all"
+        }).to_string())
+        .bind(json!([
+            {"type": "move", "params": {"folder": "Newsletters"}}
+        ]).to_string())
+        .bind(enabled)
+        .bind(None::<String>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_mail_rule_with_null_json(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_rules
+                (id, user_id, account_id, name, conditions, actions, enabled, last_run, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(account_id)
+        .bind(name)
+        .bind(None::<String>)
+        .bind(None::<String>)
+        .bind(true)
+        .bind(None::<String>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_mail_rule_with_literal_null_json(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_rules
+                (id, user_id, account_id, name, conditions, actions, enabled, last_run, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(account_id)
+        .bind(name)
+        .bind("null")
+        .bind("null")
+        .bind(true)
+        .bind(None::<String>)
         .execute(pool)
         .await
         .unwrap();

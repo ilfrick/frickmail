@@ -340,6 +340,15 @@ async fn native_compat_response(
         "FrickmailSetDefaultIdentity" => Some(
             native_frickmail_set_default_identity(state, original_action, payload, session).await,
         ),
+        "FrickmailListRules" => {
+            Some(native_frickmail_list_rules(state, original_action, payload, session).await)
+        }
+        "FrickmailDeleteRule" => {
+            Some(native_frickmail_delete_rule(state, original_action, payload, session).await)
+        }
+        "FrickmailToggleRule" => {
+            Some(native_frickmail_toggle_rule(state, original_action, payload, session).await)
+        }
         _ => None,
     }
 }
@@ -604,6 +613,114 @@ async fn native_frickmail_set_default_identity(
         pool,
         user.user_id,
         payload_i64(payload, "id"),
+    )
+    .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_list_rules(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::list_mail_rules(
+        pool,
+        user.user_id,
+        payload_i64(payload, "account_id"),
+    )
+    .await
+    {
+        Ok(rules) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "rules": rules
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_delete_rule(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::delete_mail_rule(pool, user.user_id, payload_i64(payload, "id")).await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_toggle_rule(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::toggle_mail_rule(
+        pool,
+        user.user_id,
+        payload_i64(payload, "id"),
+        payload_bool(payload, "enabled"),
     )
     .await
     {
@@ -1383,6 +1500,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_rule_list_toggle_delete_match_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_mail_rule_tables(&pool).await;
+        seed_user(&pool, 48, "rules", Some("rules@example.com")).await;
+        seed_mail_account(&pool, 330, 48, "Primary", true).await;
+        seed_mail_rule(&pool, 430, 48, 330, "Move newsletters", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(48, "rules", None).await;
+
+        let response = super::native_frickmail_list_rules(
+            &state,
+            "FrickmailListRules",
+            &json!({"account_id": 330}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(body["Result"]["rules"][0]["id"], 430);
+        assert_eq!(body["Result"]["rules"][0]["enabled"], true);
+        assert_eq!(body["Result"]["rules"][0]["conditions_logic"], "all");
+        assert_eq!(body["Result"]["rules"][0]["conditions"][0]["field"], "from");
+        assert_eq!(body["Result"]["rules"][0]["actions"][0]["type"], "move");
+
+        let response = super::native_frickmail_toggle_rule(
+            &state,
+            "FrickmailToggleRule",
+            &json!({"id": 430, "enabled": "0"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_list_rules(
+            &state,
+            "FrickmailListRules",
+            &json!({"account_id": 330}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["rules"][0]["enabled"], false);
+
+        let response = super::native_frickmail_delete_rule(
+            &state,
+            "FrickmailDeleteRule",
+            &json!({"id": 430}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+
+        let response = super::native_frickmail_list_rules(
+            &state,
+            "FrickmailListRules",
+            &json!({"account_id": 330}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert!(body["Result"]["rules"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn json_api_reports_unknown_action_without_transport_failure() {
         let response = app()
             .oneshot(
@@ -1776,6 +1961,26 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_mail_rule_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_rules (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                conditions TEXT NOT NULL,
+                actions TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                last_run TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
         seed_user_with_settings(pool, id, username, email, json!({})).await;
     }
@@ -1861,6 +2066,39 @@ mod tests {
         .bind(format!("{}@example.com", name.to_ascii_lowercase()))
         .bind(None::<String>)
         .bind(is_default)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_mail_rule(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+        enabled: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_rules
+                (id, user_id, account_id, name, conditions, actions, enabled, last_run, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(account_id)
+        .bind(name)
+        .bind(json!({
+            "conditions": [
+                {"field": "from", "op": "contains", "value": "newsletter"}
+            ],
+            "conditions_logic": "all"
+        }).to_string())
+        .bind(json!([
+            {"type": "move", "params": {"folder": "Newsletters"}}
+        ]).to_string())
+        .bind(enabled)
+        .bind(None::<String>)
         .execute(pool)
         .await
         .unwrap();
