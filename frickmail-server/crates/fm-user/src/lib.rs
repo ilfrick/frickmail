@@ -377,6 +377,10 @@ impl SqlxUserRepository {
     pub async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result<bool> {
         delete_smime_cert(pool, user_id, cert_id).await
     }
+
+    pub async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
+        delete_mail_account(pool, user_id, account_id).await
+    }
 }
 
 pub fn normalize_username(username: &str) -> String {
@@ -1139,6 +1143,46 @@ async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result
         .map_err(db_error)
 }
 
+async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        sqlx::query(delete_message_index_for_account_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        sqlx::query(delete_mail_account_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -1619,6 +1663,22 @@ fn delete_smime_cert_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => "DELETE FROM frickmail_smime_certs WHERE user_id = $1 AND id = $2",
         _ => "DELETE FROM frickmail_smime_certs WHERE user_id = ? AND id = ?",
+    }
+}
+
+fn delete_message_index_for_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "DELETE FROM frickmail_message_index WHERE user_id = $1 AND account_id = $2"
+        }
+        _ => "DELETE FROM frickmail_message_index WHERE user_id = ? AND account_id = ?",
+    }
+}
+
+fn delete_mail_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2",
+        _ => "DELETE FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?",
     }
 }
 
@@ -2173,6 +2233,34 @@ mod tests {
         assert!(accounts[0].identities[0].is_default);
         assert_eq!(accounts[1].id, 101);
         assert!(accounts[1].identities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_deletes_mail_account_and_user_scoped_message_index() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        insert_user(&pool, 15, json!({})).await;
+        insert_user(&pool, 16, json!({})).await;
+        insert_mail_account(&pool, 130, 15, "Work", true).await;
+        insert_mail_account(&pool, 131, 16, "OtherUser", true).await;
+        insert_message_index(&pool, 15, 130, "INBOX", 1).await;
+        insert_message_index(&pool, 16, 131, "INBOX", 2).await;
+
+        SqlxUserRepository::delete_mail_account(&pool, 16, 130)
+            .await
+            .unwrap();
+        assert_eq!(mail_account_count(&pool, 15).await, 1);
+        assert_eq!(message_index_count(&pool, 15, 130).await, 1);
+
+        SqlxUserRepository::delete_mail_account(&pool, 15, 130)
+            .await
+            .unwrap();
+        assert_eq!(mail_account_count(&pool, 15).await, 0);
+        assert_eq!(message_index_count(&pool, 15, 130).await, 0);
+        assert_eq!(mail_account_count(&pool, 16).await, 1);
+        assert_eq!(message_index_count(&pool, 16, 131).await, 1);
     }
 
     #[tokio::test]
@@ -2886,6 +2974,22 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_message_index_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_message_index (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                folder TEXT NOT NULL,
+                imap_uid INTEGER NOT NULL,
+                subject TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn create_task_tables(pool: &AnyPool) {
         sqlx::query(
             "CREATE TABLE frickmail_tasks (
@@ -3037,6 +3141,50 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn insert_message_index(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder: &str,
+        imap_uid: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_message_index
+                (user_id, account_id, folder, imap_uid, subject)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(account_id)
+        .bind(folder)
+        .bind(imap_uid)
+        .bind("Indexed message")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn mail_account_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_mail_accounts WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
+    }
+
+    async fn message_index_count(pool: &AnyPool, user_id: i64, account_id: i64) -> i64 {
+        sqlx::query(
+            "SELECT COUNT(*) AS count FROM frickmail_message_index
+             WHERE user_id = ? AND account_id = ?",
+        )
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get("count"))
+        .unwrap()
     }
 
     async fn insert_mail_rule(

@@ -331,6 +331,9 @@ async fn native_compat_response(
         "FrickmailListAccounts" => {
             Some(native_frickmail_list_accounts(state, original_action, session).await)
         }
+        "FrickmailDeleteAccount" => {
+            Some(native_frickmail_delete_account(state, original_action, payload, session).await)
+        }
         "FrickmailListIdentities" => {
             Some(native_frickmail_list_identities(state, original_action, payload, session).await)
         }
@@ -518,6 +521,39 @@ async fn native_frickmail_list_accounts(
             original_action,
             compat_error(UNKNOWN_ERROR, err.public_message()),
         ),
+    }
+}
+
+async fn native_frickmail_delete_account(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::delete_mail_account(pool, user.user_id, payload_i64(payload, "id"))
+        .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
 
@@ -1870,6 +1906,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_delete_account_cleans_user_scoped_message_index() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        seed_user(&pool, 145, "accounts", Some("accounts@example.com")).await;
+        seed_user(&pool, 146, "other", Some("other@example.com")).await;
+        seed_mail_account(&pool, 1300, 145, "Primary", true).await;
+        seed_mail_account(&pool, 1301, 146, "Other", true).await;
+        seed_message_index(&pool, 145, 1300, "INBOX", 1).await;
+        seed_message_index(&pool, 146, 1301, "INBOX", 2).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(145, "accounts", None).await;
+
+        let response = super::native_frickmail_delete_account(
+            &state,
+            "FrickmailDeleteAccount",
+            &json!({"id": 1301}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(mail_account_count(&pool, 146).await, 1);
+        assert_eq!(message_index_count(&pool, 146, 1301).await, 1);
+
+        let response = super::native_frickmail_delete_account(
+            &state,
+            "FrickmailDeleteAccount",
+            &json!({"id": 1300}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(mail_account_count(&pool, 145).await, 0);
+        assert_eq!(message_index_count(&pool, 145, 1300).await, 0);
+    }
+
+    #[tokio::test]
     async fn native_frickmail_list_identities_returns_account_scoped_identities() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
@@ -2834,6 +2909,22 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_message_index_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_message_index (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                folder TEXT NOT NULL,
+                imap_uid INTEGER NOT NULL,
+                subject TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn create_task_tables(pool: &AnyPool) {
         sqlx::query(
             "CREATE TABLE frickmail_tasks (
@@ -2995,6 +3086,50 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn seed_message_index(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder: &str,
+        imap_uid: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_message_index
+                (user_id, account_id, folder, imap_uid, subject)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(account_id)
+        .bind(folder)
+        .bind(imap_uid)
+        .bind("Indexed message")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn mail_account_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_mail_accounts WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
+    }
+
+    async fn message_index_count(pool: &AnyPool, user_id: i64, account_id: i64) -> i64 {
+        sqlx::query(
+            "SELECT COUNT(*) AS count FROM frickmail_message_index
+             WHERE user_id = ? AND account_id = ?",
+        )
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get("count"))
+        .unwrap()
     }
 
     async fn seed_mail_rule(
