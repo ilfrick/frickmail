@@ -137,6 +137,13 @@ pub struct PushSubscription {
     pub auth_key: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OidcLink {
+    pub provider_hash: String,
+    pub provider_name: String,
+    pub linked_at: Option<String>,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -332,6 +339,22 @@ impl SqlxUserRepository {
         endpoint: String,
     ) -> Result<()> {
         delete_push_subscription(pool, user_id, endpoint).await
+    }
+
+    pub async fn list_oidc_links(
+        pool: &AnyPool,
+        user_id: i64,
+        provider_name: &str,
+    ) -> Result<Vec<OidcLink>> {
+        list_oidc_links(pool, user_id, provider_name).await
+    }
+
+    pub async fn unlink_oidc_identity(
+        pool: &AnyPool,
+        user_id: i64,
+        provider_hash: String,
+    ) -> Result<()> {
+        unlink_oidc_identity(pool, user_id, provider_hash).await
     }
 }
 
@@ -995,6 +1018,79 @@ async fn delete_push_subscription(pool: &AnyPool, user_id: i64, endpoint: String
         .map_err(db_error)
 }
 
+async fn list_oidc_links(
+    pool: &AnyPool,
+    user_id: i64,
+    provider_name: &str,
+) -> Result<Vec<OidcLink>> {
+    let provider_name = oidc_provider_name(provider_name);
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(oidc_links_query(&backend))
+        .bind(user_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(|row| row_to_oidc_link(row, &provider_name))
+        .collect()
+}
+
+async fn unlink_oidc_identity(pool: &AnyPool, user_id: i64, provider_hash: String) -> Result<()> {
+    let provider_hash = provider_hash.trim().to_string();
+    if provider_hash.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "provider_hash required".to_string(),
+        ));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        sqlx::query(delete_oidc_identity_query(&backend))
+            .bind(user_id)
+            .bind(provider_hash)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        let remaining: i64 = sqlx::query(oidc_identity_count_query(&backend))
+            .bind(user_id)
+            .fetch_one(&mut *conn)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .map_err(db_error)?;
+        if remaining == 0 {
+            sqlx::query(clear_oidc_escrow_key_query(&backend))
+                .bind(user_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_error)?;
+        }
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -1399,6 +1495,52 @@ fn delete_push_subscription_query(backend: &str) -> &'static str {
     }
 }
 
+fn oidc_links_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT provider_hash, linked_at::text AS linked_at \
+             FROM frickmail_oidc_identities WHERE user_id = $1 ORDER BY linked_at DESC"
+        }
+        "MySQL" => {
+            "SELECT provider_hash, CAST(linked_at AS CHAR) AS linked_at \
+             FROM frickmail_oidc_identities WHERE user_id = ? ORDER BY linked_at DESC"
+        }
+        _ => {
+            "SELECT provider_hash, CAST(linked_at AS TEXT) AS linked_at \
+             FROM frickmail_oidc_identities WHERE user_id = ? ORDER BY linked_at DESC"
+        }
+    }
+}
+
+fn delete_oidc_identity_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "DELETE FROM frickmail_oidc_identities WHERE user_id = $1 AND provider_hash = $2"
+        }
+        _ => "DELETE FROM frickmail_oidc_identities WHERE user_id = ? AND provider_hash = ?",
+    }
+}
+
+fn oidc_identity_count_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT COUNT(*) AS count FROM frickmail_oidc_identities WHERE user_id = $1"
+        }
+        _ => "SELECT COUNT(*) AS count FROM frickmail_oidc_identities WHERE user_id = ?",
+    }
+}
+
+fn clear_oidc_escrow_key_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_users SET oidc_escrow_key = NULL, updated_at = NOW() WHERE id = $1"
+        }
+        _ => {
+            "UPDATE frickmail_users SET oidc_escrow_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        }
+    }
+}
+
 fn insert_mail_rule_returning_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -1522,6 +1664,14 @@ fn row_to_mail_task(row: sqlx::any::AnyRow) -> Result<MailTask> {
     })
 }
 
+fn row_to_oidc_link(row: sqlx::any::AnyRow, provider_name: &str) -> Result<OidcLink> {
+    Ok(OidcLink {
+        provider_hash: row.try_get("provider_hash").map_err(db_error)?,
+        provider_name: provider_name.to_string(),
+        linked_at: row.try_get("linked_at").map_err(db_error)?,
+    })
+}
+
 fn int_flag(row: &sqlx::any::AnyRow, column: &str) -> Result<bool> {
     let value: i64 = row.try_get(column).map_err(db_error)?;
     Ok(value != 0)
@@ -1553,6 +1703,15 @@ fn looks_like_email_address(email: &str) -> bool {
     };
 
     !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+}
+
+fn oidc_provider_name(provider_name: &str) -> String {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        "SSO".to_string()
+    } else {
+        provider_name.to_string()
+    }
 }
 
 fn row_to_user(row: sqlx::any::AnyRow) -> Result<FrickmailUser> {
@@ -2386,6 +2545,67 @@ mod tests {
         assert_eq!(err.public_message(), "Missing subscription fields");
     }
 
+    #[tokio::test]
+    async fn repository_lists_and_unlinks_oidc_identities_with_escrow_cleanup() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_oidc_identity_tables(&pool).await;
+        insert_user(&pool, 23, json!({})).await;
+        insert_user(&pool, 24, json!({})).await;
+        set_oidc_escrow_key(&pool, 23, Some(vec![1, 2, 3])).await;
+        insert_oidc_identity(&pool, 23, "provider-a", "subject-a", "2026-06-02 10:00:00").await;
+        insert_oidc_identity(&pool, 23, "provider-b", "subject-b", "2026-06-01 10:00:00").await;
+        insert_oidc_identity(
+            &pool,
+            24,
+            "provider-a",
+            "other-subject",
+            "2026-06-03 10:00:00",
+        )
+        .await;
+
+        let links = SqlxUserRepository::list_oidc_links(&pool, 23, "  Company SSO  ")
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].provider_hash, "provider-a");
+        assert_eq!(links[0].provider_name, "Company SSO");
+        assert_eq!(links[1].provider_hash, "provider-b");
+
+        let links = SqlxUserRepository::list_oidc_links(&pool, 23, " ")
+            .await
+            .unwrap();
+        assert_eq!(links[0].provider_name, "SSO");
+
+        SqlxUserRepository::unlink_oidc_identity(&pool, 23, " provider-a ".to_string())
+            .await
+            .unwrap();
+        assert_eq!(oidc_identity_count(&pool, 23).await, 1);
+        assert!(SqlxUserRepository::find_by_id(&pool, 23)
+            .await
+            .unwrap()
+            .unwrap()
+            .oidc_escrow_key
+            .is_some());
+        assert_eq!(oidc_identity_count(&pool, 24).await, 1);
+
+        SqlxUserRepository::unlink_oidc_identity(&pool, 23, "provider-b".to_string())
+            .await
+            .unwrap();
+        assert_eq!(oidc_identity_count(&pool, 23).await, 0);
+        assert!(SqlxUserRepository::find_by_id(&pool, 23)
+            .await
+            .unwrap()
+            .unwrap()
+            .oidc_escrow_key
+            .is_none());
+
+        let err = SqlxUserRepository::unlink_oidc_identity(&pool, 23, " ".to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(err.public_message(), "provider_hash required");
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -2518,6 +2738,22 @@ mod tests {
                 auth_key TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, endpoint)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_oidc_identity_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_oidc_identities (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                provider_hash TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(provider_hash, subject)
             )",
         )
         .execute(pool)
@@ -2740,5 +2976,44 @@ mod tests {
         .await
         .unwrap()
         .map(|row| row.try_get("auth_key").unwrap())
+    }
+
+    async fn set_oidc_escrow_key(pool: &AnyPool, user_id: i64, value: Option<Vec<u8>>) {
+        sqlx::query("UPDATE frickmail_users SET oidc_escrow_key = ? WHERE id = ?")
+            .bind(value)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_oidc_identity(
+        pool: &AnyPool,
+        user_id: i64,
+        provider_hash: &str,
+        subject: &str,
+        linked_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_oidc_identities
+                (user_id, provider_hash, subject, linked_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(provider_hash)
+        .bind(subject)
+        .bind(linked_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn oidc_identity_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_oidc_identities WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
     }
 }

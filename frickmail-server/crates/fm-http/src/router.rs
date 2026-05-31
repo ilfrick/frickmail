@@ -376,6 +376,12 @@ async fn native_compat_response(
         "FrickmailPushUnsubscribe" => {
             Some(native_frickmail_push_unsubscribe(state, original_action, payload, session).await)
         }
+        "FrickmailListOidcLinks" => {
+            Some(native_frickmail_list_oidc_links(state, original_action, session).await)
+        }
+        "FrickmailUnlinkOidc" => {
+            Some(native_frickmail_unlink_oidc(state, original_action, payload, session).await)
+        }
         _ => None,
     }
 }
@@ -1047,6 +1053,81 @@ async fn native_frickmail_push_unsubscribe(
             json!({
                 "Result": {
                     "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_list_oidc_links(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::list_oidc_links(
+        pool,
+        user.user_id,
+        &state.config().oidc.provider_name,
+    )
+    .await
+    {
+        Ok(links) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "links": links
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_unlink_oidc(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::unlink_oidc_identity(
+        pool,
+        user.user_id,
+        payload_string(payload, "provider_hash").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "message": "OIDC identity unlinked."
                 }
             }),
         ),
@@ -2098,6 +2179,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_oidc_link_list_and_unlink_match_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_oidc_identity_tables(&pool).await;
+        seed_user(&pool, 51, "oidc", Some("oidc@example.com")).await;
+        set_oidc_escrow_key(&pool, 51, Some(vec![4, 5, 6])).await;
+        seed_oidc_identity(&pool, 51, "provider-a", "subject-a", "2026-06-02 10:00:00").await;
+        seed_oidc_identity(&pool, 51, "provider-b", "subject-b", "2026-06-01 10:00:00").await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(51, "oidc", None).await;
+
+        let response =
+            super::native_frickmail_list_oidc_links(&state, "FrickmailListOidcLinks", &session)
+                .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["links"].as_array().unwrap().len(), 2);
+        assert_eq!(body["Result"]["links"][0]["provider_hash"], "provider-a");
+        assert_eq!(body["Result"]["links"][0]["provider_name"], "SSO");
+
+        let response = super::native_frickmail_unlink_oidc(
+            &state,
+            "FrickmailUnlinkOidc",
+            &json!({"provider_hash": "provider-a"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["message"], "OIDC identity unlinked.");
+        assert_eq!(oidc_identity_count(&pool, 51).await, 1);
+        assert!(SqlxUserRepository::find_by_id(&pool, 51)
+            .await
+            .unwrap()
+            .unwrap()
+            .oidc_escrow_key
+            .is_some());
+
+        let response = super::native_frickmail_unlink_oidc(
+            &state,
+            "FrickmailUnlinkOidc",
+            &json!({"provider_hash": "provider-b"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(oidc_identity_count(&pool, 51).await, 0);
+        assert!(SqlxUserRepository::find_by_id(&pool, 51)
+            .await
+            .unwrap()
+            .unwrap()
+            .oidc_escrow_key
+            .is_none());
+
+        let response = super::native_frickmail_unlink_oidc(
+            &state,
+            "FrickmailUnlinkOidc",
+            &json!({"provider_hash": ""}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "provider_hash required");
+    }
+
+    #[tokio::test]
     async fn json_api_reports_unknown_action_without_transport_failure() {
         let response = app()
             .oneshot(
@@ -2547,6 +2695,22 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_oidc_identity_tables(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_oidc_identities (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                provider_hash TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(provider_hash, subject)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn seed_user(pool: &AnyPool, id: i64, username: &str, email: Option<&str>) {
         seed_user_with_settings(pool, id, username, email, json!({})).await;
     }
@@ -2722,6 +2886,45 @@ mod tests {
         .await
         .unwrap()
         .map(|row| row.try_get("auth_key").unwrap())
+    }
+
+    async fn set_oidc_escrow_key(pool: &AnyPool, user_id: i64, value: Option<Vec<u8>>) {
+        sqlx::query("UPDATE frickmail_users SET oidc_escrow_key = ? WHERE id = ?")
+            .bind(value)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn seed_oidc_identity(
+        pool: &AnyPool,
+        user_id: i64,
+        provider_hash: &str,
+        subject: &str,
+        linked_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_oidc_identities
+                (user_id, provider_hash, subject, linked_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(provider_hash)
+        .bind(subject)
+        .bind(linked_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn oidc_identity_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query("SELECT COUNT(*) AS count FROM frickmail_oidc_identities WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("count"))
+            .unwrap()
     }
 
     async fn spawn_bridge() -> (Option<String>, Arc<Mutex<BridgeCapture>>) {
