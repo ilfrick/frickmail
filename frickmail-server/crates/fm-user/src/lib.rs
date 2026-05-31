@@ -214,6 +214,13 @@ impl SqlxUserRepository {
         Ok(Some(preferences_from_settings(&user.settings)))
     }
 
+    pub async fn totp_enabled(pool: &AnyPool, user_id: i64) -> Result<bool> {
+        Ok(Self::find_by_id(pool, user_id)
+            .await?
+            .and_then(|user| user.totp_secret)
+            .is_some_and(|secret| !secret.is_empty() && secret != "0"))
+    }
+
     pub async fn update_preferences(
         pool: &AnyPool,
         user_id: i64,
@@ -2367,6 +2374,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_reports_totp_enabled_status() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        insert_user(&pool, 25, json!({})).await;
+        insert_user(&pool, 26, json!({})).await;
+        set_totp_secret(&pool, 26, Some("SECRET")).await;
+
+        assert!(!SqlxUserRepository::totp_enabled(&pool, 25).await.unwrap());
+        assert!(SqlxUserRepository::totp_enabled(&pool, 26).await.unwrap());
+        set_totp_secret(&pool, 26, Some("")).await;
+        assert!(!SqlxUserRepository::totp_enabled(&pool, 26).await.unwrap());
+        set_totp_secret(&pool, 26, Some("0")).await;
+        assert!(!SqlxUserRepository::totp_enabled(&pool, 26).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn repository_lists_mail_identities_for_one_account() {
         let pool = sqlite_pool().await;
         create_users_table(&pool, "TEXT").await;
@@ -3288,6 +3311,15 @@ mod tests {
         .await
         .and_then(|row| row.try_get("count"))
         .unwrap()
+    }
+
+    async fn set_totp_secret(pool: &AnyPool, user_id: i64, secret: Option<&str>) {
+        sqlx::query("UPDATE frickmail_users SET totp_secret = ? WHERE id = ?")
+            .bind(secret)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     async fn insert_mail_rule(

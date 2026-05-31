@@ -322,6 +322,9 @@ async fn native_compat_response(
 ) -> Option<Response> {
     match action {
         "FrickmailMe" => Some(native_frickmail_me(state, original_action, session).await),
+        "FrickmailGetTotpStatus" => {
+            Some(native_frickmail_get_totp_status(state, original_action, session).await)
+        }
         "FrickmailGetPrefs" => {
             Some(native_frickmail_get_prefs(state, original_action, session).await)
         }
@@ -416,6 +419,37 @@ async fn native_frickmail_me(
             "Result": result
         }),
     )
+}
+
+async fn native_frickmail_get_totp_status(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::totp_enabled(pool, user.user_id).await {
+        Ok(enabled) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "enabled": enabled
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
 }
 
 async fn native_frickmail_get_prefs(
@@ -1725,6 +1759,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_dispatches_native_totp_status_action() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailGetTotpStatus"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+        assert_eq!(body["Action"], "PluginFrickmailGetTotpStatus");
+    }
+
+    #[tokio::test]
     async fn json_api_accepts_legacy_json_url_shape() {
         let response = app()
             .oneshot(
@@ -1838,6 +1893,38 @@ mod tests {
         assert_eq!(body["Result"]["ok"], true);
         assert_eq!(body["Result"]["authenticated"], false);
         assert!(session_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_get_totp_status_matches_secret_presence() {
+        let pool = user_db_pool().await;
+        seed_user(&pool, 143, "totp", Some("totp@example.com")).await;
+        set_totp_secret(&pool, 143, Some("SECRET")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(143, "totp", None).await;
+
+        let response =
+            super::native_frickmail_get_totp_status(&state, "FrickmailGetTotpStatus", &session)
+                .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["enabled"], true);
+
+        set_totp_secret(&pool, 143, Some("")).await;
+        let response =
+            super::native_frickmail_get_totp_status(&state, "FrickmailGetTotpStatus", &session)
+                .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["enabled"], false);
+
+        set_totp_secret(&pool, 143, Some("0")).await;
+        let response =
+            super::native_frickmail_get_totp_status(&state, "FrickmailGetTotpStatus", &session)
+                .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["enabled"], false);
     }
 
     #[tokio::test]
@@ -3216,6 +3303,15 @@ mod tests {
         .await
         .and_then(|row| row.try_get("count"))
         .unwrap()
+    }
+
+    async fn set_totp_secret(pool: &AnyPool, user_id: i64, secret: Option<&str>) {
+        sqlx::query("UPDATE frickmail_users SET totp_secret = ? WHERE id = ?")
+            .bind(secret)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     async fn seed_mail_rule(
