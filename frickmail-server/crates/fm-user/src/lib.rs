@@ -1,10 +1,12 @@
 use argon2::{
-    password_hash::{PasswordHash, PasswordVerifier},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Algorithm, Argon2, Params, Version,
 };
 use fm_core::{FrickmailError, Result, UserSession};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
 
@@ -12,6 +14,8 @@ pub const KDF_SALT_BYTES: usize = 16;
 pub const CREDENTIAL_KEY_BYTES: usize = 32;
 pub const KDF_OPSLIMIT: u32 = 3;
 pub const KDF_MEMLIMIT_KIB: u32 = 65_536;
+pub const PASSWORD_HASH_OPSLIMIT: u32 = 4;
+pub const PASSWORD_HASH_MEMLIMIT_KIB: u32 = 65_536;
 pub const DUMMY_PASSWORD_HASH: &str =
     "$argon2id$v=19$m=65536,t=4,p=1$TTJYNUVsNlE5Q1RwTzZacQ$AnMUliGcTz3HHGhxmAib/d0fPagGYhpUa1uQxLPgyeg";
 
@@ -170,6 +174,13 @@ pub struct MessageSearchResult {
     pub date_ts: Option<String>,
     pub snippet: Option<String>,
     pub account_email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PasswordResetResult {
+    pub ok: bool,
+    pub username: String,
+    pub message: String,
 }
 
 impl FrickmailMe {
@@ -420,6 +431,14 @@ impl SqlxUserRepository {
     ) -> Result<Vec<MessageSearchResult>> {
         search_messages(pool, user_id, query, limit).await
     }
+
+    pub async fn reset_password(
+        pool: &AnyPool,
+        token: String,
+        password: String,
+    ) -> Result<PasswordResetResult> {
+        reset_password(pool, token, password).await
+    }
 }
 
 pub fn normalize_username(username: &str) -> String {
@@ -443,6 +462,21 @@ pub fn verify_login_password(password: &str, user: Option<&FrickmailUser>) -> Re
 
     let verified = verify_password(password, hash).unwrap_or(false);
     Ok(user.is_some() && verified)
+}
+
+pub fn hash_login_password(password: &str) -> Result<String> {
+    let params = Params::new(PASSWORD_HASH_MEMLIMIT_KIB, PASSWORD_HASH_OPSLIMIT, 1, None)
+        .map_err(|err| FrickmailError::Upstream(format!("invalid Argon2id hash params: {err}")))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let salt = SaltString::generate(&mut OsRng);
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|err| FrickmailError::Upstream(format!("Frickmail password hash failed: {err}")))
+}
+
+pub fn password_reset_token_hash(token: &str) -> String {
+    sha256_hex(token.as_bytes())
 }
 
 pub fn derive_credential_key(password: &str, salt: &[u8]) -> Result<[u8; CREDENTIAL_KEY_BYTES]> {
@@ -733,6 +767,32 @@ async fn mail_account_exists_on_conn(
         .map_err(db_error)?;
 
     Ok(count > 0)
+}
+
+struct ActivePasswordReset {
+    reset_id: i64,
+    user_id: i64,
+    username: String,
+}
+
+async fn active_password_reset_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    token_hash: &str,
+) -> Result<Option<ActivePasswordReset>> {
+    sqlx::query(active_password_reset_query(backend))
+        .bind(token_hash)
+        .fetch_optional(&mut **conn)
+        .await
+        .map_err(db_error)?
+        .map(|row| {
+            Ok(ActivePasswordReset {
+                reset_id: row.try_get("reset_id").map_err(db_error)?,
+                user_id: row.try_get("user_id").map_err(db_error)?,
+                username: row.try_get("username").map_err(db_error)?,
+            })
+        })
+        .transpose()
 }
 
 async fn mail_identity_default_exists_on_conn(
@@ -1286,6 +1346,84 @@ async fn search_messages(
         .collect()
 }
 
+async fn reset_password(
+    pool: &AnyPool,
+    token: String,
+    password: String,
+) -> Result<PasswordResetResult> {
+    if token.is_empty() {
+        return Err(FrickmailError::BadRequest("Token required".to_string()));
+    }
+    if password.len() < 8 {
+        return Err(FrickmailError::BadRequest(
+            "Password must be at least 8 chars".to_string(),
+        ));
+    }
+
+    let token_hash = password_reset_token_hash(&token);
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        let reset = active_password_reset_on_conn(&mut conn, &backend, &token_hash)
+            .await?
+            .ok_or_else(|| FrickmailError::BadRequest("Invalid or expired token".to_string()))?;
+
+        let consumed = sqlx::query(consume_password_reset_query(&backend))
+            .bind(reset.reset_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?
+            .rows_affected();
+        if consumed != 1 {
+            return Err(FrickmailError::BadRequest(
+                "Invalid or expired token".to_string(),
+            ));
+        }
+
+        let password_hash = hash_login_password(&password)?;
+        let mut kdf_salt = vec![0_u8; KDF_SALT_BYTES];
+        OsRng.fill_bytes(&mut kdf_salt);
+
+        sqlx::query(apply_password_reset_user_query(&backend))
+            .bind(&password_hash)
+            .bind(&kdf_salt)
+            .bind(reset.user_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        sqlx::query(clear_mail_account_credentials_query(&backend))
+            .bind(reset.user_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        Ok(PasswordResetResult {
+            ok: true,
+            username: reset.username,
+            message: "Password reset. Sign in with your new password. Linked mail-account credentials must be re-entered.".to_string(),
+        })
+    }
+    .await;
+
+    match result {
+        Ok(result) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| result)
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -1835,6 +1973,71 @@ fn search_messages_query(backend: &str) -> &'static str {
     }
 }
 
+fn active_password_reset_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT r.id AS reset_id, r.user_id, u.username \
+             FROM frickmail_password_resets r \
+             JOIN frickmail_users u ON u.id = r.user_id \
+             WHERE r.token_hash = $1 AND r.used_at IS NULL AND r.expires_at > NOW() \
+             LIMIT 1"
+        }
+        _ => {
+            "SELECT r.id AS reset_id, r.user_id, u.username \
+             FROM frickmail_password_resets r \
+             JOIN frickmail_users u ON u.id = r.user_id \
+             WHERE r.token_hash = ? AND r.used_at IS NULL AND r.expires_at > CURRENT_TIMESTAMP \
+             LIMIT 1"
+        }
+    }
+}
+
+fn apply_password_reset_user_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_users \
+             SET password_hash = $1, kdf_salt = $2, updated_at = NOW() \
+             WHERE id = $3"
+        }
+        "MySQL" => {
+            "UPDATE frickmail_users \
+             SET password_hash = ?, kdf_salt = ?, updated_at = CURRENT_TIMESTAMP \
+             WHERE id = ?"
+        }
+        _ => {
+            "UPDATE frickmail_users \
+             SET password_hash = ?, kdf_salt = ?, updated_at = CURRENT_TIMESTAMP \
+             WHERE id = ?"
+        }
+    }
+}
+
+fn clear_mail_account_credentials_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts \
+             SET encrypted_password = NULL, encrypted_oauth_refresh_token = NULL, updated_at = NOW() \
+             WHERE user_id = $1"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts \
+             SET encrypted_password = NULL, encrypted_oauth_refresh_token = NULL, updated_at = CURRENT_TIMESTAMP \
+             WHERE user_id = ?"
+        }
+    }
+}
+
+fn consume_password_reset_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_password_resets SET used_at = NOW() WHERE id = $1 AND used_at IS NULL"
+        }
+        _ => {
+            "UPDATE frickmail_password_resets SET used_at = CURRENT_TIMESTAMP WHERE id = ? AND used_at IS NULL"
+        }
+    }
+}
+
 fn insert_mail_rule_returning_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -1994,6 +2197,17 @@ fn row_to_message_search_result(row: sqlx::any::AnyRow) -> Result<MessageSearchR
         snippet: row.try_get("snippet").map_err(db_error)?,
         account_email: row.try_get("account_email").map_err(db_error)?,
     })
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(input);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn int_flag(row: &sqlx::any::AnyRow, column: &str) -> Result<bool> {
@@ -2515,6 +2729,68 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.public_message(), "Query too short");
+    }
+
+    #[tokio::test]
+    async fn repository_resets_password_and_invalidates_credentials() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_password_reset_table(&pool).await;
+        insert_user(&pool, 29, json!({})).await;
+        insert_mail_account(&pool, 160, 29, "Work", true).await;
+        set_oauth_refresh_token(&pool, 160, vec![8_u8, 9, 10]).await;
+        insert_password_reset(
+            &pool,
+            500,
+            29,
+            &super::sha256_hex(b"reset-token"),
+            "2999-01-01 00:00:00",
+            None,
+        )
+        .await;
+
+        let result = SqlxUserRepository::reset_password(
+            &pool,
+            "reset-token".to_string(),
+            "new-secret".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.username, "user29");
+        assert_eq!(
+            result.message,
+            "Password reset. Sign in with your new password. Linked mail-account credentials must be re-entered."
+        );
+        let user = SqlxUserRepository::find_by_id(&pool, 29)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(verify_login_password("new-secret", Some(&user)).unwrap());
+        assert_eq!(user.kdf_salt.len(), KDF_SALT_BYTES);
+        assert_ne!(user.kdf_salt, vec![1_u8, 2, 3, 4]);
+        assert!(account_credentials_are_null(&pool, 160).await);
+        assert!(password_reset_used_at(&pool, 500).await.is_some());
+
+        let err = SqlxUserRepository::reset_password(
+            &pool,
+            "reset-token".to_string(),
+            "another-secret".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Invalid or expired token");
+
+        let err = SqlxUserRepository::reset_password(
+            &pool,
+            "missing-token".to_string(),
+            "short".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Password must be at least 8 chars");
     }
 
     #[tokio::test]
@@ -3305,6 +3581,22 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_password_reset_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_password_resets (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn create_task_tables(pool: &AnyPool) {
         sqlx::query(
             "CREATE TABLE frickmail_tasks (
@@ -3515,6 +3807,68 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn set_oauth_refresh_token(pool: &AnyPool, account_id: i64, token: Vec<u8>) {
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET encrypted_oauth_refresh_token = ?
+             WHERE id = ?",
+        )
+        .bind(token)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_password_reset(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        token_hash: &str,
+        expires_at: &str,
+        used_at: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_password_resets
+                (id, user_id, token_hash, expires_at, used_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(token_hash)
+        .bind(expires_at)
+        .bind(used_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn account_credentials_are_null(pool: &AnyPool, account_id: i64) -> bool {
+        sqlx::query(
+            "SELECT encrypted_password, encrypted_oauth_refresh_token
+             FROM frickmail_mail_accounts
+             WHERE id = ?",
+        )
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
+        .map(|row| {
+            let password: Option<Vec<u8>> = row.try_get("encrypted_password").unwrap();
+            let token: Option<Vec<u8>> = row.try_get("encrypted_oauth_refresh_token").unwrap();
+            password.is_none() && token.is_none()
+        })
+        .unwrap()
+    }
+
+    async fn password_reset_used_at(pool: &AnyPool, reset_id: i64) -> Option<String> {
+        sqlx::query("SELECT used_at FROM frickmail_password_resets WHERE id = ?")
+            .bind(reset_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("used_at"))
+            .unwrap()
     }
 
     async fn mail_account_count(pool: &AnyPool, user_id: i64) -> i64 {

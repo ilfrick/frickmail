@@ -9,8 +9,10 @@ repository.workspace = true
 [dependencies]
 argon2.workspace = true
 fm-core = { path = "../fm-core" }
+rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 
 [dev-dependencies]

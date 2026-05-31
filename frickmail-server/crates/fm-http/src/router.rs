@@ -325,6 +325,9 @@ async fn native_compat_response(
         "FrickmailGetTotpStatus" => {
             Some(native_frickmail_get_totp_status(state, original_action, session).await)
         }
+        "FrickmailResetPassword" => {
+            Some(native_frickmail_reset_password(state, original_action, payload).await)
+        }
         "FrickmailGetPrefs" => {
             Some(native_frickmail_get_prefs(state, original_action, session).await)
         }
@@ -449,6 +452,33 @@ async fn native_frickmail_get_totp_status(
                     "ok": true,
                     "enabled": enabled
                 }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_reset_password(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+) -> Response {
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::reset_password(
+        pool,
+        payload_string(payload, "token").unwrap_or_default(),
+        payload_string(payload, "password").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(result) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": result
             }),
         ),
         Err(err) => json_result_error(original_action, &err.public_message()),
@@ -1987,6 +2017,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_dispatches_native_reset_password_action() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_password_reset_table(&pool).await;
+        seed_user(&pool, 144, "reset-user", Some("reset@example.com")).await;
+        seed_mail_account(&pool, 1200, 144, "Primary", true).await;
+        insert_password_reset(
+            &pool,
+            700,
+            144,
+            &fm_user::password_reset_token_hash("reset-token"),
+            "2999-01-01 00:00:00",
+            None,
+        )
+        .await;
+        let app = super::build_router(AppState::with_db_pool(
+            test_config(None),
+            Some(pool.clone()),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailResetPassword&token=reset-token&password=new-secret",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailResetPassword");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["username"], "reset-user");
+        assert_eq!(
+            body["Result"]["message"],
+            "Password reset. Sign in with your new password. Linked mail-account credentials must be re-entered."
+        );
+        let user = SqlxUserRepository::find_by_id(&pool, 144)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(fm_user::verify_login_password("new-secret", Some(&user)).unwrap());
+        assert!(password_reset_used_at(&pool, 700).await.is_some());
+
+        let response = super::native_frickmail_reset_password(
+            &AppState::with_db_pool(test_config(None), Some(pool)),
+            "FrickmailResetPassword",
+            &json!({"token": "reset-token", "password": "short"}),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Password must be at least 8 chars");
+    }
+
+    #[tokio::test]
     async fn native_frickmail_get_prefs_reads_existing_settings() {
         let pool = user_db_pool().await;
         seed_user_with_settings(
@@ -3298,6 +3389,22 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_password_reset_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_password_resets (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn create_task_tables(pool: &AnyPool) {
         sqlx::query(
             "CREATE TABLE frickmail_tasks (
@@ -3518,6 +3625,38 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn insert_password_reset(
+        pool: &AnyPool,
+        id: i64,
+        user_id: i64,
+        token_hash: &str,
+        expires_at: &str,
+        used_at: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_password_resets
+                (id, user_id, token_hash, expires_at, used_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(token_hash)
+        .bind(expires_at)
+        .bind(used_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn password_reset_used_at(pool: &AnyPool, reset_id: i64) -> Option<String> {
+        sqlx::query("SELECT used_at FROM frickmail_password_resets WHERE id = ?")
+            .bind(reset_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("used_at"))
+            .unwrap()
     }
 
     async fn mail_account_count(pool: &AnyPool, user_id: i64) -> i64 {
