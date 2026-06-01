@@ -285,6 +285,14 @@ impl SqlxUserRepository {
         Ok(accounts)
     }
 
+    pub async fn get_mail_account(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+    ) -> Result<Option<MailAccount>> {
+        fetch_mail_account(pool, user_id, account_id).await
+    }
+
     pub async fn list_mail_identities(
         pool: &AnyPool,
         user_id: i64,
@@ -616,6 +624,24 @@ async fn fetch_mail_accounts(pool: &AnyPool, user_id: i64) -> Result<Vec<MailAcc
         .into_iter()
         .map(row_to_mail_account)
         .collect()
+}
+
+async fn fetch_mail_account(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+) -> Result<Option<MailAccount>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(mail_account_query(&backend))
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .map(row_to_mail_account)
+        .transpose()
 }
 
 async fn fetch_mail_identities(pool: &AnyPool, user_id: i64) -> Result<Vec<MailIdentity>> {
@@ -1557,6 +1583,21 @@ fn mail_accounts_query(backend: &str) -> &'static str {
             "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
                 CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
              FROM frickmail_mail_accounts WHERE user_id = ? ORDER BY is_primary DESC, id ASC"
+        }
+    }
+}
+
+fn mail_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
+             FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2"
+        }
+        _ => {
+            "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
+             FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
         }
     }
 }
@@ -2616,6 +2657,30 @@ mod tests {
         assert!(accounts[0].identities[0].is_default);
         assert_eq!(accounts[1].id, 101);
         assert!(accounts[1].identities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_gets_one_mail_account_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 13, json!({})).await;
+        insert_user(&pool, 14, json!({})).await;
+        insert_mail_account(&pool, 120, 13, "Work", true).await;
+        insert_mail_account(&pool, 121, 14, "OtherUser", true).await;
+
+        let account = SqlxUserRepository::get_mail_account(&pool, 13, 120)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.email, "work@example.com");
+        assert_eq!(account.account_type, "imap");
+        assert!(account.identities.is_empty());
+
+        let account = SqlxUserRepository::get_mail_account(&pool, 13, 121)
+            .await
+            .unwrap();
+        assert!(account.is_none());
     }
 
     #[tokio::test]

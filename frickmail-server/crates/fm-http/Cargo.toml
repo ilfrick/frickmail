@@ -13,6 +13,7 @@ fm-plugin-compat = { path = "../fm-plugin-compat" }
 fm-session = { path = "../fm-session" }
 fm-user = { path = "../fm-user" }
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
 sqlx.workspace = true

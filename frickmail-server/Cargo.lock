@@ -730,6 +730,7 @@ dependencies = [
  "fm-session",
  "fm-user",
  "reqwest",
+ "serde",
  "serde_json",
  "serde_urlencoded",
  "sqlx",

@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
+    net::{IpAddr, SocketAddr},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -19,9 +20,10 @@ use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
 use fm_user::{
-    FrickmailMe, NewMailIdentity, NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository,
-    TaskFilter, UpdateMailTask,
+    FrickmailMe, MailAccount, NewMailIdentity, NewMailRule, NewMailTask, PushSubscription,
+    SqlxUserRepository, TaskFilter, UpdateMailTask,
 };
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
@@ -31,6 +33,19 @@ use crate::AppState;
 const INVALID_INPUT_ARGUMENT: u16 = 903;
 const UNKNOWN_ERROR: u16 = 999;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DiscoveredService {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    service_type: String,
+    provider: String,
+    url: String,
+    note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    needs_oauth: Option<bool>,
+}
 
 pub fn build_router(state: AppState) -> Router {
     let static_root = state.config().static_root.clone();
@@ -328,6 +343,9 @@ async fn native_compat_response(
         "FrickmailResetPassword" => {
             Some(native_frickmail_reset_password(state, original_action, payload).await)
         }
+        "FrickmailDiscoverServices" => {
+            Some(native_frickmail_discover_services(state, original_action, payload, session).await)
+        }
         "FrickmailGetPrefs" => {
             Some(native_frickmail_get_prefs(state, original_action, session).await)
         }
@@ -481,6 +499,44 @@ async fn native_frickmail_reset_password(
                 "Result": result
             }),
         ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_discover_services(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::get_mail_account(pool, user.user_id, payload_i64(payload, "id")).await
+    {
+        Ok(Some(account)) => {
+            let services = discover_account_services(&account).await;
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": {
+                        "ok": true,
+                        "email": account.email,
+                        "services": services
+                    }
+                }),
+            )
+        }
+        Ok(None) => json_result_error(original_action, "Account not found"),
         Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
@@ -1651,6 +1707,204 @@ fn compat_error(code: u16, message: impl Into<String>) -> Value {
     })
 }
 
+async fn discover_account_services(account: &MailAccount) -> Vec<DiscoveredService> {
+    let domain = account
+        .email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.to_ascii_lowercase())
+        .unwrap_or_default();
+    let account_type = account.account_type.as_str();
+
+    let is_google = account_type == "gmail"
+        || matches!(domain.as_str(), "gmail.com" | "googlemail.com")
+        || domain.ends_with(".google.com");
+    let is_microsoft = account_type == "o365"
+        || matches!(
+            domain.as_str(),
+            "outlook.com" | "hotmail.com" | "live.com" | "msn.com"
+        );
+
+    if is_google {
+        let has_oauth = account_type == "gmail";
+        let note = if has_oauth {
+            "Syncs via Google API using the linked OAuth token."
+        } else {
+            "Requires Google OAuth2 - app passwords are not supported by Google for contacts/calendar sync. Re-add this account via \"Sign in with Google\" to enable sync."
+        };
+        return vec![
+            DiscoveredService {
+                id: "google-contacts".to_string(),
+                name: "Google Contacts".to_string(),
+                service_type: "contacts".to_string(),
+                provider: "google".to_string(),
+                url: "https://www.googleapis.com/carddav/v1".to_string(),
+                note: note.to_string(),
+                needs_oauth: Some(!has_oauth),
+            },
+            DiscoveredService {
+                id: "google-calendar".to_string(),
+                name: "Google Calendar".to_string(),
+                service_type: "calendar".to_string(),
+                provider: "google".to_string(),
+                url: "https://apidata.googleusercontent.com/caldav/v2".to_string(),
+                note: note.to_string(),
+                needs_oauth: Some(!has_oauth),
+            },
+        ];
+    }
+
+    if is_microsoft {
+        let has_oauth = account_type == "o365";
+        let note = if has_oauth {
+            "Syncs via Microsoft Graph using the linked OAuth token."
+        } else {
+            "Requires Microsoft OAuth2 - re-add this account via \"Sign in with Microsoft\" to enable sync."
+        };
+        return vec![
+            DiscoveredService {
+                id: "o365-contacts".to_string(),
+                name: "Microsoft Contacts".to_string(),
+                service_type: "contacts".to_string(),
+                provider: "o365".to_string(),
+                url: "https://graph.microsoft.com/v1.0/me/contacts".to_string(),
+                note: note.to_string(),
+                needs_oauth: Some(!has_oauth),
+            },
+            DiscoveredService {
+                id: "o365-calendar".to_string(),
+                name: "Microsoft Calendar".to_string(),
+                service_type: "calendar".to_string(),
+                provider: "o365".to_string(),
+                url: "https://outlook.office365.com/caldav/v1".to_string(),
+                note: note.to_string(),
+                needs_oauth: Some(!has_oauth),
+            },
+        ];
+    }
+
+    let mut services = Vec::new();
+    if let Some(service) = probe_well_known_service(&domain, "carddav").await {
+        services.push(service);
+    }
+    if let Some(service) = probe_well_known_service(&domain, "caldav").await {
+        services.push(service);
+    }
+    services
+}
+
+async fn probe_well_known_service(domain: &str, proto: &str) -> Option<DiscoveredService> {
+    let addrs = public_socket_addrs(domain, 443).await?;
+
+    let url = format!("https://{domain}/.well-known/{proto}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(domain, &addrs)
+        .build()
+        .ok()?;
+    let method = reqwest::Method::from_bytes(b"PROPFIND").ok()?;
+    let response = client
+        .request(method, &url)
+        .header("Depth", "0")
+        .header("Content-Type", "application/xml")
+        .body("<?xml version=\"1.0\"?><propfind xmlns=\"DAV:\"><prop><current-user-principal/></prop></propfind>")
+        .send()
+        .await
+        .ok()?;
+
+    if !matches!(response.status().as_u16(), 200 | 207 | 301 | 302) {
+        return None;
+    }
+
+    let is_contacts = proto == "carddav";
+    Some(DiscoveredService {
+        id: format!("{proto}-{domain}"),
+        name: if is_contacts {
+            format!("Contacts ({domain})")
+        } else {
+            format!("Calendar ({domain})")
+        },
+        service_type: if is_contacts {
+            "contacts".to_string()
+        } else {
+            "calendar".to_string()
+        },
+        provider: "dav".to_string(),
+        url: url.clone(),
+        note: format!(
+            "{} service found at {url}",
+            if is_contacts { "CardDAV" } else { "CalDAV" }
+        ),
+        needs_oauth: None,
+    })
+}
+
+async fn public_socket_addrs(domain: &str, port: u16) -> Option<Vec<SocketAddr>> {
+    if domain.is_empty() {
+        return None;
+    }
+    let addrs = tokio::net::lookup_host((domain, port)).await.ok()?;
+    let mut public_addrs = Vec::new();
+    for addr in addrs {
+        if is_reserved_ip(addr.ip()) {
+            return None;
+        }
+        public_addrs.push(addr);
+    }
+    if public_addrs.is_empty() {
+        None
+    } else {
+        Some(public_addrs)
+    }
+}
+
+fn is_reserved_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || octets[0] == 0
+                || octets[0] >= 240
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(ipv4) = ip.to_ipv4_mapped() {
+                return is_reserved_ip(IpAddr::V4(ipv4));
+            }
+            let segments = ip.segments();
+            let nat64_well_known = segments[0] == 0x0064
+                && segments[1] == 0xff9b
+                && segments[2..6].iter().all(|segment| *segment == 0);
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+                || segments[..6].iter().all(|segment| *segment == 0)
+                || nat64_well_known
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001)
+                || (segments[0] == 0x0100
+                    && segments[1] == 0
+                    && segments[2] == 0
+                    && segments[3] == 0)
+                || (segments[0] == 0x2001 && segments[1] <= 0x01ff)
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || segments[0] == 0x2002
+        }
+    }
+}
+
 fn payload_i64(payload: &Value, key: &str) -> i64 {
     match payload.get(key) {
         Some(Value::Number(number)) => number
@@ -2075,6 +2329,113 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["Result"]["ok"], false);
         assert_eq!(body["Result"]["error"], "Password must be at least 8 chars");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_discover_services_matches_provider_shape() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 151, "discover", Some("discover@example.com")).await;
+        seed_user(
+            &pool,
+            152,
+            "other-discover",
+            Some("other-discover@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 1320, 151, "Google", true).await;
+        seed_mail_account(&pool, 1321, 152, "Other", true).await;
+        set_mail_account_email_and_type(&pool, 1320, "person@gmail.com", "imap").await;
+        set_mail_account_email_and_type(&pool, 1321, "person@hotmail.com", "imap").await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(151, "discover", None).await;
+
+        let response = super::native_frickmail_discover_services(
+            &state,
+            "FrickmailDiscoverServices",
+            &json!({"id": 1320}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["email"], "person@gmail.com");
+        let services = body["Result"]["services"].as_array().unwrap();
+        assert_eq!(services.len(), 2);
+        assert_eq!(services[0]["id"], "google-contacts");
+        assert_eq!(services[0]["type"], "contacts");
+        assert_eq!(services[0]["provider"], "google");
+        assert_eq!(services[0]["needs_oauth"], true);
+        assert_eq!(services[1]["id"], "google-calendar");
+        assert_eq!(services[1]["type"], "calendar");
+
+        let response = super::native_frickmail_discover_services(
+            &state,
+            "FrickmailDiscoverServices",
+            &json!({"id": 1321}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Account not found");
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_discover_services_action() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailDiscoverServices&id=1"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailDiscoverServices");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[test]
+    fn service_discovery_rejects_reserved_ips() {
+        assert!(super::is_reserved_ip("127.0.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("10.0.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("100.64.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("198.18.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("192.0.2.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("240.0.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("::1".parse().unwrap()));
+        assert!(super::is_reserved_ip("fc00::1".parse().unwrap()));
+        assert!(super::is_reserved_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("::127.0.0.1".parse().unwrap()));
+        assert!(super::is_reserved_ip("64:ff9b::0a00:0001".parse().unwrap()));
+        assert!(super::is_reserved_ip(
+            "64:ff9b:1::0a00:0001".parse().unwrap()
+        ));
+        assert!(super::is_reserved_ip("100::1".parse().unwrap()));
+        assert!(super::is_reserved_ip("2001:20::1".parse().unwrap()));
+        assert!(super::is_reserved_ip("2002:0808:0808::1".parse().unwrap()));
+        assert!(super::is_reserved_ip("2001::1".parse().unwrap()));
+        assert!(super::is_reserved_ip("2001:db8::1".parse().unwrap()));
+        assert!(!super::is_reserved_ip("8.8.8.8".parse().unwrap()));
+        assert!(!super::is_reserved_ip("::ffff:8.8.8.8".parse().unwrap()));
+        assert!(!super::is_reserved_ip(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
+        assert!(!super::is_reserved_ip(
+            "2001:4860:4860::8888".parse().unwrap()
+        ));
     }
 
     #[tokio::test]
@@ -3538,6 +3899,26 @@ mod tests {
         .bind(None::<Vec<u8>>)
         .bind(None::<String>)
         .bind(is_primary)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn set_mail_account_email_and_type(
+        pool: &AnyPool,
+        account_id: i64,
+        email: &str,
+        account_type: &str,
+    ) {
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET email = ?, type = ?, login = ?
+             WHERE id = ?",
+        )
+        .bind(email)
+        .bind(account_type)
+        .bind(email)
+        .bind(account_id)
         .execute(pool)
         .await
         .unwrap();
