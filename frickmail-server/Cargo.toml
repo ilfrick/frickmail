@@ -27,7 +27,9 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 base64 = "0.22"
 config = { version = "0.15", default-features = false, features = ["toml"] }
+data-encoding = "2"
 deadpool-redis = "0.18"
+hmac = "0.12"
 http = "1"
 imap-proto = "0.16"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1-rustls-tls"] }
@@ -35,11 +37,13 @@ mail-builder = "0.4"
 mail-parser = "0.10"
 openidconnect = "4"
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+qrcode = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
+sha1 = "0.10"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["any", "chrono", "json", "macros", "mysql", "postgres", "runtime-tokio-rustls", "sqlite", "uuid"] }
 thiserror = "2"

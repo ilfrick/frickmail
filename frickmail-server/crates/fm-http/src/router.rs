@@ -33,6 +33,7 @@ use crate::AppState;
 const INVALID_INPUT_ARGUMENT: u16 = 903;
 const UNKNOWN_ERROR: u16 = 999;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const TOTP_PENDING_SESSION_KEY: &str = "frickmail_totp_pending_secret";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DiscoveredService {
@@ -340,6 +341,15 @@ async fn native_compat_response(
         "FrickmailGetTotpStatus" => {
             Some(native_frickmail_get_totp_status(state, original_action, session).await)
         }
+        "FrickmailEnableTotp" => {
+            Some(native_frickmail_enable_totp(state, original_action, session).await)
+        }
+        "FrickmailConfirmTotp" => {
+            Some(native_frickmail_confirm_totp(state, original_action, payload, session).await)
+        }
+        "FrickmailDisableTotp" => {
+            Some(native_frickmail_disable_totp(state, original_action, payload, session).await)
+        }
         "FrickmailResetPassword" => {
             Some(native_frickmail_reset_password(state, original_action, payload).await)
         }
@@ -479,6 +489,148 @@ async fn native_frickmail_get_totp_status(
                     "ok": true,
                     "enabled": enabled
                 }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_enable_totp(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::begin_totp_setup(pool, user.user_id).await {
+        Ok(setup) => {
+            if let Err(err) = session
+                .insert(TOTP_PENDING_SESSION_KEY, setup.secret.clone())
+                .await
+            {
+                return json_result_error(
+                    original_action,
+                    &format!("Frickmail session write failed: {err}"),
+                );
+            }
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": {
+                        "ok": setup.ok,
+                        "secret": setup.secret,
+                        "otpauth_uri": setup.otpauth_uri,
+                        "qr_data_url": setup.qr_data_url,
+                        "message": setup.message
+                    }
+                }),
+            )
+        }
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_confirm_totp(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let pending_secret = match session.get::<String>(TOTP_PENDING_SESSION_KEY).await {
+        Ok(Some(secret)) => secret,
+        Ok(None) => {
+            return json_result_error(
+                original_action,
+                "No pending TOTP setup. Call EnableTotp first.",
+            )
+        }
+        Err(err) => {
+            return json_result_error(
+                original_action,
+                &format!("Frickmail session read failed: {err}"),
+            )
+        }
+    };
+
+    match SqlxUserRepository::confirm_totp(
+        pool,
+        user.user_id,
+        pending_secret,
+        payload_string(payload, "code").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(result) => {
+            if result.ok {
+                if let Err(err) = session.remove::<String>(TOTP_PENDING_SESSION_KEY).await {
+                    return json_result_error(
+                        original_action,
+                        &format!("Frickmail session cleanup failed: {err}"),
+                    );
+                }
+            }
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": result
+                }),
+            )
+        }
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_disable_totp(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::disable_totp(
+        pool,
+        user.user_id,
+        payload_string(payload, "code").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(result) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": result
             }),
         ),
         Err(err) => json_result_error(original_action, &err.public_message()),
@@ -2384,6 +2536,85 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["Result"]["ok"], true);
         assert_eq!(body["Result"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_totp_setup_and_disable_match_plugin_shape() {
+        let pool = user_db_pool().await;
+        seed_user(&pool, 1443, "totp-setup", Some("totp-setup@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(1443, "totp-setup", None).await;
+
+        let response =
+            super::native_frickmail_enable_totp(&state, "FrickmailEnableTotp", &session).await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert!(body["Result"]["secret"].as_str().unwrap().len() >= 16);
+        assert!(body["Result"]["otpauth_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/Frickmail:"));
+        assert!(body["Result"]["qr_data_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/svg+xml;base64,"));
+        let pending = session
+            .get::<String>(super::TOTP_PENDING_SESSION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending, body["Result"]["secret"]);
+
+        let response = super::native_frickmail_confirm_totp(
+            &state,
+            "FrickmailConfirmTotp",
+            &json!({"code": "000000"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Invalid code");
+
+        set_totp_secret(&pool, 1443, Some("JBSWY3DPEHPK3PXP")).await;
+        let response = super::native_frickmail_disable_totp(
+            &state,
+            "FrickmailDisableTotp",
+            &json!({"code": "000000"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "A valid TOTP code is required to disable two-factor authentication."
+        );
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_enable_totp_action() {
+        let pool = user_db_pool().await;
+        seed_user(&pool, 1444, "totp-route", Some("totp-route@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(1444, "totp-route", None).await;
+
+        let response = super::json_api_request(
+            state,
+            "/?/Json/".parse().unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?/Json/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("Action=PluginFrickmailEnableTotp"))
+                .unwrap(),
+            session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailEnableTotp");
+        assert_eq!(body["Result"]["ok"], true);
+        assert!(body["Result"]["secret"].as_str().unwrap().len() >= 16);
     }
 
     #[tokio::test]

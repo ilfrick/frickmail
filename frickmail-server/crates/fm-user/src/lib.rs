@@ -2,18 +2,28 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Algorithm, Argon2, Params, Version,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
+use data_encoding::BASE32_NOPAD;
 use fm_core::{FrickmailError, Result, UserSession};
+use hmac::{Hmac, Mac};
 use p256::{
     ecdsa::SigningKey,
     pkcs8::{EncodePrivateKey, LineEnding},
 };
+use qrcode::{render::svg, QrCode};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub const KDF_SALT_BYTES: usize = 16;
 pub const CREDENTIAL_KEY_BYTES: usize = 32;
@@ -207,6 +217,24 @@ pub struct ActivateServiceResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TotpSetupResult {
+    pub ok: bool,
+    pub secret: String,
+    pub otpauth_uri: String,
+    pub qr_data_url: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TotpActionResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -269,6 +297,27 @@ impl SqlxUserRepository {
             .await?
             .and_then(|user| user.totp_secret)
             .is_some_and(|secret| !secret.is_empty() && secret != "0"))
+    }
+
+    pub async fn begin_totp_setup(pool: &AnyPool, user_id: i64) -> Result<TotpSetupResult> {
+        begin_totp_setup(pool, user_id).await
+    }
+
+    pub async fn confirm_totp(
+        pool: &AnyPool,
+        user_id: i64,
+        pending_secret: String,
+        code: String,
+    ) -> Result<TotpActionResult> {
+        confirm_totp(pool, user_id, pending_secret, code).await
+    }
+
+    pub async fn disable_totp(
+        pool: &AnyPool,
+        user_id: i64,
+        code: String,
+    ) -> Result<TotpActionResult> {
+        disable_totp(pool, user_id, code).await
     }
 
     pub async fn update_preferences(
@@ -548,6 +597,86 @@ pub fn generate_kdf_salt() -> Vec<u8> {
 
 pub fn password_reset_token_hash(token: &str) -> String {
     sha256_hex(token.as_bytes())
+}
+
+fn generate_totp_secret() -> String {
+    let mut secret = [0_u8; 20];
+    OsRng.fill_bytes(&mut secret);
+    BASE32_NOPAD.encode(&secret)
+}
+
+fn normalize_totp_code(code: &str) -> String {
+    code.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn verify_totp_code_at_current_time(secret: &str, code: &str) -> Result<bool> {
+    let counter = current_totp_counter();
+    for offset in -1..=1 {
+        if counter >= -offset
+            && constant_time_eq(
+                totp_code(secret, (counter + offset) as u64)?.as_bytes(),
+                code.as_bytes(),
+            )
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for i in 0..max_len {
+        diff |= usize::from(*left.get(i).unwrap_or(&0) ^ *right.get(i).unwrap_or(&0));
+    }
+    diff == 0
+}
+
+fn current_totp_counter() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| (duration.as_secs() / 30) as i64)
+        .unwrap_or_default()
+}
+
+fn totp_code(secret: &str, counter: u64) -> Result<String> {
+    let secret = secret.trim().to_ascii_uppercase();
+    let key = BASE32_NOPAD
+        .decode(secret.as_bytes())
+        .map_err(|err| FrickmailError::BadRequest(format!("invalid TOTP secret: {err}")))?;
+    let mut mac = Hmac::<Sha1>::new_from_slice(&key)
+        .map_err(|err| FrickmailError::Upstream(format!("TOTP HMAC failed: {err}")))?;
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = (digest[19] & 0x0f) as usize;
+    let value = (((digest[offset] & 0x7f) as u32) << 24)
+        | ((digest[offset + 1] as u32) << 16)
+        | ((digest[offset + 2] as u32) << 8)
+        | (digest[offset + 3] as u32);
+    Ok(format!("{:06}", value % 1_000_000))
+}
+
+fn url_encode(input: &str) -> String {
+    let mut encoded = String::new();
+    for byte in input.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn qr_data_url(input: &str) -> Result<String> {
+    let code = QrCode::new(input.as_bytes())
+        .map_err(|err| FrickmailError::Upstream(format!("TOTP QR generation failed: {err}")))?;
+    let svg = code.render::<svg::Color>().min_dimensions(256, 256).build();
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        STANDARD.encode(svg.as_bytes())
+    ))
 }
 
 pub fn derive_credential_key(password: &str, salt: &[u8]) -> Result<[u8; CREDENTIAL_KEY_BYTES]> {
@@ -848,6 +977,122 @@ async fn release_mysql_signup_lock(conn: &mut sqlx::pool::PoolConnection<sqlx::A
         .await
         .map(|_| ())
         .map_err(db_error)
+}
+
+async fn begin_totp_setup(pool: &AnyPool, user_id: i64) -> Result<TotpSetupResult> {
+    let user = SqlxUserRepository::find_by_id(pool, user_id)
+        .await?
+        .ok_or(FrickmailError::Unauthorized)?;
+    if user
+        .totp_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty() && secret != "0")
+    {
+        return Err(FrickmailError::BadRequest(
+            "Two-factor authentication is already enabled. Disable it first.".to_string(),
+        ));
+    }
+
+    let secret = generate_totp_secret();
+    let issuer = "Frickmail";
+    let otpauth_uri = format!(
+        "otpauth://totp/{}:{}?secret={}&issuer={}",
+        url_encode(issuer),
+        url_encode(&user.username),
+        secret,
+        url_encode(issuer)
+    );
+
+    Ok(TotpSetupResult {
+        ok: true,
+        secret,
+        qr_data_url: qr_data_url(&otpauth_uri)?,
+        otpauth_uri,
+        message:
+            "Scan the QR code (or paste the secret) into your authenticator app, then submit a code to confirm."
+                .to_string(),
+    })
+}
+
+async fn confirm_totp(
+    pool: &AnyPool,
+    user_id: i64,
+    pending_secret: String,
+    code: String,
+) -> Result<TotpActionResult> {
+    let code = normalize_totp_code(&code);
+    if code.is_empty() {
+        return Err(FrickmailError::BadRequest("Code required".to_string()));
+    }
+    if pending_secret.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "No pending TOTP setup. Call EnableTotp first.".to_string(),
+        ));
+    }
+    if !verify_totp_code_at_current_time(&pending_secret, &code)? {
+        return Ok(TotpActionResult {
+            ok: false,
+            message: None,
+            error: Some("Invalid code".to_string()),
+        });
+    }
+
+    update_totp_secret(pool, user_id, Some(&pending_secret)).await?;
+    Ok(TotpActionResult {
+        ok: true,
+        message: Some("Two-factor authentication enabled.".to_string()),
+        error: None,
+    })
+}
+
+async fn disable_totp(pool: &AnyPool, user_id: i64, code: String) -> Result<TotpActionResult> {
+    let Some(user) = SqlxUserRepository::find_by_id(pool, user_id).await? else {
+        return Err(FrickmailError::Unauthorized);
+    };
+    let Some(secret) = user
+        .totp_secret
+        .filter(|secret| !secret.is_empty() && secret != "0")
+    else {
+        return Ok(TotpActionResult {
+            ok: true,
+            message: Some("Two-factor was not enabled.".to_string()),
+            error: None,
+        });
+    };
+
+    let code = normalize_totp_code(&code);
+    if code.is_empty() || !verify_totp_code_at_current_time(&secret, &code)? {
+        return Ok(TotpActionResult {
+            ok: false,
+            message: None,
+            error: Some(
+                "A valid TOTP code is required to disable two-factor authentication.".to_string(),
+            ),
+        });
+    }
+
+    update_totp_secret(pool, user_id, None).await?;
+    Ok(TotpActionResult {
+        ok: true,
+        message: Some("Two-factor authentication disabled.".to_string()),
+        error: None,
+    })
+}
+
+async fn update_totp_secret(pool: &AnyPool, user_id: i64, secret: Option<&str>) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let affected = sqlx::query(update_totp_secret_query(&backend))
+        .bind(secret)
+        .bind(user_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .rows_affected();
+    if affected == 0 {
+        return Err(FrickmailError::Unauthorized);
+    }
+    Ok(())
 }
 
 async fn acquire_closed_signup_lock_on_conn(
@@ -2563,6 +2808,17 @@ fn clear_mail_account_credentials_query(backend: &str) -> &'static str {
     }
 }
 
+fn update_totp_secret_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_users SET totp_secret = $1, updated_at = NOW() WHERE id = $2"
+        }
+        _ => {
+            "UPDATE frickmail_users SET totp_secret = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        }
+    }
+}
+
 fn consume_password_reset_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -2929,10 +3185,10 @@ mod tests {
     use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 
     use super::{
-        clean_preferences_patch, derive_credential_key, normalize_username,
-        preferences_from_settings, verify_login_password, verify_password, FrickmailMe,
-        NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailTask,
-        VapidKeyBundle, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
+        clean_preferences_patch, current_totp_counter, derive_credential_key, normalize_username,
+        preferences_from_settings, totp_code, url_encode, verify_login_password, verify_password,
+        FrickmailMe, NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository, TaskFilter,
+        UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
         VAPID_SETTING_KEY,
     };
     use fm_core::UserSession;
@@ -3557,6 +3813,70 @@ mod tests {
         assert!(!SqlxUserRepository::totp_enabled(&pool, 26).await.unwrap());
         set_totp_secret(&pool, 26, Some("0")).await;
         assert!(!SqlxUserRepository::totp_enabled(&pool, 26).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn repository_enables_confirms_and_disables_totp() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        insert_user(&pool, 27, json!({})).await;
+
+        let setup = SqlxUserRepository::begin_totp_setup(&pool, 27)
+            .await
+            .unwrap();
+        assert!(setup.ok);
+        assert!(setup.otpauth_uri.starts_with("otpauth://totp/Frickmail:"));
+
+        let code = totp_code(&setup.secret, current_totp_counter() as u64).unwrap();
+        let result = SqlxUserRepository::confirm_totp(&pool, 27, setup.secret.clone(), code)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(SqlxUserRepository::totp_enabled(&pool, 27).await.unwrap());
+
+        let err = SqlxUserRepository::begin_totp_setup(&pool, 27)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.public_message(),
+            "Two-factor authentication is already enabled. Disable it first."
+        );
+
+        let invalid = SqlxUserRepository::disable_totp(&pool, 27, "000000".to_string())
+            .await
+            .unwrap();
+        assert!(!invalid.ok);
+        assert_eq!(
+            invalid.error.as_deref(),
+            Some("A valid TOTP code is required to disable two-factor authentication.")
+        );
+
+        let code = totp_code(&setup.secret, current_totp_counter() as u64).unwrap();
+        let result = SqlxUserRepository::disable_totp(&pool, 27, code)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(!SqlxUserRepository::totp_enabled(&pool, 27).await.unwrap());
+    }
+
+    #[test]
+    fn totp_code_matches_rfc_4226_sha1_vectors() {
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let expected = [
+            "755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583",
+            "399871", "520489",
+        ];
+        for (counter, code) in expected.into_iter().enumerate() {
+            assert_eq!(totp_code(secret, counter as u64).unwrap(), code);
+        }
+    }
+
+    #[test]
+    fn totp_uri_encoding_matches_php_rawurlencode() {
+        assert_eq!(
+            url_encode("Frick Mail+User@example.com"),
+            "Frick%20Mail%2BUser%40example.com"
+        );
     }
 
     #[tokio::test]
