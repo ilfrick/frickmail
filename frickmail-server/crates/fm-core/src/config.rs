@@ -25,6 +25,8 @@ pub struct FrickmailConfig {
     pub oidc: OidcConfig,
     #[serde(default)]
     pub mail: MailDefaults,
+    #[serde(default)]
+    pub transactional_smtp: TransactionalSmtpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -46,6 +48,35 @@ pub struct MailDefaults {
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TransactionalSmtpConfig {
+    #[serde(default)]
+    pub host: String,
+    #[serde(default = "default_transactional_smtp_port")]
+    pub port: u16,
+    #[serde(default = "default_transactional_smtp_secure")]
+    pub secure: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default = "default_transactional_smtp_from")]
+    pub from: String,
+}
+
+impl Default for TransactionalSmtpConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: default_transactional_smtp_port(),
+            secure: default_transactional_smtp_secure(),
+            user: String::new(),
+            password: String::new(),
+            from: default_transactional_smtp_from(),
+        }
+    }
 }
 
 impl Default for MailDefaults {
@@ -82,6 +113,7 @@ impl FrickmailConfig {
         if let Some(open_signup) = legacy_open_signup() {
             config.open_signup = open_signup;
         }
+        config.transactional_smtp.merge_legacy_env();
 
         config.validate()?;
         Ok(config)
@@ -101,6 +133,35 @@ impl FrickmailConfig {
         }
 
         Ok(())
+    }
+}
+
+impl TransactionalSmtpConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.host.trim().is_empty()
+    }
+
+    fn merge_legacy_env(&mut self) {
+        if let Ok(host) = env::var("FRICKMAIL_SMTP_HOST") {
+            self.host = host;
+        }
+        if let Ok(port) = env::var("FRICKMAIL_SMTP_PORT") {
+            if let Ok(port) = port.parse() {
+                self.port = port;
+            }
+        }
+        if let Ok(secure) = env::var("FRICKMAIL_SMTP_SECURE") {
+            self.secure = secure;
+        }
+        if let Ok(user) = env::var("FRICKMAIL_SMTP_USER") {
+            self.user = user;
+        }
+        if let Ok(password) = env::var("FRICKMAIL_SMTP_PASSWORD") {
+            self.password = password;
+        }
+        if let Ok(from) = env::var("FRICKMAIL_SMTP_FROM") {
+            self.from = from;
+        }
     }
 }
 
@@ -187,4 +248,16 @@ fn default_smtp_host() -> String {
 
 fn default_smtp_port() -> u16 {
     587
+}
+
+fn default_transactional_smtp_port() -> u16 {
+    587
+}
+
+fn default_transactional_smtp_secure() -> String {
+    "tls".to_string()
+}
+
+fn default_transactional_smtp_from() -> String {
+    "no-reply@frickmail.local".to_string()
 }

@@ -206,6 +206,21 @@ pub struct PasswordResetResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PasswordResetRequestResult {
+    pub ok: bool,
+    pub message: String,
+    #[serde(skip_serializing)]
+    pub delivery: Option<PasswordResetDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PasswordResetDelivery {
+    pub to: String,
+    pub username: String,
+    pub reset_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisterUserResult {
     pub ok: bool,
     pub message: String,
@@ -517,6 +532,14 @@ impl SqlxUserRepository {
         search_messages(pool, user_id, query, limit).await
     }
 
+    pub async fn request_password_reset(
+        pool: &AnyPool,
+        username: String,
+        base_url: String,
+    ) -> Result<PasswordResetRequestResult> {
+        request_password_reset(pool, username, base_url).await
+    }
+
     pub async fn reset_password(
         pool: &AnyPool,
         token: String,
@@ -597,6 +620,41 @@ pub fn generate_kdf_salt() -> Vec<u8> {
 
 pub fn password_reset_token_hash(token: &str) -> String {
     sha256_hex(token.as_bytes())
+}
+
+fn generic_password_reset_request_result() -> PasswordResetRequestResult {
+    PasswordResetRequestResult {
+        ok: true,
+        message: "If the username exists and has a recovery email, a reset link has been sent."
+            .to_string(),
+        delivery: None,
+    }
+}
+
+fn generate_password_reset_token() -> String {
+    let mut token = [0_u8; 32];
+    OsRng.fill_bytes(&mut token);
+    URL_SAFE_NO_PAD.encode(token)
+}
+
+fn valid_recovery_email(email: &str) -> bool {
+    let email = email.trim();
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !email.chars().any(char::is_whitespace)
+}
+
+fn build_password_reset_url(base_url: &str, token: &str) -> String {
+    format!(
+        "{}/?reset_token={}",
+        base_url.trim_end_matches('/'),
+        url_encode(token)
+    )
 }
 
 fn generate_totp_secret() -> String {
@@ -2043,6 +2101,81 @@ async fn search_messages(
         .collect()
 }
 
+async fn request_password_reset(
+    pool: &AnyPool,
+    username: String,
+    base_url: String,
+) -> Result<PasswordResetRequestResult> {
+    let username = username.trim();
+    if username.is_empty() {
+        return Ok(generic_password_reset_request_result());
+    }
+
+    let Some(user) = SqlxUserRepository::find_by_username(pool, username).await? else {
+        return Ok(generic_password_reset_request_result());
+    };
+    let Some(email) = user
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| valid_recovery_email(email))
+    else {
+        return Ok(generic_password_reset_request_result());
+    };
+
+    let token = generate_password_reset_token();
+    let token_hash = password_reset_token_hash(&token);
+    create_password_reset_token(pool, user.id, &token_hash).await?;
+
+    Ok(PasswordResetRequestResult {
+        delivery: Some(PasswordResetDelivery {
+            to: email.to_string(),
+            username: user.username,
+            reset_url: build_password_reset_url(&base_url, &token),
+        }),
+        ..generic_password_reset_request_result()
+    })
+}
+
+async fn create_password_reset_token(pool: &AnyPool, user_id: i64, token_hash: &str) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query("BEGIN")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        sqlx::query(delete_unused_password_resets_query(&backend))
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        sqlx::query(insert_password_reset_query(&backend))
+            .bind(user_id)
+            .bind(token_hash)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
 async fn reset_password(
     pool: &AnyPool,
     token: String,
@@ -2769,6 +2902,32 @@ fn active_password_reset_query(backend: &str) -> &'static str {
              JOIN frickmail_users u ON u.id = r.user_id \
              WHERE r.token_hash = ? AND r.used_at IS NULL AND r.expires_at > CURRENT_TIMESTAMP \
              LIMIT 1"
+        }
+    }
+}
+
+fn delete_unused_password_resets_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "DELETE FROM frickmail_password_resets WHERE user_id = $1 AND used_at IS NULL"
+        }
+        _ => "DELETE FROM frickmail_password_resets WHERE user_id = ? AND used_at IS NULL",
+    }
+}
+
+fn insert_password_reset_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_password_resets (user_id, token_hash, expires_at) \
+             VALUES ($1, $2, NOW() + INTERVAL '1800 seconds')"
+        }
+        "MySQL" => {
+            "INSERT INTO frickmail_password_resets (user_id, token_hash, expires_at) \
+             VALUES (?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 1800 SECOND))"
+        }
+        _ => {
+            "INSERT INTO frickmail_password_resets (user_id, token_hash, expires_at) \
+             VALUES (?, ?, datetime(CURRENT_TIMESTAMP, '+1800 seconds'))"
         }
     }
 }
@@ -3695,6 +3854,59 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.public_message(), "Query too short");
+    }
+
+    #[tokio::test]
+    async fn repository_requests_password_reset_without_account_leakage() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_password_reset_table(&pool).await;
+        insert_user(&pool, 28, json!({})).await;
+
+        let result = SqlxUserRepository::request_password_reset(
+            &pool,
+            " USER28 ".to_string(),
+            "https://mail.example/webmail/".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(
+            result.message,
+            "If the username exists and has a recovery email, a reset link has been sent."
+        );
+        let delivery = result.delivery.as_ref().unwrap();
+        assert_eq!(delivery.to, "user28@example.com");
+        assert_eq!(delivery.username, "user28");
+        assert!(delivery
+            .reset_url
+            .starts_with("https://mail.example/webmail/?reset_token="));
+        assert!(delivery.reset_url.len() > "https://mail.example/webmail/?reset_token=".len());
+        assert_eq!(active_password_reset_count(&pool, 28).await, 1);
+        assert!(serde_json::to_value(&result)
+            .unwrap()
+            .get("delivery")
+            .is_none());
+
+        let second = SqlxUserRepository::request_password_reset(
+            &pool,
+            "user28".to_string(),
+            "https://mail.example".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(second.delivery.is_some());
+        assert_eq!(active_password_reset_count(&pool, 28).await, 1);
+
+        let unknown = SqlxUserRepository::request_password_reset(
+            &pool,
+            "missing".to_string(),
+            "https://mail.example".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(unknown.delivery.is_none());
     }
 
     #[tokio::test]
@@ -4955,6 +5167,18 @@ mod tests {
             .await
             .and_then(|row| row.try_get("used_at"))
             .unwrap()
+    }
+
+    async fn active_password_reset_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query(
+            "SELECT COUNT(*) AS count FROM frickmail_password_resets
+             WHERE user_id = ? AND used_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get("count"))
+        .unwrap()
     }
 
     async fn mail_account_count(pool: &AnyPool, user_id: i64) -> i64 {

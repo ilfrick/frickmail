@@ -746,6 +746,7 @@ dependencies = [
  "fm-core",
  "fm-plugin-compat",
  "fm-session",
+ "fm-smtp",
  "fm-user",
  "reqwest",
  "serde",

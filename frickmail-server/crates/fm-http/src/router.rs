@@ -19,6 +19,7 @@ use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, Hea
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
+use fm_smtp::{send_password_reset_email, PasswordResetEmail};
 use fm_user::{
     FrickmailMe, MailAccount, NewMailIdentity, NewMailRule, NewMailTask, PushSubscription,
     SqlxUserRepository, TaskFilter, UpdateMailTask,
@@ -27,6 +28,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
+use tracing::warn;
 
 use crate::AppState;
 
@@ -350,6 +352,9 @@ async fn native_compat_response(
         "FrickmailDisableTotp" => {
             Some(native_frickmail_disable_totp(state, original_action, payload, session).await)
         }
+        "FrickmailRequestPasswordReset" => {
+            Some(native_frickmail_request_password_reset(state, original_action, payload).await)
+        }
         "FrickmailResetPassword" => {
             Some(native_frickmail_reset_password(state, original_action, payload).await)
         }
@@ -634,6 +639,79 @@ async fn native_frickmail_disable_totp(
             }),
         ),
         Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_request_password_reset(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+) -> Response {
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::request_password_reset(
+        pool,
+        payload_string(payload, "username").unwrap_or_default(),
+        state.config().base_url.clone(),
+    )
+    .await
+    {
+        Ok(result) => {
+            if let Some(delivery) = &result.delivery {
+                let smtp_config = state.config().transactional_smtp.clone();
+                let email = PasswordResetEmail {
+                    to: delivery.to.clone(),
+                    username: delivery.username.clone(),
+                    reset_url: delivery.reset_url.clone(),
+                };
+                tokio::spawn(async move {
+                    match tokio::task::spawn_blocking(move || {
+                        send_password_reset_email(&smtp_config, &email)
+                    })
+                    .await
+                    {
+                        Ok(Ok(_sent)) => {}
+                        Ok(Err(err)) => {
+                            warn!(
+                                error = %err,
+                                "password-reset email delivery failed after generic response"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                "password-reset email worker failed after generic response"
+                            );
+                        }
+                    }
+                });
+            }
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": result
+                }),
+            )
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "password-reset request failed; returning generic server error"
+            );
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": {
+                        "ok": false,
+                        "error": "Server error"
+                    }
+                }),
+            )
+        }
     }
 }
 
@@ -2618,6 +2696,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_dispatches_native_request_password_reset_action() {
+        let pool = user_db_pool().await;
+        create_password_reset_table(&pool).await;
+        seed_user(
+            &pool,
+            145,
+            "request-reset",
+            Some("reset-request@example.com"),
+        )
+        .await;
+        let app = super::build_router(AppState::with_db_pool(
+            test_config(None),
+            Some(pool.clone()),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailRequestPasswordReset&username=request-reset",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailRequestPasswordReset");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(
+            body["Result"]["message"],
+            "If the username exists and has a recovery email, a reset link has been sent."
+        );
+        assert!(body["Result"].get("delivery").is_none());
+        assert_eq!(active_password_reset_count(&pool, 145).await, 1);
+
+        let response = super::native_frickmail_request_password_reset(
+            &AppState::with_db_pool(test_config(None), Some(pool.clone())),
+            "FrickmailRequestPasswordReset",
+            &json!({"username": "missing"}),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(active_password_reset_count(&pool, 145).await, 1);
+    }
+
+    #[tokio::test]
     async fn json_api_dispatches_native_reset_password_action() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
@@ -4178,6 +4307,7 @@ mod tests {
             open_signup: false,
             oidc: Default::default(),
             mail: Default::default(),
+            transactional_smtp: Default::default(),
         }
     }
 
@@ -4627,6 +4757,18 @@ mod tests {
             .await
             .and_then(|row| row.try_get("used_at"))
             .unwrap()
+    }
+
+    async fn active_password_reset_count(pool: &AnyPool, user_id: i64) -> i64 {
+        sqlx::query(
+            "SELECT COUNT(*) AS count FROM frickmail_password_resets
+             WHERE user_id = ? AND used_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get("count"))
+        .unwrap()
     }
 
     async fn mail_account_count(pool: &AnyPool, user_id: i64) -> i64 {
