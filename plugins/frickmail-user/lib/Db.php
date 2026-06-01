@@ -762,6 +762,16 @@ class Db
 		return $st->fetchAll(\PDO::FETCH_ASSOC);
 	}
 
+	public function getAppSetting(string $key) : ?string
+	{
+		$st = $this->pdo->prepare(
+			'SELECT setting_value FROM frickmail_app_settings WHERE setting_key = :k'
+		);
+		$st->execute([':k' => $key]);
+		$value = $st->fetchColumn();
+		return false === $value ? null : (string) $value;
+	}
+
 	/* ------------------------------------------------------------------ */
 	/*  OIDC identities + escrow key                                        */
 	/* ------------------------------------------------------------------ */

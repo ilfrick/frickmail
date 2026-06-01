@@ -228,6 +228,27 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
             UNIQUE(user_id, endpoint)
         )");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_push_user ON frickmail_push_subscriptions(user_id)");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_app_settings (
+            setting_key   VARCHAR(191) PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )");
+        $legacyVapidConfig = "/var/lib/snappymail/_data_/_default_/configs/plugin-frickmail-user.json";
+        if (is_file($legacyVapidConfig)) {
+            $legacyConfig = json_decode((string) file_get_contents($legacyVapidConfig), true);
+            $legacyPlugin = is_array($legacyConfig["plugin"] ?? null) ? $legacyConfig["plugin"] : [];
+            $legacyPublic = (string) ($legacyPlugin["vapid_public_b64u"] ?? "");
+            $legacyPrivate = (string) ($legacyPlugin["vapid_private_pem"] ?? "");
+            if ($legacyPublic !== "" && $legacyPrivate !== "") {
+                $bundle = json_encode([
+                    "public_b64u" => $legacyPublic,
+                    "private_pem" => $legacyPrivate,
+                ], JSON_UNESCAPED_SLASHES);
+                $st = $pdo->prepare("INSERT INTO frickmail_app_settings (setting_key, setting_value)
+                    VALUES (:k, :v) ON CONFLICT (setting_key) DO NOTHING");
+                $st->execute([":k" => "vapid_keys", ":v" => $bundle]);
+            }
+        }
         // OIDC login support (login-oidc plugin)
         $pdo->exec("ALTER TABLE frickmail_users ADD COLUMN IF NOT EXISTS oidc_escrow_key BYTEA");
         $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_oidc_identities (

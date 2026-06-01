@@ -2,7 +2,12 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Algorithm, Argon2, Params, Version,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fm_core::{FrickmailError, Result, UserSession};
+use p256::{
+    ecdsa::SigningKey,
+    pkcs8::{EncodePrivateKey, LineEnding},
+};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
@@ -18,6 +23,7 @@ pub const PASSWORD_HASH_OPSLIMIT: u32 = 4;
 pub const PASSWORD_HASH_MEMLIMIT_KIB: u32 = 65_536;
 pub const DUMMY_PASSWORD_HASH: &str =
     "$argon2id$v=19$m=65536,t=4,p=1$TTJYNUVsNlE5Q1RwTzZacQ$AnMUliGcTz3HHGhxmAib/d0fPagGYhpUa1uQxLPgyeg";
+const VAPID_SETTING_KEY: &str = "vapid_keys";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrickmailUser {
@@ -139,6 +145,12 @@ pub struct PushSubscription {
     pub endpoint: String,
     pub p256dh: String,
     pub auth_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct VapidKeyBundle {
+    public_b64u: String,
+    private_pem: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -405,6 +417,10 @@ impl SqlxUserRepository {
         endpoint: String,
     ) -> Result<()> {
         delete_push_subscription(pool, user_id, endpoint).await
+    }
+
+    pub async fn get_or_create_vapid_public_key(pool: &AnyPool) -> Result<String> {
+        get_or_create_vapid_public_key(pool).await
     }
 
     pub async fn list_oidc_links(
@@ -1486,6 +1502,98 @@ async fn delete_push_subscription(pool: &AnyPool, user_id: i64, endpoint: String
         .map_err(db_error)
 }
 
+async fn get_or_create_vapid_public_key(pool: &AnyPool) -> Result<String> {
+    ensure_app_settings_table(pool).await?;
+
+    if let Some(bundle) = read_vapid_key_bundle(pool).await? {
+        return Ok(bundle.public_b64u);
+    }
+
+    let bundle = generate_vapid_key_bundle()?;
+    insert_app_setting_if_absent(
+        pool,
+        VAPID_SETTING_KEY,
+        serde_json::to_string(&bundle).map_err(json_error)?,
+    )
+    .await?;
+
+    read_vapid_key_bundle(pool)
+        .await?
+        .map(|bundle| bundle.public_b64u)
+        .ok_or_else(|| {
+            FrickmailError::Upstream("VAPID key creation did not persist a usable key".to_string())
+        })
+}
+
+async fn read_vapid_key_bundle(pool: &AnyPool) -> Result<Option<VapidKeyBundle>> {
+    let Some(value) = get_app_setting(pool, VAPID_SETTING_KEY).await? else {
+        return Ok(None);
+    };
+
+    let bundle = serde_json::from_str::<VapidKeyBundle>(&value).map_err(|err| {
+        FrickmailError::Upstream(format!("stored VAPID key bundle is invalid: {err}"))
+    })?;
+    if bundle.public_b64u.is_empty() || bundle.private_pem.is_empty() {
+        return Err(FrickmailError::Upstream(
+            "stored VAPID key bundle is incomplete".to_string(),
+        ));
+    }
+
+    Ok(Some(bundle))
+}
+
+fn generate_vapid_key_bundle() -> Result<VapidKeyBundle> {
+    let signing_key = SigningKey::random(&mut OsRng);
+    let public_b64u = URL_SAFE_NO_PAD.encode(
+        signing_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes(),
+    );
+    let private_pem = signing_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|err| FrickmailError::Upstream(format!("VAPID key generation failed: {err}")))?
+        .to_string();
+
+    Ok(VapidKeyBundle {
+        public_b64u,
+        private_pem,
+    })
+}
+
+async fn get_app_setting(pool: &AnyPool, key: &str) -> Result<Option<String>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(app_setting_select_query(&backend))
+        .bind(key)
+        .fetch_optional(&mut *conn)
+        .await
+        .map(|row| row.map(|row| row.get::<String, _>("setting_value")))
+        .map_err(db_error)
+}
+
+async fn ensure_app_settings_table(pool: &AnyPool) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(app_setting_create_table_query(&backend))
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn insert_app_setting_if_absent(pool: &AnyPool, key: &str, value: String) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(app_setting_insert_if_absent_query(&backend))
+        .bind(key)
+        .bind(value)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
 async fn list_oidc_links(
     pool: &AnyPool,
     user_id: i64,
@@ -2205,6 +2313,57 @@ fn delete_push_subscription_query(backend: &str) -> &'static str {
     }
 }
 
+fn app_setting_select_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "SELECT setting_value FROM frickmail_app_settings WHERE setting_key = $1",
+        _ => "SELECT setting_value FROM frickmail_app_settings WHERE setting_key = ?",
+    }
+}
+
+fn app_setting_create_table_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "CREATE TABLE IF NOT EXISTS frickmail_app_settings (
+                setting_key   VARCHAR(191) PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"
+        }
+        "MySQL" => {
+            "CREATE TABLE IF NOT EXISTS frickmail_app_settings (
+                setting_key   VARCHAR(191) PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )"
+        }
+        _ => {
+            "CREATE TABLE IF NOT EXISTS frickmail_app_settings (
+                setting_key   VARCHAR(191) PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        }
+    }
+}
+
+fn app_setting_insert_if_absent_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_app_settings (setting_key, setting_value) \
+             VALUES ($1, $2) \
+             ON CONFLICT (setting_key) DO NOTHING"
+        }
+        "MySQL" => {
+            "INSERT IGNORE INTO frickmail_app_settings (setting_key, setting_value) \
+             VALUES (?, ?)"
+        }
+        _ => {
+            "INSERT OR IGNORE INTO frickmail_app_settings (setting_key, setting_value) \
+             VALUES (?, ?)"
+        }
+    }
+}
+
 fn oidc_links_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -2665,6 +2824,10 @@ fn db_error(err: sqlx::Error) -> FrickmailError {
     FrickmailError::Upstream(format!("frickmail user database error: {err}"))
 }
 
+fn json_error(err: serde_json::Error) -> FrickmailError {
+    FrickmailError::Upstream(format!("frickmail JSON error: {err}"))
+}
+
 #[derive(Debug, Clone)]
 struct PreferenceSpec {
     key: &'static str,
@@ -2769,7 +2932,8 @@ mod tests {
         clean_preferences_patch, derive_credential_key, normalize_username,
         preferences_from_settings, verify_login_password, verify_password, FrickmailMe,
         NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailTask,
-        CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
+        VapidKeyBundle, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
+        VAPID_SETTING_KEY,
     };
     use fm_core::UserSession;
 
@@ -3861,6 +4025,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_gets_or_creates_persistent_vapid_key() {
+        let pool = sqlite_pool().await;
+        create_app_settings_table(&pool).await;
+
+        let public_key = SqlxUserRepository::get_or_create_vapid_public_key(&pool)
+            .await
+            .unwrap();
+        assert!(!public_key.is_empty());
+
+        let stored = app_setting(&pool, VAPID_SETTING_KEY).await.unwrap();
+        let bundle: VapidKeyBundle = serde_json::from_str(&stored).unwrap();
+        assert_eq!(bundle.public_b64u, public_key);
+        assert!(bundle.private_pem.contains("BEGIN PRIVATE KEY"));
+
+        let second = SqlxUserRepository::get_or_create_vapid_public_key(&pool)
+            .await
+            .unwrap();
+        assert_eq!(second, public_key);
+    }
+
+    #[tokio::test]
+    async fn repository_reuses_existing_vapid_key_bundle() {
+        let pool = sqlite_pool().await;
+        create_app_settings_table(&pool).await;
+        let existing = VapidKeyBundle {
+            public_b64u: "existing-public-key".to_string(),
+            private_pem: "existing-private-pem".to_string(),
+        };
+        insert_app_setting(
+            &pool,
+            VAPID_SETTING_KEY,
+            &serde_json::to_string(&existing).unwrap(),
+        )
+        .await;
+
+        let public_key = SqlxUserRepository::get_or_create_vapid_public_key(&pool)
+            .await
+            .unwrap();
+        assert_eq!(public_key, "existing-public-key");
+    }
+
+    #[tokio::test]
     async fn repository_lists_and_unlinks_oidc_identities_with_escrow_cleanup() {
         let pool = sqlite_pool().await;
         create_users_table(&pool, "TEXT").await;
@@ -4173,6 +4379,19 @@ mod tests {
                 auth_key TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, endpoint)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_app_settings_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_app_settings (
+                setting_key VARCHAR(191) PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
         )
         .execute(pool)
@@ -4595,6 +4814,26 @@ mod tests {
         .await
         .unwrap()
         .map(|row| row.try_get("auth_key").unwrap())
+    }
+
+    async fn app_setting(pool: &AnyPool, key: &str) -> Option<String> {
+        sqlx::query("SELECT setting_value FROM frickmail_app_settings WHERE setting_key = ?")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+            .map(|row| row.try_get("setting_value").unwrap())
+    }
+
+    async fn insert_app_setting(pool: &AnyPool, key: &str, value: &str) {
+        sqlx::query(
+            "INSERT INTO frickmail_app_settings (setting_key, setting_value) VALUES (?, ?)",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn set_oidc_escrow_key(pool: &AnyPool, user_id: i64, value: Option<Vec<u8>>) {

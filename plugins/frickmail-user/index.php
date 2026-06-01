@@ -694,8 +694,22 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	/** Send a Web Push notification to every registered subscription for this user. */
 	private function sendWebPushToUser(int $uid, array $accounts) : void
 	{
-		$privatePem = (string) $this->Config()->Get('plugin', 'vapid_private_pem',  '');
-		$publicB64u = (string) $this->Config()->Get('plugin', 'vapid_public_b64u',  '');
+		$privatePem = '';
+		$publicB64u = '';
+		try {
+			$bundle = \json_decode((string) ($this->db()->getAppSetting('vapid_keys') ?? ''), true);
+			if (\is_array($bundle)) {
+				$privatePem = (string) ($bundle['private_pem'] ?? '');
+				$publicB64u = (string) ($bundle['public_b64u'] ?? '');
+			}
+		} catch (\Throwable $e) {
+			$privatePem = '';
+			$publicB64u = '';
+		}
+		if ('' === $privatePem || '' === $publicB64u) {
+			$privatePem = (string) $this->Config()->Get('plugin', 'vapid_private_pem',  '');
+			$publicB64u = (string) $this->Config()->Get('plugin', 'vapid_public_b64u',  '');
+		}
 		if ('' === $privatePem || '' === $publicB64u) return;
 
 		$subs = $this->db()->listPushSubscriptions($uid);

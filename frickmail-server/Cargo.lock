@@ -800,7 +800,9 @@ name = "fm-user"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "base64 0.22.1",
  "fm-core",
+ "p256",
  "rand_core 0.6.4",
  "serde",
  "serde_json",

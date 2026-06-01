@@ -412,6 +412,9 @@ async fn native_compat_response(
         "FrickmailPushSubscribe" => {
             Some(native_frickmail_push_subscribe(state, original_action, payload, session).await)
         }
+        "FrickmailGetVapidKey" => {
+            Some(native_frickmail_get_vapid_key(state, original_action, session).await)
+        }
         "FrickmailPushUnsubscribe" => {
             Some(native_frickmail_push_unsubscribe(state, original_action, payload, session).await)
         }
@@ -1345,6 +1348,37 @@ async fn native_frickmail_push_subscribe(
             json!({
                 "Result": {
                     "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_get_vapid_key(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(_user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::get_or_create_vapid_public_key(pool).await {
+        Ok(public_key) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "public_key": public_key
                 }
             }),
         ),
@@ -3395,6 +3429,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_get_vapid_key_matches_plugin_shape() {
+        let pool = user_db_pool().await;
+        create_app_settings_table(&pool).await;
+        seed_user(&pool, 501, "vapid", Some("vapid@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(501, "vapid", None).await;
+
+        let response =
+            super::native_frickmail_get_vapid_key(&state, "FrickmailGetVapidKey", &session).await;
+        let body = read_json(response).await;
+        let public_key = body["Result"]["public_key"].as_str().unwrap().to_string();
+        assert_eq!(body["Result"]["ok"], true);
+        assert!(!public_key.is_empty());
+        assert!(app_setting(&pool, "vapid_keys").await.is_some());
+
+        let response =
+            super::native_frickmail_get_vapid_key(&state, "FrickmailGetVapidKey", &session).await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["public_key"], public_key);
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_get_vapid_key_action() {
+        let pool = user_db_pool().await;
+        create_app_settings_table(&pool).await;
+        seed_user(&pool, 502, "vapid-route", Some("vapid-route@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(502, "vapid-route", None).await;
+
+        let response = super::json_api_request(
+            state,
+            "/?/Json/".parse().unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?/Json/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("Action=PluginFrickmailGetVapidKey"))
+                .unwrap(),
+            session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailGetVapidKey");
+        assert_eq!(body["Result"]["ok"], true);
+        assert!(!body["Result"]["public_key"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn native_frickmail_oidc_link_list_and_unlink_match_plugin_shape() {
         let pool = user_db_pool().await;
         create_oidc_identity_tables(&pool).await;
@@ -4054,6 +4136,19 @@ mod tests {
         .unwrap();
     }
 
+    async fn create_app_settings_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_app_settings (
+                setting_key VARCHAR(191) PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn create_oidc_identity_tables(pool: &AnyPool) {
         sqlx::query(
             "CREATE TABLE frickmail_oidc_identities (
@@ -4419,6 +4514,15 @@ mod tests {
         .await
         .unwrap()
         .map(|row| row.try_get("auth_key").unwrap())
+    }
+
+    async fn app_setting(pool: &AnyPool, key: &str) -> Option<String> {
+        sqlx::query("SELECT setting_value FROM frickmail_app_settings WHERE setting_key = ?")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+            .map(|row| row.try_get("setting_value").unwrap())
     }
 
     async fn set_oidc_escrow_key(pool: &AnyPool, user_id: i64, value: Option<Vec<u8>>) {

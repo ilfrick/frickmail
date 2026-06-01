@@ -25,6 +25,7 @@ anyhow = "1.0"
 argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
 config = { version = "0.15", default-features = false, features = ["toml"] }
 deadpool-redis = "0.18"
 http = "1"
@@ -33,6 +34,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "h
 mail-builder = "0.4"
 mail-parser = "0.10"
 openidconnect = "4"
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
