@@ -6,6 +6,10 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
 };
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    XChaCha20Poly1305, XNonce,
+};
 use data_encoding::BASE32_NOPAD;
 use fm_core::{FrickmailError, Result, UserSession};
 use hmac::{Hmac, Mac};
@@ -22,6 +26,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Row};
 use std::{
     collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -29,6 +34,7 @@ pub const KDF_SALT_BYTES: usize = 16;
 pub const CREDENTIAL_KEY_BYTES: usize = 32;
 pub const KDF_OPSLIMIT: u32 = 3;
 pub const KDF_MEMLIMIT_KIB: u32 = 65_536;
+pub const ACCOUNT_SECRET_NONCE_BYTES: usize = 24;
 pub const PASSWORD_HASH_OPSLIMIT: u32 = 4;
 pub const PASSWORD_HASH_MEMLIMIT_KIB: u32 = 65_536;
 pub const DUMMY_PASSWORD_HASH: &str =
@@ -83,6 +89,37 @@ pub struct MailAccount {
     pub login: Option<String>,
     pub is_primary: bool,
     pub identities: Vec<MailIdentity>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct NewMailAccount {
+    pub label: Option<String>,
+    pub email: String,
+    pub account_type: String,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<i64>,
+    pub imap_secure: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i64>,
+    pub smtp_secure: Option<String>,
+    pub login: Option<String>,
+    pub password: Option<String>,
+    pub oauth_tenant: Option<String>,
+    pub is_primary: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct UpdateMailAccount {
+    pub id: i64,
+    pub label: Option<String>,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<i64>,
+    pub imap_secure: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i64>,
+    pub smtp_secure: Option<String>,
+    pub login: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +418,24 @@ impl SqlxUserRepository {
         fetch_mail_account(pool, user_id, account_id).await
     }
 
+    pub async fn add_mail_account(
+        pool: &AnyPool,
+        user_id: i64,
+        input: NewMailAccount,
+        credential_key: &[u8],
+    ) -> Result<i64> {
+        add_mail_account(pool, user_id, input, credential_key).await
+    }
+
+    pub async fn update_mail_account(
+        pool: &AnyPool,
+        user_id: i64,
+        input: UpdateMailAccount,
+        credential_key: &[u8],
+    ) -> Result<()> {
+        update_mail_account(pool, user_id, input, credential_key).await
+    }
+
     pub async fn list_mail_identities(
         pool: &AnyPool,
         user_id: i64,
@@ -521,6 +576,27 @@ impl SqlxUserRepository {
         account_id: i64,
     ) -> Result<()> {
         set_primary_mail_account(pool, user_id, account_id).await
+    }
+
+    pub async fn set_mail_account_password(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        password: String,
+        credential_key: &[u8],
+    ) -> Result<bool> {
+        set_mail_account_password(pool, user_id, account_id, password, credential_key).await
+    }
+
+    pub async fn save_oauth_refresh_token(
+        pool: &AnyPool,
+        user_id: i64,
+        account_type: String,
+        email: String,
+        token: String,
+        credential_key: &[u8],
+    ) -> Result<bool> {
+        save_oauth_refresh_token(pool, user_id, account_type, email, token, credential_key).await
     }
 
     pub async fn search_messages(
@@ -703,7 +779,7 @@ fn totp_code(secret: &str, counter: u64) -> Result<String> {
     let key = BASE32_NOPAD
         .decode(secret.as_bytes())
         .map_err(|err| FrickmailError::BadRequest(format!("invalid TOTP secret: {err}")))?;
-    let mut mac = Hmac::<Sha1>::new_from_slice(&key)
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key)
         .map_err(|err| FrickmailError::Upstream(format!("TOTP HMAC failed: {err}")))?;
     mac.update(&counter.to_be_bytes());
     let digest = mac.finalize().into_bytes();
@@ -758,6 +834,49 @@ pub fn derive_credential_key(password: &str, salt: &[u8]) -> Result<[u8; CREDENT
         .hash_password_into(password.as_bytes(), salt, &mut key)
         .map_err(|err| FrickmailError::Upstream(format!("Frickmail KDF failed: {err}")))?;
     Ok(key)
+}
+
+#[allow(deprecated)]
+pub fn encrypt_account_secret(plaintext: &str, key: &[u8]) -> Result<Vec<u8>> {
+    let cipher = account_secret_cipher(key)?;
+    let mut nonce = [0_u8; ACCOUNT_SECRET_NONCE_BYTES];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(&XNonce::clone_from_slice(&nonce), plaintext.as_bytes())
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Frickmail credential encryption failed: {err}"))
+        })?;
+    let mut blob = Vec::with_capacity(nonce.len() + ciphertext.len());
+    blob.extend_from_slice(&nonce);
+    blob.extend_from_slice(&ciphertext);
+    Ok(blob)
+}
+
+#[allow(deprecated)]
+pub fn decrypt_account_secret(blob: &[u8], key: &[u8]) -> Result<Option<String>> {
+    if blob.len() < ACCOUNT_SECRET_NONCE_BYTES {
+        return Ok(None);
+    }
+
+    let cipher = account_secret_cipher(key)?;
+    let (nonce, ciphertext) = blob.split_at(ACCOUNT_SECRET_NONCE_BYTES);
+    let plaintext = match cipher.decrypt(&XNonce::clone_from_slice(nonce), ciphertext) {
+        Ok(plaintext) => plaintext,
+        Err(_) => return Ok(None),
+    };
+    Ok(String::from_utf8(plaintext).ok())
+}
+
+fn account_secret_cipher(key: &[u8]) -> Result<XChaCha20Poly1305> {
+    if key.len() != CREDENTIAL_KEY_BYTES {
+        return Err(FrickmailError::BadRequest(format!(
+            "invalid Frickmail credential key length: expected {CREDENTIAL_KEY_BYTES}, got {}",
+            key.len()
+        )));
+    }
+    XChaCha20Poly1305::new_from_slice(key).map_err(|err| {
+        FrickmailError::Upstream(format!("Frickmail credential cipher setup failed: {err}"))
+    })
 }
 
 pub fn preferences_from_settings(settings: &Value) -> Value {
@@ -903,15 +1022,129 @@ async fn fetch_mail_account(
 ) -> Result<Option<MailAccount>> {
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
+    fetch_mail_account_on_conn(&mut conn, &backend, user_id, account_id).await
+}
 
-    sqlx::query(mail_account_query(&backend))
+async fn fetch_mail_account_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    account_id: i64,
+) -> Result<Option<MailAccount>> {
+    sqlx::query(mail_account_query(backend))
         .bind(user_id)
         .bind(account_id)
-        .fetch_optional(&mut *conn)
+        .fetch_optional(&mut **conn)
         .await
         .map_err(db_error)?
         .map(row_to_mail_account)
         .transpose()
+}
+
+async fn add_mail_account(
+    pool: &AnyPool,
+    user_id: i64,
+    input: NewMailAccount,
+    credential_key: &[u8],
+) -> Result<i64> {
+    let prepared = prepare_new_mail_account(input, credential_key)?;
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(begin_account_primary_transaction_query(&backend))
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        lock_user_account_mutations_on_conn(&mut conn, &backend, user_id).await?;
+        let account_count = mail_account_count_on_conn(&mut conn, &backend, user_id).await?;
+        let make_primary = account_count == 0 || prepared.request_primary;
+        let account_id =
+            insert_mail_account_on_conn(&mut conn, &backend, user_id, &prepared).await?;
+
+        if make_primary {
+            sqlx::query(clear_primary_mail_accounts_query(&backend))
+                .bind(user_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_error)?;
+            sqlx::query(set_primary_mail_account_query(&backend))
+                .bind(user_id)
+                .bind(account_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_error)?;
+        }
+
+        Ok(account_id)
+    }
+    .await;
+
+    match result {
+        Ok(account_id) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| account_id)
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
+async fn update_mail_account(
+    pool: &AnyPool,
+    user_id: i64,
+    input: UpdateMailAccount,
+    credential_key: &[u8],
+) -> Result<()> {
+    if input.id <= 0 {
+        return Err(FrickmailError::BadRequest("Invalid account id".to_string()));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let existing = fetch_mail_account_on_conn(&mut conn, &backend, user_id, input.id)
+        .await?
+        .ok_or_else(|| FrickmailError::BadRequest("Account not found".to_string()))?;
+
+    let original_label = existing.label.clone();
+    let label = trim_non_empty(input.label).unwrap_or_else(|| original_label.clone());
+    if existing.account_type != "imap" {
+        if label != original_label {
+            sqlx::query(update_mail_account_label_query(&backend))
+                .bind(&label)
+                .bind(user_id)
+                .bind(input.id)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_error)?;
+        }
+        return Ok(());
+    }
+
+    let new_imap_host = trim_non_empty(input.imap_host);
+    let new_smtp_host = trim_non_empty(input.smtp_host);
+    validate_optional_mail_host(new_imap_host.as_deref(), "imap_host")?;
+    validate_optional_mail_host(new_smtp_host.as_deref(), "smtp_host")?;
+    let encrypted_password = encrypt_optional_secret(input.password, credential_key)?;
+    sqlx::query(update_imap_mail_account_query(&backend))
+        .bind(&label)
+        .bind(new_imap_host.or(existing.imap_host))
+        .bind(input.imap_port.or(existing.imap_port))
+        .bind(trim_non_empty(input.imap_secure).or(existing.imap_secure))
+        .bind(new_smtp_host.or(existing.smtp_host))
+        .bind(input.smtp_port.or(existing.smtp_port))
+        .bind(trim_non_empty(input.smtp_secure).or(existing.smtp_secure))
+        .bind(trim_non_empty(input.login).or(existing.login))
+        .bind(encrypted_password)
+        .bind(user_id)
+        .bind(input.id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
 }
 
 async fn register_user(
@@ -2040,12 +2273,13 @@ async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> R
 async fn set_primary_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
-    sqlx::query("BEGIN")
+    sqlx::query(begin_account_primary_transaction_query(&backend))
         .execute(&mut *conn)
         .await
         .map_err(db_error)?;
 
     let result = async {
+        lock_user_account_mutations_on_conn(&mut conn, &backend, user_id).await?;
         sqlx::query(clear_primary_mail_accounts_query(&backend))
             .bind(user_id)
             .execute(&mut *conn)
@@ -2074,6 +2308,67 @@ async fn set_primary_mail_account(pool: &AnyPool, user_id: i64, account_id: i64)
             Err(err)
         }
     }
+}
+
+async fn set_mail_account_password(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+    password: String,
+    credential_key: &[u8],
+) -> Result<bool> {
+    if account_id <= 0 {
+        return Err(FrickmailError::BadRequest(
+            "Account id required".to_string(),
+        ));
+    }
+    let password = trim_required(password, "Password required")?;
+    let encrypted_password = encrypt_account_secret(&password, credential_key)?;
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    if !mail_account_exists_on_conn(&mut conn, &backend, user_id, account_id).await? {
+        return Err(FrickmailError::BadRequest("Account not found".to_string()));
+    }
+
+    sqlx::query(set_mail_account_password_query(&backend))
+        .bind(encrypted_password)
+        .bind(user_id)
+        .bind(account_id)
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(db_error)
+}
+
+async fn save_oauth_refresh_token(
+    pool: &AnyPool,
+    user_id: i64,
+    account_type: String,
+    email: String,
+    token: String,
+    credential_key: &[u8],
+) -> Result<bool> {
+    let account_type = normalize_oauth_account_type(&account_type)?;
+    let email = trim_required(email, "Missing email or token")?;
+    let token = trim_required(token, "Missing email or token")?;
+    let encrypted_token = encrypt_account_secret(&token, credential_key)?;
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let account_id = mail_account_id_by_email_on_conn(&mut conn, &backend, user_id, &email)
+        .await?
+        .ok_or_else(|| {
+            FrickmailError::BadRequest(format!("Account not found for email {email}"))
+        })?;
+
+    sqlx::query(save_oauth_refresh_token_query(&backend))
+        .bind(&account_type)
+        .bind(encrypted_token)
+        .bind(user_id)
+        .bind(account_id)
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(db_error)
 }
 
 async fn search_messages(
@@ -2312,6 +2607,296 @@ fn optional_non_empty_string(value: Option<String>) -> Option<String> {
     value.and_then(|value| if value.is_empty() { None } else { Some(value) })
 }
 
+fn trim_non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+fn trim_required(value: String, message: &str) -> Result<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(FrickmailError::BadRequest(message.to_string()));
+    }
+    Ok(value)
+}
+
+struct PreparedMailAccount {
+    label: String,
+    email: String,
+    account_type: String,
+    imap_host: Option<String>,
+    imap_port: Option<i64>,
+    imap_secure: Option<String>,
+    smtp_host: Option<String>,
+    smtp_port: Option<i64>,
+    smtp_secure: Option<String>,
+    login: Option<String>,
+    encrypted_password: Option<Vec<u8>>,
+    oauth_tenant: Option<String>,
+    request_primary: bool,
+}
+
+fn prepare_new_mail_account(
+    input: NewMailAccount,
+    credential_key: &[u8],
+) -> Result<PreparedMailAccount> {
+    let account_type = normalize_account_type(&input.account_type)?;
+    let email = trim_required(input.email, "Email is required")?;
+    let label = trim_non_empty(input.label).unwrap_or_else(|| email.clone());
+
+    if account_type == "imap" {
+        let imap_host = trim_non_empty(input.imap_host).unwrap_or_default();
+        let smtp_host = trim_non_empty(input.smtp_host).unwrap_or_default();
+        validate_optional_mail_host(Some(&imap_host), "imap_host")?;
+        validate_optional_mail_host(Some(&smtp_host), "smtp_host")?;
+        return Ok(PreparedMailAccount {
+            label,
+            email: email.clone(),
+            account_type,
+            imap_host: Some(imap_host),
+            imap_port: Some(input.imap_port.unwrap_or(993)),
+            imap_secure: Some(
+                trim_non_empty(input.imap_secure).unwrap_or_else(|| "SSL".to_string()),
+            ),
+            smtp_host: Some(smtp_host),
+            smtp_port: Some(input.smtp_port.unwrap_or(465)),
+            smtp_secure: Some(
+                trim_non_empty(input.smtp_secure).unwrap_or_else(|| "SSL".to_string()),
+            ),
+            login: Some(trim_non_empty(input.login).unwrap_or(email)),
+            encrypted_password: encrypt_optional_secret(input.password, credential_key)?,
+            oauth_tenant: None,
+            request_primary: input.is_primary,
+        });
+    }
+
+    let oauth_tenant = if account_type == "o365" {
+        Some(trim_non_empty(input.oauth_tenant).unwrap_or_else(|| "common".to_string()))
+    } else {
+        None
+    };
+    Ok(PreparedMailAccount {
+        label,
+        email: email.clone(),
+        account_type,
+        imap_host: None,
+        imap_port: None,
+        imap_secure: None,
+        smtp_host: None,
+        smtp_port: None,
+        smtp_secure: None,
+        login: Some(email),
+        encrypted_password: None,
+        oauth_tenant,
+        request_primary: input.is_primary,
+    })
+}
+
+fn normalize_account_type(account_type: &str) -> Result<String> {
+    let account_type = account_type.trim().to_ascii_lowercase();
+    match account_type.as_str() {
+        "imap" | "gmail" | "o365" => Ok(account_type),
+        _ => Err(FrickmailError::BadRequest("Unknown type".to_string())),
+    }
+}
+
+fn normalize_oauth_account_type(account_type: &str) -> Result<String> {
+    let account_type = account_type.trim().to_ascii_lowercase();
+    match account_type.as_str() {
+        "gmail" | "o365" => Ok(account_type),
+        _ => Err(FrickmailError::BadRequest("Unknown type".to_string())),
+    }
+}
+
+fn encrypt_optional_secret(
+    secret: Option<String>,
+    credential_key: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    trim_non_empty(secret)
+        .map(|secret| encrypt_account_secret(&secret, credential_key))
+        .transpose()
+}
+
+fn validate_optional_mail_host(host: Option<&str>, field: &str) -> Result<()> {
+    let Some(host) = host else {
+        return Ok(());
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return Ok(());
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return validate_public_mail_ip(ip, field);
+    }
+    if host.contains(':') {
+        return Err(FrickmailError::BadRequest(format!(
+            "{field} must be a hostname or IP address without a port"
+        )));
+    }
+
+    let resolved = match (host, 0_u16).to_socket_addrs() {
+        Ok(resolved) => resolved,
+        // PHP's gethostbyname() also stores unresolved hostnames. The bridge
+        // will fail later if the hostname never resolves.
+        Err(_) => return Ok(()),
+    };
+
+    for address in resolved {
+        validate_public_mail_ip(address.ip(), field)?;
+    }
+    Ok(())
+}
+
+fn validate_public_mail_ip(ip: IpAddr, field: &str) -> Result<()> {
+    if mail_ip_is_reserved(ip) {
+        return Err(FrickmailError::BadRequest(format!(
+            "{field} resolves to a reserved IP address and cannot be used."
+        )));
+    }
+    Ok(())
+}
+
+fn mail_ip_is_reserved(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ipv4_is_reserved(ip),
+        IpAddr::V6(ip) => ipv6_is_reserved(ip),
+    }
+}
+
+fn ipv4_is_reserved(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || ip.is_unspecified()
+        || octets[0] == 0
+        || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64)
+        || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+}
+
+fn ipv6_is_reserved(ip: Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return ipv4_is_reserved(mapped);
+    }
+
+    let segments = ip.segments();
+    ip.is_loopback()
+        || ip.is_multicast()
+        || ip.is_unspecified()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+async fn lock_user_account_mutations_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+) -> Result<()> {
+    sqlx::query(lock_user_account_mutations_query(backend))
+        .bind(user_id)
+        .execute(&mut **conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn mail_account_count_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+) -> Result<i64> {
+    sqlx::query(mail_account_count_query(backend))
+        .bind(user_id)
+        .fetch_one(&mut **conn)
+        .await
+        .and_then(|row| row.try_get("count"))
+        .map_err(db_error)
+}
+
+async fn mail_account_id_by_email_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    email: &str,
+) -> Result<Option<i64>> {
+    sqlx::query(mail_account_id_by_email_query(backend))
+        .bind(user_id)
+        .bind(email)
+        .fetch_optional(&mut **conn)
+        .await
+        .map_err(db_error)?
+        .map(|row| row.try_get("id").map_err(db_error))
+        .transpose()
+}
+
+async fn insert_mail_account_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    account: &PreparedMailAccount,
+) -> Result<i64> {
+    if matches!(backend, "PostgreSQL" | "SQLite") {
+        return bind_insert_mail_account(
+            sqlx::query(insert_mail_account_returning_query(backend)),
+            user_id,
+            account,
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .and_then(|row| row.try_get("id"))
+        .map_err(db_error);
+    }
+
+    bind_insert_mail_account(
+        sqlx::query(insert_mail_account_query(backend)),
+        user_id,
+        account,
+    )
+    .execute(&mut **conn)
+    .await
+    .map_err(db_error)?
+    .last_insert_id()
+    .ok_or_else(|| {
+        FrickmailError::Upstream(
+            "frickmail user database error: inserted mail account id is unavailable".to_string(),
+        )
+    })
+}
+
+fn bind_insert_mail_account<'q>(
+    query: sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>>,
+    user_id: i64,
+    account: &'q PreparedMailAccount,
+) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>> {
+    query
+        .bind(user_id)
+        .bind(&account.label)
+        .bind(&account.email)
+        .bind(&account.account_type)
+        .bind(&account.imap_host)
+        .bind(account.imap_port)
+        .bind(&account.imap_secure)
+        .bind(&account.smtp_host)
+        .bind(account.smtp_port)
+        .bind(&account.smtp_secure)
+        .bind(&account.login)
+        .bind(&account.encrypted_password)
+        .bind(None::<Vec<u8>>)
+        .bind(&account.oauth_tenant)
+        .bind(0_i64)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_mail_rule_on_conn(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
@@ -2420,6 +3005,103 @@ fn mail_account_query(backend: &str) -> &'static str {
             "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
                 CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
              FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
+fn mail_account_count_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "SELECT COUNT(*) AS count FROM frickmail_mail_accounts WHERE user_id = $1",
+        _ => "SELECT COUNT(*) AS count FROM frickmail_mail_accounts WHERE user_id = ?",
+    }
+}
+
+fn begin_account_primary_transaction_query(backend: &str) -> &'static str {
+    match backend {
+        "SQLite" => "BEGIN IMMEDIATE",
+        _ => "BEGIN",
+    }
+}
+
+fn lock_user_account_mutations_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "SELECT id FROM frickmail_users WHERE id = $1 FOR UPDATE",
+        "MySQL" => "SELECT id FROM frickmail_users WHERE id = ? FOR UPDATE",
+        _ => "SELECT id FROM frickmail_users WHERE id = ?",
+    }
+}
+
+fn mail_account_id_by_email_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id FROM frickmail_mail_accounts WHERE user_id = $1 AND lower(email) = lower($2) LIMIT 1"
+        }
+        _ => {
+            "SELECT id FROM frickmail_mail_accounts WHERE user_id = ? AND lower(email) = lower(?) LIMIT 1"
+        }
+    }
+}
+
+fn insert_mail_account_returning_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_mail_accounts \
+                (user_id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                 encrypted_password, encrypted_oauth_refresh_token, oauth_tenant, is_primary) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, ($15 <> 0)) RETURNING id"
+        }
+        _ => {
+            "INSERT INTO frickmail_mail_accounts \
+                (user_id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                 encrypted_password, encrypted_oauth_refresh_token, oauth_tenant, is_primary) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
+        }
+    }
+}
+
+fn insert_mail_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_mail_accounts \
+                (user_id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                 encrypted_password, encrypted_oauth_refresh_token, oauth_tenant, is_primary) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, ($15 <> 0))"
+        }
+        _ => {
+            "INSERT INTO frickmail_mail_accounts \
+                (user_id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
+                 encrypted_password, encrypted_oauth_refresh_token, oauth_tenant, is_primary) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        }
+    }
+}
+
+fn update_mail_account_label_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts SET label = $1, updated_at = NOW() WHERE user_id = $2 AND id = $3"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts SET label = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
+fn update_imap_mail_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts \
+                SET label = $1, imap_host = $2, imap_port = $3, imap_secure = $4, \
+                    smtp_host = $5, smtp_port = $6, smtp_secure = $7, login = $8, \
+                    encrypted_password = COALESCE($9, encrypted_password), updated_at = NOW() \
+              WHERE user_id = $10 AND id = $11"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts \
+                SET label = ?, imap_host = ?, imap_port = ?, imap_secure = ?, \
+                    smtp_host = ?, smtp_port = ?, smtp_secure = ?, login = ?, \
+                    encrypted_password = COALESCE(?, encrypted_password), updated_at = CURRENT_TIMESTAMP \
+              WHERE user_id = ? AND id = ?"
         }
     }
 }
@@ -2850,6 +3532,36 @@ fn set_primary_mail_account_query(backend: &str) -> &'static str {
             "UPDATE frickmail_mail_accounts SET is_primary = TRUE WHERE user_id = $1 AND id = $2"
         }
         _ => "UPDATE frickmail_mail_accounts SET is_primary = 1 WHERE user_id = ? AND id = ?",
+    }
+}
+
+fn set_mail_account_password_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts \
+                SET encrypted_password = $1, updated_at = NOW() \
+              WHERE user_id = $2 AND id = $3"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts \
+                SET encrypted_password = ?, updated_at = CURRENT_TIMESTAMP \
+              WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
+fn save_oauth_refresh_token_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts \
+                SET type = $1, encrypted_oauth_refresh_token = $2, updated_at = NOW() \
+              WHERE user_id = $3 AND id = $4"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts \
+                SET type = ?, encrypted_oauth_refresh_token = ?, updated_at = CURRENT_TIMESTAMP \
+              WHERE user_id = ? AND id = ?"
+        }
     }
 }
 
@@ -3344,10 +4056,12 @@ mod tests {
     use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 
     use super::{
-        clean_preferences_patch, current_totp_counter, derive_credential_key, normalize_username,
+        clean_preferences_patch, current_totp_counter, decrypt_account_secret,
+        derive_credential_key, encrypt_account_secret, normalize_username,
         preferences_from_settings, totp_code, url_encode, verify_login_password, verify_password,
-        FrickmailMe, NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository, TaskFilter,
-        UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
+        FrickmailMe, NewMailAccount, NewMailRule, NewMailTask, PushSubscription,
+        SqlxUserRepository, TaskFilter, UpdateMailAccount, UpdateMailTask, VapidKeyBundle,
+        ACCOUNT_SECRET_NONCE_BYTES, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
         VAPID_SETTING_KEY,
     };
     use fm_core::UserSession;
@@ -3398,6 +4112,23 @@ mod tests {
     #[test]
     fn credential_key_derivation_rejects_invalid_salt_lengths() {
         assert!(derive_credential_key("secret", b"short").is_err());
+    }
+
+    #[test]
+    fn account_secret_crypto_matches_php_blob_shape() {
+        let key = [9_u8; CREDENTIAL_KEY_BYTES];
+        let other_key = [10_u8; CREDENTIAL_KEY_BYTES];
+        let blob = encrypt_account_secret("imap-password", &key).unwrap();
+
+        assert!(blob.len() > ACCOUNT_SECRET_NONCE_BYTES);
+        assert_ne!(blob, b"imap-password");
+        assert_eq!(
+            decrypt_account_secret(&blob, &key).unwrap().as_deref(),
+            Some("imap-password")
+        );
+        assert_eq!(decrypt_account_secret(&blob, &other_key).unwrap(), None);
+        assert!(encrypt_account_secret("secret", b"short").is_err());
+        assert_eq!(decrypt_account_secret(b"short", &key).unwrap(), None);
     }
 
     #[test]
@@ -3683,6 +4414,288 @@ mod tests {
             .await
             .unwrap();
         assert!(account.is_none());
+    }
+
+    #[tokio::test]
+    async fn repository_adds_mail_account_with_encrypted_password_and_primary_rules() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 15, json!({})).await;
+        let key = [3_u8; CREDENTIAL_KEY_BYTES];
+
+        let first_id = SqlxUserRepository::add_mail_account(
+            &pool,
+            15,
+            NewMailAccount {
+                label: None,
+                email: "owner@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: Some("8.8.8.8".to_string()),
+                imap_port: None,
+                imap_secure: None,
+                smtp_host: Some("8.8.4.4".to_string()),
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: Some("secret-pass".to_string()),
+                oauth_tenant: None,
+                is_primary: false,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 15)
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, first_id);
+        assert_eq!(accounts[0].label, "owner@example.com");
+        assert_eq!(accounts[0].imap_port, Some(993));
+        assert_eq!(accounts[0].smtp_port, Some(465));
+        assert!(accounts[0].is_primary);
+        let password_blob = account_encrypted_password(&pool, first_id).await.unwrap();
+        assert_ne!(password_blob, b"secret-pass");
+        assert_eq!(
+            decrypt_account_secret(&password_blob, &key)
+                .unwrap()
+                .as_deref(),
+            Some("secret-pass")
+        );
+
+        let second_id = SqlxUserRepository::add_mail_account(
+            &pool,
+            15,
+            NewMailAccount {
+                label: Some("Gmail".to_string()),
+                email: "owner@gmail.com".to_string(),
+                account_type: "gmail".to_string(),
+                imap_host: None,
+                imap_port: None,
+                imap_secure: None,
+                smtp_host: None,
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: None,
+                oauth_tenant: None,
+                is_primary: true,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 15)
+            .await
+            .unwrap();
+        assert_eq!(accounts[0].id, second_id);
+        assert!(accounts[0].is_primary);
+        assert_eq!(accounts[0].account_type, "gmail");
+        assert_eq!(accounts[0].login.as_deref(), Some("owner@gmail.com"));
+        assert!(
+            !accounts
+                .iter()
+                .find(|account| account.id == first_id)
+                .unwrap()
+                .is_primary
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_updates_imap_account_and_preserves_password_when_empty() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 16, json!({})).await;
+        insert_mail_account(&pool, 122, 16, "Work", true).await;
+        let key = [4_u8; CREDENTIAL_KEY_BYTES];
+        SqlxUserRepository::set_mail_account_password(
+            &pool,
+            16,
+            122,
+            "old-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap();
+        let old_blob = account_encrypted_password(&pool, 122).await.unwrap();
+
+        SqlxUserRepository::update_mail_account(
+            &pool,
+            16,
+            UpdateMailAccount {
+                id: 122,
+                label: Some(" Work Updated ".to_string()),
+                imap_host: Some("1.1.1.1".to_string()),
+                imap_port: Some(143),
+                imap_secure: Some("STARTTLS".to_string()),
+                smtp_host: Some("8.8.8.8".to_string()),
+                smtp_port: Some(587),
+                smtp_secure: Some("STARTTLS".to_string()),
+                login: Some("owner".to_string()),
+                password: Some("".to_string()),
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+
+        let account = SqlxUserRepository::get_mail_account(&pool, 16, 122)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.label, "Work Updated");
+        assert_eq!(account.imap_host.as_deref(), Some("1.1.1.1"));
+        assert_eq!(account.imap_port, Some(143));
+        assert_eq!(account.smtp_port, Some(587));
+        assert_eq!(account.login.as_deref(), Some("owner"));
+        assert_eq!(
+            account_encrypted_password(&pool, 122).await.unwrap(),
+            old_blob
+        );
+
+        SqlxUserRepository::set_mail_account_password(
+            &pool,
+            16,
+            122,
+            "new-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap();
+        let new_blob = account_encrypted_password(&pool, 122).await.unwrap();
+        assert_ne!(new_blob, old_blob);
+        assert_eq!(
+            decrypt_account_secret(&new_blob, &key).unwrap().as_deref(),
+            Some("new-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_rejects_reserved_mail_hosts() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 19, json!({})).await;
+        insert_mail_account(&pool, 125, 19, "Work", true).await;
+        let key = [6_u8; CREDENTIAL_KEY_BYTES];
+
+        let err = SqlxUserRepository::add_mail_account(
+            &pool,
+            19,
+            NewMailAccount {
+                label: None,
+                email: "blocked@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: Some("127.0.0.1".to_string()),
+                imap_port: None,
+                imap_secure: None,
+                smtp_host: Some("8.8.8.8".to_string()),
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: None,
+                oauth_tenant: None,
+                is_primary: false,
+            },
+            &key,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.public_message().contains("reserved IP"));
+
+        let err = SqlxUserRepository::update_mail_account(
+            &pool,
+            19,
+            UpdateMailAccount {
+                id: 125,
+                label: None,
+                imap_host: None,
+                imap_port: None,
+                imap_secure: None,
+                smtp_host: Some("10.0.0.2".to_string()),
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: None,
+            },
+            &key,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.public_message().contains("reserved IP"));
+
+        let err = SqlxUserRepository::add_mail_account(
+            &pool,
+            19,
+            NewMailAccount {
+                label: None,
+                email: "mapped@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: Some("::ffff:127.0.0.1".to_string()),
+                imap_port: None,
+                imap_secure: None,
+                smtp_host: Some("8.8.8.8".to_string()),
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: None,
+                oauth_tenant: None,
+                is_primary: false,
+            },
+            &key,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.public_message().contains("reserved IP"));
+    }
+
+    #[tokio::test]
+    async fn repository_saves_oauth_token_by_case_insensitive_email_and_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 17, json!({})).await;
+        insert_user(&pool, 18, json!({})).await;
+        insert_mail_account(&pool, 123, 17, "Oauth", true).await;
+        insert_mail_account(&pool, 124, 18, "Other", true).await;
+        let key = [5_u8; CREDENTIAL_KEY_BYTES];
+
+        let ok = SqlxUserRepository::save_oauth_refresh_token(
+            &pool,
+            17,
+            "o365".to_string(),
+            "OAUTH@example.com".to_string(),
+            "refresh-token".to_string(),
+            &key,
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        assert_eq!(account_type(&pool, 123).await, "o365");
+        let token_blob = account_oauth_refresh_token(&pool, 123).await.unwrap();
+        assert_eq!(
+            decrypt_account_secret(&token_blob, &key)
+                .unwrap()
+                .as_deref(),
+            Some("refresh-token")
+        );
+        assert!(account_oauth_refresh_token(&pool, 124).await.is_none());
+
+        let err = SqlxUserRepository::save_oauth_refresh_token(
+            &pool,
+            17,
+            "imap".to_string(),
+            "oauth@example.com".to_string(),
+            "refresh-token".to_string(),
+            &key,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.public_message().contains("Unknown type"));
     }
 
     #[tokio::test]
@@ -5158,6 +6171,35 @@ mod tests {
             password.is_none() && token.is_none()
         })
         .unwrap()
+    }
+
+    async fn account_encrypted_password(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {
+        sqlx::query("SELECT encrypted_password FROM frickmail_mail_accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("encrypted_password"))
+            .unwrap()
+    }
+
+    async fn account_oauth_refresh_token(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {
+        sqlx::query(
+            "SELECT encrypted_oauth_refresh_token FROM frickmail_mail_accounts WHERE id = ?",
+        )
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get("encrypted_oauth_refresh_token"))
+        .unwrap()
+    }
+
+    async fn account_type(pool: &AnyPool, account_id: i64) -> String {
+        sqlx::query("SELECT type FROM frickmail_mail_accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("type"))
+            .unwrap()
     }
 
     async fn password_reset_used_at(pool: &AnyPool, reset_id: i64) -> Option<String> {
