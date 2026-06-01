@@ -1,5 +1,6 @@
 services:
   rust-dev:
+    image: frickmail-rust-dev:latest
     build:
       context: .
       dockerfile: .docker/dev/rust/Dockerfile

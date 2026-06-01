@@ -121,10 +121,12 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
             encrypted_password BYTEA,
             encrypted_oauth_refresh_token BYTEA,
             oauth_tenant TEXT,
+            settings JSONB NOT NULL DEFAULT '\''{}'\''::jsonb,
             is_primary BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )");
+        $pdo->exec("ALTER TABLE frickmail_mail_accounts ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '\''{}'\''::jsonb");
         $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_mail_accounts_user ON frickmail_mail_accounts(user_id)");
         $pdo->exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_fm_mail_accounts_primary ON frickmail_mail_accounts(user_id) WHERE is_primary");
         $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_password_resets (

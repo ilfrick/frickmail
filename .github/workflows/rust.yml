@@ -38,6 +38,17 @@ jobs:
       - name: Build Rust dev image
         run: docker compose -f docker-compose.rust.yml build rust-dev
 
+      - name: Smoke test Rust dev container
+        run: |
+          set -eu
+          COMPOSE_PROJECT_NAME=frickmail-rust-smoke
+          cleanup() {
+            docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.rust.yml logs --no-color rust-dev || true
+            docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.rust.yml down --volumes || true
+          }
+          trap cleanup EXIT
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.rust.yml up --no-build --abort-on-container-exit --exit-code-from rust-dev rust-dev
+
       - name: Check formatting
         run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo fmt --all -- --check
 

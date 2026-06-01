@@ -189,6 +189,12 @@ pub struct RegisterUserResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivateServiceResult {
+    pub ok: bool,
+    pub message: String,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -463,6 +469,25 @@ impl SqlxUserRepository {
     ) -> Result<RegisterUserResult> {
         register_user(pool, signup_open, username, email, password).await
     }
+
+    pub async fn activate_service(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        service_type: String,
+        provider: String,
+        service_url: String,
+    ) -> Result<ActivateServiceResult> {
+        activate_service(
+            pool,
+            user_id,
+            account_id,
+            service_type,
+            provider,
+            service_url,
+        )
+        .await
+    }
 }
 
 pub fn normalize_username(username: &str) -> String {
@@ -606,6 +631,26 @@ async fn update_settings_patch(pool: &AnyPool, user_id: i64, patch: &Value) -> R
     sqlx::query(query)
         .bind(patch.to_string())
         .bind(user_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn update_mail_account_settings_patch(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+    patch: &Value,
+) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = update_mail_account_settings_patch_query(&backend);
+
+    sqlx::query(query)
+        .bind(patch.to_string())
+        .bind(user_id)
+        .bind(account_id)
         .execute(&mut *conn)
         .await
         .map(|_| ())
@@ -865,6 +910,56 @@ async fn insert_user_on_conn(
                 "frickmail user database error: inserted user id is unavailable".to_string(),
             )
         })
+}
+
+async fn activate_service(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+    service_type: String,
+    provider: String,
+    service_url: String,
+) -> Result<ActivateServiceResult> {
+    if fetch_mail_account(pool, user_id, account_id)
+        .await?
+        .is_none()
+    {
+        return Err(FrickmailError::BadRequest("Account not found".to_string()));
+    }
+
+    let service_type = service_type.trim();
+    let provider = provider.trim();
+    if matches!(provider, "google" | "o365") {
+        let message = if service_type == "contacts" {
+            "Contacts sync triggered. Open Settings -> Contacts Sync to run a full sync."
+        } else {
+            "Calendar sync ready. Open Settings -> Calendar to view events."
+        };
+        return Ok(ActivateServiceResult {
+            ok: true,
+            message: message.to_string(),
+        });
+    }
+
+    let key = if service_type == "contacts" {
+        "carddav_url"
+    } else {
+        "caldav_url"
+    };
+    update_mail_account_settings_patch(pool, user_id, account_id, &json!({ key: service_url }))
+        .await?;
+
+    Ok(ActivateServiceResult {
+        ok: true,
+        message: format!(
+            "{} URL saved. You can configure credentials in Settings -> Accounts.",
+            if service_type == "contacts" {
+                "CardDAV"
+            } else {
+                "CalDAV"
+            }
+        ),
+    })
 }
 
 async fn fetch_mail_identities(pool: &AnyPool, user_id: i64) -> Result<Vec<MailIdentity>> {
@@ -2376,6 +2471,20 @@ fn update_settings_patch_query(backend: &str) -> &'static str {
     }
 }
 
+fn update_mail_account_settings_patch_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts SET settings = COALESCE(settings, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE user_id = $2 AND id = $3"
+        }
+        "MySQL" => {
+            "UPDATE frickmail_mail_accounts SET settings = JSON_MERGE_PATCH(COALESCE(settings, JSON_OBJECT()), CAST(? AS JSON)), updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts SET settings = json_patch(COALESCE(settings, '{}'), ?), updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
 fn row_to_mail_account(row: sqlx::any::AnyRow) -> Result<MailAccount> {
     Ok(MailAccount {
         id: row.try_get("id").map_err(db_error)?,
@@ -2995,6 +3104,64 @@ mod tests {
             .await
             .unwrap();
         assert!(account.is_none());
+    }
+
+    #[tokio::test]
+    async fn repository_activates_services_with_account_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 33, json!({})).await;
+        insert_user(&pool, 34, json!({})).await;
+        insert_mail_account(&pool, 170, 33, "Work", true).await;
+        insert_mail_account(&pool, 171, 34, "OtherUser", true).await;
+
+        let result = SqlxUserRepository::activate_service(
+            &pool,
+            33,
+            170,
+            "contacts".to_string(),
+            "google".to_string(),
+            "https://ignored.example/contacts".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.message,
+            "Contacts sync triggered. Open Settings -> Contacts Sync to run a full sync."
+        );
+        assert_eq!(mail_account_settings(&pool, 170).await, json!({}));
+
+        let result = SqlxUserRepository::activate_service(
+            &pool,
+            33,
+            170,
+            "calendar".to_string(),
+            "dav".to_string(),
+            "https://dav.example/.well-known/caldav".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.message,
+            "CalDAV URL saved. You can configure credentials in Settings -> Accounts."
+        );
+        assert_eq!(
+            mail_account_settings(&pool, 170).await,
+            json!({"caldav_url": "https://dav.example/.well-known/caldav"})
+        );
+
+        let err = SqlxUserRepository::activate_service(
+            &pool,
+            33,
+            171,
+            "contacts".to_string(),
+            "dav".to_string(),
+            "https://dav.example/.well-known/carddav".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.public_message(), "Account not found");
     }
 
     #[tokio::test]
@@ -3893,6 +4060,7 @@ mod tests {
                 encrypted_password BLOB,
                 encrypted_oauth_refresh_token BLOB,
                 oauth_tenant TEXT,
+                settings TEXT NOT NULL DEFAULT '{}',
                 is_primary BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TEXT,
                 updated_at TEXT
@@ -4257,6 +4425,17 @@ mod tests {
             .await
             .and_then(|row| row.try_get("count"))
             .unwrap()
+    }
+
+    async fn mail_account_settings(pool: &AnyPool, account_id: i64) -> Value {
+        let settings: String =
+            sqlx::query("SELECT settings FROM frickmail_mail_accounts WHERE id = ?")
+                .bind(account_id)
+                .fetch_one(pool)
+                .await
+                .and_then(|row| row.try_get("settings"))
+                .unwrap();
+        serde_json::from_str(&settings).unwrap()
     }
 
     async fn message_index_count(pool: &AnyPool, user_id: i64, account_id: i64) -> i64 {

@@ -349,6 +349,9 @@ async fn native_compat_response(
         "FrickmailDiscoverServices" => {
             Some(native_frickmail_discover_services(state, original_action, payload, session).await)
         }
+        "FrickmailActivateService" => {
+            Some(native_frickmail_activate_service(state, original_action, payload, session).await)
+        }
         "FrickmailGetPrefs" => {
             Some(native_frickmail_get_prefs(state, original_action, session).await)
         }
@@ -578,6 +581,44 @@ async fn native_frickmail_discover_services(
             )
         }
         Ok(None) => json_result_error(original_action, "Account not found"),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_activate_service(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::activate_service(
+        pool,
+        user.user_id,
+        payload_i64(payload, "account_id"),
+        payload_string(payload, "service_type").unwrap_or_default(),
+        payload_string(payload, "provider").unwrap_or_default(),
+        payload_string(payload, "url").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(result) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": result
+            }),
+        ),
         Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
@@ -2522,6 +2563,99 @@ mod tests {
         assert_eq!(body["Result"]["error"], "Not authenticated");
     }
 
+    #[tokio::test]
+    async fn native_frickmail_activate_service_matches_provider_shape() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 153, "activate", Some("activate@example.com")).await;
+        seed_user(&pool, 154, "other-activate", Some("other@example.com")).await;
+        seed_mail_account(&pool, 1330, 153, "Work", true).await;
+        seed_mail_account(&pool, 1331, 154, "Other", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(153, "activate", None).await;
+
+        let response = super::native_frickmail_activate_service(
+            &state,
+            "FrickmailActivateService",
+            &json!({
+                "account_id": 1330,
+                "service_type": "contacts",
+                "provider": "google",
+                "url": "https://ignored.example/contacts"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(
+            body["Result"]["message"],
+            "Contacts sync triggered. Open Settings -> Contacts Sync to run a full sync."
+        );
+        assert_eq!(mail_account_settings(&pool, 1330).await, json!({}));
+
+        let response = super::native_frickmail_activate_service(
+            &state,
+            "FrickmailActivateService",
+            &json!({
+                "account_id": 1330,
+                "service_type": "contacts",
+                "provider": "dav",
+                "url": "https://dav.example/.well-known/carddav"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(
+            mail_account_settings(&pool, 1330).await,
+            json!({"carddav_url": "https://dav.example/.well-known/carddav"})
+        );
+
+        let response = super::native_frickmail_activate_service(
+            &state,
+            "FrickmailActivateService",
+            &json!({
+                "account_id": 1331,
+                "service_type": "calendar",
+                "provider": "dav",
+                "url": "https://dav.example/.well-known/caldav"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Account not found");
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_activate_service_action() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailActivateService&account_id=1&service_type=contacts&provider=dav&url=https%3A%2F%2Fdav.example",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailActivateService");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
     #[test]
     fn service_discovery_rejects_reserved_ips() {
         assert!(super::is_reserved_ip("127.0.0.1".parse().unwrap()));
@@ -3800,6 +3934,7 @@ mod tests {
                 encrypted_password BLOB,
                 encrypted_oauth_refresh_token BLOB,
                 oauth_tenant TEXT,
+                settings TEXT NOT NULL DEFAULT '{}',
                 is_primary BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TEXT,
                 updated_at TEXT
@@ -4039,6 +4174,17 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn mail_account_settings(pool: &AnyPool, account_id: i64) -> Value {
+        let settings: String =
+            sqlx::query("SELECT settings FROM frickmail_mail_accounts WHERE id = ?")
+                .bind(account_id)
+                .fetch_one(pool)
+                .await
+                .and_then(|row| row.try_get("settings"))
+                .unwrap();
+        serde_json::from_str(&settings).unwrap()
     }
 
     async fn seed_identity(
