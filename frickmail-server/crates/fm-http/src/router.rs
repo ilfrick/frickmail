@@ -343,6 +343,9 @@ async fn native_compat_response(
         "FrickmailResetPassword" => {
             Some(native_frickmail_reset_password(state, original_action, payload).await)
         }
+        "FrickmailRegister" => {
+            Some(native_frickmail_register(state, original_action, payload).await)
+        }
         "FrickmailDiscoverServices" => {
             Some(native_frickmail_discover_services(state, original_action, payload, session).await)
         }
@@ -488,6 +491,44 @@ async fn native_frickmail_reset_password(
     match SqlxUserRepository::reset_password(
         pool,
         payload_string(payload, "token").unwrap_or_default(),
+        payload_string(payload, "password").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(result) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": result
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_register(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+) -> Response {
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let email = payload_optional_string(payload, "email").and_then(|value| {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    });
+
+    match SqlxUserRepository::register_user(
+        pool,
+        state.config().open_signup,
+        payload_string(payload, "username").unwrap_or_default(),
+        email,
         payload_string(payload, "password").unwrap_or_default(),
     )
     .await
@@ -2332,6 +2373,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_dispatches_native_register_action() {
+        let pool = user_db_pool().await;
+        let mut config = test_config(None);
+        config.open_signup = true;
+        let app = super::build_router(AppState::with_db_pool(config, Some(pool.clone())));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailRegister&username=NewUser&email=new@example.com&password=correct-horse",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailRegister");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(
+            body["Result"]["message"],
+            "Account created. Sign in to add your mail accounts."
+        );
+        let user = SqlxUserRepository::find_by_username(&pool, "newuser")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.email.as_deref(), Some("new@example.com"));
+        assert!(fm_user::verify_login_password("correct-horse", Some(&user)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_register_matches_signup_gating() {
+        let pool = user_db_pool().await;
+        seed_user(&pool, 150, "existing", Some("existing@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+
+        let response = super::native_frickmail_register(
+            &state,
+            "FrickmailRegister",
+            &json!({
+                "username": "blocked",
+                "password": "correct-horse",
+            }),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Self-signup is disabled. Ask your admin or set FRICKMAIL_OPEN_SIGNUP=true."
+        );
+
+        let mut config = test_config(None);
+        config.open_signup = true;
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        let response = super::native_frickmail_register(
+            &state,
+            "FrickmailRegister",
+            &json!({
+                "username": " existing ",
+                "password": "correct-horse",
+            }),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Username already taken");
+    }
+
+    #[tokio::test]
     async fn native_frickmail_discover_services_matches_provider_shape() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
@@ -3612,6 +3728,7 @@ mod tests {
             php_bridge_url,
             database_url: None,
             redis_url: "redis://redis:6379/0".to_string(),
+            open_signup: false,
             oidc: Default::default(),
             mail: Default::default(),
         }

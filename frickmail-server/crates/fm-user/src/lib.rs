@@ -183,6 +183,12 @@ pub struct PasswordResetResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisterUserResult {
+    pub ok: bool,
+    pub message: String,
+}
+
 impl FrickmailMe {
     pub fn anonymous() -> Self {
         Self {
@@ -447,6 +453,16 @@ impl SqlxUserRepository {
     ) -> Result<PasswordResetResult> {
         reset_password(pool, token, password).await
     }
+
+    pub async fn register_user(
+        pool: &AnyPool,
+        signup_open: bool,
+        username: String,
+        email: Option<String>,
+        password: String,
+    ) -> Result<RegisterUserResult> {
+        register_user(pool, signup_open, username, email, password).await
+    }
 }
 
 pub fn normalize_username(username: &str) -> String {
@@ -481,6 +497,12 @@ pub fn hash_login_password(password: &str) -> Result<String> {
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
         .map_err(|err| FrickmailError::Upstream(format!("Frickmail password hash failed: {err}")))
+}
+
+pub fn generate_kdf_salt() -> Vec<u8> {
+    let mut salt = vec![0_u8; KDF_SALT_BYTES];
+    OsRng.fill_bytes(&mut salt);
+    salt
 }
 
 pub fn password_reset_token_hash(token: &str) -> String {
@@ -642,6 +664,207 @@ async fn fetch_mail_account(
         .map_err(db_error)?
         .map(row_to_mail_account)
         .transpose()
+}
+
+async fn register_user(
+    pool: &AnyPool,
+    signup_open: bool,
+    username: String,
+    email: Option<String>,
+    password: String,
+) -> Result<RegisterUserResult> {
+    let username = normalize_username(&username);
+    if username.len() < 3 {
+        return Err(FrickmailError::BadRequest(
+            "Username must be at least 3 chars".to_string(),
+        ));
+    }
+    if password.len() < 8 {
+        return Err(FrickmailError::BadRequest(
+            "Password must be at least 8 chars".to_string(),
+        ));
+    }
+    let email = email.and_then(|value| {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    });
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let mysql_signup_lock = !signup_open && backend == "MySQL";
+    if mysql_signup_lock {
+        acquire_mysql_signup_lock(&mut conn).await?;
+    }
+
+    let begin = if !signup_open && backend == "SQLite" {
+        "BEGIN IMMEDIATE"
+    } else {
+        "BEGIN"
+    };
+    if let Err(err) = sqlx::query(begin).execute(&mut *conn).await {
+        if mysql_signup_lock {
+            let _ = release_mysql_signup_lock(&mut conn).await;
+        }
+        return Err(db_error(err));
+    }
+
+    let result = async {
+        if !signup_open {
+            acquire_closed_signup_lock_on_conn(&mut conn, &backend).await?;
+            if user_count_on_conn(&mut conn).await? > 0 {
+                return Err(FrickmailError::BadRequest(
+                    "Self-signup is disabled. Ask your admin or set FRICKMAIL_OPEN_SIGNUP=true."
+                        .to_string(),
+                ));
+            }
+        }
+        if user_exists_by_username_on_conn(&mut conn, &backend, &username).await? {
+            return Err(FrickmailError::BadRequest(
+                "Username already taken".to_string(),
+            ));
+        }
+
+        let password_hash = hash_login_password(&password)?;
+        let kdf_salt = generate_kdf_salt();
+        insert_user_on_conn(
+            &mut conn,
+            &backend,
+            &username,
+            email.as_deref(),
+            &password_hash,
+            &kdf_salt,
+        )
+        .await?;
+
+        Ok(RegisterUserResult {
+            ok: true,
+            message: "Account created. Sign in to add your mail accounts.".to_string(),
+        })
+    }
+    .await;
+
+    match result {
+        Ok(result) => {
+            let commit = sqlx::query("COMMIT").execute(&mut *conn).await;
+            if mysql_signup_lock {
+                let _ = release_mysql_signup_lock(&mut conn).await;
+            }
+            commit.map_err(db_error)?;
+            Ok(result)
+        }
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            if mysql_signup_lock {
+                let _ = release_mysql_signup_lock(&mut conn).await;
+            }
+            Err(err)
+        }
+    }
+}
+
+async fn acquire_mysql_signup_lock(conn: &mut sqlx::pool::PoolConnection<sqlx::Any>) -> Result<()> {
+    let locked = sqlx::query("SELECT GET_LOCK('frickmail_register_first_user', 10) AS locked")
+        .fetch_one(&mut **conn)
+        .await
+        .and_then(|row| row.try_get::<i64, _>("locked"))
+        .map_err(db_error)?;
+    if locked == 1 {
+        Ok(())
+    } else {
+        Err(FrickmailError::Upstream(
+            "frickmail user database error: could not acquire signup lock".to_string(),
+        ))
+    }
+}
+
+async fn release_mysql_signup_lock(conn: &mut sqlx::pool::PoolConnection<sqlx::Any>) -> Result<()> {
+    sqlx::query("SELECT RELEASE_LOCK('frickmail_register_first_user')")
+        .execute(&mut **conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn acquire_closed_signup_lock_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+) -> Result<()> {
+    if backend == "PostgreSQL" {
+        sqlx::query("LOCK TABLE frickmail_users IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut **conn)
+            .await
+            .map_err(db_error)?;
+    }
+    Ok(())
+}
+
+async fn user_count_on_conn(conn: &mut sqlx::pool::PoolConnection<sqlx::Any>) -> Result<i64> {
+    sqlx::query("SELECT COUNT(*) AS count FROM frickmail_users")
+        .fetch_one(&mut **conn)
+        .await
+        .and_then(|row| row.try_get::<i64, _>("count"))
+        .map_err(db_error)
+}
+
+async fn user_exists_by_username_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    username: &str,
+) -> Result<bool> {
+    let query = match backend {
+        "PostgreSQL" => "SELECT 1 FROM frickmail_users WHERE username = $1",
+        _ => "SELECT 1 FROM frickmail_users WHERE username = ?",
+    };
+    sqlx::query(query)
+        .bind(username)
+        .fetch_optional(&mut **conn)
+        .await
+        .map(|row| row.is_some())
+        .map_err(db_error)
+}
+
+async fn insert_user_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    username: &str,
+    email: Option<&str>,
+    password_hash: &str,
+    kdf_salt: &[u8],
+) -> Result<i64> {
+    let settings = json!({}).to_string();
+
+    if matches!(backend, "PostgreSQL" | "SQLite") {
+        return sqlx::query(insert_user_returning_query(backend))
+            .bind(username)
+            .bind(email)
+            .bind(password_hash)
+            .bind(kdf_salt)
+            .bind(&settings)
+            .fetch_one(&mut **conn)
+            .await
+            .and_then(|row| row.try_get("id"))
+            .map_err(db_error);
+    }
+
+    sqlx::query(insert_user_query())
+        .bind(username)
+        .bind(email)
+        .bind(password_hash)
+        .bind(kdf_salt)
+        .bind(&settings)
+        .execute(&mut **conn)
+        .await
+        .map_err(db_error)?
+        .last_insert_id()
+        .ok_or_else(|| {
+            FrickmailError::Upstream(
+                "frickmail user database error: inserted user id is unavailable".to_string(),
+            )
+        })
 }
 
 async fn fetch_mail_identities(pool: &AnyPool, user_id: i64) -> Result<Vec<MailIdentity>> {
@@ -1570,6 +1793,24 @@ fn user_select_query(backend: &str, column: &str) -> String {
         "SELECT id, username, email, password_hash, kdf_salt, {settings} AS settings_json, \
          totp_secret, oidc_escrow_key FROM frickmail_users WHERE {column} = {placeholder}"
     )
+}
+
+fn insert_user_returning_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_users (username, email, password_hash, kdf_salt, settings) \
+             VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id"
+        }
+        _ => {
+            "INSERT INTO frickmail_users (username, email, password_hash, kdf_salt, settings) \
+             VALUES (?, ?, ?, ?, ?) RETURNING id"
+        }
+    }
+}
+
+fn insert_user_query() -> &'static str {
+    "INSERT INTO frickmail_users (username, email, password_hash, kdf_salt, settings) \
+     VALUES (?, ?, ?, ?, ?)"
 }
 
 fn mail_accounts_query(backend: &str) -> &'static str {
@@ -2556,6 +2797,79 @@ mod tests {
         assert_eq!(by_id.totp_secret.as_deref(), Some("123456"));
         assert_eq!(by_id.oidc_escrow_key, Some(vec![9, 8, 7]));
         assert_eq!(SqlxUserRepository::user_count(&pool).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn repository_registers_users_with_php_signup_rules() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+
+        let first = SqlxUserRepository::register_user(
+            &pool,
+            false,
+            "  Alice  ".to_string(),
+            Some("alice@example.com".to_string()),
+            "correct horse battery staple".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            first.message,
+            "Account created. Sign in to add your mail accounts."
+        );
+
+        let alice = SqlxUserRepository::find_by_username(&pool, "ALICE")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alice.username, "alice");
+        assert_eq!(alice.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(alice.kdf_salt.len(), KDF_SALT_BYTES);
+        assert!(verify_password("correct horse battery staple", &alice.password_hash).unwrap());
+        assert_eq!(alice.settings, json!({}));
+
+        let blocked = SqlxUserRepository::register_user(
+            &pool,
+            false,
+            "bob".to_string(),
+            None,
+            "another good password".to_string(),
+        )
+        .await
+        .unwrap_err()
+        .public_message();
+        assert_eq!(
+            blocked,
+            "Self-signup is disabled. Ask your admin or set FRICKMAIL_OPEN_SIGNUP=true."
+        );
+
+        SqlxUserRepository::register_user(
+            &pool,
+            true,
+            "bob".to_string(),
+            Some("".to_string()),
+            "another good password".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(SqlxUserRepository::find_by_username(&pool, "bob")
+            .await
+            .unwrap()
+            .unwrap()
+            .email
+            .is_none());
+
+        let duplicate = SqlxUserRepository::register_user(
+            &pool,
+            true,
+            "ALICE".to_string(),
+            None,
+            "another good password".to_string(),
+        )
+        .await
+        .unwrap_err()
+        .public_message();
+        assert_eq!(duplicate, "Username already taken");
     }
 
     #[test]
@@ -3552,7 +3866,7 @@ mod tests {
                 email TEXT,
                 password_hash TEXT NOT NULL,
                 kdf_salt BLOB NOT NULL,
-                settings {settings_type} NOT NULL,
+                settings {settings_type} NOT NULL DEFAULT '{{}}',
                 totp_secret TEXT,
                 oidc_escrow_key BLOB,
                 updated_at TEXT

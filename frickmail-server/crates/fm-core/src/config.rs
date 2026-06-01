@@ -20,6 +20,8 @@ pub struct FrickmailConfig {
     #[serde(default = "default_redis_url")]
     pub redis_url: String,
     #[serde(default)]
+    pub open_signup: bool,
+    #[serde(default)]
     pub oidc: OidcConfig,
     #[serde(default)]
     pub mail: MailDefaults,
@@ -77,6 +79,9 @@ impl FrickmailConfig {
         if config.database_url.is_none() {
             config.database_url = legacy_frickmail_database_url();
         }
+        if let Some(open_signup) = legacy_open_signup() {
+            config.open_signup = open_signup;
+        }
 
         config.validate()?;
         Ok(config)
@@ -113,6 +118,14 @@ fn default_static_root() -> String {
 
 fn default_database_url() -> Option<String> {
     None
+}
+
+fn legacy_open_signup() -> Option<bool> {
+    let value = env::var("FRICKMAIL_OPEN_SIGNUP").ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => None,
+    }
 }
 
 fn legacy_frickmail_database_url() -> Option<String> {
