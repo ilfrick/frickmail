@@ -827,12 +827,21 @@ async fn native_frickmail_login(
         .as_deref()
         .is_some_and(|secret| !secret.is_empty() && secret != "0")
     {
+        let secret = user.totp_secret.as_deref().unwrap_or_default();
         let totp_code = payload_string(payload, "totp_code")
             .unwrap_or_default()
             .chars()
             .filter(|ch| !ch.is_whitespace())
             .collect::<String>();
-        if totp_code.is_empty() {
+        let totp_result = match SqlxUserRepository::verify_totp_login_code(
+            pool, user.id, secret, totp_code,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        };
+        if !totp_result.ok {
             return json_value_envelope(
                 StatusCode::OK,
                 original_action,
@@ -840,22 +849,11 @@ async fn native_frickmail_login(
                     "Result": {
                         "ok": false,
                         "requires_totp": true,
-                        "error": "Two-factor code required"
+                        "error": totp_result.error.unwrap_or_else(|| "Invalid two-factor code".to_string())
                     }
                 }),
             );
         }
-        return json_value_envelope(
-            StatusCode::OK,
-            original_action,
-            json!({
-                "Result": {
-                    "ok": false,
-                    "requires_totp": true,
-                    "error": "Native TOTP login replay protection is not migrated yet."
-                }
-            }),
-        );
     }
 
     let credential_key = match derive_credential_key(&password, &user.kdf_salt) {
@@ -2766,6 +2764,7 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     use axum::{
@@ -2777,9 +2776,12 @@ mod tests {
         Json, Router,
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, UserSession};
     use fm_session::{MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, USER_SESSION_KEY};
+    use hmac::{Hmac, Mac};
     use serde_json::{json, Value};
+    use sha1::Sha1;
     use sqlx::{any::AnyPoolOptions, AnyPool, Row};
     use tokio::net::TcpListener;
     use tower::ServiceExt;
@@ -3378,6 +3380,68 @@ mod tests {
         assert_eq!(body["Result"]["requires_totp"], true);
         assert_eq!(body["Result"]["error"], "Two-factor code required");
         assert!(session
+            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_login_accepts_totp_once_and_rejects_replay() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_totp_used_table(&pool).await;
+        seed_login_user(
+            &pool,
+            1514,
+            "totp-valid-login",
+            None,
+            "correct-horse",
+            &[12_u8; fm_user::KDF_SALT_BYTES],
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let code = test_totp_code("JBSWY3DPEHPK3PXP", current_test_totp_counter());
+        let session = test_session();
+
+        let response = super::native_frickmail_login(
+            &state,
+            "FrickmailLogin",
+            &json!({
+                "username": "totp-valid-login",
+                "password": "correct-horse",
+                "totp_code": code.clone()
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["no_primary"], true);
+        assert!(session
+            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_some());
+
+        let replay_session = test_session();
+        let response = super::native_frickmail_login(
+            &state,
+            "FrickmailLogin",
+            &json!({
+                "username": "totp-valid-login",
+                "password": "correct-horse",
+                "totp_code": code
+            }),
+            &replay_session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["requires_totp"], true);
+        assert_eq!(body["Result"]["error"], "Two-factor code already used");
+        assert!(replay_session
             .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
             .await
             .unwrap()
@@ -5105,6 +5169,28 @@ mod tests {
         Session::new(None, Arc::new(MemoryStore::default()), None)
     }
 
+    fn current_test_totp_counter() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs() / 30)
+            .unwrap_or_default()
+    }
+
+    fn test_totp_code(secret: &str, counter: u64) -> String {
+        let key = BASE32_NOPAD
+            .decode(secret.trim().to_ascii_uppercase().as_bytes())
+            .unwrap();
+        let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key).unwrap();
+        mac.update(&counter.to_be_bytes());
+        let digest = mac.finalize().into_bytes();
+        let offset = (digest[19] & 0x0f) as usize;
+        let value = (((digest[offset] & 0x7f) as u32) << 24)
+            | ((digest[offset + 1] as u32) << 16)
+            | ((digest[offset + 2] as u32) << 8)
+            | (digest[offset + 3] as u32);
+        format!("{:06}", value % 1_000_000)
+    }
+
     async fn authenticated_session(user_id: i64, username: &str, email: Option<&str>) -> Session {
         let session = test_session();
         session
@@ -5258,6 +5344,21 @@ mod tests {
                 expires_at TEXT NOT NULL,
                 used_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_totp_used_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_totp_used (
+                user_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                \"window\" INTEGER NOT NULL,
+                used_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, code, \"window\")
             )",
         )
         .execute(pool)

@@ -372,6 +372,15 @@ impl SqlxUserRepository {
         disable_totp(pool, user_id, code).await
     }
 
+    pub async fn verify_totp_login_code(
+        pool: &AnyPool,
+        user_id: i64,
+        secret: &str,
+        code: String,
+    ) -> Result<TotpActionResult> {
+        verify_totp_login_code(pool, user_id, secret, code).await
+    }
+
     pub async fn update_preferences(
         pool: &AnyPool,
         user_id: i64,
@@ -744,18 +753,24 @@ fn normalize_totp_code(code: &str) -> String {
 }
 
 fn verify_totp_code_at_current_time(secret: &str, code: &str) -> Result<bool> {
+    Ok(matched_totp_counter_at_current_time(secret, code)?.is_some())
+}
+
+fn matched_totp_counter_at_current_time(secret: &str, code: &str) -> Result<Option<i64>> {
     let counter = current_totp_counter();
     for offset in -1..=1 {
-        if counter >= -offset
-            && constant_time_eq(
-                totp_code(secret, (counter + offset) as u64)?.as_bytes(),
-                code.as_bytes(),
-            )
-        {
-            return Ok(true);
+        let candidate = counter + offset;
+        if candidate < 0 {
+            continue;
+        }
+        if constant_time_eq(
+            totp_code(secret, candidate as u64)?.as_bytes(),
+            code.as_bytes(),
+        ) {
+            return Ok(Some(candidate));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -1336,6 +1351,42 @@ async fn confirm_totp(
     })
 }
 
+async fn verify_totp_login_code(
+    pool: &AnyPool,
+    user_id: i64,
+    secret: &str,
+    code: String,
+) -> Result<TotpActionResult> {
+    let code = normalize_totp_code(&code);
+    if code.is_empty() {
+        return Ok(TotpActionResult {
+            ok: false,
+            message: None,
+            error: Some("Two-factor code required".to_string()),
+        });
+    }
+    let Some(matched_window) = matched_totp_counter_at_current_time(secret, &code)? else {
+        return Ok(TotpActionResult {
+            ok: false,
+            message: None,
+            error: Some("Invalid two-factor code".to_string()),
+        });
+    };
+    if !record_totp_use(pool, user_id, &code, matched_window).await? {
+        return Ok(TotpActionResult {
+            ok: false,
+            message: None,
+            error: Some("Two-factor code already used".to_string()),
+        });
+    }
+
+    Ok(TotpActionResult {
+        ok: true,
+        message: None,
+        error: None,
+    })
+}
+
 async fn disable_totp(pool: &AnyPool, user_id: i64, code: String) -> Result<TotpActionResult> {
     let Some(user) = SqlxUserRepository::find_by_id(pool, user_id).await? else {
         return Err(FrickmailError::Unauthorized);
@@ -1384,6 +1435,25 @@ async fn update_totp_secret(pool: &AnyPool, user_id: i64, secret: Option<&str>) 
         return Err(FrickmailError::Unauthorized);
     }
     Ok(())
+}
+
+async fn record_totp_use(pool: &AnyPool, user_id: i64, code: &str, window: i64) -> Result<bool> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(prune_totp_used_query(&backend))
+        .bind(window - 2)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    sqlx::query(insert_totp_used_query(&backend))
+        .bind(user_id)
+        .bind(code)
+        .bind(window)
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected() == 1)
+        .map_err(db_error)
 }
 
 async fn acquire_closed_signup_lock_on_conn(
@@ -3690,6 +3760,32 @@ fn update_totp_secret_query(backend: &str) -> &'static str {
     }
 }
 
+fn prune_totp_used_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_totp_used WHERE \"window\" < $1",
+        "MySQL" => "DELETE FROM frickmail_totp_used WHERE `window` < ?",
+        _ => "DELETE FROM frickmail_totp_used WHERE \"window\" < ?",
+    }
+}
+
+fn insert_totp_used_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_totp_used (user_id, code, \"window\") \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT DO NOTHING"
+        }
+        "MySQL" => {
+            "INSERT IGNORE INTO frickmail_totp_used (user_id, code, `window`) \
+             VALUES (?, ?, ?)"
+        }
+        _ => {
+            "INSERT OR IGNORE INTO frickmail_totp_used (user_id, code, \"window\") \
+             VALUES (?, ?, ?)"
+        }
+    }
+}
+
 fn consume_password_reset_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -5084,6 +5180,83 @@ mod tests {
         assert!(!SqlxUserRepository::totp_enabled(&pool, 27).await.unwrap());
     }
 
+    #[tokio::test]
+    async fn repository_verifies_totp_login_codes_with_replay_protection() {
+        let pool = sqlite_pool().await;
+        create_totp_used_table(&pool).await;
+        let secret = "JBSWY3DPEHPK3PXP";
+
+        let missing =
+            SqlxUserRepository::verify_totp_login_code(&pool, 28, secret, " ".to_string())
+                .await
+                .unwrap();
+        assert!(!missing.ok);
+        assert_eq!(missing.error.as_deref(), Some("Two-factor code required"));
+
+        let invalid =
+            SqlxUserRepository::verify_totp_login_code(&pool, 28, secret, "000000".to_string())
+                .await
+                .unwrap();
+        assert!(!invalid.ok);
+        assert_eq!(invalid.error.as_deref(), Some("Invalid two-factor code"));
+
+        let code = totp_code(secret, current_totp_counter() as u64).unwrap();
+        let first = SqlxUserRepository::verify_totp_login_code(&pool, 28, secret, code.clone())
+            .await
+            .unwrap();
+        assert!(first.ok);
+
+        let replay = SqlxUserRepository::verify_totp_login_code(&pool, 28, secret, code)
+            .await
+            .unwrap();
+        assert!(!replay.ok);
+        assert_eq!(
+            replay.error.as_deref(),
+            Some("Two-factor code already used")
+        );
+
+        let future_user_id = 29;
+        let future_window = current_totp_counter() + 1;
+        let future_code = totp_code(secret, future_window as u64).unwrap();
+        let future = SqlxUserRepository::verify_totp_login_code(
+            &pool,
+            future_user_id,
+            secret,
+            future_code.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(future.ok);
+        assert_eq!(
+            totp_used_window(&pool, future_user_id, &future_code).await,
+            Some(future_window)
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_accepts_only_one_concurrent_totp_login_use() {
+        let pool = sqlite_pool().await;
+        create_totp_used_table(&pool).await;
+        let secret = "JBSWY3DPEHPK3PXP";
+        let code = totp_code(secret, current_totp_counter() as u64).unwrap();
+
+        let (first, second) = tokio::join!(
+            SqlxUserRepository::verify_totp_login_code(&pool, 30, secret, code.clone()),
+            SqlxUserRepository::verify_totp_login_code(&pool, 30, secret, code.clone())
+        );
+
+        let results = [first.unwrap(), second.unwrap()];
+        assert_eq!(results.iter().filter(|result| result.ok).count(), 1);
+        assert_eq!(results.iter().filter(|result| !result.ok).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .find(|result| !result.ok)
+                .and_then(|result| result.error.as_deref()),
+            Some("Two-factor code already used")
+        );
+    }
+
     #[test]
     fn totp_code_matches_rfc_4226_sha1_vectors() {
         let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -5893,6 +6066,31 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn create_totp_used_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_totp_used (
+                user_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                \"window\" INTEGER NOT NULL,
+                used_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, code, \"window\")
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn totp_used_window(pool: &AnyPool, user_id: i64, code: &str) -> Option<i64> {
+        sqlx::query("SELECT \"window\" FROM frickmail_totp_used WHERE user_id = ? AND code = ?")
+            .bind(user_id)
+            .bind(code)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+            .map(|row| row.try_get("window").unwrap())
     }
 
     async fn create_task_tables(pool: &AnyPool) {
