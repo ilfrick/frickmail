@@ -3,6 +3,7 @@ use tower_sessions::{cookie::SameSite, Expiry, SessionManagerLayer};
 pub use tower_sessions::{MemoryStore, Session};
 
 pub const USER_SESSION_KEY: &str = "frickmail_user";
+pub const CREDENTIAL_KEY_SESSION_KEY: &str = "frickmail_credential_key";
 
 pub fn session_layer() -> SessionManagerLayer<MemoryStore> {
     // Development-only store for the first migration slice. Production cutover

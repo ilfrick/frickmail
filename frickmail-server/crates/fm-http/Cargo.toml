@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
 fm-core = { path = "../fm-core" }
 fm-plugin-compat = { path = "../fm-plugin-compat" }
 fm-session = { path = "../fm-session" }

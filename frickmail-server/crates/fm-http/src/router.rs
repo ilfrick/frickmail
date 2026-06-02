@@ -15,14 +15,16 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
 use fm_smtp::{send_password_reset_email, PasswordResetEmail};
 use fm_user::{
-    FrickmailMe, MailAccount, NewMailIdentity, NewMailRule, NewMailTask, PushSubscription,
-    SqlxUserRepository, TaskFilter, UpdateMailTask,
+    derive_credential_key, verify_login_password, FrickmailMe, MailAccount, NewMailAccount,
+    NewMailIdentity, NewMailRule, NewMailTask, PushSubscription, SqlxUserRepository, TaskFilter,
+    UpdateMailAccount, UpdateMailTask, CREDENTIAL_KEY_BYTES,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -361,6 +363,9 @@ async fn native_compat_response(
         "FrickmailRegister" => {
             Some(native_frickmail_register(state, original_action, payload).await)
         }
+        "FrickmailLogin" => {
+            Some(native_frickmail_login(state, original_action, payload, session).await)
+        }
         "FrickmailDiscoverServices" => {
             Some(native_frickmail_discover_services(state, original_action, payload, session).await)
         }
@@ -376,11 +381,23 @@ async fn native_compat_response(
         "FrickmailListAccounts" => {
             Some(native_frickmail_list_accounts(state, original_action, session).await)
         }
+        "FrickmailAddAccount" => {
+            Some(native_frickmail_add_account(state, original_action, payload, session).await)
+        }
+        "FrickmailUpdateAccount" => {
+            Some(native_frickmail_update_account(state, original_action, payload, session).await)
+        }
         "FrickmailDeleteAccount" => {
             Some(native_frickmail_delete_account(state, original_action, payload, session).await)
         }
         "FrickmailSetPrimary" => {
             Some(native_frickmail_set_primary(state, original_action, payload, session).await)
+        }
+        "FrickmailSetAccountPassword" => Some(
+            native_frickmail_set_account_password(state, original_action, payload, session).await,
+        ),
+        "FrickmailSaveOAuthToken" => {
+            Some(native_frickmail_save_oauth_token(state, original_action, payload, session).await)
         }
         "FrickmailSearch" => {
             Some(native_frickmail_search(state, original_action, payload, session).await)
@@ -780,6 +797,143 @@ async fn native_frickmail_register(
     }
 }
 
+async fn native_frickmail_login(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let username = payload_string(payload, "username").unwrap_or_default();
+    let password = payload_string(payload, "password").unwrap_or_default();
+    let user = match SqlxUserRepository::find_by_username(pool, &username).await {
+        Ok(user) => user,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let verified = match verify_login_password(&password, user.as_ref()) {
+        Ok(verified) => verified,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    if !verified {
+        return json_result_error(original_action, "Invalid username or password");
+    }
+
+    let user = user.expect("verified login requires a user");
+    if user
+        .totp_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty() && secret != "0")
+    {
+        let totp_code = payload_string(payload, "totp_code")
+            .unwrap_or_default()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        if totp_code.is_empty() {
+            return json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": {
+                        "ok": false,
+                        "requires_totp": true,
+                        "error": "Two-factor code required"
+                    }
+                }),
+            );
+        }
+        return json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": false,
+                    "requires_totp": true,
+                    "error": "Native TOTP login replay protection is not migrated yet."
+                }
+            }),
+        );
+    }
+
+    let credential_key = match derive_credential_key(&password, &user.kdf_salt) {
+        Ok(credential_key) => credential_key,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    if let Err(err) = session.cycle_id().await {
+        return json_result_error(
+            original_action,
+            &format!("Frickmail session rotation failed: {err}"),
+        );
+    }
+    if let Err(err) = session
+        .insert(
+            fm_session::USER_SESSION_KEY,
+            fm_core::UserSession {
+                user_id: user.id,
+                username: user.username.clone(),
+                email: user.email.clone(),
+            },
+        )
+        .await
+    {
+        return json_result_error(
+            original_action,
+            &format!("Frickmail session write failed: {err}"),
+        );
+    }
+    if let Err(err) = session
+        .insert(
+            fm_session::CREDENTIAL_KEY_SESSION_KEY,
+            STANDARD.encode(credential_key),
+        )
+        .await
+    {
+        let _ = session
+            .remove::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+            .await;
+        return json_result_error(
+            original_action,
+            &format!("Frickmail session write failed: {err}"),
+        );
+    }
+
+    match SqlxUserRepository::list_mail_accounts(pool, user.id).await {
+        Ok(accounts) => {
+            let primary = accounts.iter().find(|account| account.is_primary);
+            if primary.is_none() {
+                return json_value_envelope(
+                    StatusCode::OK,
+                    original_action,
+                    json!({
+                        "Result": {
+                            "ok": true,
+                            "no_primary": true,
+                            "message": "Logged in. Add a mail account from the settings panel."
+                        }
+                    }),
+                );
+            }
+
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": {
+                        "ok": false,
+                        "bridge_pending": true,
+                        "error": "Native primary-account bridge migration is pending."
+                    }
+                }),
+            )
+        }
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
 async fn native_frickmail_discover_services(
     state: &AppState,
     original_action: &str,
@@ -965,6 +1119,111 @@ async fn native_frickmail_list_accounts(
     }
 }
 
+async fn native_frickmail_add_account(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let account = NewMailAccount {
+        label: payload_optional_string(payload, "label"),
+        email: payload_string(payload, "email").unwrap_or_default(),
+        account_type: payload_string(payload, "type")
+            .or_else(|| payload_string(payload, "account_type"))
+            .unwrap_or_else(|| "imap".to_string()),
+        imap_host: payload_optional_string(payload, "imap_host"),
+        imap_port: payload_optional_i64(payload, "imap_port"),
+        imap_secure: payload_optional_string(payload, "imap_secure"),
+        smtp_host: payload_optional_string(payload, "smtp_host"),
+        smtp_port: payload_optional_i64(payload, "smtp_port"),
+        smtp_secure: payload_optional_string(payload, "smtp_secure"),
+        login: payload_optional_string(payload, "login"),
+        password: payload_optional_string(payload, "password"),
+        oauth_tenant: payload_optional_string(payload, "tenant")
+            .or_else(|| payload_optional_string(payload, "oauth_tenant")),
+        is_primary: payload_bool(payload, "is_primary"),
+    };
+
+    match SqlxUserRepository::add_mail_account(pool, user.user_id, account, &credential_key).await {
+        Ok(id) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "id": id
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_update_account(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let account = UpdateMailAccount {
+        id: payload_i64(payload, "id"),
+        label: payload_optional_string(payload, "label"),
+        imap_host: payload_optional_string(payload, "imap_host"),
+        imap_port: payload_optional_i64(payload, "imap_port"),
+        imap_secure: payload_optional_string(payload, "imap_secure"),
+        smtp_host: payload_optional_string(payload, "smtp_host"),
+        smtp_port: payload_optional_i64(payload, "smtp_port"),
+        smtp_secure: payload_optional_string(payload, "smtp_secure"),
+        login: payload_optional_string(payload, "login"),
+        password: payload_optional_string(payload, "password"),
+    };
+
+    match SqlxUserRepository::update_mail_account(pool, user.user_id, account, &credential_key)
+        .await
+    {
+        Ok(()) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
 async fn native_frickmail_delete_account(
     state: &AppState,
     original_action: &str,
@@ -1031,6 +1290,99 @@ async fn native_frickmail_set_primary(
                 }
             }),
         ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_set_account_password(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    match SqlxUserRepository::set_mail_account_password(
+        pool,
+        user.user_id,
+        payload_i64(payload, "id"),
+        payload_string(payload, "password").unwrap_or_default(),
+        &credential_key,
+    )
+    .await
+    {
+        Ok(true) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Ok(false) => json_result_error(original_action, "Account not found"),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_save_oauth_token(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    match SqlxUserRepository::save_oauth_refresh_token(
+        pool,
+        user.user_id,
+        payload_string(payload, "type").unwrap_or_default(),
+        payload_string(payload, "email").unwrap_or_default(),
+        payload_string(payload, "refresh_token")
+            .or_else(|| payload_string(payload, "token"))
+            .unwrap_or_default(),
+        &credential_key,
+    )
+    .await
+    {
+        Ok(true) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Ok(false) => json_result_error(original_action, "Account not found"),
         Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
@@ -1850,6 +2202,37 @@ async fn load_session_user(
     }
 }
 
+async fn load_session_credential_key(
+    original_action: &str,
+    session: &fm_session::Session,
+) -> std::result::Result<Vec<u8>, Response> {
+    let encoded_key = session
+        .get::<String>(fm_session::CREDENTIAL_KEY_SESSION_KEY)
+        .await
+        .map_err(|err| {
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                compat_error(
+                    UNKNOWN_ERROR,
+                    format!("Frickmail session read failed: {err}"),
+                ),
+            )
+        })?;
+
+    let Some(encoded_key) = encoded_key else {
+        return Err(json_result_error(original_action, "Not authenticated"));
+    };
+    let Ok(key) = STANDARD.decode(encoded_key.trim()) else {
+        return Err(json_result_error(original_action, "Not authenticated"));
+    };
+    if key.len() != CREDENTIAL_KEY_BYTES {
+        return Err(json_result_error(original_action, "Not authenticated"));
+    }
+
+    Ok(key)
+}
+
 fn json_result_error(action: &str, error: &str) -> Response {
     json_value_envelope(
         StatusCode::OK,
@@ -2268,6 +2651,32 @@ fn payload_i64(payload: &Value, key: &str) -> i64 {
     }
 }
 
+fn payload_optional_i64(payload: &Value, key: &str) -> Option<i64> {
+    match payload.get(key) {
+        Some(Value::Null) | None => None,
+        Some(Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => Some(1),
+        Some(Value::String(value)) if value.trim().is_empty() => None,
+        Some(Value::String(value)) => {
+            value
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .and_then(|value| if value > 0 { Some(value) } else { None })
+        }
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_u64()
+                    .map(|value| value.min(i64::MAX as u64) as i64)
+            })
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .and_then(|value| if value > 0 { Some(value) } else { None }),
+        _ => None,
+    }
+}
+
 fn payload_search_limit(payload: &Value) -> i64 {
     let Some(value) = payload.get("limit") else {
         return 50;
@@ -2367,8 +2776,9 @@ mod tests {
         routing::any,
         Json, Router,
     };
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use fm_core::{FrickmailConfig, UserSession};
-    use fm_session::{MemoryStore, Session, USER_SESSION_KEY};
+    use fm_session::{MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, USER_SESSION_KEY};
     use serde_json::{json, Value};
     use sqlx::{any::AnyPoolOptions, AnyPool, Row};
     use tokio::net::TcpListener;
@@ -2883,6 +3293,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_login_writes_user_and_credential_sessions() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let salt = [8_u8; fm_user::KDF_SALT_BYTES];
+        seed_login_user(
+            &pool,
+            1510,
+            "login-user",
+            Some("login-user@example.com"),
+            "correct-horse",
+            &salt,
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = test_session();
+
+        let response = super::native_frickmail_login(
+            &state,
+            "FrickmailLogin",
+            &json!({
+                "username": " LOGIN-USER ",
+                "password": "correct-horse"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["no_primary"], true);
+        let user_session = session
+            .get::<UserSession>(USER_SESSION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user_session.user_id, 1510);
+        assert_eq!(user_session.username, "login-user");
+        let encoded_key = session
+            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored_key = STANDARD.decode(encoded_key).unwrap();
+        assert_eq!(
+            stored_key,
+            fm_user::derive_credential_key("correct-horse", &salt)
+                .unwrap()
+                .to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_login_does_not_bypass_totp() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1511,
+            "totp-login",
+            None,
+            "correct-horse",
+            &[9_u8; fm_user::KDF_SALT_BYTES],
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = test_session();
+
+        let response = super::native_frickmail_login(
+            &state,
+            "FrickmailLogin",
+            &json!({
+                "username": "totp-login",
+                "password": "correct-horse"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["requires_totp"], true);
+        assert_eq!(body["Result"]["error"], "Two-factor code required");
+        assert!(session
+            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_login_marks_primary_accounts_as_bridge_pending() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1513,
+            "primary-login",
+            Some("primary-login@example.com"),
+            "correct-horse",
+            &[11_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        seed_mail_account(&pool, 15130, 1513, "Primary", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = test_session();
+
+        let response = super::native_frickmail_login(
+            &state,
+            "FrickmailLogin",
+            &json!({
+                "username": "primary-login",
+                "password": "correct-horse"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["bridge_pending"], true);
+        assert!(body["Result"].get("no_primary").is_none());
+        assert!(session
+            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_login_action() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1512,
+            "route-login",
+            None,
+            "correct-horse",
+            &[10_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = test_session();
+
+        let response = super::json_api_request(
+            state,
+            "/?/Json/".parse().unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?/Json/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "Action=PluginFrickmailLogin&username=route-login&password=correct-horse",
+                ))
+                .unwrap(),
+            session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailLogin");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["no_primary"], true);
+    }
+
+    #[tokio::test]
     async fn native_frickmail_discover_services_matches_provider_shape() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
@@ -3185,6 +3764,217 @@ mod tests {
         assert!(body["Result"]["accounts"][0]
             .get("encrypted_oauth_refresh_token")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_account_mutations_encrypt_with_session_key() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            155,
+            "account-write",
+            Some("account-write@example.com"),
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let key = [7_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let session = credential_session(
+            155,
+            "account-write",
+            Some("account-write@example.com"),
+            &key,
+        )
+        .await;
+
+        let response = super::native_frickmail_add_account(
+            &state,
+            "FrickmailAddAccount",
+            &json!({
+                "type": "imap",
+                "label": "",
+                "email": "user@example.com",
+                "login": "user@example.com",
+                "password": "secret-pass",
+                "imap_host": "8.8.8.8",
+                "imap_port": 0,
+                "smtp_host": "8.8.4.4",
+                "smtp_port": "0",
+                "is_primary": true
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        let account_id = body["Result"]["id"].as_i64().unwrap();
+        assert_eq!(body["Result"]["ok"], true);
+
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 155)
+            .await
+            .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, account_id);
+        assert_eq!(accounts[0].label, "user@example.com");
+        assert_eq!(accounts[0].imap_port, Some(993));
+        assert!(accounts[0].is_primary);
+        let initial_password_blob = account_encrypted_password(&pool, account_id).await.unwrap();
+        assert_eq!(
+            fm_user::decrypt_account_secret(&initial_password_blob, &key)
+                .unwrap()
+                .as_deref(),
+            Some("secret-pass")
+        );
+
+        let response = super::native_frickmail_update_account(
+            &state,
+            "FrickmailUpdateAccount",
+            &json!({
+                "id": account_id,
+                "label": " Updated ",
+                "login": "updated-login",
+                "password": "",
+                "imap_host": "1.1.1.1",
+                "imap_port": "143",
+                "imap_secure": "STARTTLS",
+                "smtp_host": "8.8.8.8",
+                "smtp_port": 587,
+                "smtp_secure": "STARTTLS"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        let account = SqlxUserRepository::get_mail_account(&pool, 155, account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.label, "Updated");
+        assert_eq!(account.login.as_deref(), Some("updated-login"));
+        assert_eq!(account.imap_host.as_deref(), Some("1.1.1.1"));
+        assert_eq!(account.imap_port, Some(143));
+        assert_eq!(account.smtp_port, Some(587));
+        assert_eq!(
+            account_encrypted_password(&pool, account_id).await.unwrap(),
+            initial_password_blob
+        );
+
+        let response = super::native_frickmail_update_account(
+            &state,
+            "FrickmailUpdateAccount",
+            &json!({
+                "id": account_id,
+                "imap_port": "0",
+                "smtp_port": false
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        let account = SqlxUserRepository::get_mail_account(&pool, 155, account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.imap_port, Some(143));
+        assert_eq!(account.smtp_port, Some(587));
+
+        let response = super::native_frickmail_set_account_password(
+            &state,
+            "FrickmailSetAccountPassword",
+            &json!({
+                "id": account_id,
+                "password": "new-secret"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        let new_password_blob = account_encrypted_password(&pool, account_id).await.unwrap();
+        assert_ne!(new_password_blob, initial_password_blob);
+        assert_eq!(
+            fm_user::decrypt_account_secret(&new_password_blob, &key)
+                .unwrap()
+                .as_deref(),
+            Some("new-secret")
+        );
+
+        let response = super::native_frickmail_save_oauth_token(
+            &state,
+            "FrickmailSaveOAuthToken",
+            &json!({
+                "type": "o365",
+                "email": "USER@example.com",
+                "refresh_token": "refresh-token"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(account_type(&pool, account_id).await, "o365");
+        let token_blob = account_oauth_refresh_token(&pool, account_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            fm_user::decrypt_account_secret(&token_blob, &key)
+                .unwrap()
+                .as_deref(),
+            Some("refresh-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_account_mutations_require_credential_key() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 156, "account-missing-key", None).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(156, "account-missing-key", None).await;
+
+        let response = super::native_frickmail_add_account(
+            &state,
+            "FrickmailAddAccount",
+            &json!({
+                "type": "imap",
+                "email": "blocked@example.com",
+                "imap_host": "8.8.8.8",
+                "smtp_host": "8.8.4.4"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+        assert_eq!(mail_account_count(&pool, 156).await, 0);
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_add_account_action() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailAddAccount&type=imap&email=user%40example.com",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailAddAccount");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
     }
 
     #[tokio::test]
@@ -4331,6 +5121,20 @@ mod tests {
         session
     }
 
+    async fn credential_session(
+        user_id: i64,
+        username: &str,
+        email: Option<&str>,
+        credential_key: &[u8],
+    ) -> Session {
+        let session = authenticated_session(user_id, username, email).await;
+        session
+            .insert(CREDENTIAL_KEY_SESSION_KEY, STANDARD.encode(credential_key))
+            .await
+            .unwrap();
+        session
+    }
+
     async fn user_db_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         let pool = AnyPoolOptions::new()
@@ -4576,6 +5380,33 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_login_user(
+        pool: &AnyPool,
+        id: i64,
+        username: &str,
+        email: Option<&str>,
+        password: &str,
+        kdf_salt: &[u8],
+        totp_secret: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_users
+                (id, username, email, password_hash, kdf_salt, settings, totp_secret, oidc_escrow_key, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(username)
+        .bind(email.map(ToOwned::to_owned))
+        .bind(fm_user::hash_login_password(password).unwrap())
+        .bind(kdf_salt.to_vec())
+        .bind(json!({}).to_string())
+        .bind(totp_secret.map(ToOwned::to_owned))
+        .bind(None::<Vec<u8>>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn seed_mail_account(
         pool: &AnyPool,
         id: i64,
@@ -4641,6 +5472,35 @@ mod tests {
                 .and_then(|row| row.try_get("settings"))
                 .unwrap();
         serde_json::from_str(&settings).unwrap()
+    }
+
+    async fn account_encrypted_password(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {
+        sqlx::query("SELECT encrypted_password FROM frickmail_mail_accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("encrypted_password"))
+            .unwrap()
+    }
+
+    async fn account_oauth_refresh_token(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {
+        sqlx::query(
+            "SELECT encrypted_oauth_refresh_token FROM frickmail_mail_accounts WHERE id = ?",
+        )
+        .bind(account_id)
+        .fetch_one(pool)
+        .await
+        .and_then(|row| row.try_get("encrypted_oauth_refresh_token"))
+        .unwrap()
+    }
+
+    async fn account_type(pool: &AnyPool, account_id: i64) -> String {
+        sqlx::query("SELECT type FROM frickmail_mail_accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("type"))
+            .unwrap()
     }
 
     async fn seed_identity(
