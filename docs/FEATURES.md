@@ -200,12 +200,19 @@ the right pane shows the full message body fetched inline. On viewports narrower
 
 ### Implementation
 
-- **Backend** (`FrickmailUnifiedInbox`): iterates all `imap`-type accounts, opens a
-  direct `MailSo\Imap\ImapClient` connection per account (10 s timeout), fetches
+- **PHP backend** (`FrickmailUnifiedInbox`): iterates all `imap`-type accounts, opens
+  a direct `MailSo\Imap\ImapClient` connection per account (10 s timeout), fetches
   `ENVELOPE`, `FLAGS`, `INTERNALDATE`, and `UID` for the last N messages from `INBOX`,
   merges and sorts all results by `date_ts` descending, and returns up to `limit`
   messages. Errors from individual accounts are collected and returned separately so
   one failing account does not abort the rest.
+
+- **Rust backend** (`FrickmailUnifiedInbox`): serves the same response envelope from
+  `frickmail_message_index` as an indexed snapshot. It returns only `imap` accounts
+  with a stored password, filters to `INBOX`, preserves user/account scoping, and
+  sorts by indexed `date_ts`. The index does not persist IMAP `FLAGS`, so snapshot
+  rows are treated as already seen until native live header fetch or flag indexing is
+  added.
 
 - **Message body** (`FrickmailGetMessageBody`): opens a second MailSo connection for
   the owning account and uses `MailSo\Mail\MailClient::Message()` to fetch the decoded

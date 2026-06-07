@@ -281,6 +281,25 @@ pub struct MessageSearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnifiedInboxMessage {
+    pub account_id: i64,
+    pub account_email: String,
+    pub folder: String,
+    #[serde(rename = "uid")]
+    pub imap_uid: i64,
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    #[serde(rename = "from")]
+    pub from_display: String,
+    pub from_addr: Option<String>,
+    pub from_name: Option<String>,
+    pub date_ts: i64,
+    pub snippet: Option<String>,
+    pub flags: Vec<String>,
+    pub is_seen: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexedMessageBody {
     pub account_id: i64,
     pub folder: String,
@@ -696,6 +715,14 @@ impl SqlxUserRepository {
         limit: i64,
     ) -> Result<Vec<MessageSearchResult>> {
         search_messages(pool, user_id, query, limit).await
+    }
+
+    pub async fn unified_inbox_messages(
+        pool: &AnyPool,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<Vec<UnifiedInboxMessage>> {
+        unified_inbox_messages(pool, user_id, limit).await
     }
 
     pub async fn indexed_message_body(
@@ -2735,6 +2762,26 @@ async fn search_messages(
         .collect()
 }
 
+async fn unified_inbox_messages(
+    pool: &AnyPool,
+    user_id: i64,
+    limit: i64,
+) -> Result<Vec<UnifiedInboxMessage>> {
+    let limit = limit.clamp(1, 100);
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(unified_inbox_messages_query(&backend))
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_unified_inbox_message)
+        .collect()
+}
+
 async fn indexed_message_body(
     pool: &AnyPool,
     user_id: i64,
@@ -4094,6 +4141,47 @@ fn search_messages_query(backend: &str) -> &'static str {
     }
 }
 
+fn unified_inbox_messages_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT mi.account_id, ma.email AS account_email, mi.folder, mi.imap_uid, \
+                mi.message_id, mi.subject, mi.from_addr, mi.from_name, \
+                mi.date_ts::text AS date_ts, mi.snippet \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = $1 AND mi.folder = 'INBOX' \
+               AND ma.type = 'imap' \
+               AND ma.encrypted_password IS NOT NULL \
+               AND octet_length(ma.encrypted_password) > 0 \
+             ORDER BY mi.date_ts DESC NULLS LAST, mi.imap_uid DESC LIMIT $2"
+        }
+        "MySQL" => {
+            "SELECT mi.account_id, ma.email AS account_email, mi.folder, mi.imap_uid, \
+                mi.message_id, mi.subject, mi.from_addr, mi.from_name, \
+                CAST(mi.date_ts AS CHAR) AS date_ts, mi.snippet \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = ? AND mi.folder = 'INBOX' \
+               AND ma.type = 'imap' \
+               AND ma.encrypted_password IS NOT NULL \
+               AND LENGTH(ma.encrypted_password) > 0 \
+             ORDER BY mi.date_ts IS NULL ASC, mi.date_ts DESC, mi.imap_uid DESC LIMIT ?"
+        }
+        _ => {
+            "SELECT mi.account_id, ma.email AS account_email, mi.folder, mi.imap_uid, \
+                mi.message_id, mi.subject, mi.from_addr, mi.from_name, \
+                CAST(mi.date_ts AS TEXT) AS date_ts, mi.snippet \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = ? AND mi.folder = 'INBOX' \
+               AND ma.type = 'imap' \
+               AND ma.encrypted_password IS NOT NULL \
+               AND length(ma.encrypted_password) > 0 \
+             ORDER BY mi.date_ts IS NULL ASC, mi.date_ts DESC, mi.imap_uid DESC LIMIT ?"
+        }
+    }
+}
+
 fn indexed_message_body_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -4438,6 +4526,80 @@ fn row_to_message_search_result(row: sqlx::any::AnyRow) -> Result<MessageSearchR
         snippet: row.try_get("snippet").map_err(db_error)?,
         account_email: row.try_get("account_email").map_err(db_error)?,
     })
+}
+
+fn row_to_unified_inbox_message(row: sqlx::any::AnyRow) -> Result<UnifiedInboxMessage> {
+    let from_name: Option<String> = row.try_get("from_name").map_err(db_error)?;
+    let from_addr: Option<String> = row.try_get("from_addr").map_err(db_error)?;
+    let from_display = from_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(from_addr.as_deref())
+        .unwrap_or_default()
+        .to_string();
+    let date_value: Option<String> = row.try_get("date_ts").map_err(db_error)?;
+
+    Ok(UnifiedInboxMessage {
+        account_id: row.try_get("account_id").map_err(db_error)?,
+        account_email: row.try_get("account_email").map_err(db_error)?,
+        folder: row.try_get("folder").map_err(db_error)?,
+        imap_uid: row.try_get("imap_uid").map_err(db_error)?,
+        message_id: row.try_get("message_id").map_err(db_error)?,
+        subject: row.try_get("subject").map_err(db_error)?,
+        from_display,
+        from_addr,
+        from_name,
+        date_ts: normalize_message_epoch(date_value.as_deref()),
+        snippet: row.try_get("snippet").map_err(db_error)?,
+        flags: Vec::new(),
+        is_seen: true,
+    })
+}
+
+fn normalize_message_epoch(value: Option<&str>) -> i64 {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return 0;
+    };
+    if let Ok(epoch) = value.parse::<i64>() {
+        return epoch;
+    }
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
+        return datetime.timestamp();
+    }
+    if let Some(normalized) = normalize_db_timestamp_for_rfc3339(value) {
+        if let Ok(datetime) = DateTime::parse_from_rfc3339(&normalized) {
+            return datetime.timestamp();
+        }
+    }
+    for format in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
+        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format) {
+            return DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc).timestamp();
+        }
+    }
+    0
+}
+
+fn normalize_db_timestamp_for_rfc3339(value: &str) -> Option<String> {
+    let mut value = value.replacen(' ', "T", 1);
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3 {
+        let offset = &bytes[bytes.len() - 3..];
+        if matches!(offset[0], b'+' | b'-')
+            && offset[1].is_ascii_digit()
+            && offset[2].is_ascii_digit()
+        {
+            value.push_str(":00");
+            return Some(value);
+        }
+    }
+    if bytes.len() >= 5 {
+        let offset = &bytes[bytes.len() - 5..];
+        if matches!(offset[0], b'+' | b'-') && offset[1..].iter().all(u8::is_ascii_digit) {
+            value.insert(value.len() - 2, ':');
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn sha256_hex(input: &[u8]) -> String {
@@ -5525,6 +5687,175 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.public_message(), "Query too short");
+    }
+
+    #[tokio::test]
+    async fn repository_lists_unified_inbox_from_index_with_user_scope_and_epoch_dates() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        insert_user(&pool, 31, json!({})).await;
+        insert_user(&pool, 32, json!({})).await;
+        insert_mail_account(&pool, 160, 31, "Work", true).await;
+        insert_mail_account(&pool, 161, 31, "Personal", false).await;
+        insert_mail_account(&pool, 162, 32, "OtherUser", true).await;
+        insert_mail_account(&pool, 163, 31, "OAuthOnly", false).await;
+        insert_mail_account(&pool, 164, 31, "NoPassword", false).await;
+        sqlx::query("UPDATE frickmail_mail_accounts SET type = 'gmail' WHERE id = ?")
+            .bind(163_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE frickmail_mail_accounts SET encrypted_password = NULL WHERE id = ?")
+            .bind(164_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 11,
+                user_id: 31,
+                account_id: 160,
+                folder: "INBOX",
+                imap_uid: 20,
+                message_id: Some("msg-20"),
+                subject: Some("Older inbox"),
+                from_addr: Some("billing@example.com"),
+                from_name: Some("Billing"),
+                date_ts: Some("2026-06-02 10:00:00"),
+                snippet: Some("Old indexed body"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 12,
+                user_id: 31,
+                account_id: 161,
+                folder: "INBOX",
+                imap_uid: 21,
+                message_id: Some("msg-21"),
+                subject: Some("Newest inbox"),
+                from_addr: Some("friend@example.com"),
+                from_name: None,
+                date_ts: Some("2026-06-03T10:00:00Z"),
+                snippet: Some("New indexed body"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 13,
+                user_id: 31,
+                account_id: 160,
+                folder: "Archive",
+                imap_uid: 22,
+                message_id: Some("msg-22"),
+                subject: Some("Archived"),
+                from_addr: Some("archive@example.com"),
+                from_name: Some("Archive"),
+                date_ts: Some("2026-06-04 10:00:00"),
+                snippet: Some("Should not appear"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 14,
+                user_id: 32,
+                account_id: 162,
+                folder: "INBOX",
+                imap_uid: 23,
+                message_id: Some("msg-23"),
+                subject: Some("Other user"),
+                from_addr: Some("other@example.com"),
+                from_name: Some("Other"),
+                date_ts: Some("2026-06-05 10:00:00"),
+                snippet: Some("Should not leak"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 15,
+                user_id: 31,
+                account_id: 163,
+                folder: "INBOX",
+                imap_uid: 24,
+                message_id: Some("msg-24"),
+                subject: Some("OAuth-only account"),
+                from_addr: Some("oauth@example.com"),
+                from_name: Some("OAuth"),
+                date_ts: Some("2026-06-06 10:00:00"),
+                snippet: Some("Non-IMAP accounts should not appear"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 16,
+                user_id: 31,
+                account_id: 164,
+                folder: "INBOX",
+                imap_uid: 25,
+                message_id: Some("msg-25"),
+                subject: Some("Passwordless account"),
+                from_addr: Some("nopass@example.com"),
+                from_name: Some("NoPassword"),
+                date_ts: Some("2026-06-07 10:00:00"),
+                snippet: Some("Credential-cleared accounts should not appear"),
+            },
+        )
+        .await;
+
+        let messages = SqlxUserRepository::unified_inbox_messages(&pool, 31, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].account_id, 161);
+        assert_eq!(messages[0].account_email, "personal@example.com");
+        assert_eq!(messages[0].imap_uid, 21);
+        assert_eq!(messages[0].from_display, "friend@example.com");
+        assert_eq!(messages[0].date_ts, 1_780_480_800);
+        assert_eq!(messages[0].flags, Vec::<String>::new());
+        assert!(messages[0].is_seen);
+        assert_eq!(messages[1].account_id, 160);
+        assert_eq!(messages[1].from_display, "Billing");
+        assert_eq!(messages[1].date_ts, 1_780_394_400);
+
+        let limited = SqlxUserRepository::unified_inbox_messages(&pool, 31, 1)
+            .await
+            .unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].imap_uid, 21);
+    }
+
+    #[test]
+    fn unified_inbox_epoch_parser_accepts_common_db_timestamp_formats() {
+        assert_eq!(
+            super::normalize_message_epoch(Some("2026-06-03T10:00:00Z")),
+            1_780_480_800
+        );
+        assert_eq!(
+            super::normalize_message_epoch(Some("2026-06-03 10:00:00.123456")),
+            1_780_480_800
+        );
+        assert_eq!(
+            super::normalize_message_epoch(Some("2026-06-03 10:00:00+00")),
+            1_780_480_800
+        );
+        assert_eq!(
+            super::normalize_message_epoch(Some("2026-06-03 12:00:00+0200")),
+            1_780_480_800
+        );
     }
 
     #[tokio::test]

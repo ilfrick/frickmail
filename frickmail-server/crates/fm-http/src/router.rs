@@ -427,6 +427,9 @@ async fn native_compat_response(
         "FrickmailSearch" => {
             Some(native_frickmail_search(state, original_action, payload, session).await)
         }
+        "FrickmailUnifiedInbox" => {
+            Some(native_frickmail_unified_inbox(state, original_action, payload, session).await)
+        }
         "FrickmailGetMessageBody" => {
             Some(native_frickmail_get_message_body(state, original_action, payload, session).await)
         }
@@ -1457,6 +1460,45 @@ async fn native_frickmail_search(
                     "ok": true,
                     "query": trimmed_query,
                     "results": results
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_unified_inbox(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    match SqlxUserRepository::unified_inbox_messages(
+        pool,
+        user.user_id,
+        payload_search_limit(payload),
+    )
+    .await
+    {
+        Ok(messages) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "messages": messages,
+                    "errors": []
                 }
             }),
         ),
@@ -4982,6 +5024,163 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["Result"]["ok"], false);
         assert_eq!(body["Result"]["error"], "Query too short");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_unified_inbox_returns_indexed_inbox_shape() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        seed_user(&pool, 151, "unified", Some("unified@example.com")).await;
+        seed_user(
+            &pool,
+            152,
+            "other-unified",
+            Some("other-unified@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 1312, 151, "Work", true).await;
+        seed_mail_account(&pool, 1313, 151, "Personal", false).await;
+        seed_mail_account(&pool, 1314, 152, "Other", true).await;
+        seed_mail_account(&pool, 1315, 151, "OAuthOnly", false).await;
+        seed_mail_account(&pool, 1316, 151, "NoPassword", false).await;
+        sqlx::query("UPDATE frickmail_mail_accounts SET type = 'gmail' WHERE id = ?")
+            .bind(1315_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE frickmail_mail_accounts SET encrypted_password = NULL WHERE id = ?")
+            .bind(1316_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 4,
+                user_id: 151,
+                account_id: 1312,
+                folder: "INBOX",
+                imap_uid: 41,
+                message_id: Some("unified-1"),
+                subject: Some("Old inbox"),
+                from_addr: Some("billing@example.com"),
+                from_name: Some("Billing"),
+                date_ts: Some("2026-06-01 10:00:00"),
+                snippet: Some("Old body"),
+            },
+        )
+        .await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 5,
+                user_id: 151,
+                account_id: 1313,
+                folder: "INBOX",
+                imap_uid: 42,
+                message_id: Some("unified-2"),
+                subject: Some("New inbox"),
+                from_addr: Some("friend@example.com"),
+                from_name: None,
+                date_ts: Some("2026-06-02 10:00:00"),
+                snippet: Some("New body"),
+            },
+        )
+        .await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 6,
+                user_id: 151,
+                account_id: 1312,
+                folder: "Archive",
+                imap_uid: 43,
+                message_id: Some("unified-3"),
+                subject: Some("Archived"),
+                from_addr: Some("archive@example.com"),
+                from_name: Some("Archive"),
+                date_ts: Some("2026-06-03 10:00:00"),
+                snippet: Some("Must not appear"),
+            },
+        )
+        .await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 7,
+                user_id: 152,
+                account_id: 1314,
+                folder: "INBOX",
+                imap_uid: 44,
+                message_id: Some("unified-4"),
+                subject: Some("Other user"),
+                from_addr: Some("other@example.com"),
+                from_name: Some("Other"),
+                date_ts: Some("2026-06-04 10:00:00"),
+                snippet: Some("Must not leak"),
+            },
+        )
+        .await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 8,
+                user_id: 151,
+                account_id: 1315,
+                folder: "INBOX",
+                imap_uid: 45,
+                message_id: Some("unified-5"),
+                subject: Some("OAuth-only account"),
+                from_addr: Some("oauth@example.com"),
+                from_name: Some("OAuth"),
+                date_ts: Some("2026-06-05 10:00:00"),
+                snippet: Some("Non-IMAP account should not appear"),
+            },
+        )
+        .await;
+        seed_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 9,
+                user_id: 151,
+                account_id: 1316,
+                folder: "INBOX",
+                imap_uid: 46,
+                message_id: Some("unified-6"),
+                subject: Some("Passwordless account"),
+                from_addr: Some("nopass@example.com"),
+                from_name: Some("NoPassword"),
+                date_ts: Some("2026-06-06 10:00:00"),
+                snippet: Some("Credential-cleared account should not appear"),
+            },
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(151, "unified", None).await;
+
+        let response = super::native_frickmail_unified_inbox(
+            &state,
+            "PluginFrickmailUnifiedInbox",
+            &json!({"limit": 1}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "PluginFrickmailUnifiedInbox");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["errors"].as_array().unwrap().len(), 0);
+        let messages = body["Result"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["account_id"], 1313);
+        assert_eq!(messages[0]["account_email"], "personal@example.com");
+        assert_eq!(messages[0]["uid"], 42);
+        assert_eq!(messages[0]["subject"], "New inbox");
+        assert_eq!(messages[0]["from"], "friend@example.com");
+        assert_eq!(messages[0]["date_ts"], 1_780_394_400);
+        assert_eq!(messages[0]["is_seen"], true);
+        assert_eq!(messages[0]["flags"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
