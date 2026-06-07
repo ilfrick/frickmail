@@ -215,9 +215,9 @@ pub struct PushSubscription {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct VapidKeyBundle {
-    public_b64u: String,
-    private_pem: String,
+pub struct VapidKeyBundle {
+    pub public_b64u: String,
+    pub private_pem: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -609,8 +609,19 @@ impl SqlxUserRepository {
         delete_push_subscription(pool, user_id, endpoint).await
     }
 
+    pub async fn list_push_subscriptions(
+        pool: &AnyPool,
+        user_id: i64,
+    ) -> Result<Vec<PushSubscription>> {
+        list_push_subscriptions(pool, user_id).await
+    }
+
     pub async fn get_or_create_vapid_public_key(pool: &AnyPool) -> Result<String> {
         get_or_create_vapid_public_key(pool).await
+    }
+
+    pub async fn get_or_create_vapid_key_bundle(pool: &AnyPool) -> Result<VapidKeyBundle> {
+        get_or_create_vapid_key_bundle(pool).await
     }
 
     pub async fn list_oidc_links(
@@ -2211,11 +2222,31 @@ async fn delete_push_subscription(pool: &AnyPool, user_id: i64, endpoint: String
         .map_err(db_error)
 }
 
+async fn list_push_subscriptions(pool: &AnyPool, user_id: i64) -> Result<Vec<PushSubscription>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(push_subscriptions_query(&backend))
+        .bind(user_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(row_to_push_subscription)
+        .collect()
+}
+
 async fn get_or_create_vapid_public_key(pool: &AnyPool) -> Result<String> {
+    get_or_create_vapid_key_bundle(pool)
+        .await
+        .map(|bundle| bundle.public_b64u)
+}
+
+async fn get_or_create_vapid_key_bundle(pool: &AnyPool) -> Result<VapidKeyBundle> {
     ensure_app_settings_table(pool).await?;
 
     if let Some(bundle) = read_vapid_key_bundle(pool).await? {
-        return Ok(bundle.public_b64u);
+        return Ok(bundle);
     }
 
     let bundle = generate_vapid_key_bundle()?;
@@ -2226,12 +2257,9 @@ async fn get_or_create_vapid_public_key(pool: &AnyPool) -> Result<String> {
     )
     .await?;
 
-    read_vapid_key_bundle(pool)
-        .await?
-        .map(|bundle| bundle.public_b64u)
-        .ok_or_else(|| {
-            FrickmailError::Upstream("VAPID key creation did not persist a usable key".to_string())
-        })
+    read_vapid_key_bundle(pool).await?.ok_or_else(|| {
+        FrickmailError::Upstream("VAPID key creation did not persist a usable key".to_string())
+    })
 }
 
 async fn read_vapid_key_bundle(pool: &AnyPool) -> Result<Option<VapidKeyBundle>> {
@@ -3799,6 +3827,17 @@ fn delete_push_subscription_query(backend: &str) -> &'static str {
     }
 }
 
+fn push_subscriptions_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT endpoint, p256dh, auth_key FROM frickmail_push_subscriptions WHERE user_id = $1 ORDER BY id ASC"
+        }
+        _ => {
+            "SELECT endpoint, p256dh, auth_key FROM frickmail_push_subscriptions WHERE user_id = ? ORDER BY id ASC"
+        }
+    }
+}
+
 fn app_setting_select_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => "SELECT setting_value FROM frickmail_app_settings WHERE setting_key = $1",
@@ -4360,6 +4399,14 @@ fn row_to_oidc_link(row: sqlx::any::AnyRow, provider_name: &str) -> Result<OidcL
         provider_hash: row.try_get("provider_hash").map_err(db_error)?,
         provider_name: provider_name.to_string(),
         linked_at: row.try_get("linked_at").map_err(db_error)?,
+    })
+}
+
+fn row_to_push_subscription(row: sqlx::any::AnyRow) -> Result<PushSubscription> {
+    Ok(PushSubscription {
+        endpoint: row.try_get("endpoint").map_err(db_error)?,
+        p256dh: row.try_get("p256dh").map_err(db_error)?,
+        auth_key: row.try_get("auth_key").map_err(db_error)?,
     })
 }
 
@@ -6304,6 +6351,17 @@ mod tests {
                 .await
                 .as_deref(),
             Some("auth-2")
+        );
+        let subscriptions = SqlxUserRepository::list_push_subscriptions(&pool, 21)
+            .await
+            .unwrap();
+        assert_eq!(
+            subscriptions,
+            vec![PushSubscription {
+                endpoint: "https://push.example/sub".to_string(),
+                p256dh: "key-2".to_string(),
+                auth_key: "auth-2".to_string(),
+            }]
         );
 
         SqlxUserRepository::delete_push_subscription(

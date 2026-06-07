@@ -15,7 +15,10 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
     fetch_mailbox_status, fetch_message_body_preview, BodyPreviewPart, ImapConnectionConfig,
@@ -30,7 +33,11 @@ use fm_user::{
     decrypt_account_secret, derive_credential_key, verify_login_password, FrickmailMe, MailAccount,
     MailAccountConnectionSecret, NewMailAccount, NewMailIdentity, NewMailRule, NewMailTask,
     NewSmimeCert, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailAccount,
-    UpdateMailTask, CREDENTIAL_KEY_BYTES,
+    UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES,
+};
+use p256::{
+    ecdsa::{signature::Signer, Signature, SigningKey},
+    pkcs8::DecodePrivateKey,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -46,6 +53,16 @@ const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const TOTP_PENDING_SESSION_KEY: &str = "frickmail_totp_pending_secret";
 const MESSAGE_BODY_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
+const LONG_POLL_NEW_MAIL_DEADLINE: Duration = Duration::from_secs(25);
+const LONG_POLL_NEW_MAIL_INTERVAL: Duration = Duration::from_secs(5);
+const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy)]
+struct LongPollNewMailTiming {
+    fetch_deadline: Duration,
+    poll_deadline: Duration,
+    poll_interval: Duration,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DiscoveredService {
@@ -416,6 +433,9 @@ async fn native_compat_response(
         "FrickmailCheckNewMail" => {
             Some(native_frickmail_check_new_mail(state, original_action, payload, session).await)
         }
+        "FrickmailLongPollNewMail" => Some(
+            native_frickmail_long_poll_new_mail(state, original_action, payload, session).await,
+        ),
         "FrickmailListIdentities" => {
             Some(native_frickmail_list_identities(state, original_action, payload, session).await)
         }
@@ -1593,31 +1613,156 @@ where
     };
 
     let last_uids = payload_last_uids(payload);
-    let accounts = match SqlxUserRepository::list_mail_accounts(pool, user.user_id).await {
+    let accounts = match check_new_mail_accounts_with_fetcher(
+        pool,
+        user.user_id,
+        &credential_key,
+        &last_uids,
+        fetch_deadline,
+        fetcher,
+    )
+    .await
+    {
         Ok(accounts) => accounts,
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
 
+    new_mail_accounts_response(original_action, accounts, false)
+}
+
+async fn native_frickmail_long_poll_new_mail(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_long_poll_new_mail_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        LongPollNewMailTiming {
+            fetch_deadline: CHECK_NEW_MAIL_ACCOUNT_DEADLINE,
+            poll_deadline: LONG_POLL_NEW_MAIL_DEADLINE,
+            poll_interval: LONG_POLL_NEW_MAIL_INTERVAL,
+        },
+        |config, password, folder| async move {
+            fetch_mailbox_status(config, &password, &folder).await
+        },
+    )
+    .await
+}
+
+async fn native_frickmail_long_poll_new_mail_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    timing: LongPollNewMailTiming,
+    fetcher: F,
+) -> Response
+where
+    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    Fut: std::future::Future<Output = fm_core::Result<MailboxStatus>>,
+{
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let started = tokio::time::Instant::now();
+    let mut last_uids = payload_last_uids(payload);
+
+    loop {
+        let accounts = match check_new_mail_accounts_with_fetcher(
+            pool,
+            user.user_id,
+            &credential_key,
+            &last_uids,
+            timing.fetch_deadline,
+            fetcher.clone(),
+        )
+        .await
+        {
+            Ok(accounts) => accounts,
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        };
+
+        for account in &accounts {
+            let Some(account_id) = account.get("account_id").and_then(Value::as_i64) else {
+                continue;
+            };
+            let uidnext = account
+                .get("uidnext")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            if uidnext > 0 {
+                last_uids.insert(account_id.to_string(), uidnext);
+            }
+        }
+
+        if accounts.iter().any(new_mail_account_has_delta) {
+            spawn_web_push_to_user(pool.clone(), user.user_id, accounts.clone());
+            return new_mail_accounts_response(original_action, accounts, false);
+        }
+
+        if started.elapsed() >= timing.poll_deadline {
+            return new_mail_accounts_response(original_action, accounts, true);
+        }
+
+        let remaining = timing
+            .poll_deadline
+            .checked_sub(started.elapsed())
+            .unwrap_or_default();
+        let sleep_for = timing.poll_interval.min(remaining);
+        if sleep_for.is_zero() {
+            return new_mail_accounts_response(original_action, accounts, true);
+        }
+        tokio::time::sleep(sleep_for).await;
+    }
+}
+
+async fn check_new_mail_accounts_with_fetcher<F, Fut>(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    credential_key: &[u8],
+    last_uids: &HashMap<String, i64>,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> fm_core::Result<Vec<Value>>
+where
+    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    Fut: std::future::Future<Output = fm_core::Result<MailboxStatus>>,
+{
+    let accounts = SqlxUserRepository::list_mail_accounts(pool, user_id).await?;
     let mut results = Vec::new();
     for account in accounts {
         if account.account_type != "imap" {
             continue;
         }
-        let secret = match SqlxUserRepository::get_mail_account_connection_secret(
-            pool,
-            user.user_id,
-            account.id,
-        )
-        .await
-        {
-            Ok(Some(secret)) => secret,
-            _ => continue,
-        };
+        let secret =
+            match SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account.id)
+                .await
+            {
+                Ok(Some(secret)) => secret,
+                _ => continue,
+            };
         let config = match imap_config_from_account_secret(&secret) {
             Ok(config) => config,
             Err(_) => continue,
         };
-        let password = match account_password(&secret, &credential_key) {
+        let password = match account_password(&secret, credential_key) {
             Ok(password) => password,
             Err(_) => continue,
         };
@@ -1653,16 +1798,187 @@ where
         }));
     }
 
+    Ok(results)
+}
+
+fn new_mail_accounts_response(action: &str, accounts: Vec<Value>, timeout: bool) -> Response {
+    let mut result = json!({
+        "ok": true,
+        "accounts": accounts
+    });
+    if timeout {
+        result["timeout"] = Value::Bool(true);
+    }
+
     json_value_envelope(
         StatusCode::OK,
-        original_action,
+        action,
         json!({
-            "Result": {
-                "ok": true,
-                "accounts": results
-            }
+            "Result": result
         }),
     )
+}
+
+fn new_mail_account_has_delta(account: &Value) -> bool {
+    account
+        .get("new_count")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        > 0
+}
+
+fn spawn_web_push_to_user(pool: sqlx::AnyPool, user_id: i64, accounts: Vec<Value>) {
+    tokio::spawn(async move {
+        send_web_push_to_user(&pool, user_id, &accounts).await;
+    });
+}
+
+async fn send_web_push_to_user(pool: &sqlx::AnyPool, user_id: i64, accounts: &[Value]) {
+    let subscriptions = match SqlxUserRepository::list_push_subscriptions(pool, user_id).await {
+        Ok(subscriptions) if !subscriptions.is_empty() => subscriptions,
+        _ => return,
+    };
+    let bundle = match SqlxUserRepository::get_or_create_vapid_key_bundle(pool).await {
+        Ok(bundle) => bundle,
+        Err(_) => return,
+    };
+    let subject = "mailto:Frickmail";
+    let payload = new_mail_push_payload(accounts);
+
+    for subscription in subscriptions {
+        let _ = tokio::time::timeout(
+            WEB_PUSH_DELIVERY_DEADLINE,
+            send_validated_web_push_subscription(&subscription, &bundle, subject, &payload),
+        )
+        .await;
+    }
+}
+
+fn new_mail_push_payload(accounts: &[Value]) -> Value {
+    let mut total = 0_i64;
+    let mut body = String::new();
+    for account in accounts {
+        let new_count = account
+            .get("new_count")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        if new_count <= 0 {
+            continue;
+        }
+        total += new_count;
+        if body.is_empty() {
+            body = account
+                .get("account_email")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+        }
+    }
+
+    json!({
+        "title": if total == 1 {
+            "1 new message".to_string()
+        } else {
+            format!("{total} new messages")
+        },
+        "body": body,
+        "tag": "fm-newmail",
+        "url": "/"
+    })
+}
+
+async fn send_validated_web_push_subscription(
+    subscription: &PushSubscription,
+    bundle: &VapidKeyBundle,
+    subject: &str,
+    payload: &Value,
+) -> fm_core::Result<bool> {
+    let client = validated_web_push_client(&subscription.endpoint).await?;
+    send_web_push_subscription(&client, subscription, bundle, subject, payload).await
+}
+
+async fn validated_web_push_client(endpoint: &str) -> fm_core::Result<reqwest::Client> {
+    let endpoint = url::Url::parse(endpoint.trim())
+        .map_err(|err| FrickmailError::BadRequest(format!("invalid push endpoint: {err}")))?;
+    if endpoint.scheme() != "https" {
+        return Err(FrickmailError::BadRequest(
+            "push endpoint must use https".to_string(),
+        ));
+    }
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| FrickmailError::BadRequest("invalid push endpoint host".to_string()))?;
+    let port = endpoint
+        .port_or_known_default()
+        .ok_or_else(|| FrickmailError::BadRequest("invalid push endpoint port".to_string()))?;
+    let addrs = public_socket_addrs(host, port).await.ok_or_else(|| {
+        FrickmailError::BadRequest("push endpoint must resolve to public addresses".to_string())
+    })?;
+
+    reqwest::Client::builder()
+        .timeout(WEB_PUSH_DELIVERY_DEADLINE)
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, &addrs)
+        .build()
+        .map_err(|err| FrickmailError::Upstream(format!("Web Push client setup failed: {err}")))
+}
+
+async fn send_web_push_subscription(
+    client: &reqwest::Client,
+    subscription: &PushSubscription,
+    bundle: &VapidKeyBundle,
+    subject: &str,
+    payload: &Value,
+) -> fm_core::Result<bool> {
+    if subscription.endpoint.trim().is_empty() {
+        return Ok(false);
+    }
+    let auth_header = vapid_auth_header(&subscription.endpoint, subject, bundle)?;
+    let body = payload.to_string();
+    let response = client
+        .post(subscription.endpoint.trim())
+        .header("Authorization", auth_header)
+        .header("TTL", "86400")
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|err| FrickmailError::Upstream(format!("Web Push request failed: {err}")))?;
+
+    Ok(response.status().is_success())
+}
+
+fn vapid_auth_header(
+    endpoint: &str,
+    subject: &str,
+    bundle: &VapidKeyBundle,
+) -> fm_core::Result<String> {
+    let endpoint = url::Url::parse(endpoint)
+        .map_err(|err| FrickmailError::BadRequest(format!("invalid push endpoint: {err}")))?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| FrickmailError::BadRequest("invalid push endpoint host".to_string()))?;
+    let audience = format!("{}://{}", endpoint.scheme(), host);
+    let jwt_header = URL_SAFE_NO_PAD.encode(r#"{"typ":"JWT","alg":"ES256"}"#);
+    let jwt_payload = URL_SAFE_NO_PAD.encode(
+        json!({
+            "aud": audience,
+            "exp": current_epoch() + 43_200,
+            "sub": subject
+        })
+        .to_string(),
+    );
+    let sig_input = format!("{jwt_header}.{jwt_payload}");
+    let signing_key = SigningKey::from_pkcs8_pem(&bundle.private_pem).map_err(|err| {
+        FrickmailError::Upstream(format!("stored VAPID private key is invalid: {err}"))
+    })?;
+    let signature: Signature = signing_key.sign(sig_input.as_bytes());
+    let signature_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+    Ok(format!(
+        "vapid t={sig_input}.{signature_b64},k={}",
+        bundle.public_b64u
+    ))
 }
 
 async fn native_frickmail_list_identities(
@@ -3209,9 +3525,10 @@ mod tests {
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use data_encoding::BASE32_NOPAD;
-    use fm_core::{FrickmailConfig, UserSession};
+    use fm_core::{FrickmailConfig, FrickmailError, UserSession};
     use fm_imap::{BodyPartKind, BodyPreviewPart, MailboxStatus};
     use fm_session::{MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, USER_SESSION_KEY};
+    use fm_user::PushSubscription;
     use hmac::{Hmac, Mac};
     use openssl::{
         asn1::Asn1Time,
@@ -3236,6 +3553,8 @@ mod tests {
         method: String,
         uri: String,
         content_type: Option<String>,
+        authorization: Option<String>,
+        ttl: Option<String>,
         cookie: Option<String>,
         x_sm_token: Option<String>,
         body: String,
@@ -4974,6 +5293,176 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), vec!["work@example.com".to_string()]);
     }
 
+    #[tokio::test]
+    async fn native_frickmail_long_poll_new_mail_returns_immediately_on_delta() {
+        let key = [14_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1338, 1339, &key).await;
+        let calls = Arc::new(Mutex::new(0_usize));
+        let calls_for_fetch = Arc::clone(&calls);
+
+        let response = super::native_frickmail_long_poll_new_mail_with_fetcher(
+            &state,
+            "FrickmailLongPollNewMail",
+            &json!({"last_uids": {"1339": 12}}),
+            &session,
+            super::LongPollNewMailTiming {
+                fetch_deadline: Duration::from_secs(1),
+                poll_deadline: Duration::from_millis(100),
+                poll_interval: Duration::from_millis(1),
+            },
+            move |config, password, folder| {
+                let calls_for_fetch = Arc::clone(&calls_for_fetch);
+                async move {
+                    assert_eq!(password, "imap-secret");
+                    assert_eq!(folder, "INBOX");
+                    assert_eq!(config.login, "work@example.com");
+                    *calls_for_fetch.lock().unwrap() += 1;
+                    Ok(MailboxStatus {
+                        uid_next: Some(15),
+                        exists: 7,
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FrickmailLongPollNewMail");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["timeout"], Value::Null);
+        let accounts = body["Result"]["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["account_id"], 1339);
+        assert_eq!(accounts[0]["uidnext"], 15);
+        assert_eq!(accounts[0]["new_count"], 3);
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_long_poll_new_mail_does_not_wait_for_push_delivery() {
+        let key = [17_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1344, 1345, &key).await;
+        let pool = state.db_pool().unwrap().clone();
+        create_push_subscription_tables(&pool).await;
+        create_app_settings_table(&pool).await;
+        let (endpoint, capture) = spawn_bridge().await;
+        SqlxUserRepository::upsert_push_subscription(
+            &pool,
+            1344,
+            PushSubscription {
+                endpoint: endpoint.unwrap(),
+                p256dh: "key".to_string(),
+                auth_key: "auth".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let response = super::native_frickmail_long_poll_new_mail_with_fetcher(
+            &state,
+            "FrickmailLongPollNewMail",
+            &json!({"last_uids": {"1345": 12}}),
+            &session,
+            super::LongPollNewMailTiming {
+                fetch_deadline: Duration::from_secs(1),
+                poll_deadline: Duration::from_secs(25),
+                poll_interval: Duration::from_secs(5),
+            },
+            move |_config, _password, _folder| async move {
+                Ok(MailboxStatus {
+                    uid_next: Some(13),
+                    exists: 7,
+                })
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["accounts"][0]["new_count"], 1);
+        assert!(elapsed < Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(capture.lock().unwrap().method, "");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_long_poll_new_mail_updates_inner_last_uids() {
+        let key = [15_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1340, 1341, &key).await;
+        let calls = Arc::new(Mutex::new(0_usize));
+        let calls_for_fetch = Arc::clone(&calls);
+
+        let response = super::native_frickmail_long_poll_new_mail_with_fetcher(
+            &state,
+            "FrickmailLongPollNewMail",
+            &json!({"last_uids": {}}),
+            &session,
+            super::LongPollNewMailTiming {
+                fetch_deadline: Duration::from_secs(1),
+                poll_deadline: Duration::from_millis(100),
+                poll_interval: Duration::from_millis(1),
+            },
+            move |_config, _password, _folder| {
+                let calls_for_fetch = Arc::clone(&calls_for_fetch);
+                async move {
+                    let mut calls = calls_for_fetch.lock().unwrap();
+                    *calls += 1;
+                    let uid_next = if *calls == 1 { 10 } else { 12 };
+                    Ok(MailboxStatus {
+                        uid_next: Some(uid_next),
+                        exists: 4,
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["timeout"], Value::Null);
+        let accounts = body["Result"]["accounts"].as_array().unwrap();
+        assert_eq!(accounts[0]["account_id"], 1341);
+        assert_eq!(accounts[0]["uidnext"], 12);
+        assert_eq!(accounts[0]["new_count"], 2);
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_long_poll_new_mail_times_out_when_idle() {
+        let key = [16_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1342, 1343, &key).await;
+
+        let response = super::native_frickmail_long_poll_new_mail_with_fetcher(
+            &state,
+            "FrickmailLongPollNewMail",
+            &json!({"last_uids": {"1343": 15}}),
+            &session,
+            super::LongPollNewMailTiming {
+                fetch_deadline: Duration::from_secs(1),
+                poll_deadline: Duration::from_millis(3),
+                poll_interval: Duration::from_millis(1),
+            },
+            move |_config, _password, _folder| async move {
+                Ok(MailboxStatus {
+                    uid_next: Some(15),
+                    exists: 7,
+                })
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FrickmailLongPollNewMail");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["timeout"], true);
+        let accounts = body["Result"]["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["account_id"], 1343);
+        assert_eq!(accounts[0]["new_count"], 0);
+    }
+
     #[test]
     fn search_limit_parsing_matches_php_defaults_and_clamps() {
         assert_eq!(super::payload_search_limit(&json!({})), 50);
@@ -5366,6 +5855,63 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["Result"]["ok"], false);
         assert_eq!(body["Result"]["error"], "Missing subscription fields");
+    }
+
+    #[tokio::test]
+    async fn web_push_delivery_sends_vapid_payload() {
+        let pool = user_db_pool().await;
+        create_app_settings_table(&pool).await;
+        let bundle = SqlxUserRepository::get_or_create_vapid_key_bundle(&pool)
+            .await
+            .unwrap();
+        let (endpoint, capture) = spawn_bridge().await;
+        let subscription = PushSubscription {
+            endpoint: endpoint.unwrap(),
+            p256dh: "unused-public-key".to_string(),
+            auth_key: "unused-auth-key".to_string(),
+        };
+
+        let ok = super::send_web_push_subscription(
+            &reqwest::Client::new(),
+            &subscription,
+            &bundle,
+            "mailto:Frickmail",
+            &json!({
+                "title": "2 new messages",
+                "body": "work@example.com",
+                "tag": "fm-newmail",
+                "url": "/"
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(ok);
+        let capture = capture.lock().unwrap().clone();
+        assert_eq!(capture.method, "POST");
+        assert_eq!(capture.ttl.as_deref(), Some("86400"));
+        assert_eq!(capture.content_type.as_deref(), Some("application/json"));
+        let authorization = capture.authorization.as_deref().unwrap();
+        assert!(authorization.starts_with("vapid t="));
+        assert!(authorization.contains(&format!(",k={}", bundle.public_b64u)));
+        let body: Value = serde_json::from_str(&capture.body).unwrap();
+        assert_eq!(body["title"], "2 new messages");
+        assert_eq!(body["body"], "work@example.com");
+        assert_eq!(body["tag"], "fm-newmail");
+        assert_eq!(body["url"], "/");
+    }
+
+    #[tokio::test]
+    async fn web_push_delivery_rejects_private_or_cleartext_endpoints() {
+        let cleartext = super::validated_web_push_client("http://push.example/sub")
+            .await
+            .unwrap_err();
+        assert!(matches!(cleartext, FrickmailError::BadRequest(_)));
+
+        let loopback = super::validated_web_push_client("https://127.0.0.1/sub")
+            .await
+            .unwrap_err();
+        assert!(matches!(loopback, FrickmailError::BadRequest(_)));
     }
 
     #[tokio::test]
@@ -6843,6 +7389,14 @@ mod tests {
             uri: uri.to_string(),
             content_type: headers
                 .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            authorization: headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            ttl: headers
+                .get("ttl")
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned),
             cookie: headers

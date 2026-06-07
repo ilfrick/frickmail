@@ -76,24 +76,40 @@
 		if (!navigator.serviceWorker || !('PushManager' in window)) return;
 
 		navigator.serviceWorker.ready.then(reg => {
-			// Check if already subscribed
-			return reg.pushManager.getSubscription().then(existing => {
-				if (existing) {
-					// Re-send to server in case it was lost (idempotent upsert on backend)
-					sendSubscriptionToServer(existing);
-					return;
-				}
-				// Fetch VAPID public key then subscribe
-				window.rl.pluginRemoteRequest((iErr, oData) => {
-					const pubKeyB64u = oData?.Result?.public_key;
-					if (!pubKeyB64u) return;
-					const appServerKey = urlBase64ToUint8Array(pubKeyB64u);
-					reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appServerKey })
-						.then(sub => sendSubscriptionToServer(sub))
-						.catch(() => {});   // push blocked by user or browser
-				}, 'FrickmailGetVapidKey', { XToken: fmToken() }, 10000);
-			});
+			window.rl.pluginRemoteRequest((iErr, oData) => {
+				const pubKeyB64u = oData?.Result?.public_key;
+				if (!pubKeyB64u) return;
+				const appServerKey = urlBase64ToUint8Array(pubKeyB64u);
+				const subscribe = () => reg.pushManager
+					.subscribe({ userVisibleOnly: true, applicationServerKey: appServerKey })
+					.then(sub => sendSubscriptionToServer(sub))
+					.catch(() => {});   // push blocked by user or browser
+
+				reg.pushManager.getSubscription().then(existing => {
+					if (existing && subscriptionUsesServerKey(existing, appServerKey)) {
+						// Re-send to server in case it was lost (idempotent upsert on backend).
+						sendSubscriptionToServer(existing);
+						return;
+					}
+					if (existing) {
+						existing.unsubscribe().catch(() => {}).then(subscribe);
+						return;
+					}
+					subscribe();
+				}).catch(() => {});
+			}, 'FrickmailGetVapidKey', { XToken: fmToken() }, 10000);
 		}).catch(() => {});
+	}
+
+	function subscriptionUsesServerKey(sub, appServerKey) {
+		const existingKey = sub?.options?.applicationServerKey;
+		if (!existingKey) return false;
+		const existing = new Uint8Array(existingKey);
+		if (existing.length !== appServerKey.length) return false;
+		for (let i = 0; i < existing.length; i++) {
+			if (existing[i] !== appServerKey[i]) return false;
+		}
+		return true;
 	}
 
 	function sendSubscriptionToServer(sub) {
