@@ -30,4 +30,5 @@ url.workspace = true
 [dev-dependencies]
 data-encoding.workspace = true
 hmac.workspace = true
+openssl.workspace = true
 sha1.workspace = true

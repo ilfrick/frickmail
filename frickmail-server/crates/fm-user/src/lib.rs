@@ -10,9 +10,16 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     XChaCha20Poly1305, XNonce,
 };
+use chrono::{DateTime, NaiveDateTime, Utc};
 use data_encoding::BASE32_NOPAD;
 use fm_core::{FrickmailError, Result, UserSession};
 use hmac::{Hmac, Mac};
+use openssl::{
+    asn1::Asn1TimeRef,
+    hash::MessageDigest,
+    nid::Nid,
+    x509::{X509NameRef, X509},
+};
 use p256::{
     ecdsa::SigningKey,
     pkcs8::{EncodePrivateKey, LineEnding},
@@ -231,6 +238,31 @@ pub struct SmimeCertificate {
     pub not_after: Option<String>,
     pub has_key: bool,
     pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSmimeCert {
+    pub account_id: i64,
+    pub pem: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SmimeImportResult {
+    pub ok: bool,
+    pub id: i64,
+    pub email: String,
+    pub fingerprint: String,
+    pub not_after: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSmimeCert {
+    cert_pem: String,
+    email: String,
+    fingerprint: String,
+    subject: String,
+    not_before: Option<String>,
+    not_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -599,6 +631,14 @@ impl SqlxUserRepository {
 
     pub async fn list_smime_certs(pool: &AnyPool, user_id: i64) -> Result<Vec<SmimeCertificate>> {
         list_smime_certs(pool, user_id).await
+    }
+
+    pub async fn import_smime_cert(
+        pool: &AnyPool,
+        user_id: i64,
+        input: NewSmimeCert,
+    ) -> Result<SmimeImportResult> {
+        import_smime_cert(pool, user_id, input).await
     }
 
     pub async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result<bool> {
@@ -2350,6 +2390,144 @@ async fn list_smime_certs(pool: &AnyPool, user_id: i64) -> Result<Vec<SmimeCerti
         .collect()
 }
 
+async fn import_smime_cert(
+    pool: &AnyPool,
+    user_id: i64,
+    input: NewSmimeCert,
+) -> Result<SmimeImportResult> {
+    if input.account_id <= 0 {
+        return Err(FrickmailError::BadRequest(
+            "account_id required".to_string(),
+        ));
+    }
+    let pem = input.pem.trim().to_string();
+    let parsed = parse_smime_cert(&pem)?;
+    if fetch_mail_account(pool, user_id, input.account_id)
+        .await?
+        .is_none()
+    {
+        return Err(FrickmailError::BadRequest("Account not found".to_string()));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let id = insert_smime_cert_on_conn(
+        &mut conn,
+        &backend,
+        user_id,
+        input.account_id,
+        &parsed.cert_pem,
+        &parsed,
+    )
+    .await?;
+
+    Ok(SmimeImportResult {
+        ok: true,
+        id,
+        email: parsed.email,
+        fingerprint: parsed.fingerprint,
+        not_after: parsed.not_after,
+    })
+}
+
+fn parse_smime_cert(pem: &str) -> Result<ParsedSmimeCert> {
+    let cert = X509::from_pem(pem.as_bytes())
+        .map_err(|_| FrickmailError::BadRequest("Invalid PEM certificate".to_string()))?;
+    let email = cert
+        .subject_alt_names()
+        .and_then(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.email())
+                .map(str::trim)
+                .find(|email| looks_like_email(email))
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            x509_name_entry_text(cert.subject_name(), Nid::COMMONNAME)
+                .filter(|value| looks_like_email(value))
+        })
+        .or_else(|| {
+            x509_name_entry_text(cert.subject_name(), Nid::PKCS9_EMAILADDRESS)
+                .filter(|value| looks_like_email(value))
+        })
+        .ok_or_else(|| {
+            FrickmailError::BadRequest("Certificate does not contain an email address".to_string())
+        })?;
+    let fingerprint = cert
+        .digest(MessageDigest::sha1())
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME certificate fingerprint failed: {err}"))
+        })?
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":");
+    let cert_pem = String::from_utf8(cert.to_pem().map_err(|err| {
+        FrickmailError::Upstream(format!("S/MIME certificate export failed: {err}"))
+    })?)
+    .map_err(|err| {
+        FrickmailError::Upstream(format!("S/MIME certificate PEM encoding failed: {err}"))
+    })?;
+
+    Ok(ParsedSmimeCert {
+        cert_pem,
+        email,
+        fingerprint,
+        subject: x509_subject_string(cert.subject_name()),
+        not_before: asn1_time_to_rfc3339(cert.not_before()),
+        not_after: asn1_time_to_rfc3339(cert.not_after()),
+    })
+}
+
+fn looks_like_email(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return false;
+    }
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty() && !domain.is_empty() && !domain.contains('@') && domain.contains('.')
+}
+
+fn x509_name_entry_text(name: &X509NameRef, nid: Nid) -> Option<String> {
+    name.entries_by_nid(nid).find_map(|entry| {
+        entry
+            .data()
+            .as_utf8()
+            .ok()
+            .map(|value| value.to_string())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn x509_subject_string(name: &X509NameRef) -> String {
+    name.entries()
+        .filter_map(|entry| {
+            let value = entry.data().as_utf8().ok()?.to_string();
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            let label = entry.object().nid().short_name().unwrap_or("UNKNOWN");
+            Some(format!("{label}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn asn1_time_to_rfc3339(value: &Asn1TimeRef) -> Option<String> {
+    NaiveDateTime::parse_from_str(&value.to_string(), "%b %e %H:%M:%S %Y GMT")
+        .ok()
+        .map(|datetime| DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc).to_rfc3339())
+}
+
 async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result<bool> {
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
@@ -3072,6 +3250,66 @@ fn bind_insert_mail_account<'q>(
         .bind(0_i64)
 }
 
+async fn insert_smime_cert_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    user_id: i64,
+    account_id: i64,
+    pem: &str,
+    parsed: &ParsedSmimeCert,
+) -> Result<i64> {
+    if matches!(backend, "PostgreSQL" | "SQLite") {
+        return bind_insert_smime_cert(
+            sqlx::query(insert_smime_cert_returning_query(backend)),
+            user_id,
+            account_id,
+            pem,
+            parsed,
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .and_then(|row| row.try_get("id"))
+        .map_err(db_error);
+    }
+
+    bind_insert_smime_cert(
+        sqlx::query(insert_smime_cert_query(backend)),
+        user_id,
+        account_id,
+        pem,
+        parsed,
+    )
+    .execute(&mut **conn)
+    .await
+    .map_err(db_error)?
+    .last_insert_id()
+    .ok_or_else(|| {
+        FrickmailError::Upstream(
+            "frickmail user database error: inserted S/MIME certificate id is unavailable"
+                .to_string(),
+        )
+    })
+}
+
+fn bind_insert_smime_cert<'q>(
+    query: sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>>,
+    user_id: i64,
+    account_id: i64,
+    pem: &'q str,
+    parsed: &'q ParsedSmimeCert,
+) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>> {
+    query
+        .bind(user_id)
+        .bind(account_id)
+        .bind(&parsed.email)
+        .bind(pem)
+        .bind(None::<Vec<u8>>)
+        .bind(&parsed.fingerprint)
+        .bind(&parsed.subject)
+        .bind(&parsed.not_before)
+        .bind(&parsed.not_after)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_mail_rule_on_conn(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
@@ -3680,6 +3918,36 @@ fn smime_certs_query(backend: &str) -> &'static str {
                 CASE WHEN encrypted_key_pem IS NULL OR length(encrypted_key_pem) = 0 THEN 0 ELSE 1 END AS has_key, \
                 CAST(created_at AS TEXT) AS created_at \
              FROM frickmail_smime_certs WHERE user_id = ? ORDER BY created_at DESC"
+        }
+    }
+}
+
+fn insert_smime_cert_returning_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_smime_certs \
+                (user_id, account_id, email, cert_pem, encrypted_key_pem, fingerprint, subject, not_before, not_after) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id"
+        }
+        _ => {
+            "INSERT INTO frickmail_smime_certs \
+                (user_id, account_id, email, cert_pem, encrypted_key_pem, fingerprint, subject, not_before, not_after) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
+        }
+    }
+}
+
+fn insert_smime_cert_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_smime_certs \
+                (user_id, account_id, email, cert_pem, encrypted_key_pem, fingerprint, subject, not_before, not_after) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+        }
+        _ => {
+            "INSERT INTO frickmail_smime_certs \
+                (user_id, account_id, email, cert_pem, encrypted_key_pem, fingerprint, subject, not_before, not_after) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         }
     }
 }
@@ -4301,6 +4569,15 @@ mod tests {
         password_hash::{PasswordHasher, SaltString},
         Argon2,
     };
+    use openssl::{
+        asn1::Asn1Time,
+        bn::BigNum,
+        hash::MessageDigest,
+        nid::Nid,
+        pkey::PKey,
+        rsa::Rsa,
+        x509::{extension::SubjectAlternativeName, X509NameBuilder, X509},
+    };
     use serde_json::{json, Value};
     use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 
@@ -4308,7 +4585,7 @@ mod tests {
         clean_preferences_patch, current_totp_counter, decrypt_account_secret,
         derive_credential_key, encrypt_account_secret, normalize_username,
         preferences_from_settings, totp_code, url_encode, verify_login_password, verify_password,
-        FrickmailMe, NewMailAccount, NewMailRule, NewMailTask, PushSubscription,
+        FrickmailMe, NewMailAccount, NewMailRule, NewMailTask, NewSmimeCert, PushSubscription,
         SqlxUserRepository, TaskFilter, UpdateMailAccount, UpdateMailTask, VapidKeyBundle,
         ACCOUNT_SECRET_NONCE_BYTES, CREDENTIAL_KEY_BYTES, DUMMY_PASSWORD_HASH, KDF_SALT_BYTES,
         VAPID_SETTING_KEY,
@@ -6238,6 +6515,92 @@ mod tests {
         assert_eq!(smime_cert_count(&pool, 31).await, 2);
     }
 
+    #[tokio::test]
+    async fn repository_imports_smime_cert_from_public_pem() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_smime_cert_tables(&pool).await;
+        insert_user(&pool, 33, json!({})).await;
+        insert_user(&pool, 34, json!({})).await;
+        insert_mail_account(&pool, 305, 33, "Work", true).await;
+        insert_mail_account(&pool, 306, 34, "Other", true).await;
+
+        let result = SqlxUserRepository::import_smime_cert(
+            &pool,
+            33,
+            NewSmimeCert {
+                account_id: 305,
+                pem: format!("\n{}\n", test_smime_cert_pem("signer@example.com")),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.ok);
+        assert!(result.id > 0);
+        assert_eq!(result.email, "signer@example.com");
+        assert_eq!(result.fingerprint.matches(':').count(), 19);
+        assert!(result.not_after.is_some());
+
+        let certs = SqlxUserRepository::list_smime_certs(&pool, 33)
+            .await
+            .unwrap();
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0].id, result.id);
+        assert_eq!(certs[0].account_id, 305);
+        assert_eq!(certs[0].email, "signer@example.com");
+        assert_eq!(certs[0].fingerprint, result.fingerprint);
+        assert!(certs[0].subject.contains("CN=signer@example.com"));
+        assert!(!certs[0].has_key);
+
+        let stored_pem = smime_cert_pem(&pool, result.id).await;
+        assert!(stored_pem.contains("BEGIN CERTIFICATE"));
+        assert!(!stored_pem.contains("PRIVATE KEY"));
+
+        let wrong_user = SqlxUserRepository::import_smime_cert(
+            &pool,
+            33,
+            NewSmimeCert {
+                account_id: 306,
+                pem: test_smime_cert_pem("other@example.com"),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(wrong_user.public_message(), "Account not found");
+
+        let invalid = SqlxUserRepository::import_smime_cert(
+            &pool,
+            33,
+            NewSmimeCert {
+                account_id: 305,
+                pem: "not a certificate".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid.public_message(), "Invalid PEM certificate");
+
+        let combined = SqlxUserRepository::import_smime_cert(
+            &pool,
+            33,
+            NewSmimeCert {
+                account_id: 305,
+                pem: format!(
+                    "{}\n{}",
+                    test_smime_cert_pem("combined@example.com"),
+                    test_private_key_pem()
+                ),
+            },
+        )
+        .await
+        .unwrap();
+        let stored_combined_pem = smime_cert_pem(&pool, combined.id).await;
+        assert!(stored_combined_pem.contains("BEGIN CERTIFICATE"));
+        assert!(!stored_combined_pem.contains("PRIVATE KEY"));
+    }
+
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
         AnyPoolOptions::new()
@@ -7011,5 +7374,50 @@ mod tests {
             .await
             .and_then(|row| row.try_get("count"))
             .unwrap()
+    }
+
+    async fn smime_cert_pem(pool: &AnyPool, cert_id: i64) -> String {
+        sqlx::query("SELECT cert_pem FROM frickmail_smime_certs WHERE id = ?")
+            .bind(cert_id)
+            .fetch_one(pool)
+            .await
+            .and_then(|row| row.try_get("cert_pem"))
+            .unwrap()
+    }
+
+    fn test_smime_cert_pem(email: &str) -> String {
+        let rsa = Rsa::generate(2048).unwrap();
+        let key = PKey::from_rsa(rsa).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, email).unwrap();
+        name.append_entry_by_nid(Nid::PKCS9_EMAILADDRESS, email)
+            .unwrap();
+        let name = name.build();
+
+        let mut builder = X509::builder().unwrap();
+        builder.set_version(2).unwrap();
+        let serial = BigNum::from_u32(42).unwrap().to_asn1_integer().unwrap();
+        builder.set_serial_number(&serial).unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(&key).unwrap();
+        let not_before = Asn1Time::days_from_now(0).unwrap();
+        let not_after = Asn1Time::days_from_now(365).unwrap();
+        builder.set_not_before(&not_before).unwrap();
+        builder.set_not_after(&not_after).unwrap();
+        let san = SubjectAlternativeName::new()
+            .email(email)
+            .build(&builder.x509v3_context(None, None))
+            .unwrap();
+        builder.append_extension(san).unwrap();
+        builder.sign(&key, MessageDigest::sha256()).unwrap();
+
+        String::from_utf8(builder.build().to_pem().unwrap()).unwrap()
+    }
+
+    fn test_private_key_pem() -> String {
+        let rsa = Rsa::generate(2048).unwrap();
+        let key = PKey::from_rsa(rsa).unwrap();
+        String::from_utf8(key.private_key_to_pem_pkcs8().unwrap()).unwrap()
     }
 }
