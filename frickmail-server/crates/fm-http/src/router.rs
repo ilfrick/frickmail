@@ -17,7 +17,10 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
-use fm_imap::{fetch_message_body_preview, BodyPreviewPart, ImapConnectionConfig};
+use fm_imap::{
+    fetch_mailbox_status, fetch_message_body_preview, BodyPreviewPart, ImapConnectionConfig,
+    MailboxStatus,
+};
 use fm_mime::parse_body;
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
@@ -42,6 +45,7 @@ const UNKNOWN_ERROR: u16 = 999;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const TOTP_PENDING_SESSION_KEY: &str = "frickmail_totp_pending_secret";
 const MESSAGE_BODY_FETCH_DEADLINE: Duration = Duration::from_secs(20);
+const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DiscoveredService {
@@ -408,6 +412,9 @@ async fn native_compat_response(
         }
         "FrickmailGetMessageBody" => {
             Some(native_frickmail_get_message_body(state, original_action, payload, session).await)
+        }
+        "FrickmailCheckNewMail" => {
+            Some(native_frickmail_check_new_mail(state, original_action, payload, session).await)
         }
         "FrickmailListIdentities" => {
             Some(native_frickmail_list_identities(state, original_action, payload, session).await)
@@ -1533,6 +1540,126 @@ where
         ),
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
+}
+
+async fn native_frickmail_check_new_mail(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_check_new_mail_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        CHECK_NEW_MAIL_ACCOUNT_DEADLINE,
+        |config, password, folder| async move {
+            fetch_mailbox_status(config, &password, &folder).await
+        },
+    )
+    .await
+}
+
+async fn native_frickmail_check_new_mail_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    Fut: std::future::Future<Output = fm_core::Result<MailboxStatus>>,
+{
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let last_uids = payload_last_uids(payload);
+    let accounts = match SqlxUserRepository::list_mail_accounts(pool, user.user_id).await {
+        Ok(accounts) => accounts,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    let mut results = Vec::new();
+    for account in accounts {
+        if account.account_type != "imap" {
+            continue;
+        }
+        let secret = match SqlxUserRepository::get_mail_account_connection_secret(
+            pool,
+            user.user_id,
+            account.id,
+        )
+        .await
+        {
+            Ok(Some(secret)) => secret,
+            _ => continue,
+        };
+        let config = match imap_config_from_account_secret(&secret) {
+            Ok(config) => config,
+            Err(_) => continue,
+        };
+        let password = match account_password(&secret, &credential_key) {
+            Ok(password) => password,
+            Err(_) => continue,
+        };
+
+        let fetcher = fetcher.clone();
+        let status = match tokio::time::timeout(
+            fetch_deadline,
+            fetcher(config, password, "INBOX".to_string()),
+        )
+        .await
+        {
+            Ok(Ok(status)) => status,
+            _ => continue,
+        };
+
+        let uidnext = i64::from(status.uid_next.unwrap_or_default());
+        let last_uidnext = last_uids
+            .get(&account.id.to_string())
+            .copied()
+            .unwrap_or_default();
+        let new_count = if last_uidnext > 0 && uidnext > last_uidnext {
+            uidnext - last_uidnext
+        } else {
+            0
+        };
+
+        results.push(json!({
+            "account_id": account.id,
+            "account_email": account.email,
+            "uidnext": uidnext,
+            "messages": status.exists,
+            "new_count": new_count
+        }));
+    }
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": {
+                "ok": true,
+                "accounts": results
+            }
+        }),
+    )
 }
 
 async fn native_frickmail_list_identities(
@@ -2797,6 +2924,34 @@ fn payload_search_limit(payload: &Value) -> i64 {
     raw.clamp(1, 100)
 }
 
+fn payload_last_uids(payload: &Value) -> HashMap<String, i64> {
+    fn parse_map(value: &Value) -> HashMap<String, i64> {
+        let Some(object) = value.as_object() else {
+            return HashMap::new();
+        };
+
+        object
+            .iter()
+            .filter_map(|(key, value)| {
+                let uid = match value {
+                    Value::Number(number) => number.as_i64(),
+                    Value::String(text) => text.trim().parse::<i64>().ok(),
+                    _ => None,
+                }?;
+                Some((key.clone(), uid.max(0)))
+            })
+            .collect()
+    }
+
+    match payload.get("last_uids") {
+        Some(Value::Object(_)) => parse_map(&payload["last_uids"]),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .map(|value| parse_map(&value))
+            .unwrap_or_default(),
+        _ => HashMap::new(),
+    }
+}
+
 fn imap_config_from_account_secret(
     account: &MailAccountConnectionSecret,
 ) -> fm_core::Result<ImapConnectionConfig> {
@@ -3000,7 +3155,7 @@ mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, UserSession};
-    use fm_imap::{BodyPartKind, BodyPreviewPart};
+    use fm_imap::{BodyPartKind, BodyPreviewPart, MailboxStatus};
     use fm_session::{MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, USER_SESSION_KEY};
     use hmac::{Hmac, Mac};
     use serde_json::{json, Value};
@@ -4660,6 +4815,99 @@ mod tests {
 
         assert_eq!(body["Result"]["ok"], false);
         assert_eq!(body["Result"]["error"], "Message body fetch timed out");
+    }
+
+    #[test]
+    fn last_uid_payload_parses_object_and_json_string() {
+        assert_eq!(
+            super::payload_last_uids(&json!({"last_uids": {"7": 42, "8": "43", "9": -1}})),
+            HashMap::from([
+                ("7".to_string(), 42),
+                ("8".to_string(), 43),
+                ("9".to_string(), 0)
+            ])
+        );
+        assert_eq!(
+            super::payload_last_uids(&json!({"last_uids": "{\"7\":44,\"8\":\"45\"}"})),
+            HashMap::from([("7".to_string(), 44), ("8".to_string(), 45)])
+        );
+        assert!(super::payload_last_uids(&json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_check_new_mail_requires_authentication() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+
+        let response = super::native_frickmail_check_new_mail(
+            &state,
+            "FrickmailCheckNewMail",
+            &json!({"last_uids": {}}),
+            &test_session(),
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_check_new_mail_reports_uidnext_deltas() {
+        let key = [13_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1334, "poller", Some("poller@example.com")).await;
+        seed_mail_account(&pool, 1335, 1334, "Work", true).await;
+        seed_mail_account(&pool, 1336, 1334, "Broken", false).await;
+        seed_mail_account(&pool, 1337, 1334, "Google", false).await;
+        set_mail_account_email_and_type(&pool, 1337, "google@example.com", "gmail").await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            1334,
+            1335,
+            "imap-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = credential_session(1334, "poller", Some("poller@example.com"), &key).await;
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_fetch = Arc::clone(&calls);
+
+        let response = super::native_frickmail_check_new_mail_with_fetcher(
+            &state,
+            "FrickmailCheckNewMail",
+            &json!({"last_uids": {"1335": 12, "1336": 99}}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder| {
+                let calls_for_fetch = Arc::clone(&calls_for_fetch);
+                async move {
+                    assert_eq!(password, "imap-secret");
+                    assert_eq!(folder, "INBOX");
+                    calls_for_fetch.lock().unwrap().push(config.login);
+                    Ok(MailboxStatus {
+                        uid_next: Some(15),
+                        exists: 7,
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        let accounts = body["Result"]["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["account_id"], 1335);
+        assert_eq!(accounts[0]["account_email"], "work@example.com");
+        assert_eq!(accounts[0]["uidnext"], 15);
+        assert_eq!(accounts[0]["messages"], 7);
+        assert_eq!(accounts[0]["new_count"], 3);
+        assert_eq!(*calls.lock().unwrap(), vec!["work@example.com".to_string()]);
     }
 
     #[test]

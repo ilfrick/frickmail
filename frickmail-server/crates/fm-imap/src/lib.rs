@@ -126,6 +126,12 @@ pub struct BodyPreviewPart {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxStatus {
+    pub uid_next: Option<u32>,
+    pub exists: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyPartKind {
     Html,
     Plain,
@@ -166,6 +172,23 @@ pub async fn fetch_message_body_preview(
     let parts = fetch_preview_parts(&mut session, uid, &specs).await?;
     logout_quietly(session).await;
     Ok(Some(parts))
+}
+
+pub async fn fetch_mailbox_status(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+) -> Result<MailboxStatus> {
+    validate_mailbox(mailbox)?;
+
+    let mut session = login(config, password).await?;
+    let mailbox = timeout_imap("examine mailbox", session.examine(mailbox)).await?;
+    logout_quietly(session).await;
+
+    Ok(MailboxStatus {
+        uid_next: mailbox.uid_next,
+        exists: mailbox.exists,
+    })
 }
 
 pub fn parse_security(secure: Option<&str>) -> Result<ImapSecurity> {
