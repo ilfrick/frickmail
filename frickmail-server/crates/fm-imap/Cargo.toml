@@ -7,7 +7,13 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-imap.workspace = true
 fm-core = { path = "../fm-core" }
+futures.workspace = true
 imap-proto.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true

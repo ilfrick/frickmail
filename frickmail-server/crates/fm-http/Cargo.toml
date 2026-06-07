@@ -10,6 +10,8 @@ repository.workspace = true
 axum.workspace = true
 base64.workspace = true
 fm-core = { path = "../fm-core" }
+fm-imap = { path = "../fm-imap" }
+fm-mime = { path = "../fm-mime" }
 fm-plugin-compat = { path = "../fm-plugin-compat" }
 fm-session = { path = "../fm-session" }
 fm-smtp = { path = "../fm-smtp" }

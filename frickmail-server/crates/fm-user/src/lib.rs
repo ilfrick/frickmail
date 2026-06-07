@@ -91,6 +91,19 @@ pub struct MailAccount {
     pub identities: Vec<MailIdentity>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailAccountConnectionSecret {
+    pub id: i64,
+    pub email: String,
+    pub account_type: String,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<i64>,
+    pub imap_secure: Option<String>,
+    pub login: Option<String>,
+    pub encrypted_password: Option<Vec<u8>>,
+    pub encrypted_oauth_refresh_token: Option<Vec<u8>>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewMailAccount {
     pub label: Option<String>,
@@ -233,6 +246,15 @@ pub struct MessageSearchResult {
     pub date_ts: Option<String>,
     pub snippet: Option<String>,
     pub account_email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexedMessageBody {
+    pub account_id: i64,
+    pub folder: String,
+    pub imap_uid: i64,
+    pub subject: Option<String>,
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -427,6 +449,14 @@ impl SqlxUserRepository {
         fetch_mail_account(pool, user_id, account_id).await
     }
 
+    pub async fn get_mail_account_connection_secret(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+    ) -> Result<Option<MailAccountConnectionSecret>> {
+        fetch_mail_account_connection_secret(pool, user_id, account_id).await
+    }
+
     pub async fn add_mail_account(
         pool: &AnyPool,
         user_id: i64,
@@ -615,6 +645,16 @@ impl SqlxUserRepository {
         limit: i64,
     ) -> Result<Vec<MessageSearchResult>> {
         search_messages(pool, user_id, query, limit).await
+    }
+
+    pub async fn indexed_message_body(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder: String,
+        imap_uid: i64,
+    ) -> Result<Option<IndexedMessageBody>> {
+        indexed_message_body(pool, user_id, account_id, folder, imap_uid).await
     }
 
     pub async fn request_password_reset(
@@ -1053,6 +1093,29 @@ async fn fetch_mail_account_on_conn(
         .await
         .map_err(db_error)?
         .map(row_to_mail_account)
+        .transpose()
+}
+
+async fn fetch_mail_account_connection_secret(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+) -> Result<Option<MailAccountConnectionSecret>> {
+    if account_id <= 0 {
+        return Err(FrickmailError::BadRequest(
+            "Account id required".to_string(),
+        ));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(mail_account_connection_secret_query(&backend))
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .map(row_to_mail_account_connection_secret)
         .transpose()
 }
 
@@ -2466,6 +2529,48 @@ async fn search_messages(
         .collect()
 }
 
+async fn indexed_message_body(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+    folder: String,
+    imap_uid: i64,
+) -> Result<Option<IndexedMessageBody>> {
+    if account_id <= 0 {
+        return Err(FrickmailError::BadRequest(
+            "account_id required".to_string(),
+        ));
+    }
+    if imap_uid <= 0 {
+        return Err(FrickmailError::BadRequest("uid required".to_string()));
+    }
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return Err(FrickmailError::BadRequest("folder required".to_string()));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(indexed_message_body_query(&backend))
+        .bind(user_id)
+        .bind(account_id)
+        .bind(folder)
+        .bind(imap_uid)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .map(|row| {
+            Ok(IndexedMessageBody {
+                account_id: row.try_get("account_id").map_err(db_error)?,
+                folder: row.try_get("folder").map_err(db_error)?,
+                imap_uid: row.try_get("imap_uid").map_err(db_error)?,
+                subject: row.try_get("subject").map_err(db_error)?,
+                snippet: row.try_get("snippet").map_err(db_error)?,
+            })
+        })
+        .transpose()
+}
+
 async fn request_password_reset(
     pool: &AnyPool,
     username: String,
@@ -3079,6 +3184,19 @@ fn mail_account_query(backend: &str) -> &'static str {
     }
 }
 
+fn mail_account_connection_secret_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, email, type, imap_host, imap_port, imap_secure, login, encrypted_password, encrypted_oauth_refresh_token \
+             FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2"
+        }
+        _ => {
+            "SELECT id, email, type, imap_host, imap_port, imap_secure, login, encrypted_password, encrypted_oauth_refresh_token \
+             FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
 fn mail_account_count_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => "SELECT COUNT(*) AS count FROM frickmail_mail_accounts WHERE user_id = $1",
@@ -3669,6 +3787,23 @@ fn search_messages_query(backend: &str) -> &'static str {
     }
 }
 
+fn indexed_message_body_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT mi.account_id, mi.folder, mi.imap_uid, mi.subject, mi.snippet \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = $1 AND mi.account_id = $2 AND mi.folder = $3 AND mi.imap_uid = $4"
+        }
+        _ => {
+            "SELECT mi.account_id, mi.folder, mi.imap_uid, mi.subject, mi.snippet \
+             FROM frickmail_message_index mi \
+             JOIN frickmail_mail_accounts ma ON ma.id = mi.account_id AND ma.user_id = mi.user_id \
+             WHERE mi.user_id = ? AND mi.account_id = ? AND mi.folder = ? AND mi.imap_uid = ?"
+        }
+    }
+}
+
 fn active_password_reset_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -3882,6 +4017,24 @@ fn row_to_mail_account(row: sqlx::any::AnyRow) -> Result<MailAccount> {
         login: row.try_get("login").map_err(db_error)?,
         is_primary: int_flag(&row, "is_primary")?,
         identities: Vec::new(),
+    })
+}
+
+fn row_to_mail_account_connection_secret(
+    row: sqlx::any::AnyRow,
+) -> Result<MailAccountConnectionSecret> {
+    Ok(MailAccountConnectionSecret {
+        id: row.try_get("id").map_err(db_error)?,
+        email: row.try_get("email").map_err(db_error)?,
+        account_type: row.try_get("type").map_err(db_error)?,
+        imap_host: row.try_get("imap_host").map_err(db_error)?,
+        imap_port: row.try_get("imap_port").map_err(db_error)?,
+        imap_secure: row.try_get("imap_secure").map_err(db_error)?,
+        login: row.try_get("login").map_err(db_error)?,
+        encrypted_password: row.try_get("encrypted_password").map_err(db_error)?,
+        encrypted_oauth_refresh_token: row
+            .try_get("encrypted_oauth_refresh_token")
+            .map_err(db_error)?,
     })
 }
 
@@ -4513,6 +4666,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_gets_connection_secret_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 141, json!({})).await;
+        insert_user(&pool, 142, json!({})).await;
+        let key = [14_u8; CREDENTIAL_KEY_BYTES];
+
+        let owner_account_id = SqlxUserRepository::add_mail_account(
+            &pool,
+            141,
+            NewMailAccount {
+                label: Some("Owner".to_string()),
+                email: "owner@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: Some("imap.example.com".to_string()),
+                imap_port: Some(993),
+                imap_secure: Some("SSL".to_string()),
+                smtp_host: None,
+                smtp_port: None,
+                smtp_secure: None,
+                login: Some("owner-login".to_string()),
+                password: Some("imap-secret".to_string()),
+                oauth_tenant: None,
+                is_primary: true,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+        let other_account_id = SqlxUserRepository::add_mail_account(
+            &pool,
+            142,
+            NewMailAccount {
+                label: Some("Other".to_string()),
+                email: "other@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: Some("imap.other.example".to_string()),
+                imap_port: Some(993),
+                imap_secure: Some("SSL".to_string()),
+                smtp_host: None,
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: Some("other-secret".to_string()),
+                oauth_tenant: None,
+                is_primary: true,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+
+        let secret =
+            SqlxUserRepository::get_mail_account_connection_secret(&pool, 141, owner_account_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(secret.id, owner_account_id);
+        assert_eq!(secret.email, "owner@example.com");
+        assert_eq!(secret.account_type, "imap");
+        assert_eq!(secret.imap_host.as_deref(), Some("imap.example.com"));
+        assert_eq!(secret.imap_port, Some(993));
+        assert_eq!(secret.imap_secure.as_deref(), Some("SSL"));
+        assert_eq!(secret.login.as_deref(), Some("owner-login"));
+        assert_eq!(
+            decrypt_account_secret(&secret.encrypted_password.unwrap(), &key)
+                .unwrap()
+                .as_deref(),
+            Some("imap-secret")
+        );
+
+        let leaked =
+            SqlxUserRepository::get_mail_account_connection_secret(&pool, 141, other_account_id)
+                .await
+                .unwrap();
+        assert!(leaked.is_none());
+        assert!(
+            SqlxUserRepository::get_mail_account_connection_secret(&pool, 141, 0)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn repository_adds_mail_account_with_encrypted_password_and_primary_rules() {
         let pool = sqlite_pool().await;
         create_users_table(&pool, "TEXT").await;
@@ -4963,6 +5201,79 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.public_message(), "Query too short");
+    }
+
+    #[tokio::test]
+    async fn repository_gets_indexed_message_body_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        create_message_index_table(&pool).await;
+        insert_user(&pool, 35, json!({})).await;
+        insert_user(&pool, 36, json!({})).await;
+        insert_mail_account(&pool, 180, 35, "Work", true).await;
+        insert_mail_account(&pool, 181, 36, "OtherUser", true).await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 4,
+                user_id: 35,
+                account_id: 180,
+                folder: "INBOX",
+                imap_uid: 20,
+                message_id: Some("body-1"),
+                subject: Some("Body subject"),
+                from_addr: Some("sender@example.com"),
+                from_name: Some("Sender"),
+                date_ts: Some("2026-06-02 11:00:00"),
+                snippet: Some("Indexed plain body preview"),
+            },
+        )
+        .await;
+        insert_search_message(
+            &pool,
+            SearchMessageSeed {
+                id: 5,
+                user_id: 36,
+                account_id: 181,
+                folder: "INBOX",
+                imap_uid: 20,
+                message_id: Some("body-2"),
+                subject: Some("Leaked subject"),
+                from_addr: Some("other@example.com"),
+                from_name: Some("Other"),
+                date_ts: Some("2026-06-02 12:00:00"),
+                snippet: Some("Must not leak"),
+            },
+        )
+        .await;
+
+        let body =
+            SqlxUserRepository::indexed_message_body(&pool, 35, 180, "INBOX".to_string(), 20)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(body.account_id, 180);
+        assert_eq!(body.folder, "INBOX");
+        assert_eq!(body.imap_uid, 20);
+        assert_eq!(body.subject.as_deref(), Some("Body subject"));
+        assert_eq!(body.snippet.as_deref(), Some("Indexed plain body preview"));
+
+        let missing =
+            SqlxUserRepository::indexed_message_body(&pool, 35, 181, "INBOX".to_string(), 20)
+                .await
+                .unwrap();
+        assert!(missing.is_none());
+
+        let err = SqlxUserRepository::indexed_message_body(&pool, 35, 0, "INBOX".to_string(), 20)
+            .await
+            .unwrap_err();
+        assert_eq!(err.public_message(), "account_id required");
+
+        let err = SqlxUserRepository::indexed_message_body(&pool, 35, 180, "INBOX".to_string(), 0)
+            .await
+            .unwrap_err();
+        assert_eq!(err.public_message(), "uid required");
     }
 
     #[tokio::test]
