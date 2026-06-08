@@ -106,6 +106,29 @@ legacy application, not just the Frickmail-user plugin:
 6. Legacy themes, bundle generation, PHP plugins, nginx/PHP-FPM, and upstream
    names are deleted only after their replacement path is active.
 
+## Frickmail-User Usable Release Gate
+
+Before continuing from the Frickmail-user migration into the broader legacy
+SnappyMail/RainLoop runtime rewrite, ship a usable partial Rust version and
+pause for operator input.
+
+This gate is reached when the Frickmail-owned user surface is native and usable:
+
+1. Login, registration, password reset, TOTP, preferences, account management,
+   account switching, identities, OAuth token persistence, search, unified
+   inbox, notifications, tasks, rules, S/MIME metadata, and retained
+   Frickmail-user settings are implemented or explicitly deferred with a known
+   fallback.
+2. The partial build is available as a tested branch/tag or image that can be
+   deployed without changing the existing database backend.
+3. Docker-only tests, Docker build, temporary container startup, log check,
+   senior Rust review, and GitHub CI pass for that release candidate.
+4. Release notes list remaining PHP bridge dependencies and any user-visible
+   limitations.
+5. Work pauses after publishing the usable Frickmail-user release candidate.
+   Continue into the full legacy SnappyMail/RainLoop runtime migration only
+   after explicit user/operator approval.
+
 ## Naming Policy
 
 Frickmail is a complete rewrite, not a forked runtime. The migration rules are:
@@ -485,12 +508,16 @@ Every migration slice must follow this loop:
 6. Temporary test container startup and log check.
 7. Commit and push to both configured remotes.
 8. Confirm GitHub Actions passes.
+9. At the Frickmail-user usable release gate, publish the release candidate and
+   ask for user/operator input before starting the next migration phase.
 
 ## Immediate Next Work
 
 1. Generate and commit the complete legacy route/hook/frontend-call inventory.
-2. Port `FrickmailBridgeSession` and `FrickmailSwitchAccount` so account
-   switching no longer depends on PHP session state.
+2. Complete native mailbox account switching: wire the selected account into
+   native folder/message routes, then change `FrickmailBridgeSession` and
+   `FrickmailSwitchAccount` from the current safe pending response to real
+   success without PHP session state.
 3. Add native coverage for `FrickmailApplyRules`, import/export, and remaining
    S/MIME actions.
 4. Add the missing Microsoft Graph mailbox actions to the compatibility
@@ -500,3 +527,6 @@ Every migration slice must follow this loop:
 6. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user
    theming.
 7. Add CI allowlists for temporary legacy names so naming cleanup is measurable.
+8. Track the Frickmail-user usable release gate and do not continue into full
+   legacy runtime removal until that release is available and operator input is
+   received.

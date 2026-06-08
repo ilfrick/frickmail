@@ -391,6 +391,12 @@ async fn native_compat_response(
         "FrickmailLogin" => {
             Some(native_frickmail_login(state, original_action, payload, session).await)
         }
+        "FrickmailBridgeSession" => {
+            Some(native_frickmail_bridge_session(state, original_action, session).await)
+        }
+        "FrickmailSwitchAccount" => {
+            Some(native_frickmail_switch_account(state, original_action, payload, session).await)
+        }
         "FrickmailDiscoverServices" => {
             Some(native_frickmail_discover_services(state, original_action, payload, session).await)
         }
@@ -969,6 +975,192 @@ async fn native_frickmail_login(
             )
         }
         Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_bridge_session(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "No active Frickmail session");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let accounts = match SqlxUserRepository::list_mail_accounts(pool, user.user_id).await {
+        Ok(accounts) => accounts,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let Some(account) = accounts.first() else {
+        return json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "no_primary": true
+                }
+            }),
+        );
+    };
+
+    prepare_mail_account_bridge(
+        pool,
+        user.user_id,
+        account.id,
+        &credential_key,
+        original_action,
+        true,
+    )
+    .await
+}
+
+async fn native_frickmail_switch_account(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    prepare_mail_account_bridge(
+        pool,
+        user.user_id,
+        payload_i64(payload, "id"),
+        &credential_key,
+        original_action,
+        false,
+    )
+    .await
+}
+
+async fn prepare_mail_account_bridge(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_id: i64,
+    credential_key: &[u8],
+    original_action: &str,
+    reauth_response: bool,
+) -> Response {
+    let account =
+        match SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account_id)
+            .await
+        {
+            Ok(Some(account)) => account,
+            Ok(None) => return json_result_error(original_action, "Account not found"),
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        };
+
+    if let Err(err) = validate_mail_account_bridge_credentials(&account, credential_key) {
+        if reauth_response {
+            return reauth_required_response(original_action, &account, &err.public_message());
+        }
+        return json_result_error(original_action, &err.public_message());
+    }
+
+    mailbox_switch_pending_response(original_action, &account)
+}
+
+fn validate_mail_account_bridge_credentials(
+    account: &MailAccountConnectionSecret,
+    credential_key: &[u8],
+) -> fm_core::Result<()> {
+    match account.account_type.as_str() {
+        "imap" => {
+            let _ = imap_config_from_account_secret(account)?;
+            let _ = account_password(account, credential_key)?;
+            Ok(())
+        }
+        "gmail" | "o365" => {
+            let Some(blob) = account.encrypted_oauth_refresh_token.as_deref() else {
+                return Err(FrickmailError::BadRequest(
+                    "Missing OAuth refresh token — re-authorize this account.".to_string(),
+                ));
+            };
+            let token = decrypt_account_secret(blob, credential_key)?;
+            if token.as_deref().unwrap_or_default().trim().is_empty() {
+                return Err(FrickmailError::BadRequest(
+                    "Missing OAuth refresh token — re-authorize this account.".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(FrickmailError::BadRequest("Invalid type".to_string())),
+    }
+}
+
+fn mailbox_switch_pending_response(
+    action: &str,
+    account: &MailAccountConnectionSecret,
+) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({
+            "Result": {
+                "ok": false,
+                "bridge_pending": true,
+                "native_mailbox_pending": true,
+                "account_id": account.id,
+                "email": account.email.as_str(),
+                "error": "Native mailbox account switching is pending; keep the PHP bridge enabled until folder and message switching are migrated."
+            }
+        }),
+    )
+}
+
+fn reauth_required_response(
+    action: &str,
+    account: &MailAccountConnectionSecret,
+    message: &str,
+) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({
+            "Result": {
+                "ok": true,
+                "reauth_required": true,
+                "reauth_account_id": account.id,
+                "reauth_account_email": account.email.as_str(),
+                "reauth_account_type": account.account_type.as_str(),
+                "message": reauth_message(message)
+            }
+        }),
+    )
+}
+
+fn reauth_message(message: &str) -> String {
+    if message.contains("please re-authorise") || message.contains("please re-authorize") {
+        message.to_string()
+    } else {
+        format!("{message} — please re-authorise this account.")
     }
 }
 
@@ -3414,8 +3606,14 @@ fn account_password(
             "No credentials stored".to_string(),
         ));
     };
-    decrypt_account_secret(blob, credential_key)?
-        .ok_or_else(|| FrickmailError::BadRequest("No credentials stored".to_string()))
+    let password = decrypt_account_secret(blob, credential_key)?
+        .ok_or_else(|| FrickmailError::BadRequest("No credentials stored".to_string()))?;
+    if password.trim().is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "No credentials stored".to_string(),
+        ));
+    }
+    Ok(password)
 }
 
 fn payload_string(payload: &Value, key: &str) -> Option<String> {
@@ -4289,6 +4487,288 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_bridge_session_selects_primary_but_does_not_claim_switch_success() {
+        let key = [21_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1600, "bridge-primary", Some("bridge@example.com")).await;
+        seed_mail_account(&pool, 1601, 1600, "Oldest", false).await;
+        seed_mail_account(&pool, 1602, 1600, "Primary", true).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            1600,
+            1602,
+            "imap-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1600, "bridge-primary", Some("bridge@example.com"), &key).await;
+
+        let response =
+            super::native_frickmail_bridge_session(&state, "FrickmailBridgeSession", &session)
+                .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["bridge_pending"], true);
+        assert_eq!(body["Result"]["native_mailbox_pending"], true);
+        assert_eq!(body["Result"]["email"], "primary@example.com");
+        assert_eq!(body["Result"]["account_id"], 1602);
+        assert!(body["Result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Native mailbox account switching is pending"));
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_bridge_session_falls_back_to_oldest_without_false_success() {
+        let key = [22_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1603, "bridge-oldest", Some("oldest@example.com")).await;
+        seed_mail_account(&pool, 1604, 1603, "Oldest", false).await;
+        seed_mail_account(&pool, 1605, 1603, "Newest", false).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            1603,
+            1604,
+            "imap-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1603, "bridge-oldest", Some("oldest@example.com"), &key).await;
+
+        let response =
+            super::native_frickmail_bridge_session(&state, "FrickmailBridgeSession", &session)
+                .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["bridge_pending"], true);
+        assert_eq!(body["Result"]["email"], "oldest@example.com");
+        assert_eq!(body["Result"]["account_id"], 1604);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_bridge_session_reports_no_primary_without_accounts() {
+        let key = [23_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1606, "bridge-empty", Some("empty@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1606, "bridge-empty", Some("empty@example.com"), &key).await;
+
+        let response =
+            super::native_frickmail_bridge_session(&state, "FrickmailBridgeSession", &session)
+                .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["no_primary"], true);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_bridge_session_requires_reauth_for_missing_credentials() {
+        let key = [24_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1607, "bridge-reauth", Some("reauth@example.com")).await;
+        seed_mail_account(&pool, 1608, 1607, "Primary", true).await;
+        clear_mail_account_password(&pool, 1608).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1607, "bridge-reauth", Some("reauth@example.com"), &key).await;
+
+        let response =
+            super::native_frickmail_bridge_session(&state, "FrickmailBridgeSession", &session)
+                .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["reauth_required"], true);
+        assert_eq!(body["Result"]["reauth_account_id"], 1608);
+        assert_eq!(
+            body["Result"]["reauth_account_email"],
+            "primary@example.com"
+        );
+        assert_eq!(body["Result"]["reauth_account_type"], "imap");
+        assert!(body["Result"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("please re-authorise"));
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_bridge_session_requires_reauth_for_empty_credentials() {
+        let key = [27_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            1616,
+            "bridge-empty-password",
+            Some("empty-password@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 1617, 1616, "Primary", true).await;
+        set_mail_account_password_blob(
+            &pool,
+            1617,
+            Some(fm_user::encrypt_account_secret("", &key).unwrap()),
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = credential_session(
+            1616,
+            "bridge-empty-password",
+            Some("empty-password@example.com"),
+            &key,
+        )
+        .await;
+
+        let response =
+            super::native_frickmail_bridge_session(&state, "FrickmailBridgeSession", &session)
+                .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["reauth_required"], true);
+        assert_eq!(
+            body["Result"]["message"],
+            "No credentials stored — please re-authorise this account."
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_switch_account_scopes_user_and_never_false_succeeds() {
+        let key = [25_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1609, "switch-user", Some("switch@example.com")).await;
+        seed_user(&pool, 1610, "other-switch", Some("other@example.com")).await;
+        seed_mail_account(&pool, 1611, 1609, "Work", true).await;
+        seed_mail_account(&pool, 1612, 1610, "Other", true).await;
+        seed_mail_account(&pool, 1613, 1609, "Missing", false).await;
+        clear_mail_account_password(&pool, 1613).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            1609,
+            1611,
+            "imap-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1609, "switch-user", Some("switch@example.com"), &key).await;
+
+        let response = super::native_frickmail_switch_account(
+            &state,
+            "FrickmailSwitchAccount",
+            &json!({"id": 1612}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Account not found");
+
+        let response = super::native_frickmail_switch_account(
+            &state,
+            "FrickmailSwitchAccount",
+            &json!({"id": 1613}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "No credentials stored");
+
+        let response = super::native_frickmail_switch_account(
+            &state,
+            "FrickmailSwitchAccount",
+            &json!({"id": "1611"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["bridge_pending"], true);
+        assert_eq!(body["Result"]["native_mailbox_pending"], true);
+        assert_eq!(body["Result"]["email"], "work@example.com");
+        assert_eq!(body["Result"]["account_id"], 1611);
+        assert!(body["Result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Native mailbox account switching is pending"));
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_native_bridge_and_switch_actions() {
+        let key = [26_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1614, "route-bridge", Some("route@example.com")).await;
+        seed_mail_account(&pool, 1615, 1614, "Primary", true).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            1614,
+            1615,
+            "imap-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1614, "route-bridge", Some("route@example.com"), &key).await;
+
+        let response = super::json_api_request(
+            state.clone(),
+            "/?/Json/".parse().unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?/Json/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("Action=PluginFrickmailBridgeSession"))
+                .unwrap(),
+            session.clone(),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailBridgeSession");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["bridge_pending"], true);
+        assert_eq!(body["Result"]["email"], "primary@example.com");
+
+        let response = super::json_api_request(
+            state,
+            "/?/Json/".parse().unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?/Json/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("Action=PluginFrickmailSwitchAccount&id=1615"))
+                .unwrap(),
+            session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailSwitchAccount");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["bridge_pending"], true);
+        assert_eq!(body["Result"]["email"], "primary@example.com");
     }
 
     #[tokio::test]
@@ -7171,6 +7651,23 @@ mod tests {
             .await
             .and_then(|row| row.try_get("encrypted_password"))
             .unwrap()
+    }
+
+    async fn clear_mail_account_password(pool: &AnyPool, account_id: i64) {
+        set_mail_account_password_blob(pool, account_id, None).await;
+    }
+
+    async fn set_mail_account_password_blob(
+        pool: &AnyPool,
+        account_id: i64,
+        blob: Option<Vec<u8>>,
+    ) {
+        sqlx::query("UPDATE frickmail_mail_accounts SET encrypted_password = ? WHERE id = ?")
+            .bind(blob)
+            .bind(account_id)
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     async fn account_oauth_refresh_token(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {
