@@ -4,7 +4,7 @@ pub mod error;
 pub mod json;
 pub mod plugin;
 
-pub use auth::{AuthToken, UserSession};
+pub use auth::{AuthToken, SelectedMailAccountSession, UserSession};
 pub use config::FrickmailConfig;
 pub use error::{ErrorBody, FrickmailError, Result};
 pub use json::{ApiEnvelope, HealthResponse};

@@ -17,3 +17,8 @@ pub struct AuthToken {
     pub smtp_host: String,
     pub smtp_port: u16,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedMailAccountSession {
+    pub account_id: i64,
+}

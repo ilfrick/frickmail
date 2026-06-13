@@ -1021,6 +1021,7 @@ async fn native_frickmail_bridge_session(
         user.user_id,
         account.id,
         &credential_key,
+        session,
         original_action,
         true,
     )
@@ -1054,6 +1055,7 @@ async fn native_frickmail_switch_account(
         user.user_id,
         payload_i64(payload, "id"),
         &credential_key,
+        session,
         original_action,
         false,
     )
@@ -1065,6 +1067,7 @@ async fn prepare_mail_account_bridge(
     user_id: i64,
     account_id: i64,
     credential_key: &[u8],
+    session: &fm_session::Session,
     original_action: &str,
     reauth_response: bool,
 ) -> Response {
@@ -1084,7 +1087,30 @@ async fn prepare_mail_account_bridge(
         return json_result_error(original_action, &err.public_message());
     }
 
+    if let Err(response) = store_selected_mail_account(session, original_action, account.id).await {
+        return response;
+    }
+
     mailbox_switch_pending_response(original_action, &account)
+}
+
+async fn store_selected_mail_account(
+    session: &fm_session::Session,
+    original_action: &str,
+    account_id: i64,
+) -> Result<(), Response> {
+    session
+        .insert(
+            fm_session::SELECTED_ACCOUNT_SESSION_KEY,
+            fm_core::SelectedMailAccountSession { account_id },
+        )
+        .await
+        .map_err(|err| {
+            json_result_error(
+                original_action,
+                &format!("Frickmail session write failed: {err}"),
+            )
+        })
 }
 
 fn validate_mail_account_bridge_credentials(
@@ -1745,11 +1771,12 @@ where
         return json_result_error(original_action, "Frickmail database is not configured");
     };
 
-    let account_id = payload_i64(payload, "account_id");
+    let account_id = match resolve_message_body_account_id(payload, session, original_action).await
+    {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
     let uid = payload_i64(payload, "uid");
-    if account_id <= 0 {
-        return json_result_error(original_action, "Account id required");
-    }
     if uid <= 0 || uid > u32::MAX as i64 {
         return json_result_error(original_action, "uid required");
     }
@@ -1797,6 +1824,36 @@ where
         ),
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
+}
+
+async fn resolve_message_body_account_id(
+    payload: &Value,
+    session: &fm_session::Session,
+    original_action: &str,
+) -> Result<i64, Response> {
+    let account_id = payload_i64(payload, "account_id");
+    if account_id > 0 {
+        return Ok(account_id);
+    }
+
+    let selected = session
+        .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+        .await
+        .map_err(|err| {
+            json_result_error(
+                original_action,
+                &format!("Frickmail session read failed: {err}"),
+            )
+        })?;
+
+    let Some(selected) = selected else {
+        return Err(json_result_error(original_action, "Account id required"));
+    };
+    if selected.account_id <= 0 {
+        return Err(json_result_error(original_action, "Account id required"));
+    }
+
+    Ok(selected.account_id)
 }
 
 async fn native_frickmail_check_new_mail(
@@ -3765,9 +3822,12 @@ mod tests {
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use data_encoding::BASE32_NOPAD;
-    use fm_core::{FrickmailConfig, FrickmailError, UserSession};
+    use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{BodyPartKind, BodyPreviewPart, MailboxStatus};
-    use fm_session::{MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, USER_SESSION_KEY};
+    use fm_session::{
+        MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
+        USER_SESSION_KEY,
+    };
     use fm_user::PushSubscription;
     use hmac::{Hmac, Mac};
     use openssl::{
@@ -4712,6 +4772,12 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Native mailbox account switching is pending"));
+        let selected = session
+            .get::<SelectedMailAccountSession>(SELECTED_ACCOUNT_SESSION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.account_id, 1611);
     }
 
     #[tokio::test]
@@ -5733,6 +5799,17 @@ mod tests {
         let response = super::native_frickmail_get_message_body(
             &state,
             "FrickmailGetMessageBody",
+            &json!({"uid": 41}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Account id required");
+
+        let response = super::native_frickmail_get_message_body(
+            &state,
+            "FrickmailGetMessageBody",
             &json!({"account_id": 9999, "uid": 41}),
             &session,
         )
@@ -5809,6 +5886,113 @@ mod tests {
         assert_eq!(body["Result"]["html"], "<p>HTML body.</p>");
         assert_eq!(body["Result"]["plain"], "Plain body.");
         assert!(body["Result"]["subject"].is_null());
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_get_message_body_uses_selected_account_when_account_id_missing() {
+        let key = [28_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1620, "selected-viewer", Some("selected@example.com")).await;
+        seed_mail_account(&pool, 1621, 1620, "Primary", true).await;
+        seed_mail_account(&pool, 1622, 1620, "Selected", false).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            1620,
+            1622,
+            "selected-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1620, "selected-viewer", Some("selected@example.com"), &key).await;
+
+        let switch_response = super::native_frickmail_switch_account(
+            &state,
+            "FrickmailSwitchAccount",
+            &json!({"id": 1622}),
+            &session,
+        )
+        .await;
+        let switch_body = read_json(switch_response).await;
+        assert_eq!(switch_body["Result"]["ok"], false);
+        assert_eq!(switch_body["Result"]["bridge_pending"], true);
+        let selected = session
+            .get::<SelectedMailAccountSession>(SELECTED_ACCOUNT_SESSION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.account_id, 1622);
+
+        let response = super::native_frickmail_get_message_body_with_fetcher(
+            &state,
+            "FrickmailGetMessageBody",
+            &json!({"uid": 77}),
+            &session,
+            Duration::from_secs(1),
+            |config, password, folder, uid| async move {
+                assert_eq!(config.login, "selected@example.com");
+                assert_eq!(password, "selected-secret");
+                assert_eq!(folder, "INBOX");
+                assert_eq!(uid, 77);
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::Plain,
+                    raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nSelected body.".to_vec(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["plain"], "Selected body.");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_get_message_body_revalidates_selected_account_scope() {
+        let key = [29_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1630, "scoped-viewer", Some("scoped@example.com")).await;
+        seed_user(&pool, 1631, "other-viewer", Some("other@example.com")).await;
+        seed_mail_account(&pool, 1632, 1631, "Other", true).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            1631,
+            1632,
+            "other-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1630, "scoped-viewer", Some("scoped@example.com"), &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1632 },
+            )
+            .await
+            .unwrap();
+
+        let response = super::native_frickmail_get_message_body_with_fetcher(
+            &state,
+            "FrickmailGetMessageBody",
+            &json!({"uid": 77}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                panic!("fetcher should not run for another user's selected account")
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Account not found");
     }
 
     #[tokio::test]

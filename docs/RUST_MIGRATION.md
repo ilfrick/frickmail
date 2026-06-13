@@ -514,10 +514,13 @@ Every migration slice must follow this loop:
 ## Immediate Next Work
 
 1. Generate and commit the complete legacy route/hook/frontend-call inventory.
-2. Complete native mailbox account switching: wire the selected account into
-   native folder/message routes, then change `FrickmailBridgeSession` and
-   `FrickmailSwitchAccount` from the current safe pending response to real
-   success without PHP session state.
+2. Complete native mailbox account switching: `FrickmailBridgeSession` and
+   `FrickmailSwitchAccount` now persist a selected account in the Rust session
+   only after credential validation, and `FrickmailGetMessageBody` can consume it
+   while revalidating current-user account ownership. Continue wiring that
+   selected account through native folder/message routes, then change the bridge
+   and switch actions from the current safe pending response to real success
+   without PHP session state.
 3. Add native coverage for `FrickmailApplyRules`, import/export, and remaining
    S/MIME actions.
 4. Add the missing Microsoft Graph mailbox actions to the compatibility
