@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     net::{IpAddr, SocketAddr},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -56,6 +57,9 @@ const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
 const LONG_POLL_NEW_MAIL_DEADLINE: Duration = Duration::from_secs(25);
 const LONG_POLL_NEW_MAIL_INTERVAL: Duration = Duration::from_secs(5);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
+const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
+const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com";
+const MICROSOFT_GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access";
 
 #[derive(Debug, Clone, Copy)]
 struct LongPollNewMailTiming {
@@ -75,6 +79,22 @@ struct DiscoveredService {
     note: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     needs_oauth: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphOAuthConfig {
+    client_id: String,
+    client_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphListMessagesRequest {
+    tenant: String,
+    client_id: String,
+    client_secret: Option<String>,
+    refresh_token: String,
+    folder: String,
+    top: i64,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -439,6 +459,9 @@ async fn native_compat_response(
         "FrickmailGetMessageBody" => {
             Some(native_frickmail_get_message_body(state, original_action, payload, session).await)
         }
+        "FrickmailGraphListMessages" => Some(
+            native_frickmail_graph_list_messages(state, original_action, payload, session).await,
+        ),
         "FrickmailCheckNewMail" => {
             Some(native_frickmail_check_new_mail(state, original_action, payload, session).await)
         }
@@ -1640,6 +1663,106 @@ async fn native_frickmail_save_oauth_token(
         ),
         Ok(false) => json_result_error(original_action, "Account not found"),
         Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_graph_list_messages(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_graph_list_messages_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        graph_oauth_config_from_env,
+        GRAPH_FETCH_DEADLINE,
+        |request| async move { graph_list_messages_via_reqwest(request).await },
+    )
+    .await
+}
+
+async fn native_frickmail_graph_list_messages_with_fetcher<C, F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+    F: FnOnce(GraphListMessagesRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Value>>,
+{
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let account_id = payload_i64(payload, "account_id");
+    if account_id <= 0 {
+        return json_result_error(original_action, "account_id required");
+    }
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return json_result_error(original_action, "Account not found"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    let (refresh_token, tenant) = match graph_account_oauth(&account, &credential_key) {
+        Ok(oauth) => oauth,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let oauth = match oauth_config() {
+        Ok(oauth) => oauth,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let request = GraphListMessagesRequest {
+        tenant,
+        client_id: oauth.client_id,
+        client_secret: oauth.client_secret,
+        refresh_token,
+        folder: payload_optional_string(payload, "folder").unwrap_or_else(|| "inbox".to_string()),
+        top: payload_graph_top(payload),
+    };
+
+    let fetch = tokio::time::timeout(fetch_deadline, fetcher(request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Microsoft Graph request timed out".to_string()));
+
+    match fetch {
+        Ok(Ok(data)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "data": data
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
 
@@ -3331,6 +3454,243 @@ fn compat_error(code: u16, message: impl Into<String>) -> Value {
     })
 }
 
+fn graph_oauth_config_from_env() -> fm_core::Result<GraphOAuthConfig> {
+    let client_id = env::var("FRICKMAIL_O365_CLIENT_ID").unwrap_or_default();
+    if client_id.trim().is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "Microsoft Graph OAuth client is not configured".to_string(),
+        ));
+    }
+
+    Ok(GraphOAuthConfig {
+        client_id: client_id.trim().to_string(),
+        client_secret: env::var("FRICKMAIL_O365_CLIENT_SECRET")
+            .ok()
+            .and_then(|secret| {
+                let secret = secret.trim().to_string();
+                if secret.is_empty() {
+                    None
+                } else {
+                    Some(secret)
+                }
+            }),
+    })
+}
+
+fn graph_account_oauth(
+    account: &MailAccountConnectionSecret,
+    credential_key: &[u8],
+) -> fm_core::Result<(String, String)> {
+    if account.account_type != "o365" {
+        return Err(FrickmailError::BadRequest(
+            "Account is not an Office 365 account (type must be o365)".to_string(),
+        ));
+    }
+
+    let Some(blob) = account.encrypted_oauth_refresh_token.as_deref() else {
+        return Err(FrickmailError::BadRequest(
+            "Missing OAuth refresh token — re-authorize this account.".to_string(),
+        ));
+    };
+    let refresh_token = decrypt_account_secret(blob, credential_key)?
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            FrickmailError::BadRequest(
+                "Missing OAuth refresh token — re-authorize this account.".to_string(),
+            )
+        })?;
+    let tenant = graph_tenant(
+        account
+            .oauth_tenant
+            .as_deref()
+            .filter(|tenant| !tenant.trim().is_empty())
+            .unwrap_or("common"),
+    )?;
+
+    Ok((refresh_token, tenant))
+}
+
+fn graph_tenant(tenant: &str) -> fm_core::Result<String> {
+    let tenant = tenant.trim();
+    if tenant.is_empty()
+        || tenant.contains('/')
+        || tenant.contains('\\')
+        || tenant.contains('?')
+        || tenant.contains('#')
+    {
+        return Err(FrickmailError::BadRequest(
+            "Invalid Microsoft OAuth tenant".to_string(),
+        ));
+    }
+    Ok(tenant.to_string())
+}
+
+async fn graph_list_messages_via_reqwest(
+    request: GraphListMessagesRequest,
+) -> fm_core::Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(GRAPH_FETCH_DEADLINE)
+        .build()
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph client setup failed: {err}"))
+        })?;
+    let access_token = graph_access_token(&client, &request).await?;
+    let url = graph_list_messages_url(&request.folder, request.top)?;
+    let response = client
+        .get(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph request failed: {err}"))
+        })?;
+
+    graph_json_response(response, "Microsoft Graph request").await
+}
+
+async fn graph_access_token(
+    client: &reqwest::Client,
+    request: &GraphListMessagesRequest,
+) -> fm_core::Result<String> {
+    let token_url = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        request.tenant
+    );
+    let response = client
+        .post(token_url)
+        .form(&graph_token_form(request))
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft token request failed: {err}"))
+        })?;
+    let body = graph_json_response(response, "Microsoft token request").await?;
+
+    body.get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            FrickmailError::Upstream(
+                "Microsoft token response did not include access_token".to_string(),
+            )
+        })
+}
+
+fn graph_token_form(request: &GraphListMessagesRequest) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        ("client_id", request.client_id.clone()),
+        ("refresh_token", request.refresh_token.clone()),
+        ("grant_type", "refresh_token".to_string()),
+        ("scope", MICROSOFT_GRAPH_SCOPES.to_string()),
+    ];
+    if let Some(client_secret) = &request.client_secret {
+        form.push(("client_secret", client_secret.clone()));
+    }
+    form
+}
+
+fn graph_list_messages_url(folder: &str, top: i64) -> fm_core::Result<url::Url> {
+    let mut url = url::Url::parse(MICROSOFT_GRAPH_ROOT)
+        .map_err(|err| FrickmailError::Upstream(format!("Invalid Microsoft Graph URL: {err}")))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| FrickmailError::Upstream("Invalid Microsoft Graph URL".to_string()))?;
+        segments
+            .push("v1.0")
+            .push("me")
+            .push("mailFolders")
+            .push(folder)
+            .push("messages");
+    }
+    url.query_pairs_mut()
+        .append_pair("$top", &top.to_string())
+        .append_pair(
+            "$select",
+            "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
+        )
+        .append_pair("$orderby", "receivedDateTime desc");
+    Ok(url)
+}
+
+async fn graph_json_response(response: reqwest::Response, context: &str) -> fm_core::Result<Value> {
+    let status = response.status();
+    let text = response.text().await.map_err(|err| {
+        FrickmailError::Upstream(format!("{context} response read failed: {err}"))
+    })?;
+    if !status.is_success() {
+        return Err(FrickmailError::Upstream(format!(
+            "{context} failed ({}): {}",
+            status.as_u16(),
+            graph_error_summary(&text)
+        )));
+    }
+
+    serde_json::from_str(&text)
+        .map_err(|err| FrickmailError::Upstream(format!("{context} returned invalid JSON: {err}")))
+}
+
+fn graph_error_summary(text: &str) -> String {
+    let Ok(body) = serde_json::from_str::<Value>(text) else {
+        return "upstream returned a non-JSON error".to_string();
+    };
+    let error = body
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("upstream_error");
+    let description = body
+        .get("error_description")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            body.get("error")
+                .and_then(|value| value.get("message"))
+                .and_then(Value::as_str)
+        })
+        .map(|value| redact_graph_error_secrets(&value.replace(['\r', '\n'], " ")))
+        .unwrap_or_else(|| "request rejected".to_string());
+    format!(
+        "{error}: {}",
+        truncate_graph_error_description(&description)
+    )
+}
+
+fn redact_graph_error_secrets(text: &str) -> String {
+    text.split_whitespace()
+        .map(|part| {
+            let key = part
+                .split_once('=')
+                .or_else(|| part.split_once(':'))
+                .map(|(key, _)| key.trim_matches(['"', '\'', ',', ';']).to_ascii_lowercase());
+            match key.as_deref() {
+                Some("client_secret" | "refresh_token" | "access_token" | "id_token") => part
+                    .replace(
+                        part.split_once(['=', ':'])
+                            .map(|(_, value)| value)
+                            .unwrap_or_default(),
+                        "[redacted]",
+                    ),
+                _ => part.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_graph_error_description(text: &str) -> String {
+    const LIMIT: usize = 240;
+    if text.len() <= LIMIT {
+        return text.to_string();
+    }
+
+    let mut end = LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &text[..end])
+}
+
 async fn discover_account_services(account: &MailAccount) -> Vec<DiscoveredService> {
     let domain = account
         .email
@@ -3582,6 +3942,20 @@ fn payload_search_limit(payload: &Value) -> i64 {
         Value::Number(number) if number.as_f64() == Some(0.0) => 50,
         Value::String(text) if text.is_empty() || text == "0" => 50,
         _ => payload_i64(payload, "limit"),
+    };
+    raw.clamp(1, 100)
+}
+
+fn payload_graph_top(payload: &Value) -> i64 {
+    let Some(value) = payload.get("top") else {
+        return 50;
+    };
+    let raw = match value {
+        Value::Null => 50,
+        Value::Bool(false) => 50,
+        Value::Number(number) if number.as_f64() == Some(0.0) => 50,
+        Value::String(text) if text.is_empty() || text == "0" => 50,
+        _ => payload_i64(payload, "top"),
     };
     raw.clamp(1, 100)
 }
@@ -3942,7 +4316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_api_recognizes_graph_actions_as_compatibility_fallback() {
+    async fn json_api_dispatches_native_graph_list_messages_action() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -3960,12 +4334,236 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
         assert_eq!(body["Action"], "PluginFrickmailGraphListMessages");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn json_api_keeps_unmigrated_graph_actions_as_compatibility_fallback() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailGraphSearch&account_id=7"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailGraphSearch");
         assert_eq!(body["Result"], false);
         assert_eq!(body["code"], 501);
         assert_eq!(
             body["message"],
-            "Frickmail compatibility hook 'FrickmailGraphListMessages' is not migrated yet"
+            "Frickmail compatibility hook 'FrickmailGraphSearch' is not migrated yet"
         );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_graph_list_messages_fetches_o365_messages() {
+        let key = [31_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1700, "graph-user", Some("graph@example.com")).await;
+        seed_mail_account(&pool, 1701, 1700, "Graph", true).await;
+        set_mail_account_oauth_token(
+            &pool,
+            1701,
+            "graph@example.com",
+            "refresh-token",
+            Some("organizations"),
+            &key,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = credential_session(1700, "graph-user", Some("graph@example.com"), &key).await;
+        let captured: Arc<Mutex<Option<super::GraphListMessagesRequest>>> =
+            Arc::new(Mutex::new(None));
+
+        let response = super::native_frickmail_graph_list_messages_with_fetcher(
+            &state,
+            "FrickmailGraphListMessages",
+            &json!({
+                "account_id": 1701,
+                "folder": "Inbox/Sub Folder",
+                "top": "0"
+            }),
+            &session,
+            || {
+                Ok(super::GraphOAuthConfig {
+                    client_id: "client-id".to_string(),
+                    client_secret: Some("client-secret".to_string()),
+                })
+            },
+            Duration::from_secs(1),
+            {
+                let captured = captured.clone();
+                move |request| async move {
+                    *captured.lock().unwrap() = Some(request);
+                    Ok(json!({
+                        "value": [
+                            {
+                                "id": "message-1",
+                                "subject": "Native Graph",
+                                "isRead": false
+                            }
+                        ],
+                        "@odata.nextLink": "https://graph.microsoft.com/v1.0/next"
+                    }))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let request = captured.lock().unwrap().clone().unwrap();
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(
+            body["Result"]["data"]["value"][0]["subject"],
+            "Native Graph"
+        );
+        assert_eq!(request.tenant, "organizations");
+        assert_eq!(request.client_id, "client-id");
+        assert_eq!(request.client_secret.as_deref(), Some("client-secret"));
+        assert_eq!(request.refresh_token, "refresh-token");
+        assert_eq!(request.folder, "Inbox/Sub Folder");
+        assert_eq!(request.top, 50);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_graph_list_messages_scopes_account_and_requires_o365_token() {
+        let key = [32_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1702, "graph-owner", Some("owner@example.com")).await;
+        seed_user(&pool, 1703, "graph-other", Some("other@example.com")).await;
+        seed_mail_account(&pool, 1704, 1702, "Local", true).await;
+        seed_mail_account(&pool, 1705, 1703, "Other", true).await;
+        set_mail_account_oauth_token(
+            &pool,
+            1705,
+            "other@example.com",
+            "other-refresh-token",
+            None,
+            &key,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session =
+            credential_session(1702, "graph-owner", Some("owner@example.com"), &key).await;
+        let oauth = super::GraphOAuthConfig {
+            client_id: "client-id".to_string(),
+            client_secret: Some("client-secret".to_string()),
+        };
+
+        let response = super::native_frickmail_graph_list_messages_with_fetcher(
+            &state,
+            "FrickmailGraphListMessages",
+            &json!({"account_id": 1705}),
+            &session,
+            {
+                let oauth = oauth.clone();
+                move || Ok(oauth)
+            },
+            Duration::from_secs(1),
+            |_| async { Err(FrickmailError::Upstream("should not fetch".to_string())) },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Account not found");
+
+        let response = super::native_frickmail_graph_list_messages_with_fetcher(
+            &state,
+            "FrickmailGraphListMessages",
+            &json!({"account_id": 1704}),
+            &session,
+            {
+                let oauth = oauth.clone();
+                move || Ok(oauth)
+            },
+            Duration::from_secs(1),
+            |_| async { Err(FrickmailError::Upstream("should not fetch".to_string())) },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Account is not an Office 365 account (type must be o365)"
+        );
+
+        set_mail_account_email_and_type(&pool, 1704, "owner@example.com", "o365").await;
+        let response = super::native_frickmail_graph_list_messages_with_fetcher(
+            &state,
+            "FrickmailGraphListMessages",
+            &json!({"account_id": 1704}),
+            &session,
+            move || Ok(oauth),
+            Duration::from_secs(1),
+            |_| async { Err(FrickmailError::Upstream("should not fetch".to_string())) },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Missing OAuth refresh token — re-authorize this account."
+        );
+    }
+
+    #[test]
+    fn graph_error_summary_does_not_echo_raw_upstream_body() {
+        let summary = super::graph_error_summary(
+            r#"{"error":"invalid_grant","error_description":"line1\nline2 refresh_token=secret"}"#,
+        );
+        assert_eq!(
+            summary,
+            "invalid_grant: line1 line2 refresh_token=[redacted]"
+        );
+        assert_eq!(
+            super::graph_error_summary("client_secret=secret"),
+            "upstream returned a non-JSON error"
+        );
+    }
+
+    #[test]
+    fn graph_token_form_supports_public_clients_and_mail_scopes() {
+        let request = super::GraphListMessagesRequest {
+            tenant: "common".to_string(),
+            client_id: "client-id".to_string(),
+            client_secret: None,
+            refresh_token: "refresh-token".to_string(),
+            folder: "inbox".to_string(),
+            top: 50,
+        };
+        let form = super::graph_token_form(&request);
+
+        assert!(form
+            .iter()
+            .any(|(key, value)| *key == "client_id" && value == "client-id"));
+        assert!(form
+            .iter()
+            .any(|(key, value)| *key == "refresh_token" && value == "refresh-token"));
+        assert!(form
+            .iter()
+            .any(|(key, value)| *key == "grant_type" && value == "refresh_token"));
+        assert!(form
+            .iter()
+            .any(|(key, value)| *key == "scope" && value.contains("Mail.ReadWrite")));
+        assert!(!form.iter().any(|(key, _)| *key == "client_secret"));
+
+        let confidential = super::GraphListMessagesRequest {
+            client_secret: Some("secret".to_string()),
+            ..request
+        };
+        assert!(super::graph_token_form(&confidential)
+            .iter()
+            .any(|(key, value)| *key == "client_secret" && value == "secret"));
     }
 
     #[tokio::test]
@@ -4489,7 +5087,7 @@ mod tests {
             Some("JBSWY3DPEHPK3PXP"),
         )
         .await;
-        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
         let code = test_totp_code("JBSWY3DPEHPK3PXP", current_test_totp_counter());
         let session = test_session();
 
@@ -4513,27 +5111,15 @@ mod tests {
             .unwrap()
             .is_some());
 
-        let replay_session = test_session();
-        let response = super::native_frickmail_login(
-            &state,
-            "FrickmailLogin",
-            &json!({
-                "username": "totp-valid-login",
-                "password": "correct-horse",
-                "totp_code": code
-            }),
-            &replay_session,
-        )
-        .await;
-        let body = read_json(response).await;
-        assert_eq!(body["Result"]["ok"], false);
-        assert_eq!(body["Result"]["requires_totp"], true);
-        assert_eq!(body["Result"]["error"], "Two-factor code already used");
-        assert!(replay_session
-            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
-            .await
-            .unwrap()
-            .is_none());
+        let replay =
+            SqlxUserRepository::verify_totp_login_code(&pool, 1514, "JBSWY3DPEHPK3PXP", code)
+                .await
+                .unwrap();
+        assert_eq!(replay.ok, false);
+        assert_eq!(
+            replay.error.as_deref(),
+            Some("Two-factor code already used")
+        );
     }
 
     #[tokio::test]
@@ -7838,6 +8424,30 @@ mod tests {
         .bind(email)
         .bind(account_type)
         .bind(email)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn set_mail_account_oauth_token(
+        pool: &AnyPool,
+        account_id: i64,
+        email: &str,
+        refresh_token: &str,
+        tenant: Option<&str>,
+        credential_key: &[u8],
+    ) {
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET email = ?, type = 'o365', login = ?, encrypted_password = NULL,
+                 encrypted_oauth_refresh_token = ?, oauth_tenant = ?
+             WHERE id = ?",
+        )
+        .bind(email)
+        .bind(email)
+        .bind(fm_user::encrypt_account_secret(refresh_token, credential_key).unwrap())
+        .bind(tenant.map(ToOwned::to_owned))
         .bind(account_id)
         .execute(pool)
         .await

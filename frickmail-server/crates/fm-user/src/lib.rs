@@ -109,6 +109,7 @@ pub struct MailAccountConnectionSecret {
     pub login: Option<String>,
     pub encrypted_password: Option<Vec<u8>>,
     pub encrypted_oauth_refresh_token: Option<Vec<u8>>,
+    pub oauth_tenant: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -3500,11 +3501,11 @@ fn mail_account_query(backend: &str) -> &'static str {
 fn mail_account_connection_secret_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
-            "SELECT id, email, type, imap_host, imap_port, imap_secure, login, encrypted_password, encrypted_oauth_refresh_token \
+            "SELECT id, email, type, imap_host, imap_port, imap_secure, login, encrypted_password, encrypted_oauth_refresh_token, oauth_tenant \
              FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2"
         }
         _ => {
-            "SELECT id, email, type, imap_host, imap_port, imap_secure, login, encrypted_password, encrypted_oauth_refresh_token \
+            "SELECT id, email, type, imap_host, imap_port, imap_secure, login, encrypted_password, encrypted_oauth_refresh_token, oauth_tenant \
              FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
         }
     }
@@ -4430,6 +4431,7 @@ fn row_to_mail_account_connection_secret(
         encrypted_oauth_refresh_token: row
             .try_get("encrypted_oauth_refresh_token")
             .map_err(db_error)?,
+        oauth_tenant: row.try_get("oauth_tenant").map_err(db_error)?,
     })
 }
 
