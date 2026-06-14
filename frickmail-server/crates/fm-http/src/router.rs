@@ -97,6 +97,16 @@ struct GraphListMessagesRequest {
     top: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphSearchMessagesRequest {
+    tenant: String,
+    client_id: String,
+    client_secret: Option<String>,
+    refresh_token: String,
+    query: String,
+    top: i64,
+}
+
 pub fn build_router(state: AppState) -> Router {
     let static_root = state.config().static_root.clone();
 
@@ -462,6 +472,9 @@ async fn native_compat_response(
         "FrickmailGraphListMessages" => Some(
             native_frickmail_graph_list_messages(state, original_action, payload, session).await,
         ),
+        "FrickmailGraphSearch" => {
+            Some(native_frickmail_graph_search(state, original_action, payload, session).await)
+        }
         "FrickmailCheckNewMail" => {
             Some(native_frickmail_check_new_mail(state, original_action, payload, session).await)
         }
@@ -1758,6 +1771,113 @@ where
             json!({
                 "Result": {
                     "ok": true,
+                    "data": data
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_graph_search(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_graph_search_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        graph_oauth_config_from_env,
+        GRAPH_FETCH_DEADLINE,
+        |request| async move { graph_search_messages_via_reqwest(request).await },
+    )
+    .await
+}
+
+async fn native_frickmail_graph_search_with_fetcher<C, F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+    F: FnOnce(GraphSearchMessagesRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Value>>,
+{
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let account_id = payload_i64(payload, "account_id");
+    if account_id <= 0 {
+        return json_result_error(original_action, "account_id required");
+    }
+    let query = payload_string(payload, "q").unwrap_or_default();
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return json_result_error(original_action, "Search query is required");
+    }
+
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return json_result_error(original_action, "Account not found"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    let (refresh_token, tenant) = match graph_account_oauth(&account, &credential_key) {
+        Ok(oauth) => oauth,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let oauth = match oauth_config() {
+        Ok(oauth) => oauth,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let request = GraphSearchMessagesRequest {
+        tenant,
+        client_id: oauth.client_id,
+        client_secret: oauth.client_secret,
+        refresh_token,
+        query: query.clone(),
+        top: payload_graph_top(payload),
+    };
+
+    let fetch = tokio::time::timeout(fetch_deadline, fetcher(request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Microsoft Graph request timed out".to_string()));
+
+    match fetch {
+        Ok(Ok(data)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "query": query,
                     "data": data
                 }
             }),
@@ -3534,7 +3654,14 @@ async fn graph_list_messages_via_reqwest(
         .map_err(|err| {
             FrickmailError::Upstream(format!("Microsoft Graph client setup failed: {err}"))
         })?;
-    let access_token = graph_access_token(&client, &request).await?;
+    let access_token = graph_access_token_for(
+        &client,
+        &request.tenant,
+        &request.client_id,
+        request.client_secret.as_deref(),
+        &request.refresh_token,
+    )
+    .await?;
     let url = graph_list_messages_url(&request.folder, request.top)?;
     let response = client
         .get(url)
@@ -3548,17 +3675,51 @@ async fn graph_list_messages_via_reqwest(
     graph_json_response(response, "Microsoft Graph request").await
 }
 
-async fn graph_access_token(
+async fn graph_search_messages_via_reqwest(
+    request: GraphSearchMessagesRequest,
+) -> fm_core::Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(GRAPH_FETCH_DEADLINE)
+        .build()
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph client setup failed: {err}"))
+        })?;
+    let access_token = graph_access_token_for(
+        &client,
+        &request.tenant,
+        &request.client_id,
+        request.client_secret.as_deref(),
+        &request.refresh_token,
+    )
+    .await?;
+    let url = graph_search_messages_url(&request.query, request.top)?;
+    let response = client
+        .get(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph request failed: {err}"))
+        })?;
+
+    graph_json_response(response, "Microsoft Graph request").await
+}
+
+async fn graph_access_token_for(
     client: &reqwest::Client,
-    request: &GraphListMessagesRequest,
+    tenant: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
 ) -> fm_core::Result<String> {
-    let token_url = format!(
-        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-        request.tenant
-    );
+    let token_url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
     let response = client
         .post(token_url)
-        .form(&graph_token_form(request))
+        .form(&graph_token_form_fields(
+            client_id,
+            client_secret,
+            refresh_token,
+        ))
         .send()
         .await
         .map_err(|err| {
@@ -3577,15 +3738,19 @@ async fn graph_access_token(
         })
 }
 
-fn graph_token_form(request: &GraphListMessagesRequest) -> Vec<(&'static str, String)> {
+fn graph_token_form_fields(
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> Vec<(&'static str, String)> {
     let mut form = vec![
-        ("client_id", request.client_id.clone()),
-        ("refresh_token", request.refresh_token.clone()),
+        ("client_id", client_id.to_string()),
+        ("refresh_token", refresh_token.to_string()),
         ("grant_type", "refresh_token".to_string()),
         ("scope", MICROSOFT_GRAPH_SCOPES.to_string()),
     ];
-    if let Some(client_secret) = &request.client_secret {
-        form.push(("client_secret", client_secret.clone()));
+    if let Some(client_secret) = client_secret {
+        form.push(("client_secret", client_secret.to_string()));
     }
     form
 }
@@ -3611,6 +3776,26 @@ fn graph_list_messages_url(folder: &str, top: i64) -> fm_core::Result<url::Url> 
             "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
         )
         .append_pair("$orderby", "receivedDateTime desc");
+    Ok(url)
+}
+
+fn graph_search_messages_url(query: &str, top: i64) -> fm_core::Result<url::Url> {
+    let mut url = url::Url::parse(MICROSOFT_GRAPH_ROOT)
+        .map_err(|err| FrickmailError::Upstream(format!("Invalid Microsoft Graph URL: {err}")))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| FrickmailError::Upstream("Invalid Microsoft Graph URL".to_string()))?;
+        segments.push("v1.0").push("me").push("messages");
+    }
+    let escaped_query = format!("\"{}\"", query.replace('"', "\\\""));
+    url.query_pairs_mut()
+        .append_pair("$search", &escaped_query)
+        .append_pair("$top", &top.to_string())
+        .append_pair(
+            "$select",
+            "id,subject,from,receivedDateTime,isRead,bodyPreview,parentFolderId",
+        );
     Ok(url)
 }
 
@@ -4339,14 +4524,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_api_keeps_unmigrated_graph_actions_as_compatibility_fallback() {
+    async fn json_api_dispatches_native_graph_search_action() {
         let response = app()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("Action=PluginFrickmailGraphSearch&account_id=7"))
+                    .body(Body::from(
+                        "Action=PluginFrickmailGraphSearch&account_id=7&q=report",
+                    ))
                     .unwrap(),
             )
             .await
@@ -4355,11 +4542,32 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
         assert_eq!(body["Action"], "PluginFrickmailGraphSearch");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn json_api_keeps_unmigrated_graph_actions_as_compatibility_fallback() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailGraphDelta&account_id=7"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailGraphDelta");
         assert_eq!(body["Result"], false);
         assert_eq!(body["code"], 501);
         assert_eq!(
             body["message"],
-            "Frickmail compatibility hook 'FrickmailGraphSearch' is not migrated yet"
+            "Frickmail compatibility hook 'FrickmailGraphDelta' is not migrated yet"
         );
     }
 
@@ -4516,6 +4724,132 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn native_frickmail_graph_search_fetches_o365_results() {
+        let key = [33_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1706, "graph-search", Some("search@example.com")).await;
+        seed_mail_account(&pool, 1707, 1706, "Graph Search", true).await;
+        set_mail_account_oauth_token(
+            &pool,
+            1707,
+            "search@example.com",
+            "refresh-token",
+            None,
+            &key,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1706, "graph-search", Some("search@example.com"), &key).await;
+        let captured: Arc<Mutex<Option<super::GraphSearchMessagesRequest>>> =
+            Arc::new(Mutex::new(None));
+
+        let response = super::native_frickmail_graph_search_with_fetcher(
+            &state,
+            "FrickmailGraphSearch",
+            &json!({
+                "account_id": 1707,
+                "q": " quarterly report ",
+                "top": "2"
+            }),
+            &session,
+            || {
+                Ok(super::GraphOAuthConfig {
+                    client_id: "client-id".to_string(),
+                    client_secret: None,
+                })
+            },
+            Duration::from_secs(1),
+            {
+                let captured = captured.clone();
+                move |request| async move {
+                    *captured.lock().unwrap() = Some(request);
+                    Ok(json!({
+                        "value": [
+                            {
+                                "id": "message-2",
+                                "subject": "Quarterly report",
+                                "bodyPreview": "Preview"
+                            }
+                        ]
+                    }))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let request = captured.lock().unwrap().clone().unwrap();
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["query"], "quarterly report");
+        assert_eq!(body["Result"]["data"]["value"][0]["bodyPreview"], "Preview");
+        assert_eq!(request.tenant, "common");
+        assert_eq!(request.client_id, "client-id");
+        assert_eq!(request.client_secret, None);
+        assert_eq!(request.refresh_token, "refresh-token");
+        assert_eq!(request.query, "quarterly report");
+        assert_eq!(request.top, 2);
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_graph_search_requires_query_before_fetch() {
+        let key = [34_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1708, "graph-search-empty", Some("empty@example.com")).await;
+        seed_mail_account(&pool, 1709, 1708, "Graph Empty", true).await;
+        set_mail_account_oauth_token(
+            &pool,
+            1709,
+            "empty@example.com",
+            "refresh-token",
+            None,
+            &key,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1708, "graph-search-empty", Some("empty@example.com"), &key).await;
+
+        let response = super::native_frickmail_graph_search_with_fetcher(
+            &state,
+            "FrickmailGraphSearch",
+            &json!({"account_id": 1709, "q": "   "}),
+            &session,
+            || {
+                Ok(super::GraphOAuthConfig {
+                    client_id: "client-id".to_string(),
+                    client_secret: None,
+                })
+            },
+            Duration::from_secs(1),
+            |_| async { Err(FrickmailError::Upstream("should not fetch".to_string())) },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Search query is required");
+    }
+
+    #[test]
+    fn graph_search_messages_url_matches_legacy_query_shape() {
+        let url = super::graph_search_messages_url("report \"q\"", 12).unwrap();
+        let pairs = url.query_pairs().collect::<HashMap<_, _>>();
+
+        assert_eq!(url.path(), "/v1.0/me/messages");
+        assert_eq!(
+            pairs.get("$search").map(|value| value.as_ref()),
+            Some("\"report \\\"q\\\"\"")
+        );
+        assert_eq!(pairs.get("$top").map(|value| value.as_ref()), Some("12"));
+        assert_eq!(
+            pairs.get("$select").map(|value| value.as_ref()),
+            Some("id,subject,from,receivedDateTime,isRead,bodyPreview,parentFolderId")
+        );
+    }
+
     #[test]
     fn graph_error_summary_does_not_echo_raw_upstream_body() {
         let summary = super::graph_error_summary(
@@ -4533,15 +4867,7 @@ mod tests {
 
     #[test]
     fn graph_token_form_supports_public_clients_and_mail_scopes() {
-        let request = super::GraphListMessagesRequest {
-            tenant: "common".to_string(),
-            client_id: "client-id".to_string(),
-            client_secret: None,
-            refresh_token: "refresh-token".to_string(),
-            folder: "inbox".to_string(),
-            top: 50,
-        };
-        let form = super::graph_token_form(&request);
+        let form = super::graph_token_form_fields("client-id", None, "refresh-token");
 
         assert!(form
             .iter()
@@ -4557,13 +4883,11 @@ mod tests {
             .any(|(key, value)| *key == "scope" && value.contains("Mail.ReadWrite")));
         assert!(!form.iter().any(|(key, _)| *key == "client_secret"));
 
-        let confidential = super::GraphListMessagesRequest {
-            client_secret: Some("secret".to_string()),
-            ..request
-        };
-        assert!(super::graph_token_form(&confidential)
-            .iter()
-            .any(|(key, value)| *key == "client_secret" && value == "secret"));
+        assert!(
+            super::graph_token_form_fields("client-id", Some("secret"), "refresh-token")
+                .iter()
+                .any(|(key, value)| *key == "client_secret" && value == "secret")
+        );
     }
 
     #[tokio::test]
