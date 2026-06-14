@@ -168,6 +168,13 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 		$this->addJsonHook('FrickmailDiscoverServices',    'JsonDiscoverServices');
 		$this->addJsonHook('FrickmailActivateService',     'JsonActivateService');
 		$this->addJsonHook('FrickmailSaveOAuthToken',      'JsonSaveOAuthToken');
+		$this->addJsonHook('FrickmailGraphListMessages',   'JsonGraphListMessages');
+		$this->addJsonHook('FrickmailGraphSearch',         'JsonGraphSearch');
+		$this->addJsonHook('FrickmailGraphDelta',          'JsonGraphDelta');
+		$this->addJsonHook('FrickmailGraphGetMessage',     'JsonGraphGetMessage');
+		$this->addJsonHook('FrickmailGraphMarkRead',       'JsonGraphMarkRead');
+		$this->addJsonHook('FrickmailGraphMove',           'JsonGraphMove');
+		$this->addJsonHook('FrickmailGraphDelete',         'JsonGraphDelete');
 		$this->addJsonHook('FrickmailSearch',              'JsonSearch');
 		$this->addJsonHook('FrickmailUnifiedInbox',        'JsonUnifiedInbox');
 		$this->addJsonHook('FrickmailGetPrefs',            'JsonGetPrefs');
@@ -846,6 +853,98 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	}
 
 	/* ------------------------------------------------------------------ */
+	/*  Microsoft Graph mailbox actions                                     */
+	/* ------------------------------------------------------------------ */
+
+	public function JsonGraphListMessages() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$folder    = (string) ($this->jsonParam('folder') ?: 'inbox');
+			$top       = $this->graphTopParam();
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			return $this->mailAccounts()->graphListMessages($uid, $cryptKey, $accountId, $folder, $top);
+		});
+	}
+
+	public function JsonGraphSearch() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$query     = (string) $this->jsonParam('q');
+			$top       = $this->graphTopParam();
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			return $this->mailAccounts()->graphSearch($uid, $cryptKey, $accountId, $query, $top);
+		});
+	}
+
+	public function JsonGraphDelta() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId  = (int)    $this->jsonParam('account_id');
+			$folderId   = (string) ($this->jsonParam('folder_id') ?: 'inbox');
+			$deltaToken = $this->jsonParam('delta_token');
+			$deltaToken = \is_string($deltaToken) && '' !== $deltaToken ? $deltaToken : null;
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			return $this->mailAccounts()->graphDelta($uid, $cryptKey, $accountId, $folderId, $deltaToken);
+		});
+	}
+
+	public function JsonGraphGetMessage() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$messageId = (string) $this->jsonParam('message_id');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $messageId) throw new \RuntimeException('message_id required');
+			return $this->mailAccounts()->graphGetMessage($uid, $cryptKey, $accountId, $messageId);
+		});
+	}
+
+	public function JsonGraphMarkRead() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$messageId = (string) $this->jsonParam('message_id');
+			$isRead    = $this->boolJsonParam('is_read');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $messageId) throw new \RuntimeException('message_id required');
+			return $this->mailAccounts()->graphMarkRead($uid, $cryptKey, $accountId, $messageId, $isRead);
+		});
+	}
+
+	public function JsonGraphMove() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId      = (int)    $this->jsonParam('account_id');
+			$messageId      = (string) $this->jsonParam('message_id');
+			$targetFolderId = (string) $this->jsonParam('target_folder_id');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $messageId) throw new \RuntimeException('message_id required');
+			if ('' === $targetFolderId) throw new \RuntimeException('target_folder_id required');
+			return $this->mailAccounts()->graphMove($uid, $cryptKey, $accountId, $messageId, $targetFolderId);
+		});
+	}
+
+	public function JsonGraphDelete() : array
+	{
+		return $this->dispatch(__FUNCTION__, function () {
+			[$uid, $cryptKey] = $this->auth()->requireSession();
+			$accountId = (int)    $this->jsonParam('account_id');
+			$messageId = (string) $this->jsonParam('message_id');
+			if ($accountId <= 0) throw new \RuntimeException('account_id required');
+			if ('' === $messageId) throw new \RuntimeException('message_id required');
+			return $this->mailAccounts()->graphDelete($uid, $cryptKey, $accountId, $messageId);
+		});
+	}
+
+	/* ------------------------------------------------------------------ */
 	/*  Sender identity actions                                             */
 	/* ------------------------------------------------------------------ */
 
@@ -1130,6 +1229,30 @@ class FrickmailUserPlugin extends \RainLoop\Plugins\AbstractPlugin
 	/* ------------------------------------------------------------------ */
 	/*  Private helpers                                                      */
 	/* ------------------------------------------------------------------ */
+
+	private function graphTopParam() : int
+	{
+		$top = (int) ($this->jsonParam('top') ?: 50);
+		return \max(1, \min(100, $top));
+	}
+
+	private function boolJsonParam(string $name) : bool
+	{
+		$value = $this->jsonParam($name);
+		if (\is_bool($value)) {
+			return $value;
+		}
+		if (\is_int($value)) {
+			return 0 !== $value;
+		}
+		if (\is_string($value)) {
+			$parsed = \filter_var($value, \FILTER_VALIDATE_BOOLEAN, \FILTER_NULL_ON_FAILURE);
+			if (null !== $parsed) {
+				return $parsed;
+			}
+		}
+		throw new \RuntimeException($name . ' must be boolean');
+	}
 
 	/**
 	 * Plugins that bypass or corrupt frickmail-user's auth/account model if enabled.

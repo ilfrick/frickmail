@@ -513,7 +513,8 @@ Every migration slice must follow this loop:
 
 ## Immediate Next Work
 
-1. Generate and commit the complete legacy route/hook/frontend-call inventory.
+1. Keep `docs/LEGACY_ACTION_INVENTORY.md` current as the route/hook/frontend
+   source of truth for each migration slice.
 2. Complete native mailbox account switching: `FrickmailBridgeSession` and
    `FrickmailSwitchAccount` now persist a selected account in the Rust session
    only after credential validation, and `FrickmailGetMessageBody` can consume it
@@ -523,8 +524,8 @@ Every migration slice must follow this loop:
    without PHP session state.
 3. Add native coverage for `FrickmailApplyRules`, import/export, and remaining
    S/MIME actions.
-4. Add the missing Microsoft Graph mailbox actions to the compatibility
-   inventory and begin native Graph implementation.
+4. Begin native Microsoft Graph implementation for the `FrickmailGraph*` actions
+   listed in the legacy inventory.
 5. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
    compatibility.
 6. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user

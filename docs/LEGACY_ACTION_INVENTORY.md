@@ -1,0 +1,154 @@
+# Legacy Action Inventory
+
+This inventory is the migration map for the SnappyMail/RainLoop PHP runtime,
+Frickmail-user plugin, and the Rust compatibility server.
+
+Sources checked:
+
+- `plugins/frickmail-user/index.php`
+- `plugins/frickmail-user/js/*.js`
+- `plugins/login-oidc/index.php`
+- `plugins/login-oidc/LoginOIDC.js`
+- `frickmail-server/crates/fm-core/src/plugin.rs`
+- `frickmail-server/crates/fm-plugin-compat/src/lib.rs`
+- `frickmail-server/crates/fm-http/src/router.rs`
+
+Status meanings:
+
+- `native`: handled by Rust in `fm-http`.
+- `partial-native`: Rust validates or persists migration state, but still must not
+  claim complete legacy behavior.
+- `compat-known`: registered in the Rust compatibility inventory but not handled
+  natively yet; it returns a 501 compatibility fallback unless the PHP bridge
+  handles it.
+- `php-hook`: registered in the PHP plugin runtime.
+
+## Frickmail-User JSON Actions
+
+| Action | PHP hook | Frontend caller | Rust status | Notes |
+|---|---:|---|---|---|
+| `FrickmailLogin` | yes | `Login.js` | native | Writes user and credential-key sessions; TOTP replay protection is native. |
+| `FrickmailBridgeSession` | yes | `Login.js` | partial-native | Validates credentials and stores selected account, but still returns bridge-pending. |
+| `FrickmailRegister` | yes | `Login.js` | native | Signup gating and PHP-compatible validation covered. |
+| `FrickmailListAccounts` | yes | `AccountSwitcher.js`, settings UIs | native | Returns safe metadata and inline identities. |
+| `FrickmailAddAccount` | yes | `MailAccountsSettings.js` | native | Encrypts secrets with credential session key. |
+| `FrickmailUpdateAccount` | yes | `MailAccountsSettings.js` | native | Preserves password when empty; SSRF guards apply. |
+| `FrickmailDeleteAccount` | yes | `MailAccountsSettings.js` | native | Deletes account and indexed-message rows. |
+| `FrickmailSetPrimary` | yes | `MailAccountsSettings.js` | native | User-scoped primary update. |
+| `FrickmailSwitchAccount` | yes | `AccountSwitcher.js`, `Search.js`, `UnifiedInbox.js` | partial-native | Validates target account and stores selected account, but still returns bridge-pending to avoid false mailbox switch success. |
+| `FrickmailSetAccountPassword` | yes | `MailAccountsSettings.js` | native | Updates encrypted secret. |
+| `FrickmailRequestPasswordReset` | yes | `Login.js` | native | No account enumeration. |
+| `FrickmailResetPassword` | yes | `Login.js` | native | Resets password and invalidates credentials. |
+| `FrickmailMe` | yes | `Login.js`, shell probes | native | Reloads current session user from DB. |
+| `FrickmailGetTotpStatus` | yes | `TwoFactorSettings.js` | native | Reads secret presence. |
+| `FrickmailEnableTotp` | yes | `TwoFactorSettings.js` | native | Generates pending setup secret. |
+| `FrickmailConfirmTotp` | yes | `TwoFactorSettings.js` | native | Confirms setup with live code. |
+| `FrickmailDisableTotp` | yes | `TwoFactorSettings.js` | native | Requires valid live code. |
+| `FrickmailDiscoverServices` | yes | `MailAccountsSettings.js` | native | CalDAV/service discovery with reserved-IP guard. |
+| `FrickmailActivateService` | yes | `MailAccountsSettings.js` | native | Persists service activation metadata. |
+| `FrickmailSaveOAuthToken` | yes | `Login.js`, OAuth popups | native | Stores encrypted refresh token by account/email. |
+| `FrickmailGraphListMessages` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph client pending. |
+| `FrickmailGraphSearch` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph search pending. |
+| `FrickmailGraphDelta` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph delta pending. |
+| `FrickmailGraphGetMessage` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph body fetch pending. |
+| `FrickmailGraphMarkRead` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph mutation pending. |
+| `FrickmailGraphMove` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph mutation pending. |
+| `FrickmailGraphDelete` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph mutation pending. |
+| `FrickmailSearch` | yes | `Search.js` | native | Indexed search. |
+| `FrickmailUnifiedInbox` | yes | `UnifiedInbox.js` | native | Indexed inbox, not live IMAP scan. |
+| `FrickmailGetPrefs` | yes | `UserPrefs.js`, `Notifications.js` | native | Reads merged preferences. |
+| `FrickmailSetPrefs` | yes | `UserPrefs.js` | native | Validates and persists patch. |
+| `FrickmailListIdentities` | yes | `IdentitySettings.js` | native | Account-scoped. |
+| `FrickmailAddIdentity` | yes | `IdentitySettings.js` | native | Account-scoped. |
+| `FrickmailDeleteIdentity` | yes | `IdentitySettings.js` | native | Account-scoped. |
+| `FrickmailSetDefaultIdentity` | yes | `IdentitySettings.js` | native | Account-scoped default update. |
+| `FrickmailListRules` | yes | `Rules.js` | native | Account-scoped rules. |
+| `FrickmailAddRule` | yes | `Rules.js` | native | Stores rule definition. |
+| `FrickmailDeleteRule` | yes | `Rules.js` | native | Account-scoped delete. |
+| `FrickmailToggleRule` | yes | `Rules.js` | native | Account-scoped enable/disable. |
+| `FrickmailApplyRules` | yes | `Rules.js` | compat-known | Requires native IMAP rule execution. |
+| `FrickmailCheckNewMail` | feature-gated | `Notifications.js` | native | Polls all IMAP accounts; do not narrow to selected account. |
+| `FrickmailLongPollNewMail` | feature-gated | `Notifications.js` | native | Polls all IMAP accounts and triggers web push. |
+| `FrickmailGetMessageBody` | feature-gated | `UnifiedInbox.js` | native | Supports explicit account id and selected-account fallback with ownership revalidation. |
+| `FrickmailGetVapidKey` | feature-gated | `Notifications.js` | native | Creates/reads persistent VAPID key. |
+| `FrickmailPushSubscribe` | feature-gated | `Notifications.js` | native | Validates public push endpoint before storing. |
+| `FrickmailPushUnsubscribe` | feature-gated | `Notifications.js` | native | Deletes subscription. |
+| `FrickmailExportMessage` | feature-gated | `ImportExport.js` | compat-known | Native IMAP raw export pending. |
+| `FrickmailExportFolder` | feature-gated | `ImportExport.js` | compat-known | Native IMAP folder export pending. |
+| `FrickmailImportEml` | feature-gated | `ImportExport.js` | compat-known | Native IMAP append/import pending. |
+| `FrickmailListTasks` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
+| `FrickmailAddTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
+| `FrickmailCompleteTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
+| `FrickmailDeleteTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
+| `FrickmailUpdateTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
+| `FrickmailSmimeListCerts` | feature-gated | `SmimeSettings.js` | native | Lists public cert metadata only. |
+| `FrickmailSmimeImportP12` | feature-gated | `SmimeSettings.js` | compat-known | Native private-key import pending. |
+| `FrickmailSmimeImportCert` | feature-gated | `SmimeSettings.js` | native | Public certificate import. |
+| `FrickmailSmimeDeleteCert` | feature-gated | `SmimeSettings.js` | native | User-scoped delete. |
+| `FrickmailSmimeSign` | feature-gated | `SmimeSettings.js` | compat-known | Native S/MIME signing pending. |
+| `FrickmailSmimeVerify` | feature-gated | `SmimeSettings.js` | compat-known | Native S/MIME verification pending. |
+| `FrickmailListOidcLinks` | yes | `LoginOIDC.js` | native | Implemented by Rust for login-oidc compatibility. |
+| `FrickmailUnlinkOidc` | yes | `LoginOIDC.js` | native | Implemented by Rust for login-oidc compatibility. |
+
+## Other Bundled Plugin JSON Hooks
+
+These hooks are known by the Rust compatibility layer so existing SnappyMail
+plugins remain compatible during the migration. They are not Frickmail-user native
+features unless noted elsewhere.
+
+| Plugin area | Actions |
+|---|---|
+| Avatars | `Avatar` |
+| Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` |
+| Kolab | `KolabFolder` |
+| Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` |
+| Contacts sync | `JsonContactsSync`, `JsonDeduplicateContacts`, `JsonAddContact` |
+| Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` |
+| Change password | `ChangePassword` |
+| Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` |
+| Calendar | `JsonCalendarEvents`, `JsonCalendarList`, `JsonCalendarSave`, `JsonCalendarDelete` |
+| Have I Been Pwned | `HibpCheck` |
+| Two-factor-auth legacy plugin | `GetTwoFactorInfo`, `CreateTwoFactorSecret`, `ShowTwoFactorSecret`, `EnableTwoFactor`, `VerifyTwoFactorCode`, `ClearTwoFactorInfo` |
+
+## Part Hooks
+
+Part hooks must remain compatible while the SnappyMail plugin API is supported:
+
+- `RemoteAutoLogin`
+- `Avatar`
+- `StartLoginGMail`
+- `LoginGMail`
+- `StartLoginO365`
+- `LoginO365`
+- `ExternalLogin`
+- `StartLoginOIDC`
+- `LoginOIDC`
+- `cPanelAutoLogin`
+- `ProxyAuth`
+- `UserHeaderSet`
+- `ExternalSso`
+
+## Legacy Transport Shapes
+
+The Rust server currently accepts these legacy request forms:
+
+- Form body `Action=PluginFrickmailMe&XToken=...`
+- Query action `/?_action=FrickmailListAccounts`
+- Legacy JSON route shape `/?/Json/&q[]=/0/FrickmailMe/`
+- Multipart form requests with an `Action` field
+
+Unknown actions intentionally return the legacy JSON envelope with an
+`UNKNOWN_ERROR`. Known-but-not-native compatibility actions return a 501
+compatibility fallback until they are migrated.
+
+## Remaining Native Migration Targets
+
+The next Rust implementation targets from this inventory are:
+
+1. Native Microsoft Graph mailbox client for all `FrickmailGraph*` actions.
+2. Native IMAP rule execution for `FrickmailApplyRules`.
+3. Native import/export for `FrickmailExportMessage`, `FrickmailExportFolder`,
+   and `FrickmailImportEml`.
+4. Native S/MIME private-key import, signing, and verification.
+5. Native folder/message route coverage needed before `FrickmailSwitchAccount`
+   can return real success instead of bridge-pending.

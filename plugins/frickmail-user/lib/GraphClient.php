@@ -80,7 +80,7 @@ class GraphClient
         ?string $deltaLink = null
     ): array {
         if ($deltaLink !== null) {
-            return $this->request('GET', $deltaLink);
+            return $this->request('GET', self::assertGraphUrl($deltaLink));
         }
         $select = 'id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments';
         $url    = self::BASE . '/me/mailFolders/' . \rawurlencode($folder)
@@ -220,7 +220,7 @@ class GraphClient
         if ($deltaToken !== null) {
             // deltaToken may be a full URL or just the token value
             if (\str_starts_with($deltaToken, 'https://')) {
-                $url = $deltaToken;
+                $url = self::assertGraphUrl($deltaToken);
             } else {
                 $url = self::BASE . '/me/mailFolders/' . \rawurlencode($folderId)
                     . '/messages/delta?$deltatoken=' . \rawurlencode($deltaToken);
@@ -231,6 +231,18 @@ class GraphClient
                 . '/messages/delta?$select=' . \rawurlencode($select);
         }
         return $this->request('GET', $url);
+    }
+
+    private static function assertGraphUrl(string $url): string
+    {
+        $parts  = \parse_url($url);
+        $scheme = \strtolower((string) ($parts['scheme'] ?? ''));
+        $host   = \strtolower((string) ($parts['host'] ?? ''));
+        $path   = (string) ($parts['path'] ?? '');
+        if ('https' !== $scheme || 'graph.microsoft.com' !== $host || !\str_starts_with($path, '/v1.0/')) {
+            throw new \RuntimeException('Invalid Graph delta URL');
+        }
+        return $url;
     }
 
     /* ------------------------------------------------------------------ */

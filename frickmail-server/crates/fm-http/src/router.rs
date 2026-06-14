@@ -3942,6 +3942,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_recognizes_graph_actions_as_compatibility_fallback() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailGraphListMessages&account_id=7",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailGraphListMessages");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 501);
+        assert_eq!(
+            body["message"],
+            "Frickmail compatibility hook 'FrickmailGraphListMessages' is not migrated yet"
+        );
+    }
+
+    #[tokio::test]
     async fn json_api_accepts_legacy_json_url_shape() {
         let response = app()
             .oneshot(
