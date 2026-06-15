@@ -22,8 +22,9 @@ use base64::{
 };
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
-    fetch_mailbox_status, fetch_message_body_preview, BodyPreviewPart, ImapConnectionConfig,
-    MailboxStatus,
+    apply_imap_rules, fetch_mailbox_status, fetch_message_body_preview, BodyPreviewPart,
+    ImapConnectionConfig, MailboxStatus, RuleAction, RuleCondition, RuleConditionField,
+    RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::parse_body;
 use fm_plugin_compat::{
@@ -56,6 +57,7 @@ const MESSAGE_BODY_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
 const LONG_POLL_NEW_MAIL_DEADLINE: Duration = Duration::from_secs(25);
 const LONG_POLL_NEW_MAIL_INTERVAL: Duration = Duration::from_secs(5);
+const APPLY_RULES_DEADLINE: Duration = Duration::from_secs(60);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com";
@@ -560,6 +562,9 @@ async fn native_compat_response(
         }
         "FrickmailToggleRule" => {
             Some(native_frickmail_toggle_rule(state, original_action, payload, session).await)
+        }
+        "FrickmailApplyRules" => {
+            Some(native_frickmail_apply_rules(state, original_action, payload, session).await)
         }
         "FrickmailListTasks" => {
             Some(native_frickmail_list_tasks(state, original_action, payload, session).await)
@@ -3347,6 +3352,215 @@ async fn native_frickmail_toggle_rule(
     }
 }
 
+async fn native_frickmail_apply_rules(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_apply_rules_with_executor(
+        state,
+        original_action,
+        payload,
+        session,
+        APPLY_RULES_DEADLINE,
+        |config, password, rules| async move { apply_imap_rules(config, &password, &rules).await },
+    )
+    .await
+}
+
+async fn native_frickmail_apply_rules_with_executor<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    apply_deadline: Duration,
+    executor: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, Vec<RuleExecutionPlan>) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<RuleExecutionReport>>,
+{
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let account_id = payload_i64(payload, "account_id");
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return json_result_error(original_action, "Account not found"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    if account.account_type != "imap" {
+        return json_result_error(original_action, "Rules only supported for IMAP accounts");
+    }
+    let config = match imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let password = match account_password(&account, &credential_key) {
+        Ok(password) => password,
+        Err(_) => return json_result_error(original_action, "Missing IMAP password"),
+    };
+
+    let rules = match SqlxUserRepository::list_mail_rules(pool, user.user_id, account_id).await {
+        Ok(rules) => rules,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    if rules.is_empty() {
+        return apply_rules_response(original_action, Vec::new());
+    }
+
+    let plans = rules
+        .iter()
+        .filter(|rule| rule.enabled)
+        .filter_map(mail_rule_execution_plan)
+        .collect::<Vec<_>>();
+    if plans.is_empty() {
+        return apply_rules_response(original_action, Vec::new());
+    }
+
+    let report = tokio::time::timeout(apply_deadline, executor(config, password, plans))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Rule application timed out".to_string()));
+
+    match report {
+        Ok(Ok(report)) => {
+            for rule_id in &report.executed_rule_ids {
+                if let Err(err) =
+                    SqlxUserRepository::update_mail_rule_last_run(pool, user.user_id, *rule_id)
+                        .await
+                {
+                    return json_result_error(original_action, &err.public_message());
+                }
+            }
+            apply_rules_response(original_action, report.applied)
+        }
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+fn apply_rules_response(
+    original_action: &str,
+    applied: Vec<fm_imap::RuleExecutionResult>,
+) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": {
+                "ok": true,
+                "applied": applied
+            }
+        }),
+    )
+}
+
+fn mail_rule_execution_plan(rule: &fm_user::MailRule) -> Option<RuleExecutionPlan> {
+    let conditions = mail_rule_conditions(&rule.conditions)?;
+    let actions_array = rule.actions.as_array()?;
+    if actions_array.is_empty() {
+        return None;
+    }
+    let action_type = actions_array
+        .first()
+        .and_then(|action| action.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let actions = actions_array
+        .iter()
+        .map(mail_rule_action)
+        .collect::<Vec<_>>();
+
+    Some(RuleExecutionPlan {
+        rule_id: rule.id,
+        rule_name: rule.name.clone(),
+        conditions,
+        conditions_logic: match rule.conditions_logic.as_str() {
+            "any" => RuleConditionsLogic::Any,
+            _ => RuleConditionsLogic::All,
+        },
+        actions,
+        action_type,
+    })
+}
+
+fn mail_rule_conditions(value: &Value) -> Option<Vec<RuleCondition>> {
+    let mut conditions = Vec::new();
+    for condition in value.as_array()? {
+        let field = match condition.get("field").and_then(Value::as_str).unwrap_or("") {
+            "from" => RuleConditionField::From,
+            "subject" => RuleConditionField::Subject,
+            "to" => RuleConditionField::To,
+            _ => return None,
+        };
+        let value = condition
+            .get("value")
+            .map(value_to_php_string)
+            .unwrap_or_default();
+        if value.is_empty() {
+            continue;
+        }
+        let op = match condition
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("contains")
+        {
+            "not_contains" => RuleConditionOp::NotContains,
+            "equals" => RuleConditionOp::Equals,
+            _ => RuleConditionOp::Contains,
+        };
+        conditions.push(RuleCondition { field, op, value });
+    }
+
+    if conditions.is_empty() {
+        None
+    } else {
+        Some(conditions)
+    }
+}
+
+fn mail_rule_action(action: &Value) -> RuleAction {
+    match action.get("type").and_then(Value::as_str).unwrap_or("") {
+        "move" => {
+            let folder = action
+                .get("params")
+                .and_then(|params| params.get("folder"))
+                .map(value_to_php_string)
+                .unwrap_or_default();
+            if folder.is_empty() {
+                RuleAction::Noop
+            } else {
+                RuleAction::Move { folder }
+            }
+        }
+        "read" => RuleAction::Read,
+        "flag" => RuleAction::Flag,
+        "delete" => RuleAction::Delete,
+        _ => RuleAction::Noop,
+    }
+}
+
 async fn native_frickmail_list_tasks(
     state: &AppState,
     original_action: &str,
@@ -4991,6 +5205,17 @@ fn payload_string(payload: &Value, key: &str) -> Option<String> {
     }
 }
 
+fn value_to_php_string(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(true) => "1".to_string(),
+        Value::Bool(false) => String::new(),
+        Value::Number(number) => number.to_string(),
+        Value::String(value) => value.clone(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
 fn payload_optional_string(payload: &Value, key: &str) -> Option<String> {
     payload_string(payload, key).and_then(|value| if value.is_empty() { None } else { Some(value) })
 }
@@ -5153,7 +5378,11 @@ mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
-    use fm_imap::{BodyPartKind, BodyPreviewPart, MailboxStatus};
+    use fm_imap::{
+        BodyPartKind, BodyPreviewPart, ImapConnectionConfig, MailboxStatus, RuleAction,
+        RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+        RuleExecutionReport, RuleExecutionResult,
+    };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
         USER_SESSION_KEY,
@@ -5349,7 +5578,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_api_keeps_unmigrated_actions_as_compatibility_fallback() {
+    async fn json_api_dispatches_native_apply_rules_action() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -5365,11 +5594,34 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
         assert_eq!(body["Action"], "PluginFrickmailApplyRules");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn json_api_keeps_unmigrated_actions_as_compatibility_fallback() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailExportMessage&account_id=7",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailExportMessage");
         assert_eq!(body["Result"], false);
         assert_eq!(body["code"], 501);
         assert_eq!(
             body["message"],
-            "Frickmail compatibility hook 'FrickmailApplyRules' is not migrated yet"
+            "Frickmail compatibility hook 'FrickmailExportMessage' is not migrated yet"
         );
     }
 
@@ -8588,6 +8840,136 @@ mod tests {
         assert_eq!(
             body["Result"]["rules"][0]["actions"][0]["params"]["folder"],
             "Alerts"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_apply_rules_executes_imap_plan_and_updates_last_run() {
+        let key = [52_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_mail_rule_tables(&pool).await;
+        seed_user(&pool, 148, "apply-rules", Some("apply-rules@example.com")).await;
+        seed_mail_account(&pool, 1330, 148, "Primary", true).await;
+        seed_mail_rule(&pool, 1430, 148, 1330, "Move newsletters", true).await;
+        seed_mail_rule(&pool, 1431, 148, 1330, "Move more newsletters", true).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            148,
+            1330,
+            "imap-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session =
+            credential_session(148, "apply-rules", Some("apply-rules@example.com"), &key).await;
+        let captured: Arc<Mutex<Option<(ImapConnectionConfig, String, Vec<RuleExecutionPlan>)>>> =
+            Arc::new(Mutex::new(None));
+        let captured_for_executor = Arc::clone(&captured);
+
+        let response = super::native_frickmail_apply_rules_with_executor(
+            &state,
+            "FrickmailApplyRules",
+            &json!({"account_id": 1330}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, rules| {
+                let captured_for_executor = Arc::clone(&captured_for_executor);
+                async move {
+                    let first_rule = rules[0].rule_id;
+                    let second_rule = rules[1].rule_id;
+                    *captured_for_executor.lock().unwrap() = Some((config, password, rules));
+                    Ok(RuleExecutionReport {
+                        applied: vec![RuleExecutionResult {
+                            rule_id: first_rule,
+                            rule_name: "Move newsletters".to_string(),
+                            matched_count: 3,
+                            action_type: "move".to_string(),
+                        }],
+                        executed_rule_ids: vec![first_rule, second_rule],
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["applied"].as_array().unwrap().len(), 1);
+        assert_eq!(body["Result"]["applied"][0]["rule_id"], 1430);
+        assert_eq!(body["Result"]["applied"][0]["matched_count"], 3);
+        assert_eq!(body["Result"]["applied"][0]["action_type"], "move");
+
+        let captured = captured.lock().unwrap().take().unwrap();
+        assert_eq!(captured.0.host, "imap.example.com");
+        assert_eq!(captured.0.login, "primary@example.com");
+        assert_eq!(captured.1, "imap-secret");
+        assert_eq!(captured.2.len(), 2);
+        assert_eq!(captured.2[0].rule_id, 1430);
+        assert_eq!(captured.2[0].conditions_logic, RuleConditionsLogic::All);
+        assert_eq!(captured.2[0].conditions[0].field, RuleConditionField::From);
+        assert_eq!(captured.2[0].conditions[0].op, RuleConditionOp::Contains);
+        assert_eq!(captured.2[0].conditions[0].value, "newsletter");
+        assert_eq!(
+            captured.2[0].actions[0],
+            RuleAction::Move {
+                folder: "Newsletters".to_string()
+            }
+        );
+
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 148, 1330)
+            .await
+            .unwrap();
+        assert!(rules.iter().all(|rule| rule.last_run.is_some()));
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_apply_rules_preserves_legacy_account_errors() {
+        let key = [53_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_mail_rule_tables(&pool).await;
+        seed_user(&pool, 149, "apply-errors", Some("apply-errors@example.com")).await;
+        seed_mail_account(&pool, 1331, 149, "Primary", true).await;
+        seed_mail_rule(&pool, 1432, 149, 1331, "Move newsletters", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session =
+            credential_session(149, "apply-errors", Some("apply-errors@example.com"), &key).await;
+
+        let response = super::native_frickmail_apply_rules_with_executor(
+            &state,
+            "FrickmailApplyRules",
+            &json!({"account_id": 1331}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _rules| async {
+                panic!("missing credentials must stop before IMAP execution")
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Missing IMAP password");
+
+        set_mail_account_email_and_type(&pool, 1331, "graph@example.com", "o365").await;
+        let response = super::native_frickmail_apply_rules_with_executor(
+            &state,
+            "FrickmailApplyRules",
+            &json!({"account_id": 1331}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _rules| async {
+                panic!("non-IMAP account must stop before IMAP execution")
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Rules only supported for IMAP accounts"
         );
     }
 

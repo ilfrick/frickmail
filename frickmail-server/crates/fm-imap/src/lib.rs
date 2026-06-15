@@ -1,8 +1,11 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{collections::HashSet, fmt, sync::Arc, time::Duration};
 
-use async_imap::{Client, Session};
+use async_imap::{
+    types::{Capabilities, Capability},
+    Client, Session,
+};
 use fm_core::{FrickmailError, Result};
-use futures::TryStreamExt;
+use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
     builders::command::{Command, CommandBuilder},
     AttributeValue, BodyStructure, MessageSection, Response, SectionPath, Status,
@@ -131,6 +134,72 @@ pub struct MailboxStatus {
     pub exists: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleExecutionPlan {
+    pub rule_id: i64,
+    pub rule_name: String,
+    pub conditions: Vec<RuleCondition>,
+    pub conditions_logic: RuleConditionsLogic,
+    pub actions: Vec<RuleAction>,
+    pub action_type: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleConditionsLogic {
+    All,
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleCondition {
+    pub field: RuleConditionField,
+    pub op: RuleConditionOp,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleConditionField {
+    From,
+    Subject,
+    To,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleConditionOp {
+    Contains,
+    NotContains,
+    Equals,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleAction {
+    Move { folder: String },
+    Read,
+    Flag,
+    Delete,
+    Noop,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuleExecutionResult {
+    pub rule_id: i64,
+    pub rule_name: String,
+    pub matched_count: usize,
+    pub action_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleExecutionReport {
+    pub applied: Vec<RuleExecutionResult>,
+    pub executed_rule_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImapRuleCapabilities {
+    supports_move: bool,
+    supports_uidplus: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyPartKind {
     Html,
@@ -191,6 +260,26 @@ pub async fn fetch_mailbox_status(
     })
 }
 
+pub async fn apply_imap_rules(
+    config: ImapConnectionConfig,
+    password: &str,
+    rules: &[RuleExecutionPlan],
+) -> Result<RuleExecutionReport> {
+    if rules.is_empty() {
+        return Ok(RuleExecutionReport {
+            applied: Vec::new(),
+            executed_rule_ids: Vec::new(),
+        });
+    }
+
+    let mut session = login(config, password).await?;
+    let capabilities = imap_rule_capabilities(&mut session).await?;
+    timeout_imap("select mailbox", session.select("INBOX")).await?;
+    let result = apply_imap_rules_in_session(&mut session, capabilities, rules).await;
+    logout_quietly(session).await;
+    result
+}
+
 pub fn parse_security(secure: Option<&str>) -> Result<ImapSecurity> {
     let value = secure.unwrap_or("SSL").trim();
     if value.is_empty() {
@@ -219,6 +308,66 @@ pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<&'static str> {
     }
 
     Ok("(UID RFC822.SIZE BODYSTRUCTURE)")
+}
+
+pub fn imap_rule_search_criteria(
+    conditions: &[RuleCondition],
+    logic: RuleConditionsLogic,
+) -> Result<Option<String>> {
+    let mut criteria = Vec::new();
+    for condition in conditions {
+        if condition.value.is_empty() {
+            continue;
+        }
+        let quoted = imap_quote_search_value(&condition.value)?;
+        let field = match condition.field {
+            RuleConditionField::From => "FROM",
+            RuleConditionField::Subject => "SUBJECT",
+            RuleConditionField::To => "TO",
+        };
+        let header = match condition.field {
+            RuleConditionField::From => "From",
+            RuleConditionField::Subject => "Subject",
+            RuleConditionField::To => "To",
+        };
+        let criterion = match condition.op {
+            RuleConditionOp::NotContains => format!("NOT {field} {quoted}"),
+            RuleConditionOp::Equals => format!("HEADER {header} {quoted}"),
+            RuleConditionOp::Contains => format!("{field} {quoted}"),
+        };
+        criteria.push(criterion);
+    }
+
+    if criteria.is_empty() {
+        return Ok(None);
+    }
+    if logic == RuleConditionsLogic::Any && criteria.len() > 1 {
+        return Ok(Some(imap_rule_any_or(&criteria)));
+    }
+    Ok(Some(criteria.join(" ")))
+}
+
+pub fn uid_sequence_set(uids: &HashSet<u32>) -> String {
+    let mut sorted = uids.iter().copied().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    let mut ranges = Vec::new();
+    let mut iter = sorted.into_iter();
+    let Some(mut start) = iter.next() else {
+        return String::new();
+    };
+    let mut end = start;
+
+    for uid in iter {
+        if uid == end.saturating_add(1) {
+            end = uid;
+            continue;
+        }
+        ranges.push(uid_range(start, end));
+        start = uid;
+        end = uid;
+    }
+    ranges.push(uid_range(start, end));
+    ranges.join(",")
 }
 
 pub fn parse_uid_fetch_body_preview(input: &[u8], expected_uid: u32) -> Result<Option<Vec<u8>>> {
@@ -270,6 +419,147 @@ pub fn parse_uid_fetch_body_preview(input: &[u8], expected_uid: u32) -> Result<O
     }
 
     Ok(matched_body)
+}
+
+async fn apply_imap_rules_in_session(
+    session: &mut BoxedSession,
+    capabilities: ImapRuleCapabilities,
+    rules: &[RuleExecutionPlan],
+) -> Result<RuleExecutionReport> {
+    let mut applied = Vec::new();
+    let mut executed_rule_ids = Vec::new();
+
+    for rule in rules {
+        if rule.actions.is_empty() {
+            continue;
+        }
+        let Some(criteria) = imap_rule_search_criteria(&rule.conditions, rule.conditions_logic)?
+        else {
+            continue;
+        };
+        let uids = timeout_imap("search messages for rule", session.uid_search(criteria)).await?;
+        executed_rule_ids.push(rule.rule_id);
+        if uids.is_empty() {
+            continue;
+        }
+
+        let uid_set = uid_sequence_set(&uids);
+        for action in &rule.actions {
+            apply_rule_action(session, capabilities, &uid_set, action).await?;
+        }
+
+        applied.push(RuleExecutionResult {
+            rule_id: rule.rule_id,
+            rule_name: rule.rule_name.clone(),
+            matched_count: uids.len(),
+            action_type: rule.action_type.clone(),
+        });
+    }
+
+    Ok(RuleExecutionReport {
+        applied,
+        executed_rule_ids,
+    })
+}
+
+async fn apply_rule_action(
+    session: &mut BoxedSession,
+    capabilities: ImapRuleCapabilities,
+    uid_set: &str,
+    action: &RuleAction,
+) -> Result<()> {
+    match action {
+        RuleAction::Move { folder } => {
+            validate_mailbox(folder)?;
+            if capabilities.supports_move {
+                timeout_imap("move rule messages", session.uid_mv(uid_set, folder)).await?;
+            } else {
+                timeout_imap("copy rule messages", session.uid_copy(uid_set, folder)).await?;
+                delete_rule_messages(session, capabilities, uid_set).await?;
+            }
+        }
+        RuleAction::Read => {
+            drain_uid_store(
+                session,
+                uid_set,
+                "+FLAGS.SILENT (\\Seen)",
+                "mark rule messages read",
+            )
+            .await?;
+        }
+        RuleAction::Flag => {
+            drain_uid_store(
+                session,
+                uid_set,
+                "+FLAGS.SILENT (\\Flagged)",
+                "flag rule messages",
+            )
+            .await?;
+        }
+        RuleAction::Delete => {
+            delete_rule_messages(session, capabilities, uid_set).await?;
+        }
+        RuleAction::Noop => {}
+    }
+    Ok(())
+}
+
+async fn delete_rule_messages(
+    session: &mut BoxedSession,
+    capabilities: ImapRuleCapabilities,
+    uid_set: &str,
+) -> Result<()> {
+    drain_uid_store(
+        session,
+        uid_set,
+        "+FLAGS.SILENT (\\Deleted)",
+        "mark rule messages deleted",
+    )
+    .await?;
+
+    if capabilities.supports_uidplus {
+        let expunged = timeout_imap(
+            "expunge deleted rule messages",
+            session.uid_expunge(uid_set),
+        )
+        .await?;
+        pin_mut!(expunged);
+        while timeout_imap("read rule expunge response", expunged.try_next())
+            .await?
+            .is_some()
+        {}
+    } else {
+        let expunged = timeout_imap("expunge deleted rule messages", session.expunge()).await?;
+        pin_mut!(expunged);
+        while timeout_imap("read rule expunge response", expunged.try_next())
+            .await?
+            .is_some()
+        {}
+    }
+
+    Ok(())
+}
+
+async fn drain_uid_store(
+    session: &mut BoxedSession,
+    uid_set: &str,
+    query: &str,
+    operation: &'static str,
+) -> Result<()> {
+    let mut updates = timeout_imap(operation, session.uid_store(uid_set, query)).await?;
+    while timeout_imap("read rule store response", updates.try_next())
+        .await?
+        .is_some()
+    {}
+    Ok(())
+}
+
+async fn imap_rule_capabilities(session: &mut BoxedSession) -> Result<ImapRuleCapabilities> {
+    let capabilities = timeout_imap("read IMAP capabilities", session.capabilities()).await?;
+    Ok(ImapRuleCapabilities {
+        supports_move: has_capability_ignore_ascii_case(&capabilities, "MOVE"),
+        supports_uidplus: has_capability_ignore_ascii_case(&capabilities, "UIDPLUS"),
+    })
 }
 
 fn fetch_body_for_uid(attrs: &[AttributeValue<'_>], expected_uid: u32) -> Option<Vec<u8>> {
@@ -650,6 +940,42 @@ fn contains_crlf(value: &str) -> bool {
         .any(|byte| matches!(byte, b'\r' | b'\n'))
 }
 
+fn imap_quote_search_value(value: &str) -> Result<String> {
+    if contains_crlf(value) {
+        return Err(FrickmailError::BadRequest(
+            "rule condition value must not contain CR or LF".to_string(),
+        ));
+    }
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("\"{escaped}\""))
+}
+
+fn imap_rule_any_or(criteria: &[String]) -> String {
+    match criteria {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, rest @ ..] => format!("OR {first} ({})", imap_rule_any_or(rest)),
+    }
+}
+
+fn uid_range(start: u32, end: u32) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{start}:{end}")
+    }
+}
+
+fn has_capability_ignore_ascii_case(capabilities: &Capabilities, name: &str) -> bool {
+    capabilities.iter().any(|capability| match capability {
+        Capability::Imap4rev1 => name.eq_ignore_ascii_case("IMAP4rev1"),
+        Capability::Auth(auth) => name
+            .strip_prefix("AUTH=")
+            .is_some_and(|name| name.eq_ignore_ascii_case(auth)),
+        Capability::Atom(atom) => name.eq_ignore_ascii_case(atom),
+    })
+}
+
 fn default_security() -> ImapSecurity {
     ImapSecurity::Tls
 }
@@ -754,6 +1080,58 @@ mod tests {
             "(UID BODY.PEEK[1.MIME] BODY.PEEK[1]<0.262144>)"
         );
         assert!(!body_preview_fetch_query(&specs).contains("RFC822"));
+    }
+
+    #[test]
+    fn builds_safe_rule_search_criteria() {
+        let conditions = vec![
+            RuleCondition {
+                field: RuleConditionField::From,
+                op: RuleConditionOp::Contains,
+                value: "newsletter".to_string(),
+            },
+            RuleCondition {
+                field: RuleConditionField::Subject,
+                op: RuleConditionOp::Equals,
+                value: "weekly \"digest\"".to_string(),
+            },
+            RuleCondition {
+                field: RuleConditionField::To,
+                op: RuleConditionOp::NotContains,
+                value: r#"boss\alerts"#.to_string(),
+            },
+        ];
+
+        assert_eq!(
+            imap_rule_search_criteria(&conditions, RuleConditionsLogic::All).unwrap(),
+            Some(
+                r#"FROM "newsletter" HEADER Subject "weekly \"digest\"" NOT TO "boss\\alerts""#
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            imap_rule_search_criteria(&conditions, RuleConditionsLogic::Any).unwrap(),
+            Some(
+                r#"OR FROM "newsletter" (OR HEADER Subject "weekly \"digest\"" (NOT TO "boss\\alerts"))"#
+                    .to_string()
+            )
+        );
+        assert!(imap_rule_search_criteria(
+            &[RuleCondition {
+                field: RuleConditionField::Subject,
+                op: RuleConditionOp::Contains,
+                value: "hello\r\nNOOP".to_string(),
+            }],
+            RuleConditionsLogic::All,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn formats_uid_sequence_sets_deterministically() {
+        let uids = HashSet::from([42_u32, 7, 19, 20, 21, 43]);
+        assert_eq!(uid_sequence_set(&uids), "7,19:21,42:43");
+        assert_eq!(uid_sequence_set(&HashSet::new()), "");
     }
 
     #[test]

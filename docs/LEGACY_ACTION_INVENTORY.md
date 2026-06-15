@@ -66,7 +66,7 @@ Status meanings:
 | `FrickmailAddRule` | yes | `Rules.js` | native | Stores rule definition. |
 | `FrickmailDeleteRule` | yes | `Rules.js` | native | Account-scoped delete. |
 | `FrickmailToggleRule` | yes | `Rules.js` | native | Account-scoped enable/disable. |
-| `FrickmailApplyRules` | yes | `Rules.js` | compat-known | Requires native IMAP rule execution. |
+| `FrickmailApplyRules` | yes | `Rules.js` | native | Executes IMAP rules with MailSo-compatible MOVE/UIDPLUS fallbacks. |
 | `FrickmailCheckNewMail` | feature-gated | `Notifications.js` | native | Polls all IMAP accounts; do not narrow to selected account. |
 | `FrickmailLongPollNewMail` | feature-gated | `Notifications.js` | native | Polls all IMAP accounts and triggers web push. |
 | `FrickmailGetMessageBody` | feature-gated | `UnifiedInbox.js` | native | Supports explicit account id and selected-account fallback with ownership revalidation. |
@@ -145,9 +145,8 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Native IMAP rule execution for `FrickmailApplyRules`.
-2. Native import/export for `FrickmailExportMessage`, `FrickmailExportFolder`,
+1. Native import/export for `FrickmailExportMessage`, `FrickmailExportFolder`,
    and `FrickmailImportEml`.
-3. Native S/MIME private-key import, signing, and verification.
-4. Native folder/message route coverage needed before `FrickmailSwitchAccount`
+2. Native S/MIME private-key import, signing, and verification.
+3. Native folder/message route coverage needed before `FrickmailSwitchAccount`
    can return real success instead of bridge-pending.

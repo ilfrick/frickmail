@@ -584,6 +584,14 @@ impl SqlxUserRepository {
         toggle_mail_rule(pool, user_id, rule_id, enabled).await
     }
 
+    pub async fn update_mail_rule_last_run(
+        pool: &AnyPool,
+        user_id: i64,
+        rule_id: i64,
+    ) -> Result<()> {
+        update_mail_rule_last_run(pool, user_id, rule_id).await
+    }
+
     pub async fn list_tasks(
         pool: &AnyPool,
         user_id: i64,
@@ -2095,6 +2103,19 @@ async fn toggle_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64, enabled: b
 
     sqlx::query(toggle_mail_rule_query(&backend))
         .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(user_id)
+        .bind(rule_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn update_mail_rule_last_run(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(update_mail_rule_last_run_query(&backend))
         .bind(user_id)
         .bind(rule_id)
         .execute(&mut *conn)
@@ -4370,6 +4391,15 @@ fn toggle_mail_rule_query(backend: &str) -> &'static str {
     }
 }
 
+fn update_mail_rule_last_run_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_rules SET last_run = CURRENT_TIMESTAMP WHERE user_id = $1 AND id = $2"
+        }
+        _ => "UPDATE frickmail_rules SET last_run = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?",
+    }
+}
+
 fn update_settings_patch_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -6372,6 +6402,22 @@ mod tests {
             .await
             .unwrap();
         assert!(!rules[0].enabled);
+
+        SqlxUserRepository::update_mail_rule_last_run(&pool, 16, 300)
+            .await
+            .unwrap();
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+            .await
+            .unwrap();
+        assert_eq!(rules[0].last_run, None);
+
+        SqlxUserRepository::update_mail_rule_last_run(&pool, 15, 300)
+            .await
+            .unwrap();
+        let rules = SqlxUserRepository::list_mail_rules(&pool, 15, 130)
+            .await
+            .unwrap();
+        assert!(rules[0].last_run.is_some());
 
         SqlxUserRepository::delete_mail_rule(&pool, 16, 300)
             .await
