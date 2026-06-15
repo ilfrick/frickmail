@@ -49,11 +49,11 @@ Status meanings:
 | `FrickmailSaveOAuthToken` | yes | `Login.js`, OAuth popups | native | Stores encrypted refresh token by account/email. |
 | `FrickmailGraphListMessages` | yes | `GraphMailbox.js` | native | Lists Office 365 folder messages through Microsoft Graph using the encrypted refresh token. |
 | `FrickmailGraphSearch` | yes | `GraphMailbox.js` | native | Searches Office 365 mail through Microsoft Graph `$search` using the encrypted refresh token. |
-| `FrickmailGraphDelta` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph delta pending. |
-| `FrickmailGraphGetMessage` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph body fetch pending. |
-| `FrickmailGraphMarkRead` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph mutation pending. |
-| `FrickmailGraphMove` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph mutation pending. |
-| `FrickmailGraphDelete` | yes | `GraphMailbox.js` | compat-known | PHP wrapper exists; native Graph mutation pending. |
+| `FrickmailGraphDelta` | yes | `GraphMailbox.js` | native | Runs Microsoft Graph delta sync with validated follow-up links. |
+| `FrickmailGraphGetMessage` | yes | `GraphMailbox.js` | native | Fetches Office 365 message detail through Microsoft Graph. |
+| `FrickmailGraphMarkRead` | yes | `GraphMailbox.js` | native | Marks Office 365 messages read/unread through Microsoft Graph. |
+| `FrickmailGraphMove` | yes | `GraphMailbox.js` | native | Moves Office 365 messages through Microsoft Graph. |
+| `FrickmailGraphDelete` | yes | `GraphMailbox.js` | native | Deletes Office 365 messages through Microsoft Graph. |
 | `FrickmailSearch` | yes | `Search.js` | native | Indexed search. |
 | `FrickmailUnifiedInbox` | yes | `UnifiedInbox.js` | native | Indexed inbox, not live IMAP scan. |
 | `FrickmailGetPrefs` | yes | `UserPrefs.js`, `Notifications.js` | native | Reads merged preferences. |
@@ -145,11 +145,9 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Native Microsoft Graph mailbox client for the remaining `FrickmailGraph*`
-   actions: delta, get-message, mark-read, move, and delete.
-2. Native IMAP rule execution for `FrickmailApplyRules`.
-3. Native import/export for `FrickmailExportMessage`, `FrickmailExportFolder`,
+1. Native IMAP rule execution for `FrickmailApplyRules`.
+2. Native import/export for `FrickmailExportMessage`, `FrickmailExportFolder`,
    and `FrickmailImportEml`.
-4. Native S/MIME private-key import, signing, and verification.
-5. Native folder/message route coverage needed before `FrickmailSwitchAccount`
+3. Native S/MIME private-key import, signing, and verification.
+4. Native folder/message route coverage needed before `FrickmailSwitchAccount`
    can return real success instead of bridge-pending.

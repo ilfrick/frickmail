@@ -81,13 +81,21 @@ struct DiscoveredService {
     needs_oauth: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct GraphOAuthConfig {
     client_id: String,
     client_secret: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
+struct GraphAccountRequest {
+    tenant: String,
+    client_id: String,
+    client_secret: Option<String>,
+    refresh_token: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct GraphListMessagesRequest {
     tenant: String,
     client_id: String,
@@ -97,7 +105,7 @@ struct GraphListMessagesRequest {
     top: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct GraphSearchMessagesRequest {
     tenant: String,
     client_id: String,
@@ -105,6 +113,39 @@ struct GraphSearchMessagesRequest {
     refresh_token: String,
     query: String,
     top: i64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GraphDeltaMessagesRequest {
+    auth: GraphAccountRequest,
+    folder_id: String,
+    delta_token: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GraphGetMessageRequest {
+    auth: GraphAccountRequest,
+    message_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GraphMarkReadRequest {
+    auth: GraphAccountRequest,
+    message_id: String,
+    is_read: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GraphMoveMessageRequest {
+    auth: GraphAccountRequest,
+    message_id: String,
+    target_folder_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GraphDeleteMessageRequest {
+    auth: GraphAccountRequest,
+    message_id: String,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -474,6 +515,21 @@ async fn native_compat_response(
         ),
         "FrickmailGraphSearch" => {
             Some(native_frickmail_graph_search(state, original_action, payload, session).await)
+        }
+        "FrickmailGraphDelta" => {
+            Some(native_frickmail_graph_delta(state, original_action, payload, session).await)
+        }
+        "FrickmailGraphGetMessage" => {
+            Some(native_frickmail_graph_get_message(state, original_action, payload, session).await)
+        }
+        "FrickmailGraphMarkRead" => {
+            Some(native_frickmail_graph_mark_read(state, original_action, payload, session).await)
+        }
+        "FrickmailGraphMove" => {
+            Some(native_frickmail_graph_move(state, original_action, payload, session).await)
+        }
+        "FrickmailGraphDelete" => {
+            Some(native_frickmail_graph_delete(state, original_action, payload, session).await)
         }
         "FrickmailCheckNewMail" => {
             Some(native_frickmail_check_new_mail(state, original_action, payload, session).await)
@@ -1879,6 +1935,486 @@ where
                     "ok": true,
                     "query": query,
                     "data": data
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn graph_account_request_from_payload<C>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+) -> Result<GraphAccountRequest, Response>
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+{
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return Err(response),
+    }) else {
+        return Err(json_result_error(original_action, "Not authenticated"));
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return Err(response),
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return Err(json_result_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+
+    if let Some(response) = graph_account_id_error(original_action, payload) {
+        return Err(response);
+    }
+    let account_id = payload_i64(payload, "account_id");
+
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return Err(json_result_error(original_action, "Account not found")),
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+
+    let (refresh_token, tenant) = match graph_account_oauth(&account, &credential_key) {
+        Ok(oauth) => oauth,
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+    let oauth = match oauth_config() {
+        Ok(oauth) => oauth,
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+
+    Ok(GraphAccountRequest {
+        tenant,
+        client_id: oauth.client_id,
+        client_secret: oauth.client_secret,
+        refresh_token,
+    })
+}
+
+fn graph_account_id_error(original_action: &str, payload: &Value) -> Option<Response> {
+    (payload_i64(payload, "account_id") <= 0)
+        .then(|| json_result_error(original_action, "account_id required"))
+}
+
+async fn graph_authentication_error(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Option<Response> {
+    match load_session_user(state, original_action, session).await {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(json_result_error(original_action, "Not authenticated")),
+        Err(response) => Some(response),
+    }
+}
+
+async fn native_frickmail_graph_delta(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_graph_delta_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        graph_oauth_config_from_env,
+        GRAPH_FETCH_DEADLINE,
+        |request| async move { graph_delta_messages_via_reqwest(request).await },
+    )
+    .await
+}
+
+async fn native_frickmail_graph_delta_with_fetcher<C, F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+    F: FnOnce(GraphDeltaMessagesRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Value>>,
+{
+    if let Some(response) = graph_authentication_error(state, original_action, session).await {
+        return response;
+    }
+    if let Some(response) = graph_account_id_error(original_action, payload) {
+        return response;
+    }
+    let folder_id =
+        payload_optional_string(payload, "folder_id").unwrap_or_else(|| "inbox".to_string());
+    let delta_token = payload_optional_string(payload, "delta_token");
+    if let Err(err) = validate_graph_delta_token(delta_token.as_deref()) {
+        return json_result_error(original_action, &err.public_message());
+    }
+
+    let auth = match graph_account_request_from_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        oauth_config,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let request = GraphDeltaMessagesRequest {
+        auth,
+        folder_id,
+        delta_token,
+    };
+
+    let fetch = tokio::time::timeout(fetch_deadline, fetcher(request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Microsoft Graph request timed out".to_string()));
+
+    match fetch {
+        Ok(Ok(data)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "data": data
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_graph_get_message(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_graph_get_message_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        graph_oauth_config_from_env,
+        GRAPH_FETCH_DEADLINE,
+        |request| async move { graph_get_message_via_reqwest(request).await },
+    )
+    .await
+}
+
+async fn native_frickmail_graph_get_message_with_fetcher<C, F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+    F: FnOnce(GraphGetMessageRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Value>>,
+{
+    if let Some(response) = graph_authentication_error(state, original_action, session).await {
+        return response;
+    }
+    if let Some(response) = graph_account_id_error(original_action, payload) {
+        return response;
+    }
+    let message_id = payload_string(payload, "message_id").unwrap_or_default();
+    if message_id.is_empty() {
+        return json_result_error(original_action, "message_id required");
+    }
+
+    let auth = match graph_account_request_from_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        oauth_config,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let request = GraphGetMessageRequest { auth, message_id };
+
+    let fetch = tokio::time::timeout(fetch_deadline, fetcher(request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Microsoft Graph request timed out".to_string()));
+
+    match fetch {
+        Ok(Ok(message)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "message": message
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_graph_mark_read(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_graph_mark_read_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        graph_oauth_config_from_env,
+        GRAPH_FETCH_DEADLINE,
+        |request| async move { graph_mark_read_via_reqwest(request).await },
+    )
+    .await
+}
+
+async fn native_frickmail_graph_mark_read_with_fetcher<C, F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+    F: FnOnce(GraphMarkReadRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Value>>,
+{
+    if let Some(response) = graph_authentication_error(state, original_action, session).await {
+        return response;
+    }
+    if let Some(response) = graph_account_id_error(original_action, payload) {
+        return response;
+    }
+    let message_id = payload_string(payload, "message_id").unwrap_or_default();
+    if message_id.is_empty() {
+        return json_result_error(original_action, "message_id required");
+    }
+    let is_read = match payload_json_bool(payload, "is_read") {
+        Ok(is_read) => is_read,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
+    let auth = match graph_account_request_from_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        oauth_config,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let request = GraphMarkReadRequest {
+        auth,
+        message_id,
+        is_read,
+    };
+
+    let fetch = tokio::time::timeout(fetch_deadline, fetcher(request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Microsoft Graph request timed out".to_string()));
+
+    match fetch {
+        Ok(Ok(_)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_graph_move(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_graph_move_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        graph_oauth_config_from_env,
+        GRAPH_FETCH_DEADLINE,
+        |request| async move { graph_move_message_via_reqwest(request).await },
+    )
+    .await
+}
+
+async fn native_frickmail_graph_move_with_fetcher<C, F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+    F: FnOnce(GraphMoveMessageRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Value>>,
+{
+    if let Some(response) = graph_authentication_error(state, original_action, session).await {
+        return response;
+    }
+    if let Some(response) = graph_account_id_error(original_action, payload) {
+        return response;
+    }
+    let message_id = payload_string(payload, "message_id").unwrap_or_default();
+    if message_id.is_empty() {
+        return json_result_error(original_action, "message_id required");
+    }
+    let target_folder_id = payload_string(payload, "target_folder_id").unwrap_or_default();
+    if target_folder_id.is_empty() {
+        return json_result_error(original_action, "target_folder_id required");
+    }
+
+    let auth = match graph_account_request_from_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        oauth_config,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let request = GraphMoveMessageRequest {
+        auth,
+        message_id,
+        target_folder_id,
+    };
+
+    let fetch = tokio::time::timeout(fetch_deadline, fetcher(request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Microsoft Graph request timed out".to_string()));
+
+    match fetch {
+        Ok(Ok(message)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "message": message
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_graph_delete(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_graph_delete_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        graph_oauth_config_from_env,
+        GRAPH_FETCH_DEADLINE,
+        |request| async move { graph_delete_message_via_reqwest(request).await },
+    )
+    .await
+}
+
+async fn native_frickmail_graph_delete_with_fetcher<C, F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    oauth_config: C,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    C: FnOnce() -> fm_core::Result<GraphOAuthConfig>,
+    F: FnOnce(GraphDeleteMessageRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Value>>,
+{
+    if let Some(response) = graph_authentication_error(state, original_action, session).await {
+        return response;
+    }
+    if let Some(response) = graph_account_id_error(original_action, payload) {
+        return response;
+    }
+    let message_id = payload_string(payload, "message_id").unwrap_or_default();
+    if message_id.is_empty() {
+        return json_result_error(original_action, "message_id required");
+    }
+
+    let auth = match graph_account_request_from_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        oauth_config,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let request = GraphDeleteMessageRequest { auth, message_id };
+
+    let fetch = tokio::time::timeout(fetch_deadline, fetcher(request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Microsoft Graph request timed out".to_string()));
+
+    match fetch {
+        Ok(Ok(_)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
                 }
             }),
         ),
@@ -3705,6 +4241,110 @@ async fn graph_search_messages_via_reqwest(
     graph_json_response(response, "Microsoft Graph request").await
 }
 
+async fn graph_delta_messages_via_reqwest(
+    request: GraphDeltaMessagesRequest,
+) -> fm_core::Result<Value> {
+    let url = graph_delta_messages_url(&request.folder_id, request.delta_token.as_deref())?;
+    let (client, access_token) = graph_client_with_access_token(&request.auth).await?;
+    let response = client
+        .get(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph request failed: {err}"))
+        })?;
+
+    graph_json_response(response, "Microsoft Graph request").await
+}
+
+async fn graph_get_message_via_reqwest(request: GraphGetMessageRequest) -> fm_core::Result<Value> {
+    let (client, access_token) = graph_client_with_access_token(&request.auth).await?;
+    let url = graph_message_url(&request.message_id, true)?;
+    let response = client
+        .get(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph request failed: {err}"))
+        })?;
+
+    graph_json_response(response, "Microsoft Graph request").await
+}
+
+async fn graph_mark_read_via_reqwest(request: GraphMarkReadRequest) -> fm_core::Result<Value> {
+    let (client, access_token) = graph_client_with_access_token(&request.auth).await?;
+    let url = graph_message_url(&request.message_id, false)?;
+    let response = client
+        .patch(url)
+        .bearer_auth(access_token)
+        .json(&json!({ "isRead": request.is_read }))
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph request failed: {err}"))
+        })?;
+
+    graph_json_response(response, "Microsoft Graph request").await
+}
+
+async fn graph_move_message_via_reqwest(
+    request: GraphMoveMessageRequest,
+) -> fm_core::Result<Value> {
+    let (client, access_token) = graph_client_with_access_token(&request.auth).await?;
+    let url = graph_move_message_url(&request.message_id)?;
+    let response = client
+        .post(url)
+        .bearer_auth(access_token)
+        .json(&json!({ "destinationId": request.target_folder_id }))
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph request failed: {err}"))
+        })?;
+
+    graph_json_response(response, "Microsoft Graph request").await
+}
+
+async fn graph_delete_message_via_reqwest(
+    request: GraphDeleteMessageRequest,
+) -> fm_core::Result<Value> {
+    let (client, access_token) = graph_client_with_access_token(&request.auth).await?;
+    let url = graph_message_url(&request.message_id, false)?;
+    let response = client
+        .delete(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph request failed: {err}"))
+        })?;
+
+    graph_json_response(response, "Microsoft Graph request").await
+}
+
+async fn graph_client_with_access_token(
+    auth: &GraphAccountRequest,
+) -> fm_core::Result<(reqwest::Client, String)> {
+    let client = reqwest::Client::builder()
+        .timeout(GRAPH_FETCH_DEADLINE)
+        .build()
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("Microsoft Graph client setup failed: {err}"))
+        })?;
+    let access_token = graph_access_token_for(
+        &client,
+        &auth.tenant,
+        &auth.client_id,
+        auth.client_secret.as_deref(),
+        &auth.refresh_token,
+    )
+    .await?;
+
+    Ok((client, access_token))
+}
+
 async fn graph_access_token_for(
     client: &reqwest::Client,
     tenant: &str,
@@ -3799,6 +4439,113 @@ fn graph_search_messages_url(query: &str, top: i64) -> fm_core::Result<url::Url>
     Ok(url)
 }
 
+fn graph_delta_messages_url(
+    folder_id: &str,
+    delta_token: Option<&str>,
+) -> fm_core::Result<url::Url> {
+    validate_graph_delta_token(delta_token)?;
+    if let Some(delta_token) = delta_token.filter(|token| token.contains("://")) {
+        return assert_graph_followup_url(delta_token, "Invalid Graph delta URL");
+    }
+
+    let mut url = url::Url::parse(MICROSOFT_GRAPH_ROOT)
+        .map_err(|err| FrickmailError::Upstream(format!("Invalid Microsoft Graph URL: {err}")))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| FrickmailError::Upstream("Invalid Microsoft Graph URL".to_string()))?;
+        segments
+            .push("v1.0")
+            .push("me")
+            .push("mailFolders")
+            .push(folder_id)
+            .push("messages")
+            .push("delta");
+    }
+    match delta_token {
+        Some(delta_token) => {
+            url.query_pairs_mut()
+                .append_pair("$deltatoken", delta_token);
+        }
+        None => {
+            url.query_pairs_mut().append_pair(
+                "$select",
+                "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
+            );
+        }
+    }
+    Ok(url)
+}
+
+fn validate_graph_delta_token(delta_token: Option<&str>) -> fm_core::Result<()> {
+    if let Some(delta_token) = delta_token {
+        if delta_token.contains("://") {
+            assert_graph_followup_url(delta_token, "Invalid Graph delta URL")?;
+        }
+    }
+    Ok(())
+}
+
+fn graph_message_url(message_id: &str, include_select: bool) -> fm_core::Result<url::Url> {
+    let mut url = url::Url::parse(MICROSOFT_GRAPH_ROOT)
+        .map_err(|err| FrickmailError::Upstream(format!("Invalid Microsoft Graph URL: {err}")))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| FrickmailError::Upstream("Invalid Microsoft Graph URL".to_string()))?;
+        segments
+            .push("v1.0")
+            .push("me")
+            .push("messages")
+            .push(message_id);
+    }
+    if include_select {
+        url.query_pairs_mut().append_pair(
+            "$select",
+            "id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,isRead,hasAttachments",
+        );
+    }
+    Ok(url)
+}
+
+fn graph_move_message_url(message_id: &str) -> fm_core::Result<url::Url> {
+    let mut url = graph_message_url(message_id, false)?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| FrickmailError::Upstream("Invalid Microsoft Graph URL".to_string()))?;
+        segments.push("move");
+    }
+    Ok(url)
+}
+
+fn assert_graph_followup_url(raw_url: &str, error: &str) -> fm_core::Result<url::Url> {
+    let url =
+        url::Url::parse(raw_url).map_err(|_| FrickmailError::BadRequest(error.to_string()))?;
+    let port = url.port_or_known_default();
+    if url.scheme() != "https"
+        || url.host_str() != Some("graph.microsoft.com")
+        || (port != Some(443))
+        || !url.path().starts_with("/v1.0/")
+        || !url.path().ends_with("/messages/delta")
+        || !graph_followup_query_is_delta_token(&url)
+    {
+        return Err(FrickmailError::BadRequest(error.to_string()));
+    }
+    Ok(url)
+}
+
+fn graph_followup_query_is_delta_token(url: &url::Url) -> bool {
+    let mut has_delta_cursor = false;
+    for (key, _) in url.query_pairs() {
+        match key.as_ref() {
+            "$deltatoken" | "$skiptoken" => has_delta_cursor = true,
+            _ => return false,
+        }
+    }
+    has_delta_cursor
+}
+
 async fn graph_json_response(response: reqwest::Response, context: &str) -> fm_core::Result<Value> {
     let status = response.status();
     let text = response.text().await.map_err(|err| {
@@ -3810,6 +4557,9 @@ async fn graph_json_response(response: reqwest::Response, context: &str) -> fm_c
             status.as_u16(),
             graph_error_summary(&text)
         )));
+    }
+    if text.trim().is_empty() {
+        return Ok(json!({}));
     }
 
     serde_json::from_str(&text)
@@ -4274,6 +5024,27 @@ fn payload_bool(payload: &Value, key: &str) -> bool {
     }
 }
 
+fn payload_json_bool(payload: &Value, key: &str) -> Result<bool, String> {
+    match payload.get(key) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(Value::Number(number)) => {
+            if let Some(value) = number.as_i64() {
+                Ok(value != 0)
+            } else if let Some(value) = number.as_u64() {
+                Ok(value != 0)
+            } else {
+                Ok(number.as_f64().unwrap_or_default() != 0.0)
+            }
+        }
+        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "yes" => Ok(true),
+            "" | "0" | "false" | "off" | "no" => Ok(false),
+            _ => Err(format!("{key} must be boolean")),
+        },
+        _ => Err(format!("{key} must be boolean")),
+    }
+}
+
 fn action_error_message(error: ActionNameError) -> &'static str {
     match error {
         ActionNameError::Empty => "Action unknown",
@@ -4547,14 +5318,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_api_keeps_unmigrated_graph_actions_as_compatibility_fallback() {
+    async fn json_api_dispatches_remaining_native_graph_actions() {
+        for action in [
+            "PluginFrickmailGraphDelta",
+            "PluginFrickmailGraphGetMessage",
+            "PluginFrickmailGraphMarkRead",
+            "PluginFrickmailGraphMove",
+            "PluginFrickmailGraphDelete",
+        ] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!(
+                            "Action={action}&account_id=7&message_id=msg-1&is_read=false&target_folder_id=deleteditems"
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = read_json(response).await;
+            assert_eq!(body["Action"], action);
+            assert_eq!(body["Result"]["ok"], false);
+            assert_eq!(body["Result"]["error"], "Not authenticated");
+        }
+    }
+
+    #[tokio::test]
+    async fn json_api_keeps_unmigrated_actions_as_compatibility_fallback() {
         let response = app()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("Action=PluginFrickmailGraphDelta&account_id=7"))
+                    .body(Body::from("Action=PluginFrickmailApplyRules&account_id=7"))
                     .unwrap(),
             )
             .await
@@ -4562,12 +5364,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
-        assert_eq!(body["Action"], "PluginFrickmailGraphDelta");
+        assert_eq!(body["Action"], "PluginFrickmailApplyRules");
         assert_eq!(body["Result"], false);
         assert_eq!(body["code"], 501);
         assert_eq!(
             body["message"],
-            "Frickmail compatibility hook 'FrickmailGraphDelta' is not migrated yet"
+            "Frickmail compatibility hook 'FrickmailApplyRules' is not migrated yet"
         );
     }
 
@@ -4833,6 +5635,210 @@ mod tests {
         assert_eq!(body["Result"]["error"], "Search query is required");
     }
 
+    #[tokio::test]
+    async fn native_frickmail_remaining_graph_actions_match_plugin_shapes() {
+        let key = [35_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1710, "graph-rest", Some("rest@example.com")).await;
+        seed_mail_account(&pool, 1711, 1710, "Graph Rest", true).await;
+        set_mail_account_oauth_token(
+            &pool,
+            1711,
+            "rest@example.com",
+            "refresh-token",
+            Some("organizations"),
+            &key,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = credential_session(1710, "graph-rest", Some("rest@example.com"), &key).await;
+        let oauth = super::GraphOAuthConfig {
+            client_id: "client-id".to_string(),
+            client_secret: Some("client-secret".to_string()),
+        };
+
+        let captured_delta: Arc<Mutex<Option<super::GraphDeltaMessagesRequest>>> =
+            Arc::new(Mutex::new(None));
+        let response = super::native_frickmail_graph_delta_with_fetcher(
+            &state,
+            "FrickmailGraphDelta",
+            &json!({
+                "account_id": 1711,
+                "folder_id": "archive",
+                "delta_token": "delta-token"
+            }),
+            &session,
+            {
+                let oauth = oauth.clone();
+                move || Ok(oauth)
+            },
+            Duration::from_secs(1),
+            {
+                let captured_delta = captured_delta.clone();
+                move |request| async move {
+                    *captured_delta.lock().unwrap() = Some(request);
+                    Ok(json!({
+                        "value": [{"id": "delta-message"}],
+                        "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=next"
+                    }))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let request = captured_delta.lock().unwrap().clone().unwrap();
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["data"]["value"][0]["id"], "delta-message");
+        assert_eq!(request.auth.tenant, "organizations");
+        assert_eq!(request.auth.client_id, "client-id");
+        assert_eq!(request.auth.client_secret.as_deref(), Some("client-secret"));
+        assert_eq!(request.auth.refresh_token, "refresh-token");
+        assert_eq!(request.folder_id, "archive");
+        assert_eq!(request.delta_token.as_deref(), Some("delta-token"));
+
+        let captured_get: Arc<Mutex<Option<super::GraphGetMessageRequest>>> =
+            Arc::new(Mutex::new(None));
+        let response = super::native_frickmail_graph_get_message_with_fetcher(
+            &state,
+            "FrickmailGraphGetMessage",
+            &json!({"account_id": 1711, "message_id": "message-1"}),
+            &session,
+            {
+                let oauth = oauth.clone();
+                move || Ok(oauth)
+            },
+            Duration::from_secs(1),
+            {
+                let captured_get = captured_get.clone();
+                move |request| async move {
+                    *captured_get.lock().unwrap() = Some(request);
+                    Ok(json!({
+                        "id": "message-1",
+                        "body": {"content": "<p>Hello</p>"}
+                    }))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let request = captured_get.lock().unwrap().clone().unwrap();
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["message"]["body"]["content"], "<p>Hello</p>");
+        assert_eq!(request.message_id, "message-1");
+
+        let captured_mark_read: Arc<Mutex<Option<super::GraphMarkReadRequest>>> =
+            Arc::new(Mutex::new(None));
+        let response = super::native_frickmail_graph_mark_read_with_fetcher(
+            &state,
+            "FrickmailGraphMarkRead",
+            &json!({"account_id": 1711, "message_id": "message-1", "is_read": "false"}),
+            &session,
+            {
+                let oauth = oauth.clone();
+                move || Ok(oauth)
+            },
+            Duration::from_secs(1),
+            {
+                let captured_mark_read = captured_mark_read.clone();
+                move |request| async move {
+                    *captured_mark_read.lock().unwrap() = Some(request);
+                    Ok(json!({}))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let request = captured_mark_read.lock().unwrap().clone().unwrap();
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(request.message_id, "message-1");
+        assert!(!request.is_read);
+
+        let captured_move: Arc<Mutex<Option<super::GraphMoveMessageRequest>>> =
+            Arc::new(Mutex::new(None));
+        let response = super::native_frickmail_graph_move_with_fetcher(
+            &state,
+            "FrickmailGraphMove",
+            &json!({
+                "account_id": 1711,
+                "message_id": "message-1",
+                "target_folder_id": "deleteditems"
+            }),
+            &session,
+            {
+                let oauth = oauth.clone();
+                move || Ok(oauth)
+            },
+            Duration::from_secs(1),
+            {
+                let captured_move = captured_move.clone();
+                move |request| async move {
+                    *captured_move.lock().unwrap() = Some(request);
+                    Ok(json!({"id": "message-1-moved"}))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let request = captured_move.lock().unwrap().clone().unwrap();
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["message"]["id"], "message-1-moved");
+        assert_eq!(request.target_folder_id, "deleteditems");
+
+        let captured_delete: Arc<Mutex<Option<super::GraphDeleteMessageRequest>>> =
+            Arc::new(Mutex::new(None));
+        let response = super::native_frickmail_graph_delete_with_fetcher(
+            &state,
+            "FrickmailGraphDelete",
+            &json!({"account_id": 1711, "message_id": "message-1"}),
+            &session,
+            move || Ok(oauth),
+            Duration::from_secs(1),
+            {
+                let captured_delete = captured_delete.clone();
+                move |request| async move {
+                    *captured_delete.lock().unwrap() = Some(request);
+                    Ok(json!({}))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let request = captured_delete.lock().unwrap().clone().unwrap();
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(request.message_id, "message-1");
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_graph_delta_rejects_bad_followup_before_secret_lookup() {
+        let key = [36_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::with_db_pool(test_config(None), None);
+        let session =
+            credential_session(1712, "graph-delta-bad", Some("delta@example.com"), &key).await;
+
+        let response = super::native_frickmail_graph_delta_with_fetcher(
+            &state,
+            "FrickmailGraphDelta",
+            &json!({
+                "account_id": 1711,
+                "delta_token": "https://graph.microsoft.com/v1.0/me/messages"
+            }),
+            &session,
+            || {
+                Err(FrickmailError::Upstream(
+                    "should not load oauth config".to_string(),
+                ))
+            },
+            Duration::from_secs(1),
+            |_| async { Err(FrickmailError::Upstream("should not fetch".to_string())) },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Invalid Graph delta URL");
+    }
+
     #[test]
     fn graph_search_messages_url_matches_legacy_query_shape() {
         let url = super::graph_search_messages_url("report \"q\"", 12).unwrap();
@@ -4848,6 +5854,90 @@ mod tests {
             pairs.get("$select").map(|value| value.as_ref()),
             Some("id,subject,from,receivedDateTime,isRead,bodyPreview,parentFolderId")
         );
+    }
+
+    #[test]
+    fn graph_remaining_urls_match_legacy_shapes_and_reject_bad_delta_links() {
+        let initial_delta = super::graph_delta_messages_url("inbox", None).unwrap();
+        let initial_pairs = initial_delta.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            initial_delta.path(),
+            "/v1.0/me/mailFolders/inbox/messages/delta"
+        );
+        assert_eq!(
+            initial_pairs.get("$select").map(|value| value.as_ref()),
+            Some("id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments")
+        );
+
+        let token_delta = super::graph_delta_messages_url("inbox", Some("opaque-token")).unwrap();
+        let token_pairs = token_delta.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            token_pairs.get("$deltatoken").map(|value| value.as_ref()),
+            Some("opaque-token")
+        );
+
+        let followup = "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=next";
+        assert_eq!(
+            super::graph_delta_messages_url("inbox", Some(followup))
+                .unwrap()
+                .as_str(),
+            followup
+        );
+        for bad in [
+            "http://graph.microsoft.com/v1.0/me/messages/delta",
+            "https://evil.example/v1.0/me/messages/delta",
+            "https://graph.microsoft.com/v1.0/me/messages",
+            "https://graph.microsoft.com/v1.0/me/messages/delta?$select=id",
+            "https://graph.microsoft.com/v2.0/me/messages/delta",
+            "https://graph.microsoft.com:444/v1.0/me/messages/delta",
+        ] {
+            assert!(super::graph_delta_messages_url("inbox", Some(bad)).is_err());
+        }
+
+        let message = super::graph_message_url("message/id", true).unwrap();
+        let message_pairs = message.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(message.path(), "/v1.0/me/messages/message%2Fid");
+        assert_eq!(
+            message_pairs.get("$select").map(|value| value.as_ref()),
+            Some("id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,isRead,hasAttachments")
+        );
+
+        let move_url = super::graph_move_message_url("message-1").unwrap();
+        assert_eq!(move_url.path(), "/v1.0/me/messages/message-1/move");
+    }
+
+    #[test]
+    fn graph_bool_json_param_matches_php_boolean_rules() {
+        assert_eq!(
+            super::payload_json_bool(&json!({"is_read": true}), "is_read"),
+            Ok(true)
+        );
+        assert_eq!(
+            super::payload_json_bool(&json!({"is_read": 1}), "is_read"),
+            Ok(true)
+        );
+        assert_eq!(
+            super::payload_json_bool(&json!({"is_read": "yes"}), "is_read"),
+            Ok(true)
+        );
+        assert_eq!(
+            super::payload_json_bool(&json!({"is_read": false}), "is_read"),
+            Ok(false)
+        );
+        assert_eq!(
+            super::payload_json_bool(&json!({"is_read": 0}), "is_read"),
+            Ok(false)
+        );
+        assert_eq!(
+            super::payload_json_bool(&json!({"is_read": "false"}), "is_read"),
+            Ok(false)
+        );
+        assert_eq!(
+            super::payload_json_bool(&json!({"is_read": "off"}), "is_read"),
+            Ok(false)
+        );
+        assert!(super::payload_json_bool(&json!({"is_read": "definitely"}), "is_read").is_err());
+        assert!(super::payload_json_bool(&json!({}), "is_read").is_err());
     }
 
     #[test]
