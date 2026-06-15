@@ -619,10 +619,13 @@ Export .mbox and Import .eml were moved from the main toolbar (low-frequency, ca
 returns `{ content_b64, filename }`. The browser triggers a download via a temporary
 object URL.
 
-**Export .mbox** (`FrickmailExportFolder`): fetches all messages in batches of 50
+**Export .mbox** (`FrickmailExportFolder`): fetches messages in batches of 50
 using `BODY.PEEK[]`, prepends a `From ` envelope line to each, concatenates them into
-mbox format, and returns the result base64-encoded. The 120-second request timeout
-accommodates large folders.
+mbox format, and returns the result base64-encoded. The Rust backend keeps PHP's
+`allow_export` default enabled, can disable these hooks with
+`FRICKMAIL__FRICKMAIL_USER__ALLOW_EXPORT=false`, and bounds exports with
+`FRICKMAIL__FRICKMAIL_USER__EXPORT_FOLDER_MAX_MESSAGES` plus
+`FRICKMAIL__FRICKMAIL_USER__EXPORT_FOLDER_MAX_BYTES`.
 
 **Import .eml** (`FrickmailImportEml`): validates the file starts with a known RFC 2822
 header field pattern, then calls `ImapClient::MessageAppendStream()` targeting the

@@ -20,11 +20,14 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
 };
+use chrono::Local;
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
-    apply_imap_rules, fetch_mailbox_status, fetch_message_body_preview, BodyPreviewPart,
-    ImapConnectionConfig, MailboxStatus, RuleAction, RuleCondition, RuleConditionField,
-    RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+    append_raw_message, apply_imap_rules, fetch_mailbox_status, fetch_message_body_preview,
+    fetch_raw_folder_messages, fetch_raw_message, validate_eml, BodyPreviewPart,
+    ImapConnectionConfig, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
+    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    RuleExecutionReport,
 };
 use fm_mime::parse_body;
 use fm_plugin_compat::{
@@ -58,6 +61,9 @@ const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
 const LONG_POLL_NEW_MAIL_DEADLINE: Duration = Duration::from_secs(25);
 const LONG_POLL_NEW_MAIL_INTERVAL: Duration = Duration::from_secs(5);
 const APPLY_RULES_DEADLINE: Duration = Duration::from_secs(60);
+const EXPORT_MESSAGE_DEADLINE: Duration = Duration::from_secs(30);
+const EXPORT_FOLDER_DEADLINE: Duration = Duration::from_secs(120);
+const IMPORT_EML_DEADLINE: Duration = Duration::from_secs(30);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com";
@@ -589,6 +595,29 @@ async fn native_compat_response(
         }
         "FrickmailPushUnsubscribe" => {
             Some(native_frickmail_push_unsubscribe(state, original_action, payload, session).await)
+        }
+        "FrickmailExportMessage" => {
+            if state.config().frickmail_user.allow_export {
+                Some(
+                    native_frickmail_export_message(state, original_action, payload, session).await,
+                )
+            } else {
+                None
+            }
+        }
+        "FrickmailExportFolder" => {
+            if state.config().frickmail_user.allow_export {
+                Some(native_frickmail_export_folder(state, original_action, payload, session).await)
+            } else {
+                None
+            }
+        }
+        "FrickmailImportEml" => {
+            if state.config().frickmail_user.allow_export {
+                Some(native_frickmail_import_eml(state, original_action, payload, session).await)
+            } else {
+                None
+            }
         }
         "FrickmailListOidcLinks" => {
             Some(native_frickmail_list_oidc_links(state, original_action, session).await)
@@ -3841,6 +3870,319 @@ async fn native_frickmail_push_unsubscribe(
     }
 }
 
+async fn native_frickmail_export_message(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_export_message_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        EXPORT_MESSAGE_DEADLINE,
+        |config, password, folder, uid| async move {
+            fetch_raw_message(config, &password, &folder, uid).await
+        },
+    )
+    .await
+}
+
+async fn native_frickmail_export_message_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    export_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, u32) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>>,
+{
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    if payload_i64(payload, "account_id") <= 0 {
+        return json_result_error(original_action, "account_id required");
+    }
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let uid = payload_i64(payload, "uid");
+    if uid <= 0 || uid > u32::MAX as i64 {
+        return json_result_error(original_action, "uid required");
+    }
+
+    let (config, password) = match imap_action_connection_for_user(
+        state,
+        original_action,
+        payload,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+
+    let raw = tokio::time::timeout(
+        export_deadline,
+        fetcher(config, password, folder, uid as u32),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message export timed out".to_string()));
+
+    match raw {
+        Ok(Ok(Some(raw))) if !raw.is_empty() => {
+            let subject = payload_optional_string(payload, "subject")
+                .unwrap_or_else(|| "message".to_string());
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": {
+                        "ok": true,
+                        "filename": format!("{}.eml", plugin_safe_filename(&subject, "message", true)),
+                        "content_b64": STANDARD.encode(raw)
+                    }
+                }),
+            )
+        }
+        Ok(Ok(Some(_))) => json_result_error(original_action, "Empty message body"),
+        Ok(Ok(None)) => {
+            json_result_error(original_action, &format!("Message not found (UID {uid})"))
+        }
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_export_folder(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let limits = export_folder_limits(state.config());
+    native_frickmail_export_folder_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        EXPORT_FOLDER_DEADLINE,
+        limits,
+        move |config, password, folder| async move {
+            fetch_raw_folder_messages(config, &password, &folder, limits).await
+        },
+    )
+    .await
+}
+
+async fn native_frickmail_export_folder_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    export_deadline: Duration,
+    limits: RawFolderFetchLimits,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Vec<Vec<u8>>>>,
+{
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    if payload_i64(payload, "account_id") <= 0 {
+        return json_result_error(original_action, "account_id required");
+    }
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+
+    let (config, password) = match imap_action_connection_for_user(
+        state,
+        original_action,
+        payload,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+
+    let messages = tokio::time::timeout(export_deadline, fetcher(config, password, folder.clone()))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Folder export timed out".to_string()));
+
+    match messages {
+        Ok(Ok(messages)) => {
+            let mbox = match plugin_mbox(messages, limits) {
+                Ok(mbox) => mbox,
+                Err(err) => return json_result_error(original_action, &err.public_message()),
+            };
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": {
+                        "ok": true,
+                        "filename": format!("{}.mbox", plugin_safe_filename(&folder, "folder", false)),
+                        "content_b64": STANDARD.encode(mbox)
+                    }
+                }),
+            )
+        }
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_import_eml(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_frickmail_import_eml_with_appender(
+        state,
+        original_action,
+        payload,
+        session,
+        IMPORT_EML_DEADLINE,
+        |config, password, folder, raw| async move {
+            append_raw_message(config, &password, &folder, &raw).await
+        },
+    )
+    .await
+}
+
+async fn native_frickmail_import_eml_with_appender<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    import_deadline: Duration,
+    appender: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    if payload_i64(payload, "account_id") <= 0 {
+        return json_result_error(original_action, "account_id required");
+    }
+    let folder = payload_optional_string(payload, "folder").unwrap_or_else(|| "INBOX".to_string());
+    let Some(eml_b64) = payload_optional_string(payload, "eml_b64") else {
+        return json_result_error(original_action, "eml_b64 required");
+    };
+    let raw = match STANDARD.decode(eml_b64.as_bytes()) {
+        Ok(raw) => raw,
+        Err(_) => return json_result_error(original_action, "Invalid base64 in eml_b64"),
+    };
+    if let Err(err) = validate_eml(&raw) {
+        return json_result_error(original_action, &err.public_message());
+    }
+
+    let (config, password) = match imap_action_connection_for_user(
+        state,
+        original_action,
+        payload,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+
+    let result = tokio::time::timeout(import_deadline, appender(config, password, folder, raw))
+        .await
+        .map_err(|_| FrickmailError::Upstream("EML import timed out".to_string()));
+
+    match result {
+        Ok(Ok(())) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true
+                }
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn imap_action_auth(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Result<(fm_core::UserSession, Vec<u8>), Response> {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return Err(response),
+    }) else {
+        return Err(json_result_error(original_action, "Not authenticated"));
+    };
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return Err(response),
+    };
+    Ok((user, credential_key))
+}
+
+async fn imap_action_connection_for_user(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    user_id: i64,
+    credential_key: &[u8],
+) -> Result<(ImapConnectionConfig, String), Response> {
+    let Some(pool) = state.db_pool() else {
+        return Err(json_result_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+
+    let account_id = payload_i64(payload, "account_id");
+    if account_id <= 0 {
+        return Err(json_result_error(original_action, "account_id required"));
+    }
+    let account =
+        match SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account_id)
+            .await
+        {
+            Ok(Some(account)) => account,
+            Ok(None) => return Err(json_result_error(original_action, "Account not found")),
+            Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+        };
+    let config = match imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+    let password = match account_password(&account, credential_key) {
+        Ok(password) => password,
+        Err(_) => return Err(json_result_error(original_action, "Missing IMAP password")),
+    };
+
+    Ok((config, password))
+}
+
 async fn native_frickmail_list_oidc_links(
     state: &AppState,
     original_action: &str,
@@ -5205,6 +5547,14 @@ fn payload_string(payload: &Value, key: &str) -> Option<String> {
     }
 }
 
+fn required_payload_string(
+    payload: &Value,
+    key: &str,
+    message: &'static str,
+) -> Result<String, &'static str> {
+    payload_optional_string(payload, key).ok_or(message)
+}
+
 fn value_to_php_string(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
@@ -5214,6 +5564,83 @@ fn value_to_php_string(value: &Value) -> String {
         Value::String(value) => value.clone(),
         _ => serde_json::to_string(value).unwrap_or_default(),
     }
+}
+
+fn plugin_safe_filename(value: &str, fallback: &str, trim_edges: bool) -> String {
+    let mut filename = String::new();
+    let mut in_invalid_run = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ' ') {
+            filename.push(ch);
+            in_invalid_run = false;
+        } else if !in_invalid_run {
+            filename.push('_');
+            in_invalid_run = true;
+        } else {
+            in_invalid_run = true;
+        }
+    }
+    if trim_edges {
+        filename = filename.trim_matches([' ', '_']).to_string();
+    }
+    if filename.is_empty() {
+        filename = fallback.to_string();
+    }
+    filename.chars().take(80).collect()
+}
+
+fn export_folder_limits(config: &fm_core::FrickmailConfig) -> RawFolderFetchLimits {
+    RawFolderFetchLimits {
+        max_messages: config.frickmail_user.export_folder_max_messages,
+        max_bytes: config.frickmail_user.export_folder_max_bytes,
+    }
+}
+
+fn plugin_mbox(messages: Vec<Vec<u8>>, limits: RawFolderFetchLimits) -> fm_core::Result<Vec<u8>> {
+    let separator_date = Local::now().format("%a %b %d %H:%M:%S %Y").to_string();
+    plugin_mbox_with_date(messages, limits, &separator_date)
+}
+
+fn plugin_mbox_with_date(
+    messages: Vec<Vec<u8>>,
+    limits: RawFolderFetchLimits,
+    separator_date: &str,
+) -> fm_core::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut total_raw_bytes = 0_usize;
+    for (index, raw) in messages.into_iter().enumerate() {
+        if index >= limits.max_messages {
+            return Err(FrickmailError::BadRequest(
+                "Folder export exceeds configured message limit".to_string(),
+            ));
+        }
+        total_raw_bytes = total_raw_bytes
+            .checked_add(raw.len())
+            .filter(|bytes| *bytes <= limits.max_bytes)
+            .ok_or_else(|| {
+                FrickmailError::BadRequest(
+                    "Folder export exceeds configured size limit".to_string(),
+                )
+            })?;
+        out.extend_from_slice(format!("From nobody {separator_date}\r\n").as_bytes());
+        out.extend_from_slice(&mbox_escape_from_lines(&raw));
+        out.extend_from_slice(b"\r\n");
+    }
+    Ok(out)
+}
+
+fn mbox_escape_from_lines(raw: &[u8]) -> Vec<u8> {
+    let mut escaped = Vec::with_capacity(raw.len());
+    if raw.starts_with(b"From ") {
+        escaped.push(b'>');
+    }
+    for index in 0..raw.len() {
+        escaped.push(raw[index]);
+        if raw[index] == b'\n' && raw[index + 1..].starts_with(b"From ") {
+            escaped.push(b'>');
+        }
+    }
+    escaped
 }
 
 fn payload_optional_string(payload: &Value, key: &str) -> Option<String> {
@@ -5379,8 +5806,8 @@ mod tests {
     use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
-        BodyPartKind, BodyPreviewPart, ImapConnectionConfig, MailboxStatus, RuleAction,
-        RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+        BodyPartKind, BodyPreviewPart, ImapConnectionConfig, MailboxStatus, RawFolderFetchLimits,
+        RuleAction, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
         RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
@@ -5599,15 +6026,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_api_keeps_unmigrated_actions_as_compatibility_fallback() {
-        let response = app()
+    async fn json_api_dispatches_native_import_export_actions() {
+        let eml_b64 = STANDARD.encode(b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nbody");
+        for body in [
+            "Action=PluginFrickmailExportMessage&account_id=7&folder=INBOX&uid=1".to_string(),
+            "Action=PluginFrickmailExportFolder&account_id=7&folder=INBOX".to_string(),
+            format!("Action=PluginFrickmailImportEml&account_id=7&eml_b64={eml_b64}"),
+        ] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = read_json(response).await;
+            assert_eq!(body["Result"]["ok"], false);
+            assert_eq!(body["Result"]["error"], "Not authenticated");
+        }
+    }
+
+    #[tokio::test]
+    async fn json_api_respects_disabled_import_export_feature_gate() {
+        let mut config = test_config(None);
+        config.frickmail_user.allow_export = false;
+        let app = super::build_router(AppState::new(config));
+
+        let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/")
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(
-                        "Action=PluginFrickmailExportMessage&account_id=7",
+                        "Action=PluginFrickmailExportMessage&account_id=7&folder=INBOX&uid=1",
                     ))
                     .unwrap(),
             )
@@ -5622,6 +6080,31 @@ mod tests {
         assert_eq!(
             body["message"],
             "Frickmail compatibility hook 'FrickmailExportMessage' is not migrated yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_api_keeps_unmigrated_actions_as_compatibility_fallback() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailSmimeSign&account_id=7"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailSmimeSign");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 501);
+        assert_eq!(
+            body["message"],
+            "Frickmail compatibility hook 'FrickmailSmimeSign' is not migrated yet"
         );
     }
 
@@ -8342,6 +8825,243 @@ mod tests {
         assert_eq!(body["Result"]["error"], "Message body fetch timed out");
     }
 
+    #[tokio::test]
+    async fn native_frickmail_export_message_returns_safe_eml_payload() {
+        let key = [30_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1640, 1641, &key).await;
+        let captured: Arc<Mutex<Option<(String, String, String, u32)>>> =
+            Arc::new(Mutex::new(None));
+        let captured_for_fetch = Arc::clone(&captured);
+
+        let response = super::native_frickmail_export_message_with_fetcher(
+            &state,
+            "FrickmailExportMessage",
+            &json!({
+                "account_id": 1641,
+                "folder": "Sent Items",
+                "uid": 77,
+                "subject": "__Hello?/World__"
+            }),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, uid| {
+                let captured_for_fetch = Arc::clone(&captured_for_fetch);
+                async move {
+                    *captured_for_fetch.lock().unwrap() =
+                        Some((config.login, password, folder, uid));
+                    Ok(Some(
+                        b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nExported body".to_vec(),
+                    ))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["filename"], "Hello_World.eml");
+        let raw = STANDARD
+            .decode(body["Result"]["content_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            raw,
+            b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nExported body"
+        );
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some((
+                "work@example.com".to_string(),
+                "imap-secret".to_string(),
+                "Sent Items".to_string(),
+                77,
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_export_folder_returns_mbox_payload() {
+        let key = [31_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1642, 1643, &key).await;
+        let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
+        let captured_for_fetch = Arc::clone(&captured);
+
+        let response = super::native_frickmail_export_folder_with_fetcher(
+            &state,
+            "FrickmailExportFolder",
+            &json!({"account_id": 1643, "folder": "Archive?/2026"}),
+            &session,
+            Duration::from_secs(1),
+            RawFolderFetchLimits {
+                max_messages: 10,
+                max_bytes: 1024,
+            },
+            move |config, password, folder| {
+                let captured_for_fetch = Arc::clone(&captured_for_fetch);
+                async move {
+                    *captured_for_fetch.lock().unwrap() = Some((config.login, password, folder));
+                    Ok(vec![
+                        b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\nFrom escaped\r\nBody".to_vec(),
+                        b"From sender@example.com\r\n\r\nBody".to_vec(),
+                    ])
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["filename"], "Archive_2026.mbox");
+        let mbox = STANDARD
+            .decode(body["Result"]["content_b64"].as_str().unwrap())
+            .unwrap();
+        let mbox = String::from_utf8(mbox).unwrap();
+        assert!(mbox.contains("From nobody "));
+        assert!(mbox.contains("\r\n>From escaped\r\n"));
+        assert!(mbox.contains("\r\n>From sender@example.com"));
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some((
+                "work@example.com".to_string(),
+                "imap-secret".to_string(),
+                "Archive?/2026".to_string(),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_export_folder_enforces_configured_limits() {
+        let key = [33_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1646, 1647, &key).await;
+
+        let response = super::native_frickmail_export_folder_with_fetcher(
+            &state,
+            "FrickmailExportFolder",
+            &json!({"account_id": 1647, "folder": "Archive"}),
+            &session,
+            Duration::from_secs(1),
+            RawFolderFetchLimits {
+                max_messages: 1,
+                max_bytes: 1024,
+            },
+            |_config, _password, _folder| async move {
+                Ok(vec![
+                    b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nOne".to_vec(),
+                    b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nTwo".to_vec(),
+                ])
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Folder export exceeds configured message limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_import_eml_appends_decoded_message() {
+        let key = [32_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1644, 1645, &key).await;
+        let raw = b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nImported body";
+        let captured: Arc<Mutex<Option<(String, String, String, Vec<u8>)>>> =
+            Arc::new(Mutex::new(None));
+        let captured_for_append = Arc::clone(&captured);
+
+        let response = super::native_frickmail_import_eml_with_appender(
+            &state,
+            "FrickmailImportEml",
+            &json!({
+                "account_id": 1645,
+                "folder": "Uploads",
+                "eml_b64": STANDARD.encode(raw)
+            }),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, raw| {
+                let captured_for_append = Arc::clone(&captured_for_append);
+                async move {
+                    *captured_for_append.lock().unwrap() =
+                        Some((config.login, password, folder, raw));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some((
+                "work@example.com".to_string(),
+                "imap-secret".to_string(),
+                "Uploads".to_string(),
+                raw.to_vec(),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_import_eml_validates_message_before_account_lookup() {
+        let key = [34_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::new(test_config(None));
+        let session =
+            credential_session(1648, "importer", Some("importer@example.com"), &key).await;
+
+        let response = super::native_frickmail_import_eml_with_appender(
+            &state,
+            "FrickmailImportEml",
+            &json!({
+                "account_id": 9999,
+                "eml_b64": STANDARD.encode(b"Subject: not accepted by legacy import check\r\n\r\nbody")
+            }),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _raw| async move {
+                panic!("appender should not run for invalid EML")
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Invalid EML format: file does not look like an RFC 2822 message"
+        );
+    }
+
+    #[test]
+    fn import_export_helpers_match_plugin_shapes() {
+        assert_eq!(
+            super::plugin_safe_filename("__Hello?/World__", "message", true),
+            "Hello_World"
+        );
+        assert_eq!(
+            super::plugin_safe_filename("Archive?/2026", "folder", false),
+            "Archive_2026"
+        );
+        assert_eq!(
+            super::plugin_safe_filename("////", "message", true),
+            "message"
+        );
+
+        let mbox = super::plugin_mbox_with_date(
+            vec![b"From sender\r\nFrom body\r\n".to_vec()],
+            RawFolderFetchLimits {
+                max_messages: 10,
+                max_bytes: 1024,
+            },
+            "Thu Jan 01 00:00:00 1970",
+        )
+        .unwrap();
+        let mbox = String::from_utf8(mbox).unwrap();
+        assert!(mbox.starts_with("From nobody Thu Jan 01 00:00:00 1970\r\n>From sender"));
+        assert!(mbox.contains("\r\n>From body\r\n"));
+    }
+
     #[test]
     fn last_uid_payload_parses_object_and_json_string() {
         assert_eq!(
@@ -9786,6 +10506,7 @@ mod tests {
             open_signup: false,
             oidc: Default::default(),
             mail: Default::default(),
+            frickmail_user: Default::default(),
             transactional_smtp: Default::default(),
         }
     }

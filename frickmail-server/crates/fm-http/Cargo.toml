@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 axum.workspace = true
 base64.workspace = true
+chrono = { workspace = true, features = ["clock"] }
 fm-core = { path = "../fm-core" }
 fm-imap = { path = "../fm-imap" }
 fm-mime = { path = "../fm-mime" }

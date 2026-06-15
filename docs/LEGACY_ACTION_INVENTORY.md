@@ -73,9 +73,9 @@ Status meanings:
 | `FrickmailGetVapidKey` | feature-gated | `Notifications.js` | native | Creates/reads persistent VAPID key. |
 | `FrickmailPushSubscribe` | feature-gated | `Notifications.js` | native | Validates public push endpoint before storing. |
 | `FrickmailPushUnsubscribe` | feature-gated | `Notifications.js` | native | Deletes subscription. |
-| `FrickmailExportMessage` | feature-gated | `ImportExport.js` | compat-known | Native IMAP raw export pending. |
-| `FrickmailExportFolder` | feature-gated | `ImportExport.js` | compat-known | Native IMAP folder export pending. |
-| `FrickmailImportEml` | feature-gated | `ImportExport.js` | compat-known | Native IMAP append/import pending. |
+| `FrickmailExportMessage` | feature-gated | `ImportExport.js` | native | IMAP UID raw export with legacy filename/content envelope. |
+| `FrickmailExportFolder` | feature-gated | `ImportExport.js` | native | IMAP folder export to mbox-compatible base64 payload. |
+| `FrickmailImportEml` | feature-gated | `ImportExport.js` | native | Base64 EML validation and IMAP APPEND import. |
 | `FrickmailListTasks` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
 | `FrickmailAddTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
 | `FrickmailCompleteTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
@@ -145,8 +145,6 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Native import/export for `FrickmailExportMessage`, `FrickmailExportFolder`,
-   and `FrickmailImportEml`.
-2. Native S/MIME private-key import, signing, and verification.
-3. Native folder/message route coverage needed before `FrickmailSwitchAccount`
+1. Native S/MIME private-key import, signing, and verification.
+2. Native folder/message route coverage needed before `FrickmailSwitchAccount`
    can return real success instead of bridge-pending.

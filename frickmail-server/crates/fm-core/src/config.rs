@@ -26,6 +26,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub mail: MailDefaults,
     #[serde(default)]
+    pub frickmail_user: FrickmailUserConfig,
+    #[serde(default)]
     pub transactional_smtp: TransactionalSmtpConfig,
 }
 
@@ -64,6 +66,26 @@ pub struct TransactionalSmtpConfig {
     pub password: String,
     #[serde(default = "default_transactional_smtp_from")]
     pub from: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FrickmailUserConfig {
+    #[serde(default = "default_frickmail_user_allow_export")]
+    pub allow_export: bool,
+    #[serde(default = "default_export_folder_max_messages")]
+    pub export_folder_max_messages: usize,
+    #[serde(default = "default_export_folder_max_bytes")]
+    pub export_folder_max_bytes: usize,
+}
+
+impl Default for FrickmailUserConfig {
+    fn default() -> Self {
+        Self {
+            allow_export: default_frickmail_user_allow_export(),
+            export_folder_max_messages: default_export_folder_max_messages(),
+            export_folder_max_bytes: default_export_folder_max_bytes(),
+        }
+    }
 }
 
 impl Default for TransactionalSmtpConfig {
@@ -130,6 +152,19 @@ impl FrickmailConfig {
                 field: "php_bridge_url",
                 message: err.to_string(),
             })?;
+        }
+
+        if self.frickmail_user.export_folder_max_messages == 0 {
+            return Err(FrickmailError::InvalidConfig {
+                field: "frickmail_user.export_folder_max_messages",
+                message: "must be greater than zero".to_string(),
+            });
+        }
+        if self.frickmail_user.export_folder_max_bytes == 0 {
+            return Err(FrickmailError::InvalidConfig {
+                field: "frickmail_user.export_folder_max_bytes",
+                message: "must be greater than zero".to_string(),
+            });
         }
 
         Ok(())
@@ -260,4 +295,16 @@ fn default_transactional_smtp_secure() -> String {
 
 fn default_transactional_smtp_from() -> String {
     "no-reply@frickmail.local".to_string()
+}
+
+fn default_frickmail_user_allow_export() -> bool {
+    true
+}
+
+fn default_export_folder_max_messages() -> usize {
+    5_000
+}
+
+fn default_export_folder_max_bytes() -> usize {
+    25 * 1024 * 1024
 }

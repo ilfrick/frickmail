@@ -72,6 +72,12 @@ pub struct ImapConnectionConfig {
     pub login: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawFolderFetchLimits {
+    pub max_messages: usize,
+    pub max_bytes: usize,
+}
+
 impl ImapConnectionConfig {
     pub fn new(
         host: impl Into<String>,
@@ -260,6 +266,58 @@ pub async fn fetch_mailbox_status(
     })
 }
 
+pub async fn fetch_raw_message(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid: u32,
+) -> Result<Option<Vec<u8>>> {
+    validate_mailbox(mailbox)?;
+    if uid == 0 {
+        return Err(FrickmailError::BadRequest("uid required".to_string()));
+    }
+
+    let mut session = login(config, password).await?;
+    timeout_imap("examine mailbox", session.examine(mailbox)).await?;
+    let raw = fetch_raw_message_in_session(&mut session, uid).await?;
+    logout_quietly(session).await;
+    Ok(raw)
+}
+
+pub async fn fetch_raw_folder_messages(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    limits: RawFolderFetchLimits,
+) -> Result<Vec<Vec<u8>>> {
+    validate_mailbox(mailbox)?;
+
+    let mut session = login(config, password).await?;
+    let folder = timeout_imap("examine mailbox", session.examine(mailbox)).await?;
+    let messages = fetch_raw_messages_by_sequence(&mut session, folder.exists, limits).await?;
+    logout_quietly(session).await;
+    Ok(messages)
+}
+
+pub async fn append_raw_message(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    raw: &[u8],
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    validate_eml(raw)?;
+
+    let mut session = login(config, password).await?;
+    timeout_imap(
+        "append raw message",
+        session.append(mailbox, Some("(\\Seen)"), None, raw),
+    )
+    .await?;
+    logout_quietly(session).await;
+    Ok(())
+}
+
 pub async fn apply_imap_rules(
     config: ImapConnectionConfig,
     password: &str,
@@ -308,6 +366,31 @@ pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<&'static str> {
     }
 
     Ok("(UID RFC822.SIZE BODYSTRUCTURE)")
+}
+
+pub fn uid_fetch_raw_message_query(uid: u32) -> Result<&'static str> {
+    if uid == 0 {
+        return Err(FrickmailError::BadRequest("uid required".to_string()));
+    }
+
+    Ok("(UID BODY.PEEK[])")
+}
+
+pub fn sequence_fetch_raw_message_query() -> &'static str {
+    "(BODY.PEEK[])"
+}
+
+pub fn validate_eml(raw: &[u8]) -> Result<()> {
+    let trimmed = trim_ascii_whitespace(raw);
+    if trimmed.is_empty() {
+        return Err(FrickmailError::BadRequest("Empty EML content".to_string()));
+    }
+    if !looks_like_rfc2822_message(trimmed) {
+        return Err(FrickmailError::BadRequest(
+            "Invalid EML format: file does not look like an RFC 2822 message".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn imap_rule_search_criteria(
@@ -419,6 +502,76 @@ pub fn parse_uid_fetch_body_preview(input: &[u8], expected_uid: u32) -> Result<O
     }
 
     Ok(matched_body)
+}
+
+async fn fetch_raw_message_in_session(
+    session: &mut BoxedSession,
+    uid: u32,
+) -> Result<Option<Vec<u8>>> {
+    let mut fetches = timeout_imap(
+        "fetch raw message",
+        session.uid_fetch(uid.to_string(), uid_fetch_raw_message_query(uid)?),
+    )
+    .await?;
+
+    while let Some(fetch) = timeout_imap("read raw message", fetches.try_next()).await? {
+        if fetch.uid != Some(uid) {
+            continue;
+        }
+        return Ok(fetch.body().map(ToOwned::to_owned));
+    }
+
+    Ok(None)
+}
+
+async fn fetch_raw_messages_by_sequence(
+    session: &mut BoxedSession,
+    total: u32,
+    limits: RawFolderFetchLimits,
+) -> Result<Vec<Vec<u8>>> {
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut messages = Vec::new();
+    let mut total_bytes = 0_usize;
+    let batch_size = 50_u32;
+    let mut start = 1_u32;
+    while start <= total {
+        let end = start.saturating_add(batch_size - 1).min(total);
+        let range = if start == end {
+            start.to_string()
+        } else {
+            format!("{start}:{end}")
+        };
+        let mut fetches = timeout_imap(
+            "fetch raw folder messages",
+            session.fetch(range, sequence_fetch_raw_message_query()),
+        )
+        .await?;
+
+        while let Some(fetch) = timeout_imap("read raw folder message", fetches.try_next()).await? {
+            if let Some(body) = fetch.body().filter(|body| !body.is_empty()) {
+                if messages.len() >= limits.max_messages {
+                    return Err(FrickmailError::BadRequest(
+                        "Folder export exceeds configured message limit".to_string(),
+                    ));
+                }
+                total_bytes = total_bytes
+                    .checked_add(body.len())
+                    .filter(|bytes| *bytes <= limits.max_bytes)
+                    .ok_or_else(|| {
+                        FrickmailError::BadRequest(
+                            "Folder export exceeds configured size limit".to_string(),
+                        )
+                    })?;
+                messages.push(body.to_vec());
+            }
+        }
+        start = end.saturating_add(1);
+    }
+
+    Ok(messages)
 }
 
 async fn apply_imap_rules_in_session(
@@ -940,6 +1093,31 @@ fn contains_crlf(value: &str) -> bool {
         .any(|byte| matches!(byte, b'\r' | b'\n'))
 }
 
+fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn looks_like_rfc2822_message(value: &[u8]) -> bool {
+    const PREFIXES: &[&[u8]] = &[
+        b"From ",
+        b"Received:",
+        b"Date:",
+        b"MIME-Version:",
+        b"Content-Type:",
+        b"Return-Path:",
+        b"Message-ID:",
+    ];
+    PREFIXES.iter().any(|prefix| {
+        value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix)
+    })
+}
+
 fn imap_quote_search_value(value: &str) -> Result<String> {
     if contains_crlf(value) {
         return Err(FrickmailError::BadRequest(
@@ -1066,6 +1244,12 @@ mod tests {
             "(UID RFC822.SIZE BODYSTRUCTURE)"
         );
         assert!(uid_fetch_bodystructure_query(0).is_err());
+        assert_eq!(
+            uid_fetch_raw_message_query(42).unwrap(),
+            "(UID BODY.PEEK[])"
+        );
+        assert!(uid_fetch_raw_message_query(0).is_err());
+        assert_eq!(sequence_fetch_raw_message_query(), "(BODY.PEEK[])");
 
         let mut path = [0; 8];
         path[0] = 1;
@@ -1132,6 +1316,14 @@ mod tests {
         let uids = HashSet::from([42_u32, 7, 19, 20, 21, 43]);
         assert_eq!(uid_sequence_set(&uids), "7,19:21,42:43");
         assert_eq!(uid_sequence_set(&HashSet::new()), "");
+    }
+
+    #[test]
+    fn validates_imported_eml_like_legacy_php() {
+        assert!(validate_eml(b"Subject: missing accepted prefix\r\n\r\nbody").is_err());
+        assert!(validate_eml(b"   \r\n").is_err());
+        assert!(validate_eml(b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nbody").is_ok());
+        assert!(validate_eml(b"mime-version: 1.0\r\n\r\nbody").is_ok());
     }
 
     #[test]
