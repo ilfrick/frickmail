@@ -153,8 +153,11 @@ the session's AEAD key.
 
 ### Account switching
 
-`FrickmailSwitchAccount` calls `bridge()` for the target account and triggers
-`rl.route.reload()` on the client. The `AccountSwitcher.js` module patches the
+`FrickmailSwitchAccount` validates the target account, stores it as the selected
+mail account, and triggers `rl.route.reload()` on the client. In the PHP bridge
+runtime this still calls `bridge()` for the target account; in the Rust runtime
+the selected account is stored in the Rust session and consumed by native
+Frickmail-user mailbox routes. The `AccountSwitcher.js` module patches the
 `SystemDropDown` view model's `accountClick` handler to intercept Frickmail accounts
 and route them through this endpoint instead of SnappyMail's native account-switch
 path.

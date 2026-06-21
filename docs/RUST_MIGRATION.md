@@ -515,22 +515,16 @@ Every migration slice must follow this loop:
 
 1. Keep `docs/LEGACY_ACTION_INVENTORY.md` current as the route/hook/frontend
    source of truth for each migration slice.
-2. Complete native mailbox account switching: `FrickmailBridgeSession` and
-   `FrickmailSwitchAccount` now persist a selected account in the Rust session
-   only after credential validation, and `FrickmailGetMessageBody` can consume it
-   while revalidating current-user account ownership. Continue wiring that
-   selected account through native folder/message routes, then change the bridge
-   and switch actions from the current safe pending response to real success
-   without PHP session state.
-3. Add native coverage for `FrickmailApplyRules`, import/export, and remaining
-   S/MIME actions.
-4. Begin native Microsoft Graph implementation for the `FrickmailGraph*` actions
-   listed in the legacy inventory.
-5. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
+2. Expand native legacy folder/message route coverage beyond the Frickmail-user
+   selected-account routes. `FrickmailLogin`, `FrickmailBridgeSession`, and
+   `FrickmailSwitchAccount` now persist the selected account only after
+   credential validation, and `FrickmailGetMessageBody` consumes it while
+   revalidating current-user account ownership.
+3. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
    compatibility.
-6. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user
+4. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user
    theming.
-7. Add CI allowlists for temporary legacy names so naming cleanup is measurable.
-8. Track the Frickmail-user usable release gate and do not continue into full
+5. Add CI allowlists for temporary legacy names so naming cleanup is measurable.
+6. Track the Frickmail-user usable release gate and do not continue into full
    legacy runtime removal until that release is available and operator input is
    received.

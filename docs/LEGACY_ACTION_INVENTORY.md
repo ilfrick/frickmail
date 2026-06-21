@@ -27,15 +27,15 @@ Status meanings:
 
 | Action | PHP hook | Frontend caller | Rust status | Notes |
 |---|---:|---|---|---|
-| `FrickmailLogin` | yes | `Login.js` | native | Writes user and credential-key sessions; TOTP replay protection is native. |
-| `FrickmailBridgeSession` | yes | `Login.js` | partial-native | Validates credentials and stores selected account, but still returns bridge-pending. |
+| `FrickmailLogin` | yes | `Login.js` | native | Writes user and credential-key sessions, validates the primary-or-oldest account, and stores selected account on successful login. TOTP replay protection is native. |
+| `FrickmailBridgeSession` | yes | `Login.js` | native | Validates credentials and stores selected account with PHP-compatible primary-or-oldest fallback. |
 | `FrickmailRegister` | yes | `Login.js` | native | Signup gating and PHP-compatible validation covered. |
 | `FrickmailListAccounts` | yes | `AccountSwitcher.js`, settings UIs | native | Returns safe metadata and inline identities. |
 | `FrickmailAddAccount` | yes | `MailAccountsSettings.js` | native | Encrypts secrets with credential session key. |
 | `FrickmailUpdateAccount` | yes | `MailAccountsSettings.js` | native | Preserves password when empty; SSRF guards apply. |
 | `FrickmailDeleteAccount` | yes | `MailAccountsSettings.js` | native | Deletes account and indexed-message rows. |
 | `FrickmailSetPrimary` | yes | `MailAccountsSettings.js` | native | User-scoped primary update. |
-| `FrickmailSwitchAccount` | yes | `AccountSwitcher.js`, `Search.js`, `UnifiedInbox.js` | partial-native | Validates target account and stores selected account, but still returns bridge-pending to avoid false mailbox switch success. |
+| `FrickmailSwitchAccount` | yes | `AccountSwitcher.js`, `Search.js`, `UnifiedInbox.js` | native | Validates target account ownership and credentials before storing the selected account. |
 | `FrickmailSetAccountPassword` | yes | `MailAccountsSettings.js` | native | Updates encrypted secret. |
 | `FrickmailRequestPasswordReset` | yes | `Login.js` | native | No account enumeration. |
 | `FrickmailResetPassword` | yes | `Login.js` | native | Resets password and invalidates credentials. |
@@ -145,5 +145,5 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Native folder/message route coverage needed before `FrickmailSwitchAccount`
-   can return real success instead of bridge-pending.
+1. Expand native legacy folder/message route coverage beyond the Frickmail-user
+   selected-account routes already handled by `FrickmailGetMessageBody`.
