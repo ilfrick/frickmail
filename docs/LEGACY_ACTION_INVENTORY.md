@@ -82,11 +82,11 @@ Status meanings:
 | `FrickmailDeleteTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
 | `FrickmailUpdateTask` | feature-gated | `Tasks.js` | native | User-scoped tasks. |
 | `FrickmailSmimeListCerts` | feature-gated | `SmimeSettings.js` | native | Lists public cert metadata only. |
-| `FrickmailSmimeImportP12` | feature-gated | `SmimeSettings.js` | compat-known | Native private-key import pending. |
+| `FrickmailSmimeImportP12` | feature-gated | `SmimeSettings.js` | native | Native PKCS#12 private-key import with encrypted key storage. |
 | `FrickmailSmimeImportCert` | feature-gated | `SmimeSettings.js` | native | Public certificate import. |
 | `FrickmailSmimeDeleteCert` | feature-gated | `SmimeSettings.js` | native | User-scoped delete. |
-| `FrickmailSmimeSign` | feature-gated | `SmimeSettings.js` | compat-known | Native S/MIME signing pending. |
-| `FrickmailSmimeVerify` | feature-gated | `SmimeSettings.js` | compat-known | Native S/MIME verification pending. |
+| `FrickmailSmimeSign` | feature-gated | `SmimeSettings.js` | native | Native detached S/MIME signing. |
+| `FrickmailSmimeVerify` | feature-gated | `SmimeSettings.js` | native | Native S/MIME verification against the system trust store. |
 | `FrickmailListOidcLinks` | yes | `LoginOIDC.js` | native | Implemented by Rust for login-oidc compatibility. |
 | `FrickmailUnlinkOidc` | yes | `LoginOIDC.js` | native | Implemented by Rust for login-oidc compatibility. |
 
@@ -145,6 +145,5 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Native S/MIME private-key import, signing, and verification.
-2. Native folder/message route coverage needed before `FrickmailSwitchAccount`
+1. Native folder/message route coverage needed before `FrickmailSwitchAccount`
    can return real success instead of bridge-pending.

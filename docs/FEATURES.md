@@ -496,7 +496,7 @@ signing, import public certificates for verifying others, and test-sign messages
 **PKCS#12 (.p12/.pfx):**
 1. Browser reads the file with `FileReader.readAsArrayBuffer` and base64-encodes it.
 2. Sends `{ account_id, p12_b64, password }` to `FrickmailSmimeImportP12`.
-3. PHP decodes, calls `openssl_pkcs12_read()` with the passphrase.
+3. Rust decodes and parses the PKCS#12 bundle with OpenSSL.
 4. Extracts `cert` (PEM) and `pkey` (PEM). The private key is encrypted with
    `Crypto::encrypt(keyPem, cryptKey)` before storage.
 5. Stores in `frickmail_smime_certs` with `fingerprint` (SHA-1, colon-separated hex),
@@ -508,10 +508,8 @@ Sends `{ account_id, pem_b64 }` to `FrickmailSmimeImportCert`. No private key;
 
 ### Signing
 
-`FrickmailSmimeSign` decrypts the private key from storage, writes both cert and key
-to temporary files, calls `openssl_pkcs7_sign(..., PKCS7_DETACHED)`, and returns the
-signed message base64-encoded. Temporary files are unconditionally deleted in a
-`finally` block.
+`FrickmailSmimeSign` decrypts the private key from storage, signs with OpenSSL
+PKCS#7 detached S/MIME support, and returns the signed message base64-encoded.
 
 ### Verification
 
@@ -531,8 +529,12 @@ within 30 days and an error badge for already-expired certificates.
 
 ### Admin flag
 
-S/MIME can be disabled at the plugin level (`smime_enabled` admin setting). When
-disabled, `SmimeSettings.js` is not loaded and S/MIME endpoints are not registered.
+S/MIME can be disabled at the plugin level (`smime_enabled` admin setting). The
+Rust compatibility server mirrors that gate with
+`FRICKMAIL__FRICKMAIL_USER__SMIME_ENABLED=false`; when disabled, S/MIME hooks
+fall back to the compatibility layer instead of running native Rust handlers.
+Existing installs that disabled S/MIME in the PHP plugin admin settings should
+set the Rust environment variable as well while both compatibility layers exist.
 
 ### Files
 

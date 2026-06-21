@@ -37,7 +37,7 @@ use fm_smtp::{send_password_reset_email, PasswordResetEmail};
 use fm_user::{
     decrypt_account_secret, derive_credential_key, verify_login_password, FrickmailMe, MailAccount,
     MailAccountConnectionSecret, NewMailAccount, NewMailIdentity, NewMailRule, NewMailTask,
-    NewSmimeCert, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailAccount,
+    NewSmimeCert, NewSmimeP12, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailAccount,
     UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES,
 };
 use p256::{
@@ -66,6 +66,9 @@ const EXPORT_FOLDER_DEADLINE: Duration = Duration::from_secs(120);
 const IMPORT_EML_DEADLINE: Duration = Duration::from_secs(30);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
+const SMIME_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
+const SMIME_VERIFY_MAX_BYTES: usize = 2 * 1024 * 1024;
+const SMIME_VERIFY_MAX_BASE64_CHARS: usize = SMIME_VERIFY_MAX_BYTES.div_ceil(3) * 4;
 const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com";
 const MICROSOFT_GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access";
 
@@ -626,13 +629,64 @@ async fn native_compat_response(
             Some(native_frickmail_unlink_oidc(state, original_action, payload, session).await)
         }
         "FrickmailSmimeListCerts" => {
-            Some(native_frickmail_smime_list_certs(state, original_action, session).await)
+            native_smime_action(state, || {
+                Box::pin(native_frickmail_smime_list_certs(
+                    state,
+                    original_action,
+                    session,
+                ))
+            })
+            .await
+        }
+        "FrickmailSmimeImportP12" => {
+            native_smime_action(state, || {
+                Box::pin(native_frickmail_smime_import_p12(
+                    state,
+                    original_action,
+                    payload,
+                    session,
+                ))
+            })
+            .await
         }
         "FrickmailSmimeImportCert" => {
-            Some(native_frickmail_smime_import_cert(state, original_action, payload, session).await)
+            native_smime_action(state, || {
+                Box::pin(native_frickmail_smime_import_cert(
+                    state,
+                    original_action,
+                    payload,
+                    session,
+                ))
+            })
+            .await
         }
         "FrickmailSmimeDeleteCert" => {
-            Some(native_frickmail_smime_delete_cert(state, original_action, payload, session).await)
+            native_smime_action(state, || {
+                Box::pin(native_frickmail_smime_delete_cert(
+                    state,
+                    original_action,
+                    payload,
+                    session,
+                ))
+            })
+            .await
+        }
+        "FrickmailSmimeSign" => {
+            native_smime_action(state, || {
+                Box::pin(native_frickmail_smime_sign(
+                    state,
+                    original_action,
+                    payload,
+                    session,
+                ))
+            })
+            .await
+        }
+        "FrickmailSmimeVerify" => {
+            native_smime_action(state, || {
+                Box::pin(native_frickmail_smime_verify(original_action, payload))
+            })
+            .await
         }
         _ => None,
     }
@@ -4341,6 +4395,65 @@ async fn native_frickmail_smime_import_cert(
     }
 }
 
+async fn native_frickmail_smime_import_p12(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let account_id = payload_i64(payload, "account_id");
+    if account_id <= 0 {
+        return json_result_error(original_action, "account_id required");
+    }
+    let p12_b64 = payload_string(payload, "p12_b64").unwrap_or_default();
+    let p12_b64 = p12_b64.trim();
+    if p12_b64.is_empty() {
+        return json_result_error(original_action, "p12_b64 required");
+    }
+    let p12_der = match STANDARD.decode(p12_b64) {
+        Ok(bytes) => bytes,
+        Err(_) => return json_result_error(original_action, "Invalid base64 in p12_b64"),
+    };
+    let password = payload_string(payload, "password").unwrap_or_default();
+
+    match SqlxUserRepository::import_smime_p12(
+        pool,
+        user.user_id,
+        NewSmimeP12 {
+            account_id,
+            p12_der,
+            password,
+        },
+        &credential_key,
+    )
+    .await
+    {
+        Ok(result) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": result
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
 async fn native_frickmail_smime_delete_cert(
     state: &AppState,
     original_action: &str,
@@ -4372,6 +4485,100 @@ async fn native_frickmail_smime_delete_cert(
         ),
         Ok(false) => json_result_error(original_action, "Certificate not found or already deleted"),
         Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_smime_sign(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let email = payload_string(payload, "email").unwrap_or_default();
+    let email = email.trim().to_string();
+    if email.is_empty() {
+        return json_result_error(original_action, "email required");
+    }
+    let body = payload_string(payload, "body").unwrap_or_default();
+
+    match SqlxUserRepository::sign_smime_message(pool, user.user_id, &email, &body, &credential_key)
+        .await
+    {
+        Ok(signed) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "ok": true,
+                    "signed_b64": STANDARD.encode(signed)
+                }
+            }),
+        ),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_frickmail_smime_verify(original_action: &str, payload: &Value) -> Response {
+    let message_b64 = payload_string(payload, "message_b64").unwrap_or_default();
+    let message_b64 = message_b64.trim();
+    if message_b64.is_empty() {
+        return json_result_error(original_action, "message_b64 required");
+    }
+    if message_b64.len() > SMIME_VERIFY_MAX_BASE64_CHARS {
+        return json_result_error(original_action, "message_b64 too large");
+    }
+    let message = match STANDARD.decode(message_b64) {
+        Ok(bytes) => bytes,
+        Err(_) => return json_result_error(original_action, "Invalid base64 in message_b64"),
+    };
+    if message.len() > SMIME_VERIFY_MAX_BYTES {
+        return json_result_error(original_action, "message_b64 too large");
+    }
+    let verify =
+        tokio::task::spawn_blocking(move || SqlxUserRepository::verify_smime_message(&message));
+    let result = match tokio::time::timeout(SMIME_VERIFY_DEADLINE, verify).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => {
+            return json_result_error(
+                original_action,
+                &format!("S/MIME verification task failed: {err}"),
+            );
+        }
+        Err(_) => return json_result_error(original_action, "S/MIME verification timed out"),
+    };
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": result
+        }),
+    )
+}
+
+async fn native_smime_action<F, Fut>(state: &AppState, f: F) -> Option<Response>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    if state.config().frickmail_user.smime_enabled {
+        Some(f().await)
+    } else {
+        None
     }
 }
 
@@ -5821,7 +6028,8 @@ mod tests {
         bn::BigNum,
         hash::MessageDigest,
         nid::Nid,
-        pkey::PKey,
+        pkcs12::Pkcs12,
+        pkey::{PKey, Private},
         rsa::Rsa,
         x509::{extension::SubjectAlternativeName, X509NameBuilder, X509},
     };
@@ -6091,7 +6299,7 @@ mod tests {
                     .method(Method::POST)
                     .uri("/")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("Action=PluginFrickmailSmimeSign&account_id=7"))
+                    .body(Body::from("Action=PluginJsonAdminRestoreData"))
                     .unwrap(),
             )
             .await
@@ -6099,12 +6307,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
-        assert_eq!(body["Action"], "PluginFrickmailSmimeSign");
+        assert_eq!(body["Action"], "PluginJsonAdminRestoreData");
         assert_eq!(body["Result"], false);
         assert_eq!(body["code"], 501);
         assert_eq!(
             body["message"],
-            "Frickmail compatibility hook 'FrickmailSmimeSign' is not migrated yet"
+            "Frickmail compatibility hook 'JsonAdminRestoreData' is not migrated yet"
         );
     }
 
@@ -10207,6 +10415,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_frickmail_smime_import_p12_signs_and_verifies_shape() {
+        let key = [42_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_smime_cert_tables(&pool).await;
+        seed_user(&pool, 65, "smime-p12", Some("smime-p12@example.com")).await;
+        seed_mail_account(&pool, 407, 65, "Work", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session =
+            credential_session(65, "smime-p12", Some("smime-p12@example.com"), &key).await;
+        let p12_der = test_smime_p12_der("signer@example.com", "p12-secret");
+
+        let response = super::native_frickmail_smime_import_p12(
+            &state,
+            "FrickmailSmimeImportP12",
+            &json!({
+                "account_id": 407,
+                "p12_b64": STANDARD.encode(&p12_der),
+                "password": "p12-secret"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "FrickmailSmimeImportP12");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["email"], "signer@example.com");
+
+        let response =
+            super::native_frickmail_smime_list_certs(&state, "FrickmailSmimeListCerts", &session)
+                .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["certs"].as_array().unwrap().len(), 1);
+        assert_eq!(body["Result"]["certs"][0]["has_key"], true);
+
+        let response = super::native_frickmail_smime_sign(
+            &state,
+            "FrickmailSmimeSign",
+            &json!({
+                "email": "signer@example.com",
+                "body": "Subject: Test\r\n\r\nhello"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        let signed = STANDARD
+            .decode(body["Result"]["signed_b64"].as_str().unwrap())
+            .unwrap();
+        assert!(String::from_utf8_lossy(&signed).contains("multipart/signed"));
+
+        let response = super::native_frickmail_smime_verify(
+            "FrickmailSmimeVerify",
+            &json!({"message_b64": STANDARD.encode(&signed)}),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "FrickmailSmimeVerify");
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["verified"], false);
+        assert!(body["Result"]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Signature verification failed:"));
+
+        let response = super::native_frickmail_smime_import_p12(
+            &state,
+            "FrickmailSmimeImportP12",
+            &json!({
+                "account_id": 407,
+                "p12_b64": STANDARD.encode(&p12_der),
+                "password": "wrong"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Failed to read PKCS#12 file - wrong password or corrupt file"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frickmail_smime_verify_rejects_invalid_input_shape() {
+        let response =
+            super::native_frickmail_smime_verify("FrickmailSmimeVerify", &json!({})).await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "message_b64 required");
+
+        let response = super::native_frickmail_smime_verify(
+            "FrickmailSmimeVerify",
+            &json!({"message_b64": "not-base64"}),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Invalid base64 in message_b64");
+
+        let response = super::native_frickmail_smime_verify(
+            "FrickmailSmimeVerify",
+            &json!({"message_b64": STANDARD.encode("not smime")}),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["verified"], false);
+        assert_eq!(
+            body["Result"]["error"],
+            "Could not parse the signed message"
+        );
+
+        let response = super::native_frickmail_smime_verify(
+            "FrickmailSmimeVerify",
+            &json!({"message_b64": "A".repeat(super::SMIME_VERIFY_MAX_BASE64_CHARS + 1)}),
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "message_b64 too large");
+    }
+
+    #[tokio::test]
+    async fn json_api_respects_disabled_smime_feature_gate() {
+        let mut config = test_config(None);
+        config.frickmail_user.smime_enabled = false;
+        let app = super::build_router(AppState::new(config));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=PluginFrickmailSmimeVerify&message_b64=eA==",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "PluginFrickmailSmimeVerify");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 501);
+        assert_eq!(
+            body["message"],
+            "Frickmail compatibility hook 'FrickmailSmimeVerify' is not migrated yet"
+        );
+    }
+
+    #[tokio::test]
     async fn json_api_reports_unknown_action_without_transport_failure() {
         let response = app()
             .oneshot(
@@ -11366,6 +11731,23 @@ mod tests {
     }
 
     fn test_smime_cert_pem(email: &str) -> String {
+        let (pem, _, _) = test_smime_cert_material(email);
+        pem
+    }
+
+    fn test_smime_p12_der(email: &str, password: &str) -> Vec<u8> {
+        let (_, key, cert) = test_smime_cert_material(email);
+        Pkcs12::builder()
+            .name(email)
+            .pkey(&key)
+            .cert(&cert)
+            .build2(password)
+            .unwrap()
+            .to_der()
+            .unwrap()
+    }
+
+    fn test_smime_cert_material(email: &str) -> (String, PKey<Private>, X509) {
         let rsa = Rsa::generate(2048).unwrap();
         let key = PKey::from_rsa(rsa).unwrap();
         let mut name = X509NameBuilder::new().unwrap();
@@ -11392,7 +11774,12 @@ mod tests {
         builder.append_extension(san).unwrap();
         builder.sign(&key, MessageDigest::sha256()).unwrap();
 
-        String::from_utf8(builder.build().to_pem().unwrap()).unwrap()
+        let cert = builder.build();
+        (
+            String::from_utf8(cert.to_pem().unwrap()).unwrap(),
+            key,
+            cert,
+        )
     }
 
     async fn spawn_bridge() -> (Option<String>, Arc<Mutex<BridgeCapture>>) {

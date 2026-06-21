@@ -72,6 +72,8 @@ pub struct TransactionalSmtpConfig {
 pub struct FrickmailUserConfig {
     #[serde(default = "default_frickmail_user_allow_export")]
     pub allow_export: bool,
+    #[serde(default = "default_frickmail_user_smime_enabled")]
+    pub smime_enabled: bool,
     #[serde(default = "default_export_folder_max_messages")]
     pub export_folder_max_messages: usize,
     #[serde(default = "default_export_folder_max_bytes")]
@@ -82,6 +84,7 @@ impl Default for FrickmailUserConfig {
     fn default() -> Self {
         Self {
             allow_export: default_frickmail_user_allow_export(),
+            smime_enabled: default_frickmail_user_smime_enabled(),
             export_folder_max_messages: default_export_folder_max_messages(),
             export_folder_max_bytes: default_export_folder_max_bytes(),
         }
@@ -298,6 +301,10 @@ fn default_transactional_smtp_from() -> String {
 }
 
 fn default_frickmail_user_allow_export() -> bool {
+    true
+}
+
+fn default_frickmail_user_smime_enabled() -> bool {
     true
 }
 

@@ -18,7 +18,12 @@ use openssl::{
     asn1::Asn1TimeRef,
     hash::MessageDigest,
     nid::Nid,
-    x509::{X509NameRef, X509},
+    pkcs12::Pkcs12,
+    pkcs7::{Pkcs7, Pkcs7Flags},
+    pkey::PKey,
+    stack::Stack,
+    x509::store::X509StoreBuilder,
+    x509::{X509NameRef, X509Ref, X509},
 };
 use p256::{
     ecdsa::SigningKey,
@@ -247,6 +252,13 @@ pub struct NewSmimeCert {
     pub pem: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSmimeP12 {
+    pub account_id: i64,
+    pub p12_der: Vec<u8>,
+    pub password: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SmimeImportResult {
     pub ok: bool,
@@ -254,6 +266,15 @@ pub struct SmimeImportResult {
     pub email: String,
     pub fingerprint: String,
     pub not_after: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SmimeVerifyResult {
+    pub ok: bool,
+    pub verified: bool,
+    pub signer_email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +285,12 @@ struct ParsedSmimeCert {
     subject: String,
     not_before: Option<String>,
     not_after: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SmimeSigningMaterial {
+    cert_pem: String,
+    encrypted_key_pem: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -680,8 +707,31 @@ impl SqlxUserRepository {
         import_smime_cert(pool, user_id, input).await
     }
 
+    pub async fn import_smime_p12(
+        pool: &AnyPool,
+        user_id: i64,
+        input: NewSmimeP12,
+        credential_key: &[u8],
+    ) -> Result<SmimeImportResult> {
+        import_smime_p12(pool, user_id, input, credential_key).await
+    }
+
     pub async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result<bool> {
         delete_smime_cert(pool, user_id, cert_id).await
+    }
+
+    pub async fn sign_smime_message(
+        pool: &AnyPool,
+        user_id: i64,
+        email: &str,
+        message_body: &str,
+        credential_key: &[u8],
+    ) -> Result<Vec<u8>> {
+        sign_smime_message(pool, user_id, email, message_body, credential_key).await
+    }
+
+    pub fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
+        verify_smime_message(message)
     }
 
     pub async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
@@ -2495,6 +2545,80 @@ async fn import_smime_cert(
         input.account_id,
         &parsed.cert_pem,
         &parsed,
+        None,
+    )
+    .await?;
+
+    Ok(SmimeImportResult {
+        ok: true,
+        id,
+        email: parsed.email,
+        fingerprint: parsed.fingerprint,
+        not_after: parsed.not_after,
+    })
+}
+
+async fn import_smime_p12(
+    pool: &AnyPool,
+    user_id: i64,
+    input: NewSmimeP12,
+    credential_key: &[u8],
+) -> Result<SmimeImportResult> {
+    if input.account_id <= 0 {
+        return Err(FrickmailError::BadRequest(
+            "account_id required".to_string(),
+        ));
+    }
+    if input.p12_der.is_empty() {
+        return Err(FrickmailError::BadRequest("p12_b64 required".to_string()));
+    }
+    if fetch_mail_account(pool, user_id, input.account_id)
+        .await?
+        .is_none()
+    {
+        return Err(FrickmailError::BadRequest("Account not found".to_string()));
+    }
+
+    let parsed_archive = Pkcs12::from_der(&input.p12_der)
+        .and_then(|archive| archive.parse2(&input.password))
+        .map_err(|_| {
+            FrickmailError::BadRequest(
+                "Failed to read PKCS#12 file - wrong password or corrupt file".to_string(),
+            )
+        })?;
+    let cert = parsed_archive.cert.ok_or_else(|| {
+        FrickmailError::BadRequest("No certificate found in the PKCS#12 bundle".to_string())
+    })?;
+    let cert_pem = String::from_utf8(cert.to_pem().map_err(|err| {
+        FrickmailError::Upstream(format!("S/MIME certificate export failed: {err}"))
+    })?)
+    .map_err(|err| {
+        FrickmailError::Upstream(format!("S/MIME certificate PEM encoding failed: {err}"))
+    })?;
+    let parsed = parse_smime_cert(&cert_pem)?;
+    let encrypted_key_pem = parsed_archive
+        .pkey
+        .map(|key| -> Result<Vec<u8>> {
+            let key_pem = String::from_utf8(key.private_key_to_pem_pkcs8().map_err(|err| {
+                FrickmailError::Upstream(format!("S/MIME private key export failed: {err}"))
+            })?)
+            .map_err(|err| {
+                FrickmailError::Upstream(format!("S/MIME private key PEM encoding failed: {err}"))
+            })?;
+            encrypt_account_secret(&key_pem, credential_key)
+        })
+        .transpose()?;
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let id = insert_smime_cert_on_conn(
+        &mut conn,
+        &backend,
+        user_id,
+        input.account_id,
+        &parsed.cert_pem,
+        &parsed,
+        encrypted_key_pem,
     )
     .await?;
 
@@ -2510,27 +2634,9 @@ async fn import_smime_cert(
 fn parse_smime_cert(pem: &str) -> Result<ParsedSmimeCert> {
     let cert = X509::from_pem(pem.as_bytes())
         .map_err(|_| FrickmailError::BadRequest("Invalid PEM certificate".to_string()))?;
-    let email = cert
-        .subject_alt_names()
-        .and_then(|names| {
-            names
-                .iter()
-                .filter_map(|name| name.email())
-                .map(str::trim)
-                .find(|email| looks_like_email(email))
-                .map(ToOwned::to_owned)
-        })
-        .or_else(|| {
-            x509_name_entry_text(cert.subject_name(), Nid::COMMONNAME)
-                .filter(|value| looks_like_email(value))
-        })
-        .or_else(|| {
-            x509_name_entry_text(cert.subject_name(), Nid::PKCS9_EMAILADDRESS)
-                .filter(|value| looks_like_email(value))
-        })
-        .ok_or_else(|| {
-            FrickmailError::BadRequest("Certificate does not contain an email address".to_string())
-        })?;
+    let email = smime_cert_email(&cert).ok_or_else(|| {
+        FrickmailError::BadRequest("Certificate does not contain an email address".to_string())
+    })?;
     let fingerprint = cert
         .digest(MessageDigest::sha1())
         .map_err(|err| {
@@ -2555,6 +2661,26 @@ fn parse_smime_cert(pem: &str) -> Result<ParsedSmimeCert> {
         not_before: asn1_time_to_rfc3339(cert.not_before()),
         not_after: asn1_time_to_rfc3339(cert.not_after()),
     })
+}
+
+fn smime_cert_email(cert: &X509Ref) -> Option<String> {
+    cert.subject_alt_names()
+        .and_then(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.email())
+                .map(str::trim)
+                .find(|email| looks_like_email(email))
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            x509_name_entry_text(cert.subject_name(), Nid::COMMONNAME)
+                .filter(|value| looks_like_email(value))
+        })
+        .or_else(|| {
+            x509_name_entry_text(cert.subject_name(), Nid::PKCS9_EMAILADDRESS)
+                .filter(|value| looks_like_email(value))
+        })
 }
 
 fn looks_like_email(value: &str) -> bool {
@@ -2616,6 +2742,140 @@ async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result
         .await
         .map(|result| result.rows_affected() > 0)
         .map_err(db_error)
+}
+
+async fn sign_smime_message(
+    pool: &AnyPool,
+    user_id: i64,
+    email: &str,
+    message_body: &str,
+    credential_key: &[u8],
+) -> Result<Vec<u8>> {
+    let email = email.trim();
+    if email.is_empty() {
+        return Err(FrickmailError::BadRequest("email required".to_string()));
+    }
+    let material = fetch_smime_signing_material(pool, user_id, email)
+        .await?
+        .ok_or_else(|| {
+            FrickmailError::BadRequest(format!("No S/MIME certificate found for {email}"))
+        })?;
+    let encrypted_key = material
+        .encrypted_key_pem
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            FrickmailError::BadRequest(format!("No private key stored for {email} - cannot sign"))
+        })?;
+    let key_pem = decrypt_account_secret(encrypted_key, credential_key)?.ok_or_else(|| {
+        FrickmailError::BadRequest(
+            "Failed to decrypt private key - session key mismatch".to_string(),
+        )
+    })?;
+    let cert = X509::from_pem(material.cert_pem.as_bytes()).map_err(|err| {
+        FrickmailError::Upstream(format!("S/MIME certificate load failed: {err}"))
+    })?;
+    let key = PKey::private_key_from_pem(key_pem.as_bytes()).map_err(|err| {
+        FrickmailError::BadRequest(format!("S/MIME private key load failed: {err}"))
+    })?;
+    let certs = Stack::new().map_err(|err| {
+        FrickmailError::Upstream(format!("S/MIME certificate stack init failed: {err}"))
+    })?;
+    let flags = Pkcs7Flags::DETACHED | Pkcs7Flags::STREAM;
+    let pkcs7 = Pkcs7::sign(&cert, &key, &certs, message_body.as_bytes(), flags)
+        .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))?;
+    pkcs7
+        .to_smime(message_body.as_bytes(), flags)
+        .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))
+}
+
+fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
+    let (pkcs7, content) = match Pkcs7::from_smime(message) {
+        Ok(value) => value,
+        Err(_) => {
+            return SmimeVerifyResult {
+                ok: true,
+                verified: false,
+                signer_email: None,
+                error: Some("Could not parse the signed message".to_string()),
+            }
+        }
+    };
+    let certs = match Stack::new() {
+        Ok(certs) => certs,
+        Err(err) => {
+            return SmimeVerifyResult {
+                ok: true,
+                verified: false,
+                signer_email: None,
+                error: Some(format!("Signature verification failed: {err}")),
+            }
+        }
+    };
+    let store = match X509StoreBuilder::new().and_then(|mut builder| {
+        builder.set_default_paths()?;
+        Ok(builder.build())
+    }) {
+        Ok(store) => store,
+        Err(err) => {
+            return SmimeVerifyResult {
+                ok: true,
+                verified: false,
+                signer_email: None,
+                error: Some(format!("Signature verification failed: {err}")),
+            }
+        }
+    };
+    let mut output = Vec::new();
+    if let Err(err) = pkcs7.verify(
+        &certs,
+        &store,
+        content.as_deref(),
+        Some(&mut output),
+        Pkcs7Flags::empty(),
+    ) {
+        return SmimeVerifyResult {
+            ok: true,
+            verified: false,
+            signer_email: None,
+            error: Some(format!("Signature verification failed: {err}")),
+        };
+    }
+    let signer_email = pkcs7
+        .signers(&certs, Pkcs7Flags::empty())
+        .ok()
+        .and_then(|signers| {
+            if signers.is_empty() {
+                None
+            } else {
+                smime_cert_email(&signers[0])
+            }
+        });
+
+    SmimeVerifyResult {
+        ok: true,
+        verified: true,
+        signer_email,
+        error: None,
+    }
+}
+
+async fn fetch_smime_signing_material(
+    pool: &AnyPool,
+    user_id: i64,
+    email: &str,
+) -> Result<Option<SmimeSigningMaterial>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+
+    sqlx::query(smime_signing_material_query(&backend))
+        .bind(user_id)
+        .bind(email)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_error)?
+        .map(row_to_smime_signing_material)
+        .transpose()
 }
 
 async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
@@ -3354,6 +3614,7 @@ async fn insert_smime_cert_on_conn(
     account_id: i64,
     pem: &str,
     parsed: &ParsedSmimeCert,
+    encrypted_key_pem: Option<Vec<u8>>,
 ) -> Result<i64> {
     if matches!(backend, "PostgreSQL" | "SQLite") {
         return bind_insert_smime_cert(
@@ -3362,6 +3623,7 @@ async fn insert_smime_cert_on_conn(
             account_id,
             pem,
             parsed,
+            encrypted_key_pem,
         )
         .fetch_one(&mut **conn)
         .await
@@ -3375,6 +3637,7 @@ async fn insert_smime_cert_on_conn(
         account_id,
         pem,
         parsed,
+        encrypted_key_pem,
     )
     .execute(&mut **conn)
     .await
@@ -3394,13 +3657,14 @@ fn bind_insert_smime_cert<'q>(
     account_id: i64,
     pem: &'q str,
     parsed: &'q ParsedSmimeCert,
+    encrypted_key_pem: Option<Vec<u8>>,
 ) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>> {
     query
         .bind(user_id)
         .bind(account_id)
         .bind(&parsed.email)
         .bind(pem)
-        .bind(None::<Vec<u8>>)
+        .bind(encrypted_key_pem)
         .bind(&parsed.fingerprint)
         .bind(&parsed.subject)
         .bind(&parsed.not_before)
@@ -4067,6 +4331,19 @@ fn delete_smime_cert_query(backend: &str) -> &'static str {
     }
 }
 
+fn smime_signing_material_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT cert_pem, encrypted_key_pem FROM frickmail_smime_certs \
+             WHERE user_id = $1 AND email = $2 ORDER BY created_at DESC, id DESC LIMIT 1"
+        }
+        _ => {
+            "SELECT cert_pem, encrypted_key_pem FROM frickmail_smime_certs \
+             WHERE user_id = ? AND email = ? ORDER BY created_at DESC, id DESC LIMIT 1"
+        }
+    }
+}
+
 fn delete_message_index_for_account_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -4541,6 +4818,13 @@ fn row_to_smime_certificate(row: sqlx::any::AnyRow) -> Result<SmimeCertificate> 
         not_after: row.try_get("not_after").map_err(db_error)?,
         has_key: int_flag(&row, "has_key")?,
         created_at: row.try_get("created_at").map_err(db_error)?,
+    })
+}
+
+fn row_to_smime_signing_material(row: sqlx::any::AnyRow) -> Result<SmimeSigningMaterial> {
+    Ok(SmimeSigningMaterial {
+        cert_pem: row.try_get("cert_pem").map_err(db_error)?,
+        encrypted_key_pem: row.try_get("encrypted_key_pem").map_err(db_error)?,
     })
 }
 
