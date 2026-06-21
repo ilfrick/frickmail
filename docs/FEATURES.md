@@ -470,7 +470,10 @@ A rule has:
 `applyRules()` in `MailAccountHandler.php` translates conditions to IMAP `SEARCH`
 criteria (`FROM`, `SUBJECT`, `TO`, `HEADER`, `NOT`). `any` logic with N > 2 criteria
 builds nested binary `OR` expressions (IMAP RFC 3501 requirement). Matched UID sets
-are processed by `MessageMove`, `MessageStoreFlag`, or `MessageDelete`.
+are processed by Rust-native IMAP mutation helpers. The legacy webmail routes
+`MessageSetSeen`, `MessageSetFlagged`, `MessageSetDeleted`, `MessageCopy`,
+`MessageMove`, and `MessageDelete` are also native for the selected IMAP
+account during the broader SnappyMail/RainLoop runtime migration.
 
 ### UI
 

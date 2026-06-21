@@ -186,6 +186,25 @@ pub enum RuleAction {
     Noop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImapMessageFlag {
+    Seen,
+    Flagged,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImapMoveLearning {
+    Spam,
+    Ham,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImapMoveOptions {
+    pub mark_as_read: bool,
+    pub learning: Option<ImapMoveLearning>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RuleExecutionResult {
     pub rule_id: i64,
@@ -316,6 +335,90 @@ pub async fn append_raw_message(
     .await?;
     logout_quietly(session).await;
     Ok(())
+}
+
+pub async fn store_message_flag(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid_set: &str,
+    flag: ImapMessageFlag,
+    set: bool,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    validate_uid_set(uid_set)?;
+
+    let mut session = login(config, password).await?;
+    timeout_imap("select mailbox", session.select(mailbox)).await?;
+    let query = store_flag_query(flag, set);
+    let result = drain_uid_store(&mut session, uid_set, query, "store message flag").await;
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn copy_messages(
+    config: ImapConnectionConfig,
+    password: &str,
+    from_mailbox: &str,
+    to_mailbox: &str,
+    uid_set: &str,
+) -> Result<()> {
+    validate_mailbox(from_mailbox)?;
+    validate_mailbox(to_mailbox)?;
+    validate_uid_set(uid_set)?;
+
+    let mut session = login(config, password).await?;
+    timeout_imap("select source mailbox", session.select(from_mailbox)).await?;
+    let result = timeout_imap("copy messages", session.uid_copy(uid_set, to_mailbox)).await;
+    logout_quietly(session).await;
+    result.map(|_| ())
+}
+
+pub async fn move_messages(
+    config: ImapConnectionConfig,
+    password: &str,
+    from_mailbox: &str,
+    to_mailbox: &str,
+    uid_set: &str,
+    options: ImapMoveOptions,
+) -> Result<()> {
+    validate_mailbox(from_mailbox)?;
+    validate_mailbox(to_mailbox)?;
+    validate_uid_set(uid_set)?;
+
+    let mut session = login(config, password).await?;
+    let capabilities = imap_rule_capabilities(&mut session).await?;
+    timeout_imap("select source mailbox", session.select(from_mailbox)).await?;
+    apply_legacy_move_pre_flags(&mut session, uid_set, options).await;
+    let result = if capabilities.supports_move {
+        timeout_imap("move messages", session.uid_mv(uid_set, to_mailbox))
+            .await
+            .map(|_| ())
+    } else {
+        match timeout_imap("copy messages", session.uid_copy(uid_set, to_mailbox)).await {
+            Ok(_) => delete_rule_messages(&mut session, capabilities, uid_set).await,
+            Err(err) => Err(err),
+        }
+    };
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn delete_messages(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid_set: &str,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    validate_uid_set(uid_set)?;
+
+    let mut session = login(config, password).await?;
+    let capabilities = imap_rule_capabilities(&mut session).await?;
+    timeout_imap("select mailbox", session.select(mailbox)).await?;
+    let result = delete_rule_messages(&mut session, capabilities, uid_set).await;
+    logout_quietly(session).await;
+    result
 }
 
 pub async fn apply_imap_rules(
@@ -707,6 +810,58 @@ async fn drain_uid_store(
     Ok(())
 }
 
+async fn apply_legacy_move_pre_flags(
+    session: &mut BoxedSession,
+    uid_set: &str,
+    options: ImapMoveOptions,
+) {
+    if options.mark_as_read {
+        let _ = drain_uid_store(
+            session,
+            uid_set,
+            "+FLAGS.SILENT (\\Seen)",
+            "mark moved messages read",
+        )
+        .await;
+    }
+
+    match options.learning {
+        Some(ImapMoveLearning::Spam) => {
+            let _ = drain_uid_store(
+                session,
+                uid_set,
+                "+FLAGS.SILENT ($Junk)",
+                "mark moved messages junk",
+            )
+            .await;
+            let _ = drain_uid_store(
+                session,
+                uid_set,
+                "-FLAGS.SILENT ($NotJunk)",
+                "clear moved messages not-junk",
+            )
+            .await;
+        }
+        Some(ImapMoveLearning::Ham) => {
+            let _ = drain_uid_store(
+                session,
+                uid_set,
+                "+FLAGS.SILENT ($NotJunk)",
+                "mark moved messages not-junk",
+            )
+            .await;
+            let _ = drain_uid_store(
+                session,
+                uid_set,
+                "-FLAGS.SILENT ($Junk)",
+                "clear moved messages junk",
+            )
+            .await;
+        }
+        None => {}
+    }
+}
+
 async fn imap_rule_capabilities(session: &mut BoxedSession) -> Result<ImapRuleCapabilities> {
     let capabilities = timeout_imap("read IMAP capabilities", session.capabilities()).await?;
     Ok(ImapRuleCapabilities {
@@ -1093,6 +1248,39 @@ fn contains_crlf(value: &str) -> bool {
         .any(|byte| matches!(byte, b'\r' | b'\n'))
 }
 
+fn validate_uid_set(uid_set: &str) -> Result<()> {
+    let uid_set = uid_set.trim();
+    if uid_set.is_empty() {
+        return Err(FrickmailError::BadRequest("uids required".to_string()));
+    }
+
+    for item in uid_set.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            return Err(FrickmailError::BadRequest("invalid uid set".to_string()));
+        }
+        let uid = item
+            .parse::<u32>()
+            .map_err(|_| FrickmailError::BadRequest("invalid uid set".to_string()))?;
+        if uid == 0 {
+            return Err(FrickmailError::BadRequest("invalid uid set".to_string()));
+        }
+    }
+
+    Ok(())
+}
+
+fn store_flag_query(flag: ImapMessageFlag, set: bool) -> &'static str {
+    match (flag, set) {
+        (ImapMessageFlag::Seen, true) => "+FLAGS.SILENT (\\Seen)",
+        (ImapMessageFlag::Seen, false) => "-FLAGS.SILENT (\\Seen)",
+        (ImapMessageFlag::Flagged, true) => "+FLAGS.SILENT (\\Flagged)",
+        (ImapMessageFlag::Flagged, false) => "-FLAGS.SILENT (\\Flagged)",
+        (ImapMessageFlag::Deleted, true) => "+FLAGS.SILENT (\\Deleted)",
+        (ImapMessageFlag::Deleted, false) => "-FLAGS.SILENT (\\Deleted)",
+    }
+}
+
 fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
     while value.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
         value = &value[1..];
@@ -1264,6 +1452,39 @@ mod tests {
             "(UID BODY.PEEK[1.MIME] BODY.PEEK[1]<0.262144>)"
         );
         assert!(!body_preview_fetch_query(&specs).contains("RFC822"));
+    }
+
+    #[test]
+    fn uid_set_validation_accepts_comma_separated_positive_uids_only() {
+        assert!(validate_uid_set("1").is_ok());
+        assert!(validate_uid_set("1,2,300").is_ok());
+        assert!(validate_uid_set(" 1, 2 ").is_ok());
+
+        assert!(validate_uid_set("").is_err());
+        assert!(validate_uid_set("0").is_err());
+        assert!(validate_uid_set("1:*").is_err());
+        assert!(validate_uid_set("1\r\nNOOP").is_err());
+        assert!(validate_uid_set("1,,2").is_err());
+    }
+
+    #[test]
+    fn store_flag_queries_are_silent_and_bounded() {
+        assert_eq!(
+            store_flag_query(ImapMessageFlag::Seen, true),
+            "+FLAGS.SILENT (\\Seen)"
+        );
+        assert_eq!(
+            store_flag_query(ImapMessageFlag::Seen, false),
+            "-FLAGS.SILENT (\\Seen)"
+        );
+        assert_eq!(
+            store_flag_query(ImapMessageFlag::Flagged, true),
+            "+FLAGS.SILENT (\\Flagged)"
+        );
+        assert_eq!(
+            store_flag_query(ImapMessageFlag::Deleted, false),
+            "-FLAGS.SILENT (\\Deleted)"
+        );
     }
 
     #[test]

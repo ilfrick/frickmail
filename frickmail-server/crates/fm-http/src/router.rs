@@ -23,11 +23,12 @@ use base64::{
 use chrono::Local;
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
-    append_raw_message, apply_imap_rules, fetch_mailbox_status, fetch_message_body_preview,
-    fetch_raw_folder_messages, fetch_raw_message, validate_eml, BodyPreviewPart,
-    ImapConnectionConfig, ImapLoginProbe, MailboxStatus, RawFolderFetchLimits, RuleAction,
-    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-    RuleExecutionReport,
+    append_raw_message, apply_imap_rules, copy_messages, delete_messages, fetch_mailbox_status,
+    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message, move_messages,
+    store_message_flag, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
+    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, MailboxStatus, RawFolderFetchLimits,
+    RuleAction, RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic,
+    RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::parse_body;
 use fm_plugin_compat::{
@@ -65,6 +66,7 @@ const APPLY_RULES_DEADLINE: Duration = Duration::from_secs(60);
 const EXPORT_MESSAGE_DEADLINE: Duration = Duration::from_secs(30);
 const EXPORT_FOLDER_DEADLINE: Duration = Duration::from_secs(120);
 const IMPORT_EML_DEADLINE: Duration = Duration::from_secs(30);
+const MESSAGE_MUTATION_DEADLINE: Duration = Duration::from_secs(30);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const SMIME_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
@@ -721,6 +723,45 @@ async fn native_compat_response(
                 Box::pin(native_frickmail_smime_verify(original_action, payload))
             })
             .await
+        }
+        "MessageSetSeen" => Some(
+            native_legacy_message_store_flag(
+                state,
+                original_action,
+                payload,
+                session,
+                ImapMessageFlag::Seen,
+            )
+            .await,
+        ),
+        "MessageSetFlagged" => Some(
+            native_legacy_message_store_flag(
+                state,
+                original_action,
+                payload,
+                session,
+                ImapMessageFlag::Flagged,
+            )
+            .await,
+        ),
+        "MessageSetDeleted" => Some(
+            native_legacy_message_store_flag(
+                state,
+                original_action,
+                payload,
+                session,
+                ImapMessageFlag::Deleted,
+            )
+            .await,
+        ),
+        "MessageCopy" => {
+            Some(native_legacy_message_copy(state, original_action, payload, session).await)
+        }
+        "MessageMove" => {
+            Some(native_legacy_message_move(state, original_action, payload, session).await)
+        }
+        "MessageDelete" => {
+            Some(native_legacy_message_delete(state, original_action, payload, session).await)
         }
         _ => None,
     }
@@ -4395,6 +4436,331 @@ where
     }
 }
 
+async fn native_legacy_message_store_flag(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    flag: ImapMessageFlag,
+) -> Response {
+    native_legacy_message_store_flag_with_storer(
+        state,
+        original_action,
+        payload,
+        session,
+        flag,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, uid_set, flag, set| async move {
+            store_message_flag(config, &password, &folder, &uid_set, flag, set).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_message_store_flag_with_storer<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    flag: ImapMessageFlag,
+    mutation_deadline: Duration,
+    storer: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, String, ImapMessageFlag, bool) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password, folder, uid_set) =
+        match legacy_message_mutation_context(state, original_action, payload, session).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let set = payload_i64(payload, "setAction") != 0;
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        storer(config, password, folder, uid_set, flag, set),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message flag update timed out".to_string()));
+
+    legacy_message_bool_response(original_action, result)
+}
+
+async fn native_legacy_message_copy(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_message_copy_with_copier(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, from_folder, to_folder, uid_set| async move {
+            copy_messages(config, &password, &from_folder, &to_folder, &uid_set).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_message_copy_with_copier<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    copier: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, String, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password, from_folder, uid_set) =
+        match legacy_message_mutation_context_with_folder_key(
+            state,
+            original_action,
+            payload,
+            session,
+            "fromFolder",
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let to_folder = match required_payload_string(payload, "toFolder", "toFolder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        copier(config, password, from_folder, to_folder.clone(), uid_set),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message copy timed out".to_string()));
+
+    legacy_message_folder_response(original_action, &to_folder, result)
+}
+
+async fn native_legacy_message_move(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_message_move_with_mover(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, from_folder, to_folder, uid_set, options| async move {
+            move_messages(
+                config,
+                &password,
+                &from_folder,
+                &to_folder,
+                &uid_set,
+                options,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_message_move_with_mover<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    mover: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, String, String, ImapMoveOptions) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password, from_folder, uid_set) =
+        match legacy_message_mutation_context_with_folder_key(
+            state,
+            original_action,
+            payload,
+            session,
+            "fromFolder",
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let to_folder = match required_payload_string(payload, "toFolder", "toFolder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let options = legacy_message_move_options(payload);
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        mover(
+            config,
+            password,
+            from_folder.clone(),
+            to_folder,
+            uid_set,
+            options,
+        ),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message move timed out".to_string()));
+
+    legacy_message_folder_response(original_action, &from_folder, result)
+}
+
+async fn native_legacy_message_delete(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_message_delete_with_deleter(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, uid_set| async move {
+            delete_messages(config, &password, &folder, &uid_set).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_message_delete_with_deleter<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    deleter: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password, folder, uid_set) =
+        match legacy_message_mutation_context(state, original_action, payload, session).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        deleter(config, password, folder.clone(), uid_set),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message delete timed out".to_string()));
+
+    legacy_message_folder_response(original_action, &folder, result)
+}
+
+async fn legacy_message_mutation_context(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Result<(ImapConnectionConfig, String, String, String), Response> {
+    legacy_message_mutation_context_with_folder_key(
+        state,
+        original_action,
+        payload,
+        session,
+        "folder",
+    )
+    .await
+}
+
+async fn legacy_message_mutation_context_with_folder_key(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    folder_key: &str,
+) -> Result<(ImapConnectionConfig, String, String, String), Response> {
+    let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
+    let folder = match required_payload_string(payload, folder_key, "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return Err(json_result_error(original_action, message)),
+    };
+    let uid_set = match required_payload_string(payload, "uids", "uids required") {
+        Ok(uid_set) => uid_set,
+        Err(message) => return Err(json_result_error(original_action, message)),
+    };
+    let (config, password) = imap_action_connection_for_selected_or_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        user.user_id,
+        &credential_key,
+    )
+    .await?;
+
+    Ok((config, password, folder, uid_set))
+}
+
+fn legacy_message_move_options(payload: &Value) -> ImapMoveOptions {
+    let learning = payload_optional_string(payload, "learning").and_then(|value| {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "SPAM" => Some(ImapMoveLearning::Spam),
+            "HAM" => Some(ImapMoveLearning::Ham),
+            _ => None,
+        }
+    });
+
+    ImapMoveOptions {
+        mark_as_read: payload_i64(payload, "markAsRead") != 0,
+        learning,
+    }
+}
+
+fn legacy_message_bool_response(
+    original_action: &str,
+    result: Result<fm_core::Result<()>, FrickmailError>,
+) -> Response {
+    match result {
+        Ok(Ok(())) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": true
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+fn legacy_message_folder_response(
+    original_action: &str,
+    folder: &str,
+    result: Result<fm_core::Result<()>, FrickmailError>,
+) -> Response {
+    match result {
+        Ok(Ok(())) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": [folder, ""]
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
 async fn imap_action_auth(
     state: &AppState,
     original_action: &str,
@@ -4431,6 +4797,42 @@ async fn imap_action_connection_for_user(
     if account_id <= 0 {
         return Err(json_result_error(original_action, "account_id required"));
     }
+    let account =
+        match SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account_id)
+            .await
+        {
+            Ok(Some(account)) => account,
+            Ok(None) => return Err(json_result_error(original_action, "Account not found")),
+            Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+        };
+    let config = match imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+    let password = match account_password(&account, credential_key) {
+        Ok(password) => password,
+        Err(_) => return Err(json_result_error(original_action, "Missing IMAP password")),
+    };
+
+    Ok((config, password))
+}
+
+async fn imap_action_connection_for_selected_or_payload(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    user_id: i64,
+    credential_key: &[u8],
+) -> Result<(ImapConnectionConfig, String), Response> {
+    let Some(pool) = state.db_pool() else {
+        return Err(json_result_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+
+    let account_id = resolve_message_body_account_id(payload, session, original_action).await?;
     let account =
         match SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account_id)
             .await
@@ -6277,9 +6679,10 @@ mod tests {
     use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
-        BodyPartKind, BodyPreviewPart, ImapConnectionConfig, MailboxStatus, RawFolderFetchLimits,
-        RuleAction, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-        RuleExecutionReport, RuleExecutionResult,
+        BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
+        ImapMoveOptions, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField,
+        RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+        RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
@@ -9110,6 +9513,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_dispatches_native_legacy_message_mutation_auth_path() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=MessageSetSeen&folder=INBOX&uids=41&setAction=1",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageSetSeen");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn json_api_recognizes_unmigrated_legacy_mailbox_actions() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/Json/&q[]=/0/MessageList/&q[]=/payload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 501);
+        assert_eq!(
+            body["message"],
+            "Frickmail compatibility hook 'MessageList' is not migrated yet"
+        );
+    }
+
+    #[tokio::test]
     async fn native_frickmail_get_message_body_validates_account_before_imap() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
@@ -9323,6 +9775,176 @@ mod tests {
 
         assert_eq!(body["Result"]["ok"], false);
         assert_eq!(body["Result"]["error"], "Account not found");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_set_seen_uses_selected_account() {
+        let key = [41_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1801, 1802, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1802 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_store = Arc::clone(&captured);
+
+        let response = super::native_legacy_message_store_flag_with_storer(
+            &state,
+            "MessageSetSeen",
+            &json!({"folder": "INBOX", "uids": "41,42", "setAction": "1"}),
+            &session,
+            ImapMessageFlag::Seen,
+            Duration::from_secs(1),
+            move |config, password, folder, uid_set, flag, set| {
+                let captured = Arc::clone(&captured_for_store);
+                async move {
+                    *captured.lock().unwrap() =
+                        Some((config, password, folder, uid_set, flag, set));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageSetSeen");
+        assert_eq!(body["Result"], true);
+        let (config, password, folder, uid_set, flag, set) =
+            captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "INBOX");
+        assert_eq!(uid_set, "41,42");
+        assert_eq!(flag, ImapMessageFlag::Seen);
+        assert!(set);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_copy_returns_legacy_target_folder_tuple() {
+        let key = [44_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1807, 1808, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1808 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_copy = Arc::clone(&captured);
+
+        let response = super::native_legacy_message_copy_with_copier(
+            &state,
+            "MessageCopy",
+            &json!({"fromFolder": "INBOX", "toFolder": "Archive", "uids": "45"}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, from_folder, to_folder, uid_set| {
+                let captured = Arc::clone(&captured_for_copy);
+                async move {
+                    *captured.lock().unwrap() =
+                        Some((config, password, from_folder, to_folder, uid_set));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageCopy");
+        assert_eq!(body["Result"][0], "Archive");
+        assert_eq!(body["Result"][1], "");
+        let (config, password, from_folder, to_folder, uid_set) =
+            captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert_eq!(from_folder, "INBOX");
+        assert_eq!(to_folder, "Archive");
+        assert_eq!(uid_set, "45");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_move_returns_legacy_folder_tuple_and_options() {
+        let key = [42_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1803, 1804, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1804 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_move = Arc::clone(&captured);
+
+        let response = super::native_legacy_message_move_with_mover(
+            &state,
+            "MessageMove",
+            &json!({
+                "fromFolder": "INBOX",
+                "toFolder": "Archive",
+                "uids": "44",
+                "markAsRead": "1",
+                "learning": "SPAM"
+            }),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, from_folder, to_folder, uid_set, options| {
+                let captured = Arc::clone(&captured_for_move);
+                async move {
+                    *captured.lock().unwrap() =
+                        Some((config, password, from_folder, to_folder, uid_set, options));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageMove");
+        assert_eq!(body["Result"][0], "INBOX");
+        assert_eq!(body["Result"][1], "");
+        let (config, password, from_folder, to_folder, uid_set, options) =
+            captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert_eq!(from_folder, "INBOX");
+        assert_eq!(to_folder, "Archive");
+        assert_eq!(uid_set, "44");
+        assert_eq!(
+            options,
+            ImapMoveOptions {
+                mark_as_read: true,
+                learning: Some(ImapMoveLearning::Spam)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_delete_requires_selected_or_payload_account() {
+        let key = [43_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1805, 1806, &key).await;
+
+        let response = super::native_legacy_message_delete_with_deleter(
+            &state,
+            "MessageDelete",
+            &json!({"folder": "INBOX", "uids": "44"}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid_set| async {
+                Err(FrickmailError::Upstream("should not delete".to_string()))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageDelete");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Account id required");
     }
 
     #[tokio::test]

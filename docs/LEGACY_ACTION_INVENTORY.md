@@ -90,6 +90,30 @@ Status meanings:
 | `FrickmailListOidcLinks` | yes | `LoginOIDC.js` | native | Implemented by Rust for login-oidc compatibility. |
 | `FrickmailUnlinkOidc` | yes | `LoginOIDC.js` | native | Implemented by Rust for login-oidc compatibility. |
 
+## Legacy Webmail Core JSON Actions
+
+These are SnappyMail/RainLoop mailbox actions used by the legacy Knockout app.
+They are tracked separately from Frickmail-user plugin hooks because they are
+part of the full webmail core migration.
+
+| Action | Frontend source | Rust status | Notes |
+|---|---|---|---|
+| `MessageSetSeen` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account; validates account ownership and stored IMAP credentials. |
+| `MessageSetFlagged` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account and safe UID STORE flag updates. |
+| `MessageSetDeleted` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account and safe UID STORE flag updates. |
+| `MessageCopy` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account, source folder, target folder, and comma-separated UIDs. |
+| `MessageMove` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account; honors legacy `markAsRead` plus `learning=SPAM/HAM` pre-move flags and falls back to COPY plus delete when IMAP MOVE is unavailable. |
+| `MessageDelete` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account; marks deleted and expunges safely. |
+| `MessageList` | `dev/Stores/User/Messagelist.js` | compat-known | Full list shape, paging, sorting, threading, previews, and cache semantics still need native implementation. |
+| `Message` | `dev/Remote/User/Fetch.js` | compat-known | Full legacy message view shape remains unmigrated; `FrickmailGetMessageBody` covers the Frickmail-user selected-account body route. |
+| `MessageSetSeenToAll` | `dev/View/User/MailBox/MessageList.js` | compat-known | Bulk folder/thread mutation remains unmigrated. |
+| `MessageSetKeyword` | `dev/Model/Message.js` | compat-known | Custom keyword/tag mutation remains unmigrated. |
+| `FolderInformation` | `dev/Common/Folders.js` | compat-known | Folder status shape and ETag/cache semantics remain unmigrated. |
+| `FolderInformationMultiply` | `dev/Common/Folders.js` | compat-known | Multi-folder status refresh remains unmigrated. |
+| `FolderAppend` | `dev/Common/Folders.js` | compat-known | Frickmail-user `FrickmailImportEml` is native, but the legacy multipart folder append route is not. |
+| `FolderClear`, `FolderSettings`, `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights`, `SystemFoldersUpdate`, `FolderSetMetadata`, `FolderSubscribe`, `FolderCheckable` | `dev/View/Popup`, `dev/Settings/User/Folders.js`, `dev/Stores/User/Folder.js` | compat-known | Folder management and ACL routes remain unmigrated. |
+| `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | compat-known | Attachment actions remain on the compatibility roadmap. |
+
 ## Other Bundled Plugin JSON Hooks
 
 These hooks are known by the Rust compatibility layer so existing SnappyMail
@@ -145,5 +169,5 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Expand native legacy folder/message route coverage beyond the Frickmail-user
-   selected-account routes already handled by `FrickmailGetMessageBody`.
+1. Port `MessageList`, `Message`, and folder status routes (`FolderInformation`
+   and `FolderInformationMultiply`) to native Rust response models.

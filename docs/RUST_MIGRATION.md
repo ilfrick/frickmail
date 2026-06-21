@@ -313,7 +313,9 @@ Deliverables:
 4. Message body fetch with MIME structure, inline images, attachments, safe HTML
    sanitization, and plain-text fallback.
 5. Mark read/unread, flag/star, move, copy, delete, expunge, archive, and spam
-   actions.
+   actions. The legacy `MessageSetSeen`, `MessageSetFlagged`,
+   `MessageSetDeleted`, `MessageCopy`, `MessageMove`, and `MessageDelete`
+   routes are now native for the selected IMAP account.
 6. IMAP search, server-side search fallback, and indexed search integration.
 7. Attachment download and raw message download.
 8. Connection pooling, timeout policy, backoff, and per-account isolation.
@@ -515,11 +517,10 @@ Every migration slice must follow this loop:
 
 1. Keep `docs/LEGACY_ACTION_INVENTORY.md` current as the route/hook/frontend
    source of truth for each migration slice.
-2. Expand native legacy folder/message route coverage beyond the Frickmail-user
-   selected-account routes. `FrickmailLogin`, `FrickmailBridgeSession`, and
-   `FrickmailSwitchAccount` now persist the selected account only after
-   credential validation, and `FrickmailGetMessageBody` consumes it while
-   revalidating current-user account ownership.
+2. Port native Rust response models for `MessageList`, `Message`, and folder
+   status routes (`FolderInformation`, `FolderInformationMultiply`). Legacy
+   message mutations are native for the selected account; legacy list/view/status
+   routes are currently known compatibility fallbacks.
 3. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
    compatibility.
 4. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user

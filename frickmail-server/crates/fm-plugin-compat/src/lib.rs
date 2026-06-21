@@ -98,6 +98,31 @@ pub const FRICKMAIL_COMPAT_HOOKS: &[CompatHook] = &[
     json("FrickmailSmimeVerify"),
     json("FrickmailListOidcLinks"),
     json("FrickmailUnlinkOidc"),
+    json("MessageList"),
+    json("Message"),
+    json("MessageSetSeen"),
+    json("MessageSetSeenToAll"),
+    json("MessageSetFlagged"),
+    json("MessageSetDeleted"),
+    json("MessageSetKeyword"),
+    json("MessageCopy"),
+    json("MessageMove"),
+    json("MessageDelete"),
+    json("FolderInformation"),
+    json("FolderInformationMultiply"),
+    json("FolderAppend"),
+    json("FolderClear"),
+    json("FolderSettings"),
+    json("FolderDeleteACL"),
+    json("FolderACL"),
+    json("FolderSetACL"),
+    json("FolderIdentifierRights"),
+    json("SystemFoldersUpdate"),
+    json("FolderSetMetadata"),
+    json("FolderSubscribe"),
+    json("FolderCheckable"),
+    json("AttachmentsActions"),
+    json("MessageUploadAttachments"),
     json("NextcloudSaveMsg"),
     json("NextcloudAttachFile"),
     json("JsonCalendarEvents"),
@@ -250,6 +275,41 @@ mod tests {
 
         for action in required {
             assert!(is_compat_hook(action), "missing hook {action}");
+        }
+    }
+
+    #[test]
+    fn legacy_mailbox_core_hooks_are_known_during_rust_migration() {
+        let required = [
+            "MessageList",
+            "Message",
+            "MessageSetSeen",
+            "MessageSetSeenToAll",
+            "MessageSetFlagged",
+            "MessageSetDeleted",
+            "MessageSetKeyword",
+            "MessageCopy",
+            "MessageMove",
+            "MessageDelete",
+            "FolderInformation",
+            "FolderInformationMultiply",
+            "FolderAppend",
+            "FolderClear",
+            "FolderSettings",
+            "FolderDeleteACL",
+            "FolderACL",
+            "FolderSetACL",
+            "FolderIdentifierRights",
+            "SystemFoldersUpdate",
+            "FolderSetMetadata",
+            "FolderSubscribe",
+            "FolderCheckable",
+            "AttachmentsActions",
+            "MessageUploadAttachments",
+        ];
+
+        for action in required {
+            assert!(is_compat_hook(action), "missing legacy core hook {action}");
         }
     }
 
