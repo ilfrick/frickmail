@@ -1,7 +1,7 @@
 use std::{collections::HashSet, fmt, sync::Arc, time::Duration};
 
 use async_imap::{
-    types::{Capabilities, Capability},
+    types::{Capabilities, Capability, Flag},
     Client, Session,
 };
 use fm_core::{FrickmailError, Result};
@@ -10,6 +10,7 @@ use imap_proto::{
     builders::command::{Command, CommandBuilder},
     AttributeValue, BodyStructure, MessageSection, Response, SectionPath, Status,
 };
+use md5::{Digest, Md5};
 use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpStream, time::timeout};
@@ -138,6 +139,62 @@ pub struct BodyPreviewPart {
 pub struct MailboxStatus {
     pub uid_next: Option<u32>,
     pub exists: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyFolderInformation {
+    pub name: String,
+    pub uid_next: Option<u32>,
+    pub uid_validity: Option<u32>,
+    pub total_emails: Option<u32>,
+    pub unread_emails: Option<u32>,
+    pub highest_modseq: Option<u64>,
+    pub permanent_flags: Vec<String>,
+    pub etag: String,
+    pub new_messages: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyMessageList {
+    pub folder: LegacyFolderInformation,
+    pub total_emails: u32,
+    pub offset: u32,
+    pub limit: u32,
+    pub search: String,
+    pub sort: String,
+    pub limited: bool,
+    pub thread_uid: u32,
+    pub messages: Vec<LegacyMessageSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyMessageSummary {
+    pub folder: String,
+    pub uid: u32,
+    pub hash: String,
+    pub subject: String,
+    pub message_id: String,
+    pub in_reply_to: String,
+    pub references: String,
+    pub from: String,
+    pub reply_to: String,
+    pub to: String,
+    pub cc: String,
+    pub date: String,
+    pub size: u32,
+    pub flags: Vec<String>,
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyMessageListRequest {
+    pub mailbox: String,
+    pub offset: u32,
+    pub limit: u32,
+    pub search: String,
+    pub sort: String,
+    pub prev_uid_next: Option<u32>,
+    pub thread_uid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +340,37 @@ pub async fn fetch_mailbox_status(
         uid_next: mailbox.uid_next,
         exists: mailbox.exists,
     })
+}
+
+pub async fn fetch_legacy_folder_information(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    prev_uid_next: Option<u32>,
+) -> Result<LegacyFolderInformation> {
+    validate_mailbox(mailbox)?;
+
+    let client_hash = legacy_imap_client_hash(&config);
+    let mut session = login(config, password).await?;
+    let result =
+        legacy_folder_information_in_session(&mut session, mailbox, prev_uid_next, &client_hash)
+            .await;
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn fetch_legacy_message_list(
+    config: ImapConnectionConfig,
+    password: &str,
+    request: LegacyMessageListRequest,
+) -> Result<LegacyMessageList> {
+    validate_mailbox(&request.mailbox)?;
+
+    let client_hash = legacy_imap_client_hash(&config);
+    let mut session = login(config, password).await?;
+    let result = legacy_message_list_in_session(&mut session, request, &client_hash).await;
+    logout_quietly(session).await;
+    result
 }
 
 pub async fn fetch_raw_message(
@@ -483,6 +571,23 @@ pub fn sequence_fetch_raw_message_query() -> &'static str {
     "(BODY.PEEK[])"
 }
 
+pub fn legacy_message_list_fetch_query() -> &'static str {
+    "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])"
+}
+
+pub fn message_list_sequence_range(total: u32, offset: u32, limit: u32) -> Option<String> {
+    if total == 0 || limit == 0 || offset >= total {
+        return None;
+    }
+    let last = total - offset;
+    let first = last.saturating_sub(limit.saturating_sub(1)).max(1);
+    Some(if first == last {
+        first.to_string()
+    } else {
+        format!("{first}:{last}")
+    })
+}
+
 pub fn validate_eml(raw: &[u8]) -> Result<()> {
     let trimmed = trim_ascii_whitespace(raw);
     if trimmed.is_empty() {
@@ -494,6 +599,101 @@ pub fn validate_eml(raw: &[u8]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub fn legacy_folder_etag(
+    mailbox: &str,
+    total: u32,
+    uid_next: Option<u32>,
+    uid_validity: Option<u32>,
+    unread: Option<u32>,
+    highest_modseq: Option<u64>,
+    client_hash: &str,
+) -> String {
+    md5_hex(format!(
+        "FolderHash/{mailbox}-{total}-{}-{}-{}-{}-{client_hash}",
+        uid_next.map(|value| value.to_string()).unwrap_or_default(),
+        uid_validity
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        unread.map(|value| value.to_string()).unwrap_or_default(),
+        highest_modseq
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+    ))
+}
+
+pub fn legacy_imap_client_hash(config: &ImapConnectionConfig) -> String {
+    md5_hex(format!(
+        "ImapClientHash/{}@{}:{}",
+        config.login, config.host, config.port
+    ))
+}
+
+pub fn legacy_new_uid_range(prev_uid_next: Option<u32>, uid_next: Option<u32>) -> Vec<u32> {
+    let Some(prev) = prev_uid_next.filter(|value| *value > 0) else {
+        return Vec::new();
+    };
+    let Some(next) = uid_next.filter(|value| *value > prev) else {
+        return Vec::new();
+    };
+    (prev..next).collect()
+}
+
+pub fn legacy_message_hash(folder: &str, uid: u32) -> String {
+    md5_hex(format!("{folder}{uid}"))
+}
+
+fn md5_hex(input: impl AsRef<[u8]>) -> String {
+    let mut digest = Md5::new();
+    digest.update(input.as_ref());
+    format!("{:x}", digest.finalize())
+}
+
+fn legacy_flag_string(flag: &Flag<'_>) -> String {
+    match flag {
+        Flag::Seen => "\\seen".to_string(),
+        Flag::Answered => "\\answered".to_string(),
+        Flag::Flagged => "\\flagged".to_string(),
+        Flag::Deleted => "\\deleted".to_string(),
+        Flag::Draft => "\\draft".to_string(),
+        Flag::Recent => "\\recent".to_string(),
+        Flag::MayCreate => "\\*".to_string(),
+        Flag::Custom(value) => value.as_ref().to_ascii_lowercase(),
+    }
+}
+
+fn header_value(raw: &[u8], name: &str) -> Option<String> {
+    let mut matched = false;
+    let mut value = String::new();
+    let wanted = name.to_ascii_lowercase();
+
+    for line in String::from_utf8_lossy(raw).lines() {
+        if line.is_empty() {
+            break;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if matched {
+                value.push(' ');
+                value.push_str(line.trim());
+            }
+            continue;
+        }
+        matched = false;
+        let Some((key, next)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case(&wanted) {
+            value = next.trim().to_string();
+            matched = true;
+        }
+    }
+
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 pub fn imap_rule_search_criteria(
@@ -625,6 +825,166 @@ async fn fetch_raw_message_in_session(
     }
 
     Ok(None)
+}
+
+async fn legacy_folder_information_in_session(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    prev_uid_next: Option<u32>,
+    client_hash: &str,
+) -> Result<LegacyFolderInformation> {
+    let status = timeout_imap(
+        "status mailbox",
+        session.status(mailbox, "(MESSAGES UIDNEXT UIDVALIDITY UNSEEN)"),
+    )
+    .await?;
+    let examined = timeout_imap("examine mailbox", session.examine(mailbox)).await?;
+    Ok(legacy_folder_information_from_mailboxes(
+        mailbox,
+        &status,
+        &examined,
+        prev_uid_next,
+        client_hash,
+    ))
+}
+
+async fn legacy_message_list_in_session(
+    session: &mut BoxedSession,
+    request: LegacyMessageListRequest,
+    client_hash: &str,
+) -> Result<LegacyMessageList> {
+    let folder = legacy_folder_information_in_session(
+        session,
+        &request.mailbox,
+        request.prev_uid_next,
+        client_hash,
+    )
+    .await?;
+    let total = folder.total_emails.unwrap_or_default();
+    let limit = request.limit.clamp(1, 200);
+    let range = message_list_sequence_range(total, request.offset, limit);
+    let mut messages = Vec::new();
+
+    if let Some(range) = range {
+        let mut fetches = timeout_imap(
+            "fetch legacy message list",
+            session.fetch(range, legacy_message_list_fetch_query()),
+        )
+        .await?;
+
+        while let Some(fetch) =
+            timeout_imap("read legacy message list item", fetches.try_next()).await?
+        {
+            let Some(uid) = fetch.uid else {
+                continue;
+            };
+            let header = fetch.header().unwrap_or_default();
+            messages.push(legacy_message_summary_from_fetch(
+                &request.mailbox,
+                uid,
+                fetch.size.unwrap_or_default(),
+                fetch.flags(),
+                header,
+            ));
+        }
+        messages.sort_by_key(|message| std::cmp::Reverse(message.uid));
+    }
+
+    let limited = (request.offset as u64 + messages.len() as u64) < total as u64;
+    Ok(LegacyMessageList {
+        folder,
+        total_emails: total,
+        offset: request.offset,
+        limit,
+        search: request.search,
+        sort: request.sort,
+        limited,
+        thread_uid: request.thread_uid,
+        messages,
+    })
+}
+
+fn legacy_folder_information_from_mailboxes(
+    mailbox: &str,
+    status: &async_imap::types::Mailbox,
+    examined: &async_imap::types::Mailbox,
+    prev_uid_next: Option<u32>,
+    client_hash: &str,
+) -> LegacyFolderInformation {
+    let uid_next = status.uid_next.or(examined.uid_next);
+    let uid_validity = status.uid_validity.or(examined.uid_validity);
+    let total_emails = Some(status.exists);
+    let unread_emails = status.unseen.or(examined.unseen);
+    let highest_modseq = status.highest_modseq.or(examined.highest_modseq);
+    let permanent_flags = examined
+        .permanent_flags
+        .iter()
+        .map(legacy_flag_string)
+        .collect::<Vec<_>>();
+    let etag = legacy_folder_etag(
+        mailbox,
+        status.exists,
+        uid_next,
+        uid_validity,
+        unread_emails,
+        highest_modseq,
+        client_hash,
+    );
+    let _new_uid_range = legacy_new_uid_range(prev_uid_next, uid_next);
+    let new_messages = Vec::new();
+
+    LegacyFolderInformation {
+        name: mailbox.to_string(),
+        uid_next,
+        uid_validity,
+        total_emails,
+        unread_emails,
+        highest_modseq,
+        permanent_flags,
+        etag,
+        new_messages,
+    }
+}
+
+fn legacy_message_summary_from_fetch<'a>(
+    folder: &str,
+    uid: u32,
+    size: u32,
+    flags: impl Iterator<Item = Flag<'a>>,
+    header: &[u8],
+) -> LegacyMessageSummary {
+    let subject = header_value(header, "Subject").unwrap_or_default();
+    let message_id = header_value(header, "Message-ID")
+        .or_else(|| header_value(header, "Message-Id"))
+        .unwrap_or_default();
+    let in_reply_to = header_value(header, "In-Reply-To").unwrap_or_default();
+    let references = header_value(header, "References").unwrap_or_default();
+    let from = header_value(header, "From").unwrap_or_default();
+    let reply_to = header_value(header, "Reply-To").unwrap_or_default();
+    let to = header_value(header, "To").unwrap_or_default();
+    let cc = header_value(header, "Cc").unwrap_or_default();
+    let date = header_value(header, "Date").unwrap_or_default();
+    let flags = flags
+        .map(|flag| legacy_flag_string(&flag))
+        .collect::<Vec<_>>();
+
+    LegacyMessageSummary {
+        folder: folder.to_string(),
+        uid,
+        hash: legacy_message_hash(folder, uid),
+        subject,
+        message_id,
+        in_reply_to,
+        references,
+        from,
+        reply_to,
+        to,
+        cc,
+        date,
+        size,
+        flags,
+        preview: None,
+    }
 }
 
 async fn fetch_raw_messages_by_sequence(
@@ -1485,6 +1845,71 @@ mod tests {
             store_flag_query(ImapMessageFlag::Deleted, false),
             "-FLAGS.SILENT (\\Deleted)"
         );
+    }
+
+    #[test]
+    fn message_list_sequence_range_fetches_newest_page_safely() {
+        assert_eq!(
+            message_list_sequence_range(100, 0, 20),
+            Some("81:100".to_string())
+        );
+        assert_eq!(
+            message_list_sequence_range(100, 20, 20),
+            Some("61:80".to_string())
+        );
+        assert_eq!(
+            message_list_sequence_range(5, 0, 20),
+            Some("1:5".to_string())
+        );
+        assert_eq!(message_list_sequence_range(5, 4, 20), Some("1".to_string()));
+        assert_eq!(message_list_sequence_range(5, 5, 20), None);
+        assert_eq!(message_list_sequence_range(5, 0, 0), None);
+    }
+
+    #[test]
+    fn legacy_folder_helpers_are_deterministic() {
+        let config =
+            ImapConnectionConfig::new("imap.example.com", None, Some("SSL"), "alice").unwrap();
+        let client_hash = legacy_imap_client_hash(&config);
+
+        assert_eq!(client_hash, "934eb27e7b445be0ee3882969d8bbbaa");
+        assert_eq!(legacy_new_uid_range(Some(41), Some(44)), vec![41, 42, 43]);
+        assert!(legacy_new_uid_range(None, Some(44)).is_empty());
+        assert!(legacy_new_uid_range(Some(44), Some(44)).is_empty());
+        assert_eq!(
+            legacy_folder_etag(
+                "INBOX",
+                10,
+                Some(11),
+                Some(99),
+                Some(3),
+                Some(7),
+                &client_hash
+            ),
+            "c9cba90bef2b44f616e90a196844cdf3"
+        );
+        assert_eq!(
+            legacy_folder_etag("INBOX", 10, Some(11), None, None, Some(7), &client_hash),
+            "8632f0d8c749d9e674566db02fcfb622"
+        );
+        assert_eq!(
+            legacy_message_hash("INBOX", 44),
+            "2a7cf377296d50a49291639593793425"
+        );
+    }
+
+    #[test]
+    fn header_value_handles_case_and_folding() {
+        let raw = b"Subject: first\r\n\tcontinued\r\nMessage-ID: <id@example.com>\r\n\r\nbody";
+        assert_eq!(
+            header_value(raw, "subject"),
+            Some("first continued".to_string())
+        );
+        assert_eq!(
+            header_value(raw, "Message-ID"),
+            Some("<id@example.com>".to_string())
+        );
+        assert_eq!(header_value(raw, "From"), None);
     }
 
     #[test]

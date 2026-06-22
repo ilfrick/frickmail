@@ -473,7 +473,11 @@ builds nested binary `OR` expressions (IMAP RFC 3501 requirement). Matched UID s
 are processed by Rust-native IMAP mutation helpers. The legacy webmail routes
 `MessageSetSeen`, `MessageSetFlagged`, `MessageSetDeleted`, `MessageCopy`,
 `MessageMove`, and `MessageDelete` are also native for the selected IMAP
-account during the broader SnappyMail/RainLoop runtime migration.
+account during the broader SnappyMail/RainLoop runtime migration. Legacy
+`Message`, `FolderInformation`, and `FolderInformationMultiply` now have partial
+native selected-account POST support. `MessageList` remains on compatibility
+fallback until sort/search/threading, hidden-deleted filtering, dates, and cache
+semantics match the PHP runtime.
 
 ### UI
 

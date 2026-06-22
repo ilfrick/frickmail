@@ -11,6 +11,7 @@ async-imap.workspace = true
 fm-core = { path = "../fm-core" }
 futures.workspace = true
 imap-proto.workspace = true
+md-5.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true
 thiserror.workspace = true

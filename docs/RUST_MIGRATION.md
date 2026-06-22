@@ -517,10 +517,11 @@ Every migration slice must follow this loop:
 
 1. Keep `docs/LEGACY_ACTION_INVENTORY.md` current as the route/hook/frontend
    source of truth for each migration slice.
-2. Port native Rust response models for `MessageList`, `Message`, and folder
-   status routes (`FolderInformation`, `FolderInformationMultiply`). Legacy
-   message mutations are native for the selected account; legacy list/view/status
-   routes are currently known compatibility fallbacks.
+2. Complete native parity for legacy `MessageList`, `Message`, and folder status
+   routes. `Message` plus folder status POST paths are partial-native; `MessageList`
+   dispatch stays on compatibility fallback until search/threading, sort/cache
+   behavior, hidden-deleted filtering, dates, previews, and RawKey GET paths match
+   the PHP runtime.
 3. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
    compatibility.
 4. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user

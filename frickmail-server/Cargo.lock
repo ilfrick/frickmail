@@ -936,6 +936,7 @@ dependencies = [
  "fm-core",
  "futures",
  "imap-proto",
+ "md-5",
  "rustls-pki-types",
  "serde",
  "thiserror 2.0.18",

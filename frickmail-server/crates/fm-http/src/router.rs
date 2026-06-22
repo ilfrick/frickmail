@@ -23,12 +23,13 @@ use base64::{
 use chrono::Local;
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
-    append_raw_message, apply_imap_rules, copy_messages, delete_messages, fetch_mailbox_status,
-    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message, move_messages,
+    append_raw_message, apply_imap_rules, copy_messages, delete_messages,
+    fetch_legacy_folder_information, fetch_mailbox_status, fetch_message_body_preview,
+    fetch_raw_folder_messages, fetch_raw_message, legacy_message_hash, move_messages,
     store_message_flag, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
-    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, MailboxStatus, RawFolderFetchLimits,
-    RuleAction, RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic,
-    RuleExecutionPlan, RuleExecutionReport,
+    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation, MailboxStatus,
+    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
+    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::parse_body;
 use fm_plugin_compat::{
@@ -67,6 +68,7 @@ const EXPORT_MESSAGE_DEADLINE: Duration = Duration::from_secs(30);
 const EXPORT_FOLDER_DEADLINE: Duration = Duration::from_secs(120);
 const IMPORT_EML_DEADLINE: Duration = Duration::from_secs(30);
 const MESSAGE_MUTATION_DEADLINE: Duration = Duration::from_secs(30);
+const FOLDER_INFORMATION_DEADLINE: Duration = Duration::from_secs(15);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const SMIME_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
@@ -724,6 +726,16 @@ async fn native_compat_response(
             })
             .await
         }
+        "Message" if payload.get("folder").is_some() && payload.get("uid").is_some() => {
+            Some(native_legacy_message(state, original_action, payload, session).await)
+        }
+        "FolderInformation" if payload_optional_i64(payload, "uidNext").is_none() => {
+            Some(native_legacy_folder_information(state, original_action, payload, session).await)
+        }
+        "FolderInformationMultiply" => Some(
+            native_legacy_folder_information_multiply(state, original_action, payload, session)
+                .await,
+        ),
         "MessageSetSeen" => Some(
             native_legacy_message_store_flag(
                 state,
@@ -4436,6 +4448,196 @@ where
     }
 }
 
+async fn native_legacy_message(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_message_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_BODY_FETCH_DEADLINE,
+        |config, password, folder, uid| async move {
+            fetch_message_body_preview(config, &password, &folder, uid).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_message_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, u32) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<BodyPreviewPart>>>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let uid = payload_i64(payload, "uid");
+    if uid <= 0 || uid > u32::MAX as i64 {
+        return json_result_error(original_action, "uid required");
+    }
+
+    let result = tokio::time::timeout(
+        fetch_deadline,
+        fetcher(config, password, folder.clone(), uid as u32),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message fetch timed out".to_string()));
+
+    match result {
+        Ok(Ok(Some(parts))) => {
+            legacy_message_body_response(original_action, &folder, uid as u32, parts)
+        }
+        Ok(Ok(None)) => json_result_error(original_action, "Message not found"),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_legacy_folder_information(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_information_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        FOLDER_INFORMATION_DEADLINE,
+        |config, password, folder, prev_uid_next| async move {
+            fetch_legacy_folder_information(config, &password, &folder, prev_uid_next).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_information_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, Option<u32>) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<LegacyFolderInformation>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let prev_uid_next = payload_optional_i64(payload, "uidNext").map(|value| value as u32);
+
+    let result = tokio::time::timeout(
+        fetch_deadline,
+        fetcher(config, password, folder, prev_uid_next),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Folder information fetch timed out".to_string()));
+
+    match result {
+        Ok(Ok(info)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": legacy_folder_information_json(&info)
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_legacy_folder_information_multiply(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_information_multiply_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        FOLDER_INFORMATION_DEADLINE,
+        |config, password, folder| async move {
+            fetch_legacy_folder_information(config, &password, &folder, None).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_information_multiply_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    Fut: std::future::Future<Output = fm_core::Result<LegacyFolderInformation>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folders = payload_array(payload, "folders")
+        .into_iter()
+        .filter_map(|value| match value {
+            Value::String(folder) if !folder.trim().is_empty() => Some(folder),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut results = Vec::new();
+    for folder in folders {
+        let fetch = fetcher.clone();
+        let result = tokio::time::timeout(
+            fetch_deadline,
+            fetch(config.clone(), password.clone(), folder),
+        )
+        .await
+        .map_err(|_| FrickmailError::Upstream("Folder information fetch timed out".to_string()));
+        if let Ok(Ok(info)) = result {
+            results.push(legacy_folder_information_json(&info));
+        }
+    }
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": results
+        }),
+    )
+}
+
 async fn native_legacy_message_store_flag(
     state: &AppState,
     original_action: &str,
@@ -4759,6 +4961,200 @@ fn legacy_message_folder_response(
         ),
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
+}
+
+async fn legacy_imap_connection_context(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Result<(ImapConnectionConfig, String), Response> {
+    let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
+    imap_action_connection_for_selected_or_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+}
+
+fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
+    json!({
+        "id": Value::Null,
+        "name": info.name,
+        "uidNext": info.uid_next,
+        "uidValidity": info.uid_validity,
+        "totalEmails": info.total_emails,
+        "unreadEmails": info.unread_emails,
+        "highestModSeq": info.highest_modseq,
+        "etag": info.etag,
+        "permanentFlags": info.permanent_flags,
+        "newMessages": info.new_messages,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn legacy_message_json(
+    folder: &str,
+    uid: u32,
+    hash: &str,
+    subject: &str,
+    html: &str,
+    plain: &str,
+    message_id: &str,
+    in_reply_to: &str,
+    references: &str,
+    from: &str,
+    reply_to: &str,
+    to: &str,
+    cc: &str,
+    date: &str,
+    size: u32,
+    flags: &[String],
+    preview: Option<&str>,
+) -> Value {
+    json!({
+        "@Object": "Object/Message",
+        "folder": folder,
+        "uid": uid,
+        "hash": hash,
+        "subject": subject,
+        "encrypted": false,
+        "messageId": message_id,
+        "spamScore": 0,
+        "spamResult": "",
+        "isSpam": false,
+        "date": date,
+        "dateTimestamp": 0,
+        "dateTimestampSource": "header",
+        "from": legacy_email_collection(from),
+        "replyTo": legacy_email_collection(reply_to),
+        "to": legacy_email_collection(to),
+        "cc": legacy_email_collection(cc),
+        "bcc": [],
+        "sender": [],
+        "deliveredTo": [],
+        "readReceipt": "",
+        "attachments": [],
+        "spf": [],
+        "dkim": [],
+        "dmarc": [],
+        "flags": flags,
+        "inReplyTo": in_reply_to,
+        "id": "",
+        "size": size,
+        "preview": preview.unwrap_or_default(),
+        "headers": [],
+        "references": references,
+        "html": html,
+        "plain": plain,
+        "threads": [],
+        "threadUnseen": []
+    })
+}
+
+fn legacy_message_body_response(
+    action: &str,
+    folder: &str,
+    uid: u32,
+    parts: Vec<BodyPreviewPart>,
+) -> Response {
+    let mut html = String::new();
+    let mut plain = String::new();
+    let mut subject = String::new();
+
+    for part in parts {
+        let Some(body) = parse_body(&part.raw) else {
+            continue;
+        };
+        match part.kind {
+            fm_imap::BodyPartKind::Html => {
+                if html.is_empty() && !body.html.is_empty() {
+                    html = body.html;
+                }
+            }
+            fm_imap::BodyPartKind::Plain => {
+                if plain.is_empty() && !body.plain.is_empty() {
+                    plain = body.plain;
+                }
+            }
+            fm_imap::BodyPartKind::RawMessage => {
+                if html.is_empty() && !body.html.is_empty() {
+                    html = body.html;
+                }
+                if plain.is_empty() && !body.plain.is_empty() {
+                    plain = body.plain;
+                }
+            }
+        }
+        if subject.is_empty() {
+            subject = body.subject.unwrap_or_default();
+        }
+    }
+
+    if html.is_empty() && plain.is_empty() && subject.is_empty() {
+        return json_result_error(action, "Message body could not be parsed");
+    }
+
+    let hash = legacy_message_hash(folder, uid);
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({
+            "Result": legacy_message_json(
+                folder,
+                uid,
+                &hash,
+                &subject,
+                &html,
+                &plain,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                0,
+                &[],
+                None,
+            )
+        }),
+    )
+}
+
+fn legacy_email_collection(raw: &str) -> Vec<Value> {
+    raw.split(',')
+        .filter_map(|item| legacy_email_json(item.trim()))
+        .collect()
+}
+
+fn legacy_email_json(raw: &str) -> Option<Value> {
+    if raw.is_empty() {
+        return None;
+    }
+    let (name, email) = if let (Some(start), Some(end)) = (raw.find('<'), raw.rfind('>')) {
+        let name = raw[..start].trim().trim_matches('"').to_string();
+        let email = raw[start + 1..end].trim().to_string();
+        (name, email)
+    } else if raw.contains('@') {
+        (String::new(), raw.trim().trim_matches('"').to_string())
+    } else {
+        (raw.trim().trim_matches('"').to_string(), String::new())
+    };
+    if name.is_empty() && email.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "@Object": "Object/Email",
+        "name": name,
+        "email": email,
+        "dkimStatus": "none"
+    }))
 }
 
 async fn imap_action_auth(
@@ -6680,9 +7076,9 @@ mod tests {
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
         BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
-        ImapMoveOptions, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField,
-        RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
-        RuleExecutionResult,
+        ImapMoveOptions, LegacyFolderInformation, MailboxStatus, RawFolderFetchLimits, RuleAction,
+        RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+        RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
@@ -9562,6 +9958,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_keeps_folder_information_with_uidnext_on_compatibility_fallback() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=FolderInformation&folder=INBOX&uidNext=50",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderInformation");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 501);
+        assert_eq!(
+            body["message"],
+            "Frickmail compatibility hook 'FolderInformation' is not migrated yet"
+        );
+    }
+
+    #[tokio::test]
     async fn native_frickmail_get_message_body_validates_account_before_imap() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
@@ -9775,6 +10197,84 @@ mod tests {
 
         assert_eq!(body["Result"]["ok"], false);
         assert_eq!(body["Result"]["error"], "Account not found");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_returns_legacy_message_shape() {
+        let key = [46_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1812, 1813, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1813, "folder": "INBOX", "uid": 51}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, folder, uid| async move {
+                assert_eq!(folder, "INBOX");
+                assert_eq!(uid, 51);
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"Subject: Legacy body\r\n\r\nHello legacy".to_vec(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["@Object"], "Object/Message");
+        assert_eq!(body["Result"]["folder"], "INBOX");
+        assert_eq!(body["Result"]["uid"], 51);
+        assert_eq!(body["Result"]["subject"], "Legacy body");
+        assert_eq!(body["Result"]["plain"], "Hello legacy");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_information_returns_status_shape() {
+        let key = [47_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1814, 1815, &key).await;
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_fetch = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_information_with_fetcher(
+            &state,
+            "FolderInformation",
+            &json!({"account_id": 1815, "folder": "INBOX", "uidNext": 50}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, prev_uid_next| {
+                let captured = Arc::clone(&captured_for_fetch);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder, prev_uid_next));
+                    Ok(LegacyFolderInformation {
+                        name: "INBOX".to_string(),
+                        uid_next: Some(52),
+                        uid_validity: Some(10),
+                        total_emails: Some(8),
+                        unread_emails: Some(3),
+                        highest_modseq: Some(99),
+                        permanent_flags: vec!["\\seen".to_string()],
+                        etag: "etag-2".to_string(),
+                        new_messages: Vec::new(),
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderInformation");
+        assert_eq!(body["Result"]["name"], "INBOX");
+        assert_eq!(body["Result"]["uidNext"], 52);
+        assert_eq!(body["Result"]["totalEmails"], 8);
+        assert_eq!(body["Result"]["unreadEmails"], 3);
+        assert_eq!(body["Result"]["highestModSeq"], 99);
+
+        let (_config, password, folder, prev_uid_next) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "INBOX");
+        assert_eq!(prev_uid_next, Some(50));
     }
 
     #[tokio::test]

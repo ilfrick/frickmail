@@ -104,12 +104,12 @@ part of the full webmail core migration.
 | `MessageCopy` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account, source folder, target folder, and comma-separated UIDs. |
 | `MessageMove` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account; honors legacy `markAsRead` plus `learning=SPAM/HAM` pre-move flags and falls back to COPY plus delete when IMAP MOVE is unavailable. |
 | `MessageDelete` | `dev/Stores/User/Messagelist.js` | native | Uses selected Frickmail mail account; marks deleted and expunges safely. |
-| `MessageList` | `dev/Stores/User/Messagelist.js` | compat-known | Full list shape, paging, sorting, threading, previews, and cache semantics still need native implementation. |
-| `Message` | `dev/Remote/User/Fetch.js` | compat-known | Full legacy message view shape remains unmigrated; `FrickmailGetMessageBody` covers the Frickmail-user selected-account body route. |
+| `MessageList` | `dev/Stores/User/Messagelist.js` | compat-known | Native implementation is staged but dispatch remains disabled until sort/search/threading, hidden-deleted filtering, date grouping, RawKey GET cache paths, previews, and full cache parity match legacy PHP behavior. |
+| `Message` | `dev/Remote/User/Fetch.js` | partial-native | Native for selected-account POST requests with `folder` and `uid`; reuses Rust IMAP body preview parsing and returns legacy `Object/Message` shape. Full attachment, crypto, header collection, RawKey GET cache, and exact PHP message model parity remain compatibility work. |
 | `MessageSetSeenToAll` | `dev/View/User/MailBox/MessageList.js` | compat-known | Bulk folder/thread mutation remains unmigrated. |
 | `MessageSetKeyword` | `dev/Model/Message.js` | compat-known | Custom keyword/tag mutation remains unmigrated. |
-| `FolderInformation` | `dev/Common/Folders.js` | compat-known | Folder status shape and ETag/cache semantics remain unmigrated. |
-| `FolderInformationMultiply` | `dev/Common/Folders.js` | compat-known | Multi-folder status refresh remains unmigrated. |
+| `FolderInformation` | `dev/Common/Folders.js` | partial-native | Native for selected-account POST requests that do not include `uidNext`; returns legacy folder status shape with counts, UIDNEXT, UIDVALIDITY, permanent flags, and PHP-compatible folder ETag. Detailed new-message notification payloads and message flag refresh from `flagsUids` remain compatibility work. |
+| `FolderInformationMultiply` | `dev/Common/Folders.js` | partial-native | Native for selected-account POST refreshes; fetches each requested folder status and skips per-folder failures like legacy PHP. Detailed cache/new-message semantics remain compatibility work. |
 | `FolderAppend` | `dev/Common/Folders.js` | compat-known | Frickmail-user `FrickmailImportEml` is native, but the legacy multipart folder append route is not. |
 | `FolderClear`, `FolderSettings`, `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights`, `SystemFoldersUpdate`, `FolderSetMetadata`, `FolderSubscribe`, `FolderCheckable` | `dev/View/Popup`, `dev/Settings/User/Folders.js`, `dev/Stores/User/Folder.js` | compat-known | Folder management and ACL routes remain unmigrated. |
 | `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | compat-known | Attachment actions remain on the compatibility roadmap. |
@@ -169,5 +169,6 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Port `MessageList`, `Message`, and folder status routes (`FolderInformation`
-   and `FolderInformationMultiply`) to native Rust response models.
+1. Complete `MessageList`, `Message`, and folder status parity: RawKey GET cache
+   paths, search/threaded lists, precise legacy sort semantics, previews,
+   attachment/header details, and detailed new-message notification payloads.
