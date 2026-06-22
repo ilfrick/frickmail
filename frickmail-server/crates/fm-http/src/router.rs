@@ -26,10 +26,10 @@ use fm_imap::{
     append_raw_message, apply_imap_rules, copy_messages, delete_messages,
     fetch_legacy_folder_information, fetch_mailbox_status, fetch_message_body_preview,
     fetch_raw_folder_messages, fetch_raw_message, legacy_message_hash, move_messages,
-    store_message_flag, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
-    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation, MailboxStatus,
-    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
-    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+    store_message_flag, store_seen_to_all, validate_eml, BodyPreviewPart, ImapConnectionConfig,
+    ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation,
+    MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField,
+    RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::parse_body;
 use fm_plugin_compat::{
@@ -745,6 +745,9 @@ async fn native_compat_response(
                 ImapMessageFlag::Seen,
             )
             .await,
+        ),
+        "MessageSetSeenToAll" => Some(
+            native_legacy_message_set_seen_to_all(state, original_action, payload, session).await,
         ),
         "MessageSetFlagged" => Some(
             native_legacy_message_store_flag(
@@ -4701,6 +4704,61 @@ where
     let result = tokio::time::timeout(
         mutation_deadline,
         storer(config, password, folder, uid_set, flag, set),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message flag update timed out".to_string()));
+
+    legacy_message_bool_response(original_action, result)
+}
+
+async fn native_legacy_message_set_seen_to_all(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_message_set_seen_to_all_with_storer(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, thread_uids, set| async move {
+            store_seen_to_all(config, &password, &folder, thread_uids.as_deref(), set).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_message_set_seen_to_all_with_storer<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    storer: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let thread_uids = payload_optional_string(payload, "threadUids")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let set = payload_i64(payload, "setAction") != 0;
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        storer(config, password, folder, thread_uids, set),
     )
     .await
     .map_err(|_| FrickmailError::Upstream("Message flag update timed out".to_string()));
@@ -10396,6 +10454,49 @@ mod tests {
         assert_eq!(folder, "INBOX");
         assert_eq!(uid_set, "41,42");
         assert_eq!(flag, ImapMessageFlag::Seen);
+        assert!(set);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_set_seen_to_all_uses_selected_account() {
+        let key = [48_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1816, 1817, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1817 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_store = Arc::clone(&captured);
+
+        let response = super::native_legacy_message_set_seen_to_all_with_storer(
+            &state,
+            "MessageSetSeenToAll",
+            &json!({"folder": "INBOX", "threadUids": "41,42", "setAction": "1"}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, thread_uids, set| {
+                let captured = Arc::clone(&captured_for_store);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder, thread_uids, set));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageSetSeenToAll");
+        assert_eq!(body["Result"], true);
+        let (config, password, folder, thread_uids, set) =
+            captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "INBOX");
+        assert_eq!(thread_uids.as_deref(), Some("41,42"));
         assert!(set);
     }
 

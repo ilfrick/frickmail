@@ -467,6 +467,30 @@ pub async fn store_message_flag(
     result
 }
 
+pub async fn store_seen_to_all(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    thread_uid_set: Option<&str>,
+    set: bool,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    if let Some(uid_set) = thread_uid_set.filter(|value| !value.trim().is_empty()) {
+        validate_uid_set(uid_set)?;
+    }
+
+    let mut session = login(config, password).await?;
+    timeout_imap("select mailbox", session.select(mailbox)).await?;
+    let query = store_flag_query(ImapMessageFlag::Seen, set);
+    let result = if let Some(uid_set) = thread_uid_set.filter(|value| !value.trim().is_empty()) {
+        drain_uid_store(&mut session, uid_set, query, "store seen thread messages").await
+    } else {
+        drain_sequence_store(&mut session, "1:*", query, "store seen all messages").await
+    };
+    logout_quietly(session).await;
+    result
+}
+
 pub async fn copy_messages(
     config: ImapConnectionConfig,
     password: &str,
@@ -1315,6 +1339,20 @@ async fn drain_uid_store(
     Ok(())
 }
 
+async fn drain_sequence_store(
+    session: &mut BoxedSession,
+    sequence_set: &str,
+    query: &str,
+    operation: &'static str,
+) -> Result<()> {
+    let mut updates = timeout_imap(operation, session.store(sequence_set, query)).await?;
+    while timeout_imap("read sequence store response", updates.try_next())
+        .await?
+        .is_some()
+    {}
+    Ok(())
+}
+
 async fn apply_legacy_move_pre_flags(
     session: &mut BoxedSession,
     uid_set: &str,
@@ -1764,14 +1802,27 @@ fn validate_uid_set(uid_set: &str) -> Result<()> {
         if item.is_empty() {
             return Err(FrickmailError::BadRequest("invalid uid set".to_string()));
         }
-        let uid = item
-            .parse::<u32>()
-            .map_err(|_| FrickmailError::BadRequest("invalid uid set".to_string()))?;
-        if uid == 0 {
-            return Err(FrickmailError::BadRequest("invalid uid set".to_string()));
+        if let Some((start, end)) = item.split_once(':') {
+            validate_uid_set_number(start.trim())?;
+            validate_uid_set_number(end.trim())?;
+            if end.contains(':') {
+                return Err(FrickmailError::BadRequest("invalid uid set".to_string()));
+            }
+        } else {
+            validate_uid_set_number(item)?;
         }
     }
 
+    Ok(())
+}
+
+fn validate_uid_set_number(value: &str) -> Result<()> {
+    let uid = value
+        .parse::<u32>()
+        .map_err(|_| FrickmailError::BadRequest("invalid uid set".to_string()))?;
+    if uid == 0 {
+        return Err(FrickmailError::BadRequest("invalid uid set".to_string()));
+    }
     Ok(())
 }
 
@@ -1960,16 +2011,21 @@ mod tests {
     }
 
     #[test]
-    fn uid_set_validation_accepts_comma_separated_positive_uids_only() {
+    fn uid_set_validation_accepts_comma_separated_positive_uids_and_ranges() {
         assert!(validate_uid_set("1").is_ok());
         assert!(validate_uid_set("1,2,300").is_ok());
         assert!(validate_uid_set(" 1, 2 ").is_ok());
+        assert!(validate_uid_set("1:5").is_ok());
+        assert!(validate_uid_set("5:1").is_ok());
+        assert!(validate_uid_set("1:5, 8, 10:12").is_ok());
 
         assert!(validate_uid_set("").is_err());
         assert!(validate_uid_set("0").is_err());
+        assert!(validate_uid_set("1:0").is_err());
         assert!(validate_uid_set("1:*").is_err());
         assert!(validate_uid_set("1\r\nNOOP").is_err());
         assert!(validate_uid_set("1,,2").is_err());
+        assert!(validate_uid_set("1:2:3").is_err());
     }
 
     #[test]
