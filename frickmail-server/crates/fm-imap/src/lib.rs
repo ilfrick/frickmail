@@ -467,6 +467,32 @@ pub async fn store_message_flag(
     result
 }
 
+pub async fn store_message_keyword(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid_set: &str,
+    keyword: &str,
+    set: bool,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    validate_uid_set(uid_set)?;
+    if !keyword_can_be_stored(keyword) {
+        return Ok(());
+    }
+
+    let mut session = login(config, password).await?;
+    let selected = timeout_imap("select mailbox", session.select(mailbox)).await?;
+    if !keyword_supported(&selected, keyword) {
+        logout_quietly(session).await;
+        return Ok(());
+    }
+    let query = store_keyword_query(keyword, set);
+    let result = drain_uid_store(&mut session, uid_set, &query, "store message keyword").await;
+    logout_quietly(session).await;
+    result
+}
+
 pub async fn store_seen_to_all(
     config: ImapConnectionConfig,
     password: &str,
@@ -1826,6 +1852,36 @@ fn validate_uid_set_number(value: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+fn validate_keyword(keyword: &str) -> Result<()> {
+    if !keyword_can_be_stored(keyword) {
+        return Err(FrickmailError::BadRequest("invalid keyword".to_string()));
+    }
+    Ok(())
+}
+
+fn keyword_can_be_stored(keyword: &str) -> bool {
+    !keyword.is_empty()
+        && keyword.trim() == keyword
+        && !keyword.starts_with('\\')
+        && keyword.bytes().all(is_imap_keyword_atom_byte)
+}
+
+fn is_imap_keyword_atom_byte(byte: u8) -> bool {
+    matches!(byte, 0x21..=0x7e)
+        && !matches!(
+            byte,
+            b'(' | b')' | b'{' | b' ' | b'%' | b'*' | b'"' | b'\\' | b']'
+        )
+}
+
+fn keyword_supported(mailbox: &async_imap::types::Mailbox, keyword: &str) -> bool {
+    mailbox.permanent_flags.iter().any(|flag| {
+        matches!(flag, Flag::MayCreate)
+            || matches!(flag, Flag::Custom(value) if value.as_ref() == keyword)
+    })
+}
+
 fn store_flag_query(flag: ImapMessageFlag, set: bool) -> &'static str {
     match (flag, set) {
         (ImapMessageFlag::Seen, true) => "+FLAGS.SILENT (\\Seen)",
@@ -1835,6 +1891,15 @@ fn store_flag_query(flag: ImapMessageFlag, set: bool) -> &'static str {
         (ImapMessageFlag::Deleted, true) => "+FLAGS.SILENT (\\Deleted)",
         (ImapMessageFlag::Deleted, false) => "-FLAGS.SILENT (\\Deleted)",
     }
+}
+
+fn store_keyword_query(keyword: &str, set: bool) -> String {
+    let operation = if set {
+        "+FLAGS.SILENT"
+    } else {
+        "-FLAGS.SILENT"
+    };
+    format!("{operation} ({keyword})")
 }
 
 fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
@@ -2029,6 +2094,36 @@ mod tests {
     }
 
     #[test]
+    fn keyword_validation_accepts_safe_imap_atoms_only() {
+        assert!(validate_keyword("$label1").is_ok());
+        assert!(validate_keyword("todo-items").is_ok());
+        assert!(validate_keyword("client.label").is_ok());
+        assert!(keyword_can_be_stored("$label1"));
+
+        assert!(validate_keyword("").is_err());
+        assert!(validate_keyword("\\Seen").is_err());
+        assert!(validate_keyword("label one").is_err());
+        assert!(validate_keyword(" label").is_err());
+        assert!(validate_keyword("label\r\nNOOP").is_err());
+        assert!(validate_keyword("bad*label").is_err());
+        assert!(validate_keyword("bad]label").is_err());
+        assert!(!keyword_can_be_stored(""));
+        assert!(!keyword_can_be_stored("\\Seen"));
+    }
+
+    #[test]
+    fn keyword_support_matches_legacy_permanent_flags() {
+        let mut mailbox = async_imap::types::Mailbox::default();
+        mailbox.permanent_flags = vec![Flag::Custom("$label1".into())];
+        assert!(keyword_supported(&mailbox, "$label1"));
+        assert!(!keyword_supported(&mailbox, "$label2"));
+        assert!(!keyword_supported(&mailbox, "$Label1"));
+
+        mailbox.permanent_flags = vec![Flag::MayCreate];
+        assert!(keyword_supported(&mailbox, "$label2"));
+    }
+
+    #[test]
     fn store_flag_queries_are_silent_and_bounded() {
         assert_eq!(
             store_flag_query(ImapMessageFlag::Seen, true),
@@ -2045,6 +2140,14 @@ mod tests {
         assert_eq!(
             store_flag_query(ImapMessageFlag::Deleted, false),
             "-FLAGS.SILENT (\\Deleted)"
+        );
+        assert_eq!(
+            store_keyword_query("$label1", true),
+            "+FLAGS.SILENT ($label1)"
+        );
+        assert_eq!(
+            store_keyword_query("$label1", false),
+            "-FLAGS.SILENT ($label1)"
         );
     }
 
