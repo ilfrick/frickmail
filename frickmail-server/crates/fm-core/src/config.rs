@@ -50,6 +50,8 @@ pub struct MailDefaults {
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
+    #[serde(default = "default_fetch_new_messages")]
+    pub fetch_new_messages: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +113,7 @@ impl Default for MailDefaults {
             imap_port: default_imap_port(),
             smtp_host: default_smtp_host(),
             smtp_port: default_smtp_port(),
+            fetch_new_messages: default_fetch_new_messages(),
         }
     }
 }
@@ -286,6 +289,10 @@ fn default_smtp_host() -> String {
 
 fn default_smtp_port() -> u16 {
     587
+}
+
+fn default_fetch_new_messages() -> bool {
+    true
 }
 
 fn default_transactional_smtp_port() -> u16 {

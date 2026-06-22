@@ -729,7 +729,7 @@ async fn native_compat_response(
         "Message" if payload.get("folder").is_some() && payload.get("uid").is_some() => {
             Some(native_legacy_message(state, original_action, payload, session).await)
         }
-        "FolderInformation" if payload_optional_i64(payload, "uidNext").is_none() => {
+        "FolderInformation" => {
             Some(native_legacy_folder_information(state, original_action, payload, session).await)
         }
         "FolderInformationMultiply" => Some(
@@ -4515,14 +4515,23 @@ async fn native_legacy_folder_information(
     payload: &Value,
     session: &fm_session::Session,
 ) -> Response {
+    let fetch_new_messages = state.config().mail.fetch_new_messages;
     native_legacy_folder_information_with_fetcher(
         state,
         original_action,
         payload,
         session,
         FOLDER_INFORMATION_DEADLINE,
-        |config, password, folder, prev_uid_next| async move {
-            fetch_legacy_folder_information(config, &password, &folder, prev_uid_next).await
+        |config, password, folder, prev_uid_next, flag_uids| async move {
+            fetch_legacy_folder_information(
+                config,
+                &password,
+                &folder,
+                prev_uid_next,
+                flag_uids,
+                fetch_new_messages,
+            )
+            .await
         },
     )
     .await
@@ -4537,7 +4546,7 @@ async fn native_legacy_folder_information_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, Option<u32>) -> Fut,
+    F: FnOnce(ImapConnectionConfig, String, String, Option<u32>, Option<Vec<u32>>) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<LegacyFolderInformation>>,
 {
     let (config, password) =
@@ -4550,10 +4559,11 @@ where
         Err(message) => return json_result_error(original_action, message),
     };
     let prev_uid_next = payload_optional_i64(payload, "uidNext").map(|value| value as u32);
+    let flag_uids = payload_uid_list_optional(payload, "flagsUids");
 
     let result = tokio::time::timeout(
         fetch_deadline,
-        fetcher(config, password, folder, prev_uid_next),
+        fetcher(config, password, folder, prev_uid_next, flag_uids),
     )
     .await
     .map_err(|_| FrickmailError::Upstream("Folder information fetch timed out".to_string()));
@@ -4576,6 +4586,7 @@ async fn native_legacy_folder_information_multiply(
     payload: &Value,
     session: &fm_session::Session,
 ) -> Response {
+    let fetch_new_messages = state.config().mail.fetch_new_messages;
     native_legacy_folder_information_multiply_with_fetcher(
         state,
         original_action,
@@ -4583,7 +4594,15 @@ async fn native_legacy_folder_information_multiply(
         session,
         FOLDER_INFORMATION_DEADLINE,
         |config, password, folder| async move {
-            fetch_legacy_folder_information(config, &password, &folder, None).await
+            fetch_legacy_folder_information(
+                config,
+                &password,
+                &folder,
+                None,
+                None,
+                fetch_new_messages,
+            )
+            .await
         },
     )
     .await
@@ -4982,7 +5001,7 @@ async fn legacy_imap_connection_context(
 }
 
 fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
-    json!({
+    let mut value = json!({
         "id": Value::Null,
         "name": info.name,
         "uidNext": info.uid_next,
@@ -4992,7 +5011,26 @@ fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
         "highestModSeq": info.highest_modseq,
         "etag": info.etag,
         "permanentFlags": info.permanent_flags,
-        "newMessages": info.new_messages,
+        "newMessages": info.new_messages.iter().map(legacy_new_message_json).collect::<Vec<_>>(),
+    });
+    if let Some(messages_flags) = &info.messages_flags {
+        value["messagesFlags"] = json!(messages_flags
+            .iter()
+            .map(|message| json!({
+                "uid": message.uid,
+                "flags": message.flags,
+            }))
+            .collect::<Vec<_>>());
+    }
+    value
+}
+
+fn legacy_new_message_json(message: &fm_imap::LegacyNewMessage) -> Value {
+    json!({
+        "folder": message.folder,
+        "uid": message.uid,
+        "subject": message.subject,
+        "from": legacy_email_collection(&message.from),
     })
 }
 
@@ -6924,6 +6962,23 @@ fn payload_array(payload: &Value, key: &str) -> Vec<Value> {
     }
 }
 
+fn payload_uid_list_optional(payload: &Value, key: &str) -> Option<Vec<u32>> {
+    payload.get(key).map(|_| {
+        payload_array(payload, key)
+            .into_iter()
+            .filter_map(|value| match value {
+                Value::Number(number) => number
+                    .as_u64()
+                    .or_else(|| number.as_i64().and_then(|value| u64::try_from(value).ok()))
+                    .and_then(|value| u32::try_from(value).ok()),
+                Value::String(value) => value.trim().parse::<u32>().ok(),
+                _ => None,
+            })
+            .filter(|uid| *uid > 0)
+            .collect()
+    })
+}
+
 fn payload_task_filter(payload: &Value) -> TaskFilter {
     match payload_string(payload, "filter").as_deref() {
         Some("pending") => TaskFilter::Pending,
@@ -7076,9 +7131,9 @@ mod tests {
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
         BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
-        ImapMoveOptions, LegacyFolderInformation, MailboxStatus, RawFolderFetchLimits, RuleAction,
-        RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-        RuleExecutionReport, RuleExecutionResult,
+        ImapMoveOptions, LegacyFolderInformation, LegacyMessageFlags, LegacyNewMessage,
+        MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp,
+        RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
@@ -9958,7 +10013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_api_keeps_folder_information_with_uidnext_on_compatibility_fallback() {
+    async fn json_api_dispatches_folder_information_with_uidnext_to_native_auth_path() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -9975,12 +10030,8 @@ mod tests {
         let body = read_json(response).await;
 
         assert_eq!(body["Action"], "FolderInformation");
-        assert_eq!(body["Result"], false);
-        assert_eq!(body["code"], 501);
-        assert_eq!(
-            body["message"],
-            "Frickmail compatibility hook 'FolderInformation' is not migrated yet"
-        );
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
     }
 
     #[tokio::test]
@@ -10240,13 +10291,19 @@ mod tests {
         let response = super::native_legacy_folder_information_with_fetcher(
             &state,
             "FolderInformation",
-            &json!({"account_id": 1815, "folder": "INBOX", "uidNext": 50}),
+            &json!({
+                "account_id": 1815,
+                "folder": "INBOX",
+                "uidNext": 50,
+                "flagsUids": [41, "42", 0, "bad"]
+            }),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, prev_uid_next| {
+            move |config, password, folder, prev_uid_next, flag_uids| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder, prev_uid_next));
+                    *captured.lock().unwrap() =
+                        Some((config, password, folder, prev_uid_next, flag_uids));
                     Ok(LegacyFolderInformation {
                         name: "INBOX".to_string(),
                         uid_next: Some(52),
@@ -10256,7 +10313,16 @@ mod tests {
                         highest_modseq: Some(99),
                         permanent_flags: vec!["\\seen".to_string()],
                         etag: "etag-2".to_string(),
-                        new_messages: Vec::new(),
+                        messages_flags: Some(vec![LegacyMessageFlags {
+                            uid: 41,
+                            flags: vec!["\\seen".to_string()],
+                        }]),
+                        new_messages: vec![LegacyNewMessage {
+                            folder: "INBOX".to_string(),
+                            uid: 50,
+                            subject: "Fresh mail".to_string(),
+                            from: "Alice <alice@example.com>".to_string(),
+                        }],
                     })
                 }
             },
@@ -10270,11 +10336,21 @@ mod tests {
         assert_eq!(body["Result"]["totalEmails"], 8);
         assert_eq!(body["Result"]["unreadEmails"], 3);
         assert_eq!(body["Result"]["highestModSeq"], 99);
+        assert_eq!(body["Result"]["messagesFlags"][0]["uid"], 41);
+        assert_eq!(body["Result"]["messagesFlags"][0]["flags"][0], "\\seen");
+        assert_eq!(body["Result"]["newMessages"][0]["uid"], 50);
+        assert_eq!(body["Result"]["newMessages"][0]["subject"], "Fresh mail");
+        assert_eq!(
+            body["Result"]["newMessages"][0]["from"][0]["email"],
+            "alice@example.com"
+        );
 
-        let (_config, password, folder, prev_uid_next) = captured.lock().unwrap().clone().unwrap();
+        let (_config, password, folder, prev_uid_next, flag_uids) =
+            captured.lock().unwrap().clone().unwrap();
         assert_eq!(password, "imap-secret");
         assert_eq!(folder, "INBOX");
         assert_eq!(prev_uid_next, Some(50));
+        assert_eq!(flag_uids, Some(vec![41, 42]));
     }
 
     #[tokio::test]
@@ -10767,6 +10843,25 @@ mod tests {
             HashMap::from([("7".to_string(), 44), ("8".to_string(), 45)])
         );
         assert!(super::payload_last_uids(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn uid_list_payload_filters_positive_numeric_values() {
+        assert_eq!(
+            super::payload_uid_list_optional(
+                &json!({"flagsUids": [41, "42", 0, "bad", null]}),
+                "flagsUids"
+            ),
+            Some(vec![41, 42])
+        );
+        assert_eq!(
+            super::payload_uid_list_optional(&json!({"flagsUids": []}), "flagsUids"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            super::payload_uid_list_optional(&json!({}), "flagsUids"),
+            None
+        );
     }
 
     #[tokio::test]

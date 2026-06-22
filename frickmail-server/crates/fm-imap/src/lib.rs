@@ -151,7 +151,22 @@ pub struct LegacyFolderInformation {
     pub highest_modseq: Option<u64>,
     pub permanent_flags: Vec<String>,
     pub etag: String,
-    pub new_messages: Vec<u32>,
+    pub messages_flags: Option<Vec<LegacyMessageFlags>>,
+    pub new_messages: Vec<LegacyNewMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyMessageFlags {
+    pub uid: u32,
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyNewMessage {
+    pub folder: String,
+    pub uid: u32,
+    pub subject: String,
+    pub from: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -347,14 +362,22 @@ pub async fn fetch_legacy_folder_information(
     password: &str,
     mailbox: &str,
     prev_uid_next: Option<u32>,
+    flag_uids: Option<Vec<u32>>,
+    fetch_new_messages: bool,
 ) -> Result<LegacyFolderInformation> {
     validate_mailbox(mailbox)?;
 
     let client_hash = legacy_imap_client_hash(&config);
     let mut session = login(config, password).await?;
-    let result =
-        legacy_folder_information_in_session(&mut session, mailbox, prev_uid_next, &client_hash)
-            .await;
+    let result = legacy_folder_information_in_session(
+        &mut session,
+        mailbox,
+        prev_uid_next,
+        flag_uids.as_deref(),
+        fetch_new_messages,
+        &client_hash,
+    )
+    .await;
     logout_quietly(session).await;
     result
 }
@@ -575,6 +598,14 @@ pub fn legacy_message_list_fetch_query() -> &'static str {
     "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])"
 }
 
+pub fn legacy_message_flags_fetch_query() -> &'static str {
+    "(UID FLAGS)"
+}
+
+pub fn legacy_new_messages_fetch_query() -> &'static str {
+    "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT CONTENT-TYPE)])"
+}
+
 pub fn message_list_sequence_range(total: u32, offset: u32, limit: u32) -> Option<String> {
     if total == 0 || limit == 0 || offset >= total {
         return None;
@@ -586,6 +617,25 @@ pub fn message_list_sequence_range(total: u32, offset: u32, limit: u32) -> Optio
     } else {
         format!("{first}:{last}")
     })
+}
+
+pub fn legacy_uid_sequence_set(uids: &[u32]) -> Option<String> {
+    let mut uids = uids
+        .iter()
+        .copied()
+        .filter(|uid| *uid > 0)
+        .collect::<Vec<_>>();
+    if uids.is_empty() {
+        return None;
+    }
+    uids.sort_unstable();
+    uids.dedup();
+    Some(
+        uids.into_iter()
+            .map(|uid| uid.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
 }
 
 pub fn validate_eml(raw: &[u8]) -> Result<()> {
@@ -831,6 +881,8 @@ async fn legacy_folder_information_in_session(
     session: &mut BoxedSession,
     mailbox: &str,
     prev_uid_next: Option<u32>,
+    flag_uids: Option<&[u32]>,
+    fetch_new_messages: bool,
     client_hash: &str,
 ) -> Result<LegacyFolderInformation> {
     let status = timeout_imap(
@@ -838,14 +890,26 @@ async fn legacy_folder_information_in_session(
         session.status(mailbox, "(MESSAGES UIDNEXT UIDVALIDITY UNSEEN)"),
     )
     .await?;
-    let examined = timeout_imap("examine mailbox", session.examine(mailbox)).await?;
-    Ok(legacy_folder_information_from_mailboxes(
+    let selected = if flag_uids.is_some() {
+        timeout_imap("select mailbox", session.select(mailbox)).await?
+    } else {
+        timeout_imap("examine mailbox", session.examine(mailbox)).await?
+    };
+    let mut info = legacy_folder_information_from_mailboxes(
         mailbox,
         &status,
-        &examined,
+        &selected,
         prev_uid_next,
         client_hash,
-    ))
+    );
+    if let Some(flag_uids) = flag_uids {
+        info.messages_flags = Some(fetch_legacy_message_flags(session, flag_uids).await?);
+    }
+    if fetch_new_messages {
+        info.new_messages =
+            fetch_legacy_new_messages(session, mailbox, prev_uid_next, info.uid_next).await?;
+    }
+    Ok(info)
 }
 
 async fn legacy_message_list_in_session(
@@ -857,6 +921,8 @@ async fn legacy_message_list_in_session(
         session,
         &request.mailbox,
         request.prev_uid_next,
+        None,
+        true,
         client_hash,
     )
     .await?;
@@ -931,7 +997,6 @@ fn legacy_folder_information_from_mailboxes(
         client_hash,
     );
     let _new_uid_range = legacy_new_uid_range(prev_uid_next, uid_next);
-    let new_messages = Vec::new();
 
     LegacyFolderInformation {
         name: mailbox.to_string(),
@@ -942,8 +1007,88 @@ fn legacy_folder_information_from_mailboxes(
         highest_modseq,
         permanent_flags,
         etag,
-        new_messages,
+        messages_flags: None,
+        new_messages: Vec::new(),
     }
+}
+
+async fn fetch_legacy_message_flags(
+    session: &mut BoxedSession,
+    flag_uids: &[u32],
+) -> Result<Vec<LegacyMessageFlags>> {
+    let Some(uid_set) = legacy_uid_sequence_set(flag_uids) else {
+        return Ok(Vec::new());
+    };
+    let mut fetches = timeout_imap(
+        "fetch legacy message flags",
+        session.uid_fetch(uid_set, legacy_message_flags_fetch_query()),
+    )
+    .await?;
+    let mut messages = Vec::new();
+
+    while let Some(fetch) =
+        timeout_imap("read legacy message flags item", fetches.try_next()).await?
+    {
+        let Some(uid) = fetch.uid else {
+            continue;
+        };
+        messages.push(LegacyMessageFlags {
+            uid,
+            flags: fetch
+                .flags()
+                .map(|flag| legacy_flag_string(&flag))
+                .collect(),
+        });
+    }
+
+    Ok(messages)
+}
+
+async fn fetch_legacy_new_messages(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    prev_uid_next: Option<u32>,
+    current_uid_next: Option<u32>,
+) -> Result<Vec<LegacyNewMessage>> {
+    let Some(prev_uid_next) = prev_uid_next.filter(|value| *value > 0) else {
+        return Ok(Vec::new());
+    };
+    if current_uid_next == Some(prev_uid_next) || !mailbox.eq_ignore_ascii_case("INBOX") {
+        return Ok(Vec::new());
+    }
+
+    let mut fetches = timeout_imap(
+        "fetch legacy new messages",
+        session.uid_fetch(
+            format!("{prev_uid_next}:*"),
+            legacy_new_messages_fetch_query(),
+        ),
+    )
+    .await?;
+    let mut messages = Vec::new();
+
+    while let Some(fetch) = timeout_imap("read legacy new message item", fetches.try_next()).await?
+    {
+        let Some(uid) = fetch.uid else {
+            continue;
+        };
+        let flags = fetch
+            .flags()
+            .map(|flag| legacy_flag_string(&flag))
+            .collect::<Vec<_>>();
+        if flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\seen")) {
+            continue;
+        }
+        let header = fetch.header().unwrap_or_default();
+        messages.push(LegacyNewMessage {
+            folder: mailbox.to_string(),
+            uid,
+            subject: header_value(header, "Subject").unwrap_or_default(),
+            from: header_value(header, "From").unwrap_or_default(),
+        });
+    }
+
+    Ok(messages)
 }
 
 fn legacy_message_summary_from_fetch<'a>(
@@ -1895,6 +2040,16 @@ mod tests {
         assert_eq!(
             legacy_message_hash("INBOX", 44),
             "2a7cf377296d50a49291639593793425"
+        );
+        assert_eq!(
+            legacy_uid_sequence_set(&[42, 41, 42, 0]),
+            Some("41,42".to_string())
+        );
+        assert_eq!(legacy_uid_sequence_set(&[0]), None);
+        assert_eq!(legacy_message_flags_fetch_query(), "(UID FLAGS)");
+        assert_eq!(
+            legacy_new_messages_fetch_query(),
+            "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT CONTENT-TYPE)])"
         );
     }
 
