@@ -23,13 +23,13 @@ use base64::{
 use chrono::Local;
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
-    append_raw_message, apply_imap_rules, copy_messages, delete_messages,
-    fetch_legacy_folder_information, fetch_mailbox_status, fetch_message_body_preview,
-    fetch_raw_folder_messages, fetch_raw_message, legacy_message_hash, move_messages,
-    store_message_flag, store_message_keyword, store_seen_to_all, validate_eml, BodyPreviewPart,
-    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
-    LegacyFolderInformation, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
-    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    append_raw_message, append_raw_message_without_flags, apply_imap_rules, copy_messages,
+    delete_messages, fetch_legacy_folder_information, fetch_mailbox_status,
+    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message, legacy_message_hash,
+    move_messages, store_message_flag, store_message_keyword, store_seen_to_all, validate_eml,
+    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
+    ImapMoveOptions, LegacyFolderInformation, MailboxStatus, RawFolderFetchLimits, RuleAction,
+    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
     RuleExecutionReport,
 };
 use fm_mime::parse_body;
@@ -68,6 +68,7 @@ const APPLY_RULES_DEADLINE: Duration = Duration::from_secs(60);
 const EXPORT_MESSAGE_DEADLINE: Duration = Duration::from_secs(30);
 const EXPORT_FOLDER_DEADLINE: Duration = Duration::from_secs(120);
 const IMPORT_EML_DEADLINE: Duration = Duration::from_secs(30);
+const FOLDER_APPEND_DEADLINE: Duration = Duration::from_secs(30);
 const MESSAGE_MUTATION_DEADLINE: Duration = Duration::from_secs(30);
 const FOLDER_INFORMATION_DEADLINE: Duration = Duration::from_secs(15);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
@@ -330,6 +331,17 @@ async fn json_api_request(
             )
         }
     };
+
+    if action == "FolderAppend" {
+        return native_legacy_folder_append_multipart(
+            &state,
+            &request.action,
+            &headers,
+            &body,
+            &session,
+        )
+        .await;
+    }
 
     if is_compat_hook(&action) {
         if let Some(response) =
@@ -4455,6 +4467,229 @@ where
     }
 }
 
+async fn native_legacy_folder_append_multipart(
+    state: &AppState,
+    original_action: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_append_multipart_with_appender(
+        state,
+        original_action,
+        headers,
+        body,
+        session,
+        FOLDER_APPEND_DEADLINE,
+        |config, password, folder, raw| async move {
+            append_raw_message_without_flags(config, &password, &folder, &raw).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_append_multipart_with_appender<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    session: &fm_session::Session,
+    append_deadline: Duration,
+    appender: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (user, credential_key) =
+        match legacy_folder_append_auth(state, original_action, session).await {
+            Ok(auth) => auth,
+            Err(response) => return response,
+        };
+
+    if !state.config().frickmail_user.allow_message_append {
+        return legacy_folder_append_error(original_action, "Permission denied");
+    }
+
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let upload = match folder_append_upload(content_type, body) {
+        FolderAppendUploadResult::Upload(upload) => upload,
+        FolderAppendUploadResult::MissingFile => {
+            return legacy_folder_append_error(original_action, "No file");
+        }
+        FolderAppendUploadResult::MissingFolder => {
+            return legacy_folder_append_error(original_action, "");
+        }
+    };
+
+    let payload = json!({
+        "folder": upload.folder.clone()
+    });
+    let (config, password) = match legacy_folder_append_connection_for_selected_or_payload(
+        state,
+        original_action,
+        &payload,
+        session,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+
+    let result = tokio::time::timeout(
+        append_deadline,
+        appender(config, password, upload.folder, upload.raw),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Folder append timed out".to_string()));
+
+    legacy_folder_append_response(original_action, result)
+}
+
+async fn legacy_folder_append_auth(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Result<(fm_core::UserSession, Vec<u8>), Response> {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return Err(response),
+    }) else {
+        return Err(legacy_folder_append_error(
+            original_action,
+            "Not authenticated",
+        ));
+    };
+
+    let encoded_key = session
+        .get::<String>(fm_session::CREDENTIAL_KEY_SESSION_KEY)
+        .await
+        .map_err(|err| {
+            legacy_folder_append_error(
+                original_action,
+                format!("Frickmail session read failed: {err}"),
+            )
+        })?;
+    let Some(encoded_key) = encoded_key else {
+        return Err(legacy_folder_append_error(
+            original_action,
+            "Not authenticated",
+        ));
+    };
+    let Ok(key) = STANDARD.decode(encoded_key.trim()) else {
+        return Err(legacy_folder_append_error(
+            original_action,
+            "Not authenticated",
+        ));
+    };
+    if key.len() != CREDENTIAL_KEY_BYTES {
+        return Err(legacy_folder_append_error(
+            original_action,
+            "Not authenticated",
+        ));
+    }
+
+    Ok((user, key))
+}
+
+async fn legacy_folder_append_connection_for_selected_or_payload(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    user_id: i64,
+    credential_key: &[u8],
+) -> Result<(ImapConnectionConfig, String), Response> {
+    let Some(pool) = state.db_pool() else {
+        return Err(legacy_folder_append_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+
+    let account_id = legacy_folder_append_account_id(payload, session, original_action).await?;
+    let account =
+        match SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account_id)
+            .await
+        {
+            Ok(Some(account)) => account,
+            Ok(None) => {
+                return Err(legacy_folder_append_error(
+                    original_action,
+                    "Account not found",
+                ))
+            }
+            Err(err) => {
+                return Err(legacy_folder_append_error(
+                    original_action,
+                    err.public_message(),
+                ))
+            }
+        };
+    let config = match imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => {
+            return Err(legacy_folder_append_error(
+                original_action,
+                err.public_message(),
+            ))
+        }
+    };
+    let password = match account_password(&account, credential_key) {
+        Ok(password) => password,
+        Err(_) => {
+            return Err(legacy_folder_append_error(
+                original_action,
+                "Missing IMAP password",
+            ))
+        }
+    };
+
+    Ok((config, password))
+}
+
+async fn legacy_folder_append_account_id(
+    payload: &Value,
+    session: &fm_session::Session,
+    original_action: &str,
+) -> Result<i64, Response> {
+    let account_id = payload_i64(payload, "account_id");
+    if account_id > 0 {
+        return Ok(account_id);
+    }
+
+    let selected = session
+        .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+        .await
+        .map_err(|err| {
+            legacy_folder_append_error(
+                original_action,
+                format!("Frickmail session read failed: {err}"),
+            )
+        })?;
+
+    let Some(selected) = selected else {
+        return Err(legacy_folder_append_error(
+            original_action,
+            "Account id required",
+        ));
+    };
+    if selected.account_id <= 0 {
+        return Err(legacy_folder_append_error(
+            original_action,
+            "Account id required",
+        ));
+    }
+
+    Ok(selected.account_id)
+}
+
 async fn native_legacy_message(
     state: &AppState,
     original_action: &str,
@@ -5074,6 +5309,34 @@ fn legacy_message_bool_response(
         ),
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
+}
+
+fn legacy_folder_append_response(
+    original_action: &str,
+    result: Result<fm_core::Result<()>, FrickmailError>,
+) -> Response {
+    match result {
+        Ok(Ok(())) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": true
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            compat_error(UNKNOWN_ERROR, err.public_message()),
+        ),
+    }
+}
+
+fn legacy_folder_append_error(original_action: &str, message: impl Into<String>) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        compat_error(UNKNOWN_ERROR, message),
+    )
 }
 
 fn legacy_message_folder_response(
@@ -5938,31 +6201,156 @@ fn content_type_contains(content_type: &str, needle: &str) -> bool {
         .contains(&needle.to_ascii_lowercase())
 }
 
-fn multipart_action(content_type: &str, body: &[u8]) -> Option<String> {
-    let boundary = multipart_boundary(content_type)?;
-    let delimiter = format!("--{boundary}");
-    let body = String::from_utf8_lossy(body);
+struct MultipartPart {
+    headers: String,
+    value: Vec<u8>,
+}
 
-    for part in body.split(&delimiter).skip(1) {
-        if part.starts_with("--") {
-            break;
+struct FolderAppendUpload {
+    folder: String,
+    raw: Vec<u8>,
+}
+
+enum FolderAppendUploadResult {
+    Upload(FolderAppendUpload),
+    MissingFile,
+    MissingFolder,
+}
+
+fn folder_append_upload(content_type: &str, body: &[u8]) -> FolderAppendUploadResult {
+    let Some(parts) = multipart_parts(content_type, body) else {
+        return FolderAppendUploadResult::MissingFile;
+    };
+    let mut folder = None;
+    let mut raw = None;
+
+    for part in parts {
+        match multipart_field_name(&part.headers) {
+            Some("folder") => {
+                folder = Some(String::from_utf8_lossy(&part.value).trim().to_string());
+            }
+            Some("appendFile") if !part.value.is_empty() => {
+                raw = Some(part.value);
+            }
+            _ => {}
         }
+    }
 
-        let part = part
-            .trim_start_matches("\r\n")
-            .trim_start_matches('\n')
-            .trim_end_matches("\r\n")
-            .trim_end_matches('\n');
-        let Some((headers, value)) = split_multipart_part(part) else {
-            continue;
-        };
+    let Some(raw) = raw else {
+        return FolderAppendUploadResult::MissingFile;
+    };
+    let Some(folder) = folder.filter(|folder| !folder.is_empty()) else {
+        return FolderAppendUploadResult::MissingFolder;
+    };
+    FolderAppendUploadResult::Upload(FolderAppendUpload { folder, raw })
+}
 
-        if multipart_field_name(headers)
+fn multipart_parts(content_type: &str, body: &[u8]) -> Option<Vec<MultipartPart>> {
+    let boundary = multipart_boundary(content_type)?;
+    let delimiter = format!("--{boundary}").into_bytes();
+    let first = find_multipart_delimiter(body, &delimiter, 0)?;
+    let mut cursor = multipart_delimiter_after(body, first, &delimiter)?;
+    let mut parts = Vec::new();
+
+    while let MultipartCursor::PartStart(start) = cursor {
+        let next = find_multipart_delimiter(body, &delimiter, start)?;
+        let part = trim_multipart_part_end(&body[start..next]);
+        if let Some((headers, value)) = split_multipart_part_bytes(part) {
+            parts.push(MultipartPart { headers, value });
+        }
+        cursor = multipart_delimiter_after(body, next, &delimiter)?;
+    }
+
+    Some(parts)
+}
+
+enum MultipartCursor {
+    PartStart(usize),
+    End,
+}
+
+fn find_multipart_delimiter(body: &[u8], delimiter: &[u8], start: usize) -> Option<usize> {
+    let mut search_start = start;
+    while search_start <= body.len() {
+        let offset = find_bytes(&body[search_start..], delimiter)?;
+        let index = search_start + offset;
+        if multipart_delimiter_after(body, index, delimiter).is_some() {
+            return Some(index);
+        }
+        search_start = index + 1;
+    }
+    None
+}
+
+fn multipart_delimiter_after(
+    body: &[u8],
+    index: usize,
+    delimiter: &[u8],
+) -> Option<MultipartCursor> {
+    if index > 0 && body.get(index - 1) != Some(&b'\n') {
+        return None;
+    }
+    if !body.get(index..)?.starts_with(delimiter) {
+        return None;
+    }
+
+    let after = index + delimiter.len();
+    let remaining = &body[after..];
+    if let Some(tail) = remaining.strip_prefix(b"--") {
+        if tail.is_empty() || tail.starts_with(b"\r\n") || tail.starts_with(b"\n") {
+            return Some(MultipartCursor::End);
+        }
+        return None;
+    }
+    if remaining.starts_with(b"\r\n") {
+        return Some(MultipartCursor::PartStart(after + 2));
+    }
+    if remaining.starts_with(b"\n") {
+        return Some(MultipartCursor::PartStart(after + 1));
+    }
+    None
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|value| value == needle)
+}
+
+fn trim_multipart_part_end(mut value: &[u8]) -> &[u8] {
+    if value.ends_with(b"\r\n") {
+        value = &value[..value.len() - 2];
+    } else if value.ends_with(b"\n") {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn split_multipart_part_bytes(part: &[u8]) -> Option<(String, Vec<u8>)> {
+    if let Some(index) = find_bytes(part, b"\r\n\r\n") {
+        return Some((
+            String::from_utf8_lossy(&part[..index]).to_string(),
+            part[index + 4..].to_vec(),
+        ));
+    }
+    let index = find_bytes(part, b"\n\n")?;
+    Some((
+        String::from_utf8_lossy(&part[..index]).to_string(),
+        part[index + 2..].to_vec(),
+    ))
+}
+
+fn multipart_action(content_type: &str, body: &[u8]) -> Option<String> {
+    for part in multipart_parts(content_type, body)? {
+        if multipart_field_name(&part.headers)
             .is_some_and(|name| name.eq_ignore_ascii_case("Action") || name == "_action")
         {
-            let action = value.trim();
+            let action = String::from_utf8_lossy(&part.value).trim().to_string();
             if !action.is_empty() {
-                return Some(action.to_string());
+                return Some(action);
             }
         }
     }
@@ -5976,11 +6364,6 @@ fn multipart_boundary(content_type: &str) -> Option<String> {
         let boundary = segment.strip_prefix("boundary=")?;
         Some(boundary.trim_matches('"').to_string())
     })
-}
-
-fn split_multipart_part(part: &str) -> Option<(&str, &str)> {
-    part.split_once("\r\n\r\n")
-        .or_else(|| part.split_once("\n\n"))
 }
 
 fn multipart_field_name(headers: &str) -> Option<&str> {
@@ -10968,6 +11351,213 @@ mod tests {
         );
     }
 
+    #[test]
+    fn folder_append_upload_extracts_folder_and_file_bytes() {
+        let raw = b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nAppended body";
+        match super::folder_append_upload(
+            "multipart/form-data; boundary=frickmail",
+            &folder_append_multipart_body("Archive", raw),
+        ) {
+            super::FolderAppendUploadResult::Upload(upload) => {
+                assert_eq!(upload.folder, "Archive");
+                assert_eq!(upload.raw, raw);
+            }
+            _ => panic!("expected folder append upload"),
+        }
+    }
+
+    #[test]
+    fn folder_append_upload_preserves_embedded_boundary_token() {
+        let raw = b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nBody mentions --frickmail inline";
+        match super::folder_append_upload(
+            "multipart/form-data; boundary=frickmail",
+            &folder_append_multipart_body("Archive", raw),
+        ) {
+            super::FolderAppendUploadResult::Upload(upload) => {
+                assert_eq!(upload.folder, "Archive");
+                assert_eq!(upload.raw, raw);
+            }
+            _ => panic!("expected folder append upload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_folder_append_multipart_to_native_auth_path() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "multipart/form-data; boundary=frickmail")
+                    .body(Body::from(folder_append_multipart_body_with_action(
+                        "FolderAppend",
+                        "INBOX",
+                        b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nBody",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderAppend");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 999);
+        assert_eq!(body["message"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_append_respects_feature_gate() {
+        let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::new(test_config(None));
+        let session =
+            credential_session(1820, "append-user", Some("append@example.com"), &key).await;
+
+        let response = super::native_legacy_folder_append_multipart_with_appender(
+            &state,
+            "FolderAppend",
+            &folder_append_headers(),
+            &folder_append_multipart_body(
+                "INBOX",
+                b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nBody",
+            ),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _raw| async move {
+                panic!("appender should not run when FolderAppend is disabled")
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderAppend");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 999);
+        assert_eq!(body["message"], "Permission denied");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_append_reports_missing_file() {
+        let key = [52_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::new(test_config_with_message_append(true));
+        let session =
+            credential_session(1823, "append-user", Some("append@example.com"), &key).await;
+
+        let response = super::native_legacy_folder_append_multipart_with_appender(
+            &state,
+            "FolderAppend",
+            &folder_append_headers(),
+            b"--frickmail\r\nContent-Disposition: form-data; name=\"folder\"\r\n\r\nINBOX\r\n--frickmail--\r\n",
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _raw| async move {
+                panic!("appender should not run without appendFile")
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderAppend");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 999);
+        assert_eq!(body["message"], "No file");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_append_reports_append_failure_as_legacy_false() {
+        let key = [53_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state_with_config(
+            1824,
+            1825,
+            &key,
+            test_config_with_message_append(true),
+        )
+        .await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1825 },
+            )
+            .await
+            .unwrap();
+
+        let response = super::native_legacy_folder_append_multipart_with_appender(
+            &state,
+            "FolderAppend",
+            &folder_append_headers(),
+            &folder_append_multipart_body(
+                "INBOX",
+                b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nBody",
+            ),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _raw| async move {
+                Err(FrickmailError::Upstream("append rejected".to_string()))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderAppend");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 999);
+        assert_eq!(body["message"], "append rejected");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_append_appends_uploaded_message() {
+        let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state_with_config(
+            1821,
+            1822,
+            &key,
+            test_config_with_message_append(true),
+        )
+        .await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1822 },
+            )
+            .await
+            .unwrap();
+        let raw = b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nAppended body";
+        let captured: Arc<Mutex<Option<(String, String, String, Vec<u8>)>>> =
+            Arc::new(Mutex::new(None));
+        let captured_for_append = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_append_multipart_with_appender(
+            &state,
+            "FolderAppend",
+            &folder_append_headers(),
+            &folder_append_multipart_body("Uploads", raw),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, raw| {
+                let captured_for_append = Arc::clone(&captured_for_append);
+                async move {
+                    *captured_for_append.lock().unwrap() =
+                        Some((config.login, password, folder, raw));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderAppend");
+        assert_eq!(body["Result"], true);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some((
+                "work@example.com".to_string(),
+                "imap-secret".to_string(),
+                "Uploads".to_string(),
+                raw.to_vec(),
+            ))
+        );
+    }
+
     #[tokio::test]
     async fn native_frickmail_import_eml_validates_message_before_account_lookup() {
         let key = [34_u8; fm_user::CREDENTIAL_KEY_BYTES];
@@ -12652,6 +13242,46 @@ mod tests {
         }
     }
 
+    fn test_config_with_message_append(allow_message_append: bool) -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.frickmail_user.allow_message_append = allow_message_append;
+        config
+    }
+
+    fn folder_append_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "multipart/form-data; boundary=frickmail".parse().unwrap(),
+        );
+        headers
+    }
+
+    fn folder_append_multipart_body(folder: &str, raw: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            b"--frickmail\r\nContent-Disposition: form-data; name=\"folder\"\r\n\r\n",
+        );
+        body.extend_from_slice(folder.as_bytes());
+        body.extend_from_slice(
+            b"\r\n--frickmail\r\nContent-Disposition: form-data; name=\"appendFile\"; filename=\"message.eml\"\r\nContent-Type: message/rfc822\r\n\r\n",
+        );
+        body.extend_from_slice(raw);
+        body.extend_from_slice(b"\r\n--frickmail--\r\n");
+        body
+    }
+
+    fn folder_append_multipart_body_with_action(action: &str, folder: &str, raw: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            b"--frickmail\r\nContent-Disposition: form-data; name=\"Action\"\r\n\r\n",
+        );
+        body.extend_from_slice(action.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(&folder_append_multipart_body(folder, raw));
+        body
+    }
+
     fn test_session() -> Session {
         Session::new(None, Arc::new(MemoryStore::default()), None)
     }
@@ -12741,6 +13371,16 @@ mod tests {
         account_id: i64,
         credential_key: &[u8],
     ) -> (AppState, Session) {
+        message_body_test_state_with_config(user_id, account_id, credential_key, test_config(None))
+            .await
+    }
+
+    async fn message_body_test_state_with_config(
+        user_id: i64,
+        account_id: i64,
+        credential_key: &[u8],
+        config: FrickmailConfig,
+    ) -> (AppState, Session) {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
         seed_user(
@@ -12767,10 +13407,7 @@ mod tests {
             credential_key,
         )
         .await;
-        (
-            AppState::with_db_pool(test_config(None), Some(pool)),
-            session,
-        )
+        (AppState::with_db_pool(config, Some(pool)), session)
     }
 
     async fn user_db_pool() -> AnyPool {

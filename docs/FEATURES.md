@@ -644,6 +644,12 @@ mbox format, and returns the result base64-encoded. The Rust backend keeps PHP's
 header field pattern, then calls `ImapClient::MessageAppendStream()` targeting the
 specified folder (default `INBOX`) with the `\Seen` flag set.
 
+**Legacy folder append** (`FolderAppend`): handles the original drag/drop
+multipart `appendFile` upload path when
+`FRICKMAIL__FRICKMAIL_USER__ALLOW_MESSAGE_APPEND=true`. This gate defaults to
+false to match the legacy `labs.allow_message_append` behavior. Appended
+messages use the uploaded message flags, matching the legacy no-flags append.
+
 ### Files
 
 | Layer | File |

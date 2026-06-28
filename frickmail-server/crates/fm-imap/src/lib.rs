@@ -435,13 +435,32 @@ pub async fn append_raw_message(
     mailbox: &str,
     raw: &[u8],
 ) -> Result<()> {
+    append_raw_message_with_flags(config, password, mailbox, raw, Some("(\\Seen)")).await
+}
+
+pub async fn append_raw_message_without_flags(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    raw: &[u8],
+) -> Result<()> {
+    append_raw_message_with_flags(config, password, mailbox, raw, None).await
+}
+
+async fn append_raw_message_with_flags(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    raw: &[u8],
+    flags: Option<&str>,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
     validate_eml(raw)?;
 
     let mut session = login(config, password).await?;
     timeout_imap(
         "append raw message",
-        session.append(mailbox, Some("(\\Seen)"), None, raw),
+        session.append(mailbox, flags, None, raw),
     )
     .await?;
     logout_quietly(session).await;
