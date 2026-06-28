@@ -197,7 +197,8 @@ pub struct LegacyMessageSummary {
     pub to: String,
     pub cc: String,
     pub date: String,
-    pub date_timestamp: Option<i64>,
+    pub date_timestamp: i64,
+    pub date_timestamp_source: String,
     pub size: u32,
     pub flags: Vec<String>,
     pub preview: Option<String>,
@@ -666,7 +667,7 @@ pub fn sequence_fetch_raw_message_query() -> &'static str {
 }
 
 pub fn legacy_message_list_fetch_query() -> &'static str {
-    "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])"
+    "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])"
 }
 
 pub fn legacy_message_flags_fetch_query() -> &'static str {
@@ -1019,6 +1020,7 @@ async fn legacy_message_list_in_session(
             messages.push(legacy_message_summary_from_fetch(
                 &request.mailbox,
                 uid,
+                fetch.internal_date().map(|value| value.timestamp()),
                 fetch.size.unwrap_or_default(),
                 fetch.flags(),
                 header,
@@ -1165,6 +1167,7 @@ async fn fetch_legacy_new_messages(
 fn legacy_message_summary_from_fetch<'a>(
     folder: &str,
     uid: u32,
+    internal_timestamp: Option<i64>,
     size: u32,
     flags: impl Iterator<Item = Flag<'a>>,
     header: &[u8],
@@ -1180,7 +1183,8 @@ fn legacy_message_summary_from_fetch<'a>(
     let to = header_value(header, "To").unwrap_or_default();
     let cc = header_value(header, "Cc").unwrap_or_default();
     let date = header_value(header, "Date").unwrap_or_default();
-    let date_timestamp = legacy_header_timestamp(&date);
+    let (date_timestamp, date_timestamp_source) =
+        legacy_message_timestamp(&date, internal_timestamp);
     let flags = flags
         .map(|flag| legacy_flag_string(&flag))
         .collect::<Vec<_>>();
@@ -1199,6 +1203,7 @@ fn legacy_message_summary_from_fetch<'a>(
         cc,
         date,
         date_timestamp,
+        date_timestamp_source: date_timestamp_source.to_string(),
         size,
         flags,
         preview: None,
@@ -1209,6 +1214,14 @@ fn legacy_header_timestamp(date: &str) -> Option<i64> {
     DateTime::parse_from_rfc2822(date)
         .ok()
         .map(|value| value.timestamp())
+}
+
+fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64, &'static str) {
+    if let Some(timestamp) = legacy_header_timestamp(date).filter(|value| *value != 0) {
+        return (timestamp, "header");
+    }
+
+    (internal_timestamp.unwrap_or_default(), "internal")
 }
 
 async fn fetch_raw_messages_by_sequence(
@@ -2206,29 +2219,51 @@ mod tests {
         let summary = legacy_message_summary_from_fetch(
             "INBOX",
             41,
+            Some(1_700_000_000),
             123,
             Vec::<Flag<'_>>::new().into_iter(),
             header,
         );
 
         assert_eq!(summary.date, "Tue, 1 Jul 2003 10:52:37 +0200");
-        assert_eq!(summary.date_timestamp, Some(1_057_049_557));
+        assert_eq!(summary.date_timestamp, 1_057_049_557);
+        assert_eq!(summary.date_timestamp_source, "header");
     }
 
     #[test]
-    fn legacy_message_summary_ignores_invalid_date_header_timestamp() {
+    fn legacy_message_summary_falls_back_to_internal_date_timestamp() {
         let header = b"Subject: Bad timestamp\r\nDate: definitely not a date\r\n\r\n";
 
         let summary = legacy_message_summary_from_fetch(
             "INBOX",
             42,
+            Some(1_700_000_000),
             456,
             Vec::<Flag<'_>>::new().into_iter(),
             header,
         );
 
         assert_eq!(summary.date, "definitely not a date");
-        assert_eq!(summary.date_timestamp, None);
+        assert_eq!(summary.date_timestamp, 1_700_000_000);
+        assert_eq!(summary.date_timestamp_source, "internal");
+    }
+
+    #[test]
+    fn legacy_message_summary_defaults_to_internal_zero_without_dates() {
+        let header = b"Subject: No timestamp\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            43,
+            None,
+            789,
+            Vec::<Flag<'_>>::new().into_iter(),
+            header,
+        );
+
+        assert_eq!(summary.date, "");
+        assert_eq!(summary.date_timestamp, 0);
+        assert_eq!(summary.date_timestamp_source, "internal");
     }
 
     #[test]
@@ -2267,6 +2302,10 @@ mod tests {
         );
         assert_eq!(legacy_uid_sequence_set(&[0]), None);
         assert_eq!(legacy_message_flags_fetch_query(), "(UID FLAGS)");
+        assert_eq!(
+            legacy_message_list_fetch_query(),
+            "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])"
+        );
         assert_eq!(
             legacy_new_messages_fetch_query(),
             "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT CONTENT-TYPE)])"
