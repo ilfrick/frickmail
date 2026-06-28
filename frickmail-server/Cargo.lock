@@ -933,6 +933,7 @@ name = "fm-imap"
 version = "0.1.0"
 dependencies = [
  "async-imap",
+ "chrono",
  "fm-core",
  "futures",
  "imap-proto",

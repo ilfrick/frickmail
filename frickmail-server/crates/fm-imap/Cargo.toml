@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 async-imap.workspace = true
+chrono.workspace = true
 fm-core = { path = "../fm-core" }
 futures.workspace = true
 imap-proto.workspace = true

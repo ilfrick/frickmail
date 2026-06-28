@@ -4,6 +4,7 @@ use async_imap::{
     types::{Capabilities, Capability, Flag},
     Client, Session,
 };
+use chrono::DateTime;
 use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
@@ -196,6 +197,7 @@ pub struct LegacyMessageSummary {
     pub to: String,
     pub cc: String,
     pub date: String,
+    pub date_timestamp: Option<i64>,
     pub size: u32,
     pub flags: Vec<String>,
     pub preview: Option<String>,
@@ -1178,6 +1180,7 @@ fn legacy_message_summary_from_fetch<'a>(
     let to = header_value(header, "To").unwrap_or_default();
     let cc = header_value(header, "Cc").unwrap_or_default();
     let date = header_value(header, "Date").unwrap_or_default();
+    let date_timestamp = legacy_header_timestamp(&date);
     let flags = flags
         .map(|flag| legacy_flag_string(&flag))
         .collect::<Vec<_>>();
@@ -1195,10 +1198,17 @@ fn legacy_message_summary_from_fetch<'a>(
         to,
         cc,
         date,
+        date_timestamp,
         size,
         flags,
         preview: None,
     }
+}
+
+fn legacy_header_timestamp(date: &str) -> Option<i64> {
+    DateTime::parse_from_rfc2822(date)
+        .ok()
+        .map(|value| value.timestamp())
 }
 
 async fn fetch_raw_messages_by_sequence(
@@ -2187,6 +2197,38 @@ mod tests {
         assert_eq!(message_list_sequence_range(5, 4, 20), Some("1".to_string()));
         assert_eq!(message_list_sequence_range(5, 5, 20), None);
         assert_eq!(message_list_sequence_range(5, 0, 0), None);
+    }
+
+    #[test]
+    fn legacy_message_summary_parses_date_header_timestamp() {
+        let header = b"Subject: Timestamped\r\nDate: Tue, 1 Jul 2003 10:52:37 +0200\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            41,
+            123,
+            Vec::<Flag<'_>>::new().into_iter(),
+            header,
+        );
+
+        assert_eq!(summary.date, "Tue, 1 Jul 2003 10:52:37 +0200");
+        assert_eq!(summary.date_timestamp, Some(1_057_049_557));
+    }
+
+    #[test]
+    fn legacy_message_summary_ignores_invalid_date_header_timestamp() {
+        let header = b"Subject: Bad timestamp\r\nDate: definitely not a date\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            42,
+            456,
+            Vec::<Flag<'_>>::new().into_iter(),
+            header,
+        );
+
+        assert_eq!(summary.date, "definitely not a date");
+        assert_eq!(summary.date_timestamp, None);
     }
 
     #[test]
