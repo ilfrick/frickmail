@@ -201,6 +201,7 @@ pub struct LegacyMessageSummary {
     pub date_timestamp_source: String,
     pub size: u32,
     pub flags: Vec<String>,
+    pub has_attachments: bool,
     pub preview: Option<String>,
 }
 
@@ -667,7 +668,7 @@ pub fn sequence_fetch_raw_message_query() -> &'static str {
 }
 
 pub fn legacy_message_list_fetch_query() -> &'static str {
-    "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])"
+    "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])"
 }
 
 pub fn legacy_message_flags_fetch_query() -> &'static str {
@@ -1023,6 +1024,7 @@ async fn legacy_message_list_in_session(
                 fetch.internal_date().map(|value| value.timestamp()),
                 fetch.size.unwrap_or_default(),
                 fetch.flags(),
+                fetch.bodystructure(),
                 header,
             ));
         }
@@ -1170,6 +1172,7 @@ fn legacy_message_summary_from_fetch<'a>(
     internal_timestamp: Option<i64>,
     size: u32,
     flags: impl Iterator<Item = Flag<'a>>,
+    bodystructure: Option<&BodyStructure<'_>>,
     header: &[u8],
 ) -> LegacyMessageSummary {
     let subject = header_value(header, "Subject").unwrap_or_default();
@@ -1206,6 +1209,7 @@ fn legacy_message_summary_from_fetch<'a>(
         date_timestamp_source: date_timestamp_source.to_string(),
         size,
         flags,
+        has_attachments: bodystructure.is_some_and(legacy_body_has_attachments),
         preview: None,
     }
 }
@@ -1222,6 +1226,94 @@ fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64
     }
 
     (internal_timestamp.unwrap_or_default(), "internal")
+}
+
+fn legacy_body_has_attachments(body: &BodyStructure<'_>) -> bool {
+    legacy_body_has_attachments_with_parent(body, false)
+}
+
+fn legacy_body_has_attachments_with_parent(
+    body: &BodyStructure<'_>,
+    parent_pgp_encrypted: bool,
+) -> bool {
+    let current_pgp_encrypted = legacy_body_is_pgp_encrypted(body);
+    if !parent_pgp_encrypted && legacy_body_part_is_attachment(body) {
+        return true;
+    }
+
+    match body {
+        BodyStructure::Message { body, .. } => {
+            legacy_body_has_attachments_with_parent(body, current_pgp_encrypted)
+        }
+        BodyStructure::Multipart { bodies, .. } => bodies
+            .iter()
+            .any(|child| legacy_body_has_attachments_with_parent(child, current_pgp_encrypted)),
+        _ => false,
+    }
+}
+
+fn legacy_body_part_is_attachment(body: &BodyStructure<'_>) -> bool {
+    let common = match body {
+        BodyStructure::Basic { common, .. }
+        | BodyStructure::Text { common, .. }
+        | BodyStructure::Message { common, .. }
+        | BodyStructure::Multipart { common, .. } => common,
+    };
+
+    is_attachment(common) || (!legacy_body_is_multipart(common) && !legacy_body_is_text(common))
+}
+
+fn legacy_body_is_text(common: &imap_proto::BodyContentCommon<'_>) -> bool {
+    legacy_body_content_type_eq(common, "text", "html")
+        || legacy_body_content_type_eq(common, "text", "plain")
+        || legacy_body_content_type_eq(common, "text", "x-amp-html")
+}
+
+fn legacy_body_is_multipart(common: &imap_proto::BodyContentCommon<'_>) -> bool {
+    common.ty.ty.eq_ignore_ascii_case("multipart")
+}
+
+fn legacy_body_is_pgp_encrypted(body: &BodyStructure<'_>) -> bool {
+    let BodyStructure::Multipart { common, bodies, .. } = body else {
+        return false;
+    };
+
+    legacy_body_content_type_eq(common, "multipart", "encrypted")
+        && legacy_body_param_eq(common, "protocol", "application/pgp-encrypted")
+        && bodies.len() == 2
+        && legacy_body_type_eq(&bodies[0], "application", "pgp-encrypted")
+        && legacy_body_type_eq(&bodies[1], "application", "octet-stream")
+}
+
+fn legacy_body_type_eq(body: &BodyStructure<'_>, ty: &str, subtype: &str) -> bool {
+    let common = match body {
+        BodyStructure::Basic { common, .. }
+        | BodyStructure::Text { common, .. }
+        | BodyStructure::Message { common, .. }
+        | BodyStructure::Multipart { common, .. } => common,
+    };
+
+    legacy_body_content_type_eq(common, ty, subtype)
+}
+
+fn legacy_body_content_type_eq(
+    common: &imap_proto::BodyContentCommon<'_>,
+    ty: &str,
+    subtype: &str,
+) -> bool {
+    common.ty.ty.eq_ignore_ascii_case(ty) && common.ty.subtype.eq_ignore_ascii_case(subtype)
+}
+
+fn legacy_body_param_eq(
+    common: &imap_proto::BodyContentCommon<'_>,
+    name: &str,
+    value: &str,
+) -> bool {
+    common.ty.params.as_ref().is_some_and(|params| {
+        params.iter().any(|(param_name, param_value)| {
+            param_name.eq_ignore_ascii_case(name) && param_value.trim().eq_ignore_ascii_case(value)
+        })
+    })
 }
 
 async fn fetch_raw_messages_by_sequence(
@@ -2012,6 +2104,7 @@ fn default_security() -> ImapSecurity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
 
     #[test]
     fn normalizes_legacy_secure_modes_and_ports() {
@@ -2222,6 +2315,7 @@ mod tests {
             Some(1_700_000_000),
             123,
             Vec::<Flag<'_>>::new().into_iter(),
+            None,
             header,
         );
 
@@ -2240,6 +2334,7 @@ mod tests {
             Some(1_700_000_000),
             456,
             Vec::<Flag<'_>>::new().into_iter(),
+            None,
             header,
         );
 
@@ -2258,12 +2353,171 @@ mod tests {
             None,
             789,
             Vec::<Flag<'_>>::new().into_iter(),
+            None,
             header,
         );
 
         assert_eq!(summary.date, "");
         assert_eq!(summary.date_timestamp, 0);
         assert_eq!(summary.date_timestamp_source, "internal");
+    }
+
+    #[test]
+    fn legacy_message_summary_marks_bodystructure_attachments() {
+        let attachment = BodyStructure::Basic {
+            common: test_body_common("application", "pdf", Some("attachment")),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+        let body = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", None),
+                    other: test_body_single_part(42),
+                    lines: 1,
+                    extension: None,
+                },
+                attachment,
+            ],
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Attachment\r\n\r\n",
+        );
+
+        assert!(summary.has_attachments);
+    }
+
+    #[test]
+    fn legacy_message_summary_keeps_inline_bodystructure_unattached() {
+        let body = BodyStructure::Text {
+            common: test_body_common("text", "plain", None),
+            other: test_body_single_part(42),
+            lines: 1,
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            42,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Inline\r\n\r\n",
+        );
+
+        assert!(!summary.has_attachments);
+    }
+
+    #[test]
+    fn legacy_message_summary_marks_non_text_leaf_attachment() {
+        let body = BodyStructure::Basic {
+            common: test_body_common("application", "pdf", None),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            46,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: PDF\r\n\r\n",
+        );
+
+        assert!(summary.has_attachments);
+    }
+
+    #[test]
+    fn legacy_message_summary_skips_pgp_encrypted_payload_attachment_icon() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common_with_params(
+                "multipart",
+                "encrypted",
+                None,
+                Some(vec![("protocol", "application/pgp-encrypted")]),
+            ),
+            bodies: vec![
+                BodyStructure::Basic {
+                    common: test_body_common("application", "pgp-encrypted", None),
+                    other: test_body_single_part(11),
+                    extension: None,
+                },
+                BodyStructure::Basic {
+                    common: test_body_common("application", "octet-stream", None),
+                    other: test_body_single_part(1024),
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            47,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Encrypted\r\n\r\n",
+        );
+
+        assert!(!summary.has_attachments);
+    }
+
+    fn test_body_common(
+        ty: &'static str,
+        subtype: &'static str,
+        disposition: Option<&'static str>,
+    ) -> imap_proto::BodyContentCommon<'static> {
+        test_body_common_with_params(ty, subtype, disposition, None)
+    }
+
+    fn test_body_common_with_params(
+        ty: &'static str,
+        subtype: &'static str,
+        disposition: Option<&'static str>,
+        params: Option<Vec<(&'static str, &'static str)>>,
+    ) -> imap_proto::BodyContentCommon<'static> {
+        imap_proto::BodyContentCommon {
+            ty: imap_proto::ContentType {
+                ty: Cow::Borrowed(ty),
+                subtype: Cow::Borrowed(subtype),
+                params: params.map(|params| {
+                    params
+                        .into_iter()
+                        .map(|(name, value)| (Cow::Borrowed(name), Cow::Borrowed(value)))
+                        .collect()
+                }),
+            },
+            disposition: disposition.map(|ty| imap_proto::ContentDisposition {
+                ty: Cow::Borrowed(ty),
+                params: None,
+            }),
+            language: None,
+            location: None,
+        }
+    }
+
+    fn test_body_single_part(octets: u32) -> imap_proto::BodyContentSinglePart<'static> {
+        imap_proto::BodyContentSinglePart {
+            id: None,
+            md5: None,
+            description: None,
+            transfer_encoding: imap_proto::ContentEncoding::SevenBit,
+            octets,
+        }
     }
 
     #[test]
@@ -2304,7 +2558,7 @@ mod tests {
         assert_eq!(legacy_message_flags_fetch_query(), "(UID FLAGS)");
         assert_eq!(
             legacy_message_list_fetch_query(),
-            "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])"
+            "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])"
         );
         assert_eq!(
             legacy_new_messages_fetch_query(),
