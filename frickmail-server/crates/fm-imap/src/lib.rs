@@ -692,6 +692,16 @@ pub fn message_list_sequence_range(total: u32, offset: u32, limit: u32) -> Optio
     })
 }
 
+pub fn legacy_message_list_limit(limit: u32) -> u32 {
+    if limit < 10 {
+        10
+    } else if limit > 999 {
+        50
+    } else {
+        limit
+    }
+}
+
 pub fn legacy_uid_sequence_set(uids: &[u32]) -> Option<String> {
     let mut uids = uids
         .iter()
@@ -1000,7 +1010,7 @@ async fn legacy_message_list_in_session(
     )
     .await?;
     let total = folder.total_emails.unwrap_or_default();
-    let limit = request.limit.clamp(1, 200);
+    let limit = legacy_message_list_limit(request.limit);
     let range = message_list_sequence_range(total, request.offset, limit);
     let mut messages = Vec::new();
 
@@ -2303,6 +2313,18 @@ mod tests {
         assert_eq!(message_list_sequence_range(5, 4, 20), Some("1".to_string()));
         assert_eq!(message_list_sequence_range(5, 5, 20), None);
         assert_eq!(message_list_sequence_range(5, 0, 0), None);
+    }
+
+    #[test]
+    fn legacy_message_list_limit_matches_mailso_bounds() {
+        assert_eq!(legacy_message_list_limit(0), 10);
+        assert_eq!(legacy_message_list_limit(1), 10);
+        assert_eq!(legacy_message_list_limit(9), 10);
+        assert_eq!(legacy_message_list_limit(10), 10);
+        assert_eq!(legacy_message_list_limit(50), 50);
+        assert_eq!(legacy_message_list_limit(999), 999);
+        assert_eq!(legacy_message_list_limit(1_000), 50);
+        assert_eq!(legacy_message_list_limit(u32::MAX), 50);
     }
 
     #[test]
