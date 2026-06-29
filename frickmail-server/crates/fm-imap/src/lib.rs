@@ -727,6 +727,10 @@ pub fn legacy_message_list_sort(sort: &str, use_sort: bool) -> String {
     sort_types.join(" ")
 }
 
+pub fn legacy_message_list_limited(uses_optimized_fetch: bool) -> bool {
+    uses_optimized_fetch
+}
+
 pub fn legacy_uid_sequence_set(uids: &[u32]) -> Option<String> {
     let mut uids = uids
         .iter()
@@ -1067,7 +1071,6 @@ async fn legacy_message_list_in_session(
         messages.sort_by_key(|message| std::cmp::Reverse(message.uid));
     }
 
-    let limited = (request.offset as u64 + messages.len() as u64) < total as u64;
     Ok(LegacyMessageList {
         folder,
         total_emails: total,
@@ -1075,7 +1078,7 @@ async fn legacy_message_list_in_session(
         limit,
         search: legacy_message_list_search(&request.search),
         sort: legacy_message_list_sort(&request.sort, false),
-        limited,
+        limited: legacy_message_list_limited(false),
         thread_uid: request.thread_uid,
         messages,
     })
@@ -2389,6 +2392,12 @@ mod tests {
             "REVERSE DATE"
         );
         assert_eq!(legacy_message_list_sort("date", true), "date REVERSE DATE");
+    }
+
+    #[test]
+    fn legacy_message_list_limited_matches_mailso_optimization_flag() {
+        assert!(!legacy_message_list_limited(false));
+        assert!(legacy_message_list_limited(true));
     }
 
     #[test]
