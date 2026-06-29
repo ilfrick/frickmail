@@ -706,6 +706,10 @@ pub fn legacy_message_list_fetches_new_messages(thread_uid: u32) -> bool {
     thread_uid == 0
 }
 
+pub fn legacy_new_messages_mailbox_matches(mailbox: &str) -> bool {
+    mailbox == "INBOX"
+}
+
 pub fn legacy_message_list_search(search: &str) -> String {
     search
         .trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0b'))
@@ -1177,7 +1181,7 @@ async fn fetch_legacy_new_messages(
     let Some(prev_uid_next) = prev_uid_next.filter(|value| *value > 0) else {
         return Ok(Vec::new());
     };
-    if current_uid_next == Some(prev_uid_next) || !mailbox.eq_ignore_ascii_case("INBOX") {
+    if current_uid_next == Some(prev_uid_next) || !legacy_new_messages_mailbox_matches(mailbox) {
         return Ok(Vec::new());
     }
 
@@ -2371,6 +2375,14 @@ mod tests {
         assert!(legacy_message_list_fetches_new_messages(0));
         assert!(!legacy_message_list_fetches_new_messages(1));
         assert!(!legacy_message_list_fetches_new_messages(u32::MAX));
+    }
+
+    #[test]
+    fn legacy_new_messages_mailbox_match_is_exact_inbox() {
+        assert!(legacy_new_messages_mailbox_matches("INBOX"));
+        assert!(!legacy_new_messages_mailbox_matches("Inbox"));
+        assert!(!legacy_new_messages_mailbox_matches("inbox"));
+        assert!(!legacy_new_messages_mailbox_matches(" INBOX "));
     }
 
     #[test]
