@@ -706,6 +706,12 @@ pub fn legacy_message_list_fetches_new_messages(thread_uid: u32) -> bool {
     thread_uid == 0
 }
 
+pub fn legacy_message_list_search(search: &str) -> String {
+    search
+        .trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0b'))
+        .to_string()
+}
+
 pub fn legacy_uid_sequence_set(uids: &[u32]) -> Option<String> {
     let mut uids = uids
         .iter()
@@ -1052,7 +1058,7 @@ async fn legacy_message_list_in_session(
         total_emails: total,
         offset: request.offset,
         limit,
-        search: request.search,
+        search: legacy_message_list_search(&request.search),
         sort: request.sort,
         limited,
         thread_uid: request.thread_uid,
@@ -2337,6 +2343,24 @@ mod tests {
         assert!(legacy_message_list_fetches_new_messages(0));
         assert!(!legacy_message_list_fetches_new_messages(1));
         assert!(!legacy_message_list_fetches_new_messages(u32::MAX));
+    }
+
+    #[test]
+    fn legacy_message_list_search_matches_mailso_trim() {
+        assert_eq!(legacy_message_list_search(""), "");
+        assert_eq!(legacy_message_list_search(" subject:test "), "subject:test");
+        assert_eq!(
+            legacy_message_list_search("\tfrom:a@example.com\r\n"),
+            "from:a@example.com"
+        );
+        assert_eq!(
+            legacy_message_list_search("\0\x0bbody:test\x0b\0"),
+            "body:test"
+        );
+        assert_eq!(
+            legacy_message_list_search("\u{00a0}body:test\u{00a0}"),
+            "\u{00a0}body:test\u{00a0}"
+        );
     }
 
     #[test]
