@@ -712,6 +712,21 @@ pub fn legacy_message_list_search(search: &str) -> String {
         .to_string()
 }
 
+pub fn legacy_message_list_sort(sort: &str, use_sort: bool) -> String {
+    if !use_sort {
+        return String::new();
+    }
+
+    let mut sort_types = Vec::new();
+    if !sort.is_empty() {
+        sort_types.push(sort);
+    }
+    if !sort.contains("DATE") {
+        sort_types.push("REVERSE DATE");
+    }
+    sort_types.join(" ")
+}
+
 pub fn legacy_uid_sequence_set(uids: &[u32]) -> Option<String> {
     let mut uids = uids
         .iter()
@@ -1059,7 +1074,7 @@ async fn legacy_message_list_in_session(
         offset: request.offset,
         limit,
         search: legacy_message_list_search(&request.search),
-        sort: request.sort,
+        sort: legacy_message_list_sort(&request.sort, false),
         limited,
         thread_uid: request.thread_uid,
         messages,
@@ -2361,6 +2376,19 @@ mod tests {
             legacy_message_list_search("\u{00a0}body:test\u{00a0}"),
             "\u{00a0}body:test\u{00a0}"
         );
+    }
+
+    #[test]
+    fn legacy_message_list_sort_matches_mailso_reported_sort() {
+        assert_eq!(legacy_message_list_sort("", false), "");
+        assert_eq!(legacy_message_list_sort("FROM", false), "");
+        assert_eq!(legacy_message_list_sort("", true), "REVERSE DATE");
+        assert_eq!(legacy_message_list_sort("FROM", true), "FROM REVERSE DATE");
+        assert_eq!(
+            legacy_message_list_sort("REVERSE DATE", true),
+            "REVERSE DATE"
+        );
+        assert_eq!(legacy_message_list_sort("date", true), "date REVERSE DATE");
     }
 
     #[test]
