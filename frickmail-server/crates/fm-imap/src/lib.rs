@@ -836,6 +836,34 @@ fn legacy_flag_string(flag: &Flag<'_>) -> String {
     }
 }
 
+fn legacy_message_flag_string(flag: &Flag<'_>) -> String {
+    match flag {
+        Flag::Custom(value) => legacy_custom_message_flag_string(value.as_ref()),
+        _ => legacy_flag_string(flag),
+    }
+}
+
+fn legacy_custom_message_flag_string(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "$readreceipt" => "$mdnsent".to_string(),
+        "$replied" => "\\answered".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn legacy_unique_flag_strings(flags: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+
+    for flag in flags {
+        if seen.insert(flag.clone()) {
+            unique.push(flag);
+        }
+    }
+
+    unique
+}
+
 fn header_value(raw: &[u8], name: &str) -> Option<String> {
     let mut matched = false;
     let mut value = String::new();
@@ -1241,9 +1269,7 @@ fn legacy_message_summary_from_fetch<'a>(
     let date = header_value(header, "Date").unwrap_or_default();
     let (date_timestamp, date_timestamp_source) =
         legacy_message_timestamp(&date, internal_timestamp);
-    let flags = flags
-        .map(|flag| legacy_flag_string(&flag))
-        .collect::<Vec<_>>();
+    let flags = legacy_unique_flag_strings(flags.map(|flag| legacy_message_flag_string(&flag)));
 
     LegacyMessageSummary {
         folder: folder.to_string(),
@@ -2441,6 +2467,43 @@ mod tests {
             &["\\deleted".to_string()],
             false
         ));
+    }
+
+    #[test]
+    fn legacy_message_flags_match_mailso_aliases_and_uniqueness() {
+        let flags = legacy_unique_flag_strings(
+            vec![
+                Flag::Answered,
+                Flag::Custom("$Replied".into()),
+                Flag::Custom("$ReadReceipt".into()),
+                Flag::Custom("$MdnSent".into()),
+                Flag::Custom("$Label1".into()),
+            ]
+            .into_iter()
+            .map(|flag| legacy_message_flag_string(&flag)),
+        );
+
+        assert_eq!(
+            flags,
+            vec![
+                "\\answered".to_string(),
+                "$mdnsent".to_string(),
+                "$label1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_generic_flag_string_preserves_folder_status_aliases() {
+        assert_eq!(
+            legacy_flag_string(&Flag::Custom("$ReadReceipt".into())),
+            "$readreceipt"
+        );
+        assert_eq!(
+            legacy_flag_string(&Flag::Custom("$Replied".into())),
+            "$replied"
+        );
+        assert_eq!(legacy_flag_string(&Flag::Answered), "\\answered");
     }
 
     #[test]
