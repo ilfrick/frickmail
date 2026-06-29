@@ -731,6 +731,13 @@ pub fn legacy_message_list_limited(uses_optimized_fetch: bool) -> bool {
     uses_optimized_fetch
 }
 
+pub fn legacy_message_list_keeps_flags(flags: &[String], hide_deleted: bool) -> bool {
+    !hide_deleted
+        || !flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case("\\deleted"))
+}
+
 pub fn legacy_uid_sequence_set(uids: &[u32]) -> Option<String> {
     let mut uids = uids
         .iter()
@@ -1058,7 +1065,7 @@ async fn legacy_message_list_in_session(
                 continue;
             };
             let header = fetch.header().unwrap_or_default();
-            messages.push(legacy_message_summary_from_fetch(
+            let summary = legacy_message_summary_from_fetch(
                 &request.mailbox,
                 uid,
                 fetch.internal_date().map(|value| value.timestamp()),
@@ -1066,7 +1073,10 @@ async fn legacy_message_list_in_session(
                 fetch.flags(),
                 fetch.bodystructure(),
                 header,
-            ));
+            );
+            if legacy_message_list_keeps_flags(&summary.flags, true) {
+                messages.push(summary);
+            }
         }
         messages.sort_by_key(|message| std::cmp::Reverse(message.uid));
     }
@@ -2398,6 +2408,27 @@ mod tests {
     fn legacy_message_list_limited_matches_mailso_optimization_flag() {
         assert!(!legacy_message_list_limited(false));
         assert!(legacy_message_list_limited(true));
+    }
+
+    #[test]
+    fn legacy_message_list_keeps_flags_hides_deleted_by_default() {
+        assert!(legacy_message_list_keeps_flags(&[], true));
+        assert!(legacy_message_list_keeps_flags(
+            &["\\seen".to_string(), "$label1".to_string()],
+            true
+        ));
+        assert!(!legacy_message_list_keeps_flags(
+            &["\\deleted".to_string()],
+            true
+        ));
+        assert!(!legacy_message_list_keeps_flags(
+            &["\\Deleted".to_string()],
+            true
+        ));
+        assert!(legacy_message_list_keeps_flags(
+            &["\\deleted".to_string()],
+            false
+        ));
     }
 
     #[test]
