@@ -702,6 +702,10 @@ pub fn legacy_message_list_limit(limit: u32) -> u32 {
     }
 }
 
+pub fn legacy_message_list_fetches_new_messages(thread_uid: u32) -> bool {
+    thread_uid == 0
+}
+
 pub fn legacy_uid_sequence_set(uids: &[u32]) -> Option<String> {
     let mut uids = uids
         .iter()
@@ -1000,12 +1004,13 @@ async fn legacy_message_list_in_session(
     request: LegacyMessageListRequest,
     client_hash: &str,
 ) -> Result<LegacyMessageList> {
+    let fetch_new_messages = legacy_message_list_fetches_new_messages(request.thread_uid);
     let folder = legacy_folder_information_in_session(
         session,
         &request.mailbox,
         request.prev_uid_next,
         None,
-        true,
+        fetch_new_messages,
         client_hash,
     )
     .await?;
@@ -2325,6 +2330,13 @@ mod tests {
         assert_eq!(legacy_message_list_limit(999), 999);
         assert_eq!(legacy_message_list_limit(1_000), 50);
         assert_eq!(legacy_message_list_limit(u32::MAX), 50);
+    }
+
+    #[test]
+    fn legacy_message_list_fetches_new_messages_only_outside_threads() {
+        assert!(legacy_message_list_fetches_new_messages(0));
+        assert!(!legacy_message_list_fetches_new_messages(1));
+        assert!(!legacy_message_list_fetches_new_messages(u32::MAX));
     }
 
     #[test]
