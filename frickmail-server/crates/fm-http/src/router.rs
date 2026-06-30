@@ -24,12 +24,13 @@ use chrono::Local;
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, copy_messages,
-    delete_messages, fetch_legacy_folder_information, fetch_mailbox_status,
-    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message, legacy_message_hash,
-    move_messages, store_message_flag, store_message_keyword, store_seen_to_all, validate_eml,
-    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
-    ImapMoveOptions, LegacyFolderInformation, MailboxStatus, RawFolderFetchLimits, RuleAction,
-    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    delete_messages, fetch_legacy_folder_information, fetch_legacy_message_list,
+    fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
+    legacy_message_hash, move_messages, store_message_flag, store_message_keyword,
+    store_seen_to_all, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
+    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation, LegacyMessageList,
+    LegacyMessageListRequest, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
+    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
     RuleExecutionReport,
 };
 use fm_mime::parse_body;
@@ -69,6 +70,7 @@ const EXPORT_MESSAGE_DEADLINE: Duration = Duration::from_secs(30);
 const EXPORT_FOLDER_DEADLINE: Duration = Duration::from_secs(120);
 const IMPORT_EML_DEADLINE: Duration = Duration::from_secs(30);
 const FOLDER_APPEND_DEADLINE: Duration = Duration::from_secs(30);
+const MESSAGE_LIST_DEADLINE: Duration = Duration::from_secs(30);
 const MESSAGE_MUTATION_DEADLINE: Duration = Duration::from_secs(30);
 const FOLDER_INFORMATION_DEADLINE: Duration = Duration::from_secs(15);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
@@ -4751,6 +4753,90 @@ where
     }
 }
 
+#[allow(dead_code)]
+async fn native_legacy_message_list(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_message_list_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_LIST_DEADLINE,
+        |config, password, request| async move {
+            fetch_legacy_message_list(config, &password, request).await
+        },
+    )
+    .await
+}
+
+#[allow(dead_code)]
+async fn native_legacy_message_list_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, LegacyMessageListRequest) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<LegacyMessageList>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let request = match legacy_message_list_request_from_payload(payload) {
+        Ok(request) => request,
+        Err(message) => return json_result_error(original_action, message),
+    };
+
+    let result = tokio::time::timeout(fetch_deadline, fetcher(config, password, request))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Message list fetch timed out".to_string()));
+
+    match result {
+        Ok(Ok(list)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": legacy_message_list_json(&list)
+            }),
+        ),
+        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+#[allow(dead_code)]
+fn legacy_message_list_request_from_payload(
+    payload: &Value,
+) -> Result<LegacyMessageListRequest, &'static str> {
+    let mailbox = required_payload_string(payload, "folder", "folder required")?;
+    let offset = payload_clamped_u32(payload, "offset");
+    let limit = payload_clamped_u32(payload, "limit");
+    let prev_uid_next = payload_optional_u32(payload, "uidNext");
+    let thread_uid = if payload_bool(payload, "useThreads") {
+        payload_optional_u32(payload, "threadUid").unwrap_or_default()
+    } else {
+        0
+    };
+
+    Ok(LegacyMessageListRequest {
+        mailbox,
+        offset,
+        limit,
+        search: payload_string(payload, "search").unwrap_or_default(),
+        sort: payload_string(payload, "sort").unwrap_or_default(),
+        prev_uid_next,
+        thread_uid,
+    })
+}
+
 async fn native_legacy_folder_information(
     state: &AppState,
     original_action: &str,
@@ -7290,6 +7376,18 @@ fn payload_optional_i64(payload: &Value, key: &str) -> Option<i64> {
     }
 }
 
+fn payload_clamped_u32(payload: &Value, key: &str) -> u32 {
+    let value = payload_i64(payload, key);
+    if value <= 0 {
+        return 0;
+    }
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn payload_optional_u32(payload: &Value, key: &str) -> Option<u32> {
+    payload_optional_i64(payload, key).and_then(|value| u32::try_from(value).ok())
+}
+
 fn payload_search_limit(payload: &Value) -> i64 {
     let Some(value) = payload.get("limit") else {
         return 50;
@@ -7692,9 +7790,9 @@ mod tests {
     use fm_imap::{
         BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
         ImapMoveOptions, LegacyAttachmentSummary, LegacyFolderInformation, LegacyMessageFlags,
-        LegacyMessageList, LegacyMessageSummary, LegacyNewMessage, MailboxStatus,
-        RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp, RuleConditionsLogic,
-        RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
+        LegacyMessageList, LegacyMessageListRequest, LegacyMessageSummary, LegacyNewMessage,
+        MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp,
+        RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
@@ -10840,6 +10938,134 @@ mod tests {
         assert_eq!(body["Result"]["uid"], 51);
         assert_eq!(body["Result"]["subject"], "Legacy body");
         assert_eq!(body["Result"]["plain"], "Hello legacy");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_builds_request_and_returns_collection_shape() {
+        let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1820, 1821, &key).await;
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_fetch = Arc::clone(&captured);
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({
+                "account_id": 1821,
+                "folder": "INBOX",
+                "offset": "10",
+                "limit": "50",
+                "search": "from:alice",
+                "sort": "REVERSE DATE",
+                "uidNext": "52",
+                "useThreads": "1",
+                "threadUid": "77"
+            }),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, request| {
+                let captured = Arc::clone(&captured_for_fetch);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, request.clone()));
+                    Ok(LegacyMessageList {
+                        folder: legacy_test_folder_information(),
+                        total_emails: 12,
+                        offset: request.offset,
+                        limit: request.limit,
+                        search: request.search,
+                        sort: request.sort,
+                        limited: false,
+                        thread_uid: request.thread_uid,
+                        messages: vec![legacy_test_message_summary()],
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"]["@Object"], "Collection/MessageCollection");
+        assert_eq!(body["Result"]["@Collection"][0]["uid"], 44);
+        assert_eq!(body["Result"]["offset"], 10);
+        assert_eq!(body["Result"]["limit"], 50);
+        assert_eq!(body["Result"]["search"], "from:alice");
+        assert_eq!(body["Result"]["sort"], "REVERSE DATE");
+        assert_eq!(body["Result"]["threadUid"], 77);
+
+        let (config, password, request) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(password, "imap-secret");
+        assert_eq!(request.mailbox, "INBOX");
+        assert_eq!(request.offset, 10);
+        assert_eq!(request.limit, 50);
+        assert_eq!(request.search, "from:alice");
+        assert_eq!(request.sort, "REVERSE DATE");
+        assert_eq!(request.prev_uid_next, Some(52));
+        assert_eq!(request.thread_uid, 77);
+    }
+
+    #[test]
+    fn legacy_message_list_request_matches_post_defaults_and_thread_flag() {
+        let request = super::legacy_message_list_request_from_payload(&json!({
+            "folder": "INBOX",
+            "threadUid": 77,
+            "useThreads": "0"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            request,
+            LegacyMessageListRequest {
+                mailbox: "INBOX".to_string(),
+                offset: 0,
+                limit: 0,
+                search: String::new(),
+                sort: String::new(),
+                prev_uid_next: None,
+                thread_uid: 0,
+            }
+        );
+
+        let threaded = super::legacy_message_list_request_from_payload(&json!({
+            "folder": "INBOX",
+            "offset": 5,
+            "limit": 25,
+            "search": "subject:test",
+            "sort": "DATE",
+            "uidNext": "42",
+            "threadUid": "77",
+            "useThreads": true
+        }))
+        .unwrap();
+
+        assert_eq!(threaded.offset, 5);
+        assert_eq!(threaded.limit, 25);
+        assert_eq!(threaded.search, "subject:test");
+        assert_eq!(threaded.sort, "DATE");
+        assert_eq!(threaded.prev_uid_next, Some(42));
+        assert_eq!(threaded.thread_uid, 77);
+
+        let negative = super::legacy_message_list_request_from_payload(&json!({
+            "folder": "INBOX",
+            "offset": -1,
+            "limit": -1
+        }))
+        .unwrap();
+
+        assert_eq!(negative.offset, 0);
+        assert_eq!(negative.limit, 0);
+
+        let saturated = super::legacy_message_list_request_from_payload(&json!({
+            "folder": "INBOX",
+            "offset": 999999999999_i64,
+            "limit": 999999999999_i64
+        }))
+        .unwrap();
+
+        assert_eq!(saturated.offset, u32::MAX);
+        assert_eq!(saturated.limit, u32::MAX);
     }
 
     #[test]
