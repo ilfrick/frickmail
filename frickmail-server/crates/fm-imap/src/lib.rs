@@ -245,6 +245,7 @@ pub struct LegacyMessageListRequest {
     pub sort: String,
     pub prev_uid_next: Option<u32>,
     pub thread_uid: u32,
+    pub thread_algorithm: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -17,7 +17,7 @@ use axum::{
     Json, Router,
 };
 use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine as _,
 };
 use chrono::Local;
@@ -88,6 +88,12 @@ struct LongPollNewMailTiming {
     fetch_deadline: Duration,
     poll_deadline: Duration,
     poll_interval: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyMessageListRawKeyRequest {
+    request: LegacyMessageListRequest,
+    cache_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -306,6 +312,7 @@ async fn json_api_request(
     let request = match plugin_request_from_http(&query, &headers, &body, legacy_json_action(&uri))
     {
         Ok(request) => {
+            let request = attach_legacy_message_list_raw_key(request, &uri);
             if let Some(response) = bridge_json_request(
                 &state,
                 &method,
@@ -4791,8 +4798,18 @@ where
             Ok(connection) => connection,
             Err(response) => return response,
         };
-    let request = match legacy_message_list_request_from_payload(payload) {
-        Ok(request) => request,
+    let request = match legacy_message_list_raw_key_request_from_payload(payload) {
+        Ok(Some(raw_key_request)) => {
+            let LegacyMessageListRawKeyRequest {
+                request,
+                cache_hash: _cache_hash,
+            } = raw_key_request;
+            request
+        }
+        Ok(None) => match legacy_message_list_request_from_payload(payload) {
+            Ok(request) => request,
+            Err(message) => return json_result_error(original_action, message),
+        },
         Err(message) => return json_result_error(original_action, message),
     };
 
@@ -4820,10 +4837,16 @@ fn legacy_message_list_request_from_payload(
     let offset = payload_clamped_u32(payload, "offset");
     let limit = payload_clamped_u32(payload, "limit");
     let prev_uid_next = payload_optional_u32(payload, "uidNext");
-    let thread_uid = if payload_bool(payload, "useThreads") {
+    let use_threads = payload_bool(payload, "useThreads");
+    let thread_uid = if use_threads {
         payload_optional_u32(payload, "threadUid").unwrap_or_default()
     } else {
         0
+    };
+    let thread_algorithm = if use_threads {
+        payload_string(payload, "threadAlgorithm").unwrap_or_default()
+    } else {
+        String::new()
     };
 
     Ok(LegacyMessageListRequest {
@@ -4834,7 +4857,65 @@ fn legacy_message_list_request_from_payload(
         sort: payload_string(payload, "sort").unwrap_or_default(),
         prev_uid_next,
         thread_uid,
+        thread_algorithm,
     })
+}
+
+#[allow(dead_code)]
+fn legacy_message_list_raw_key_from_uri(uri: &Uri) -> Option<String> {
+    let query = uri.query()?;
+    if !is_legacy_json_request(uri) {
+        return None;
+    }
+    let tail = query.split_once("/0/")?.1.trim_start_matches('/');
+    let mut parts = tail.split('/');
+    if parts.next()? != "MessageList" {
+        return None;
+    }
+
+    while let Some(part) = parts.next() {
+        if part == "&q[]=" {
+            return parts
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+        }
+    }
+
+    None
+}
+
+fn legacy_message_list_raw_key_request_from_payload(
+    payload: &Value,
+) -> Result<Option<LegacyMessageListRawKeyRequest>, &'static str> {
+    let Some(raw_key) = payload_optional_string(payload, "RawKey") else {
+        return Ok(None);
+    };
+    let Some(raw_payload) = legacy_raw_key_json(&raw_key) else {
+        return Ok(None);
+    };
+    let Some(values) = raw_payload.as_object() else {
+        return Ok(None);
+    };
+    if values.len() <= 6 {
+        return Ok(None);
+    }
+
+    Ok(Some(LegacyMessageListRawKeyRequest {
+        cache_hash: payload_string(&raw_payload, "hash").unwrap_or_default(),
+        request: legacy_message_list_request_from_payload(&raw_payload)?,
+    }))
+}
+
+fn legacy_raw_key_json(raw_key: &str) -> Option<Value> {
+    if raw_key.is_empty() {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD
+        .decode(raw_key)
+        .or_else(|_| URL_SAFE.decode(raw_key))
+        .ok()?;
+    serde_json::from_slice::<Value>(&decoded).ok()
 }
 
 async fn native_legacy_folder_information(
@@ -6347,6 +6428,15 @@ fn plugin_request_from_http(
     Ok(PluginRequest { action, payload })
 }
 
+fn attach_legacy_message_list_raw_key(mut request: PluginRequest, uri: &Uri) -> PluginRequest {
+    if request.action == "MessageList" {
+        if let Some(raw_key) = legacy_message_list_raw_key_from_uri(uri) {
+            request.payload = merge_payload(request.payload, json!({ "RawKey": raw_key }));
+        }
+    }
+    request
+}
+
 fn content_type_contains(content_type: &str, needle: &str) -> bool {
     content_type
         .to_ascii_lowercase()
@@ -7779,12 +7869,15 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         extract::{Request as AxumRequest, State},
-        http::{Method, Request, StatusCode, Uri},
+        http::{HeaderMap, Method, Request, StatusCode, Uri},
         response::IntoResponse,
         routing::any,
         Json, Router,
     };
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{
+        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+        Engine as _,
+    };
     use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
@@ -8739,6 +8832,25 @@ mod tests {
         assert_eq!(body["Result"]["ok"], true);
         assert_eq!(body["Result"]["authenticated"], false);
         assert_eq!(body["Action"], "FrickmailMe");
+    }
+
+    #[test]
+    fn legacy_message_list_get_plugin_request_includes_raw_key_payload() {
+        let uri: Uri = "/?/Json/&q[]=/0/MessageList/&q[]=/encoded-key"
+            .parse()
+            .unwrap();
+        let query = super::query_map(&uri);
+        let request = super::plugin_request_from_http(
+            &query,
+            &HeaderMap::new(),
+            &[],
+            super::legacy_json_action(&uri),
+        )
+        .unwrap();
+        let request = super::attach_legacy_message_list_raw_key(request, &uri);
+
+        assert_eq!(request.action, "MessageList");
+        assert_eq!(request.payload["RawKey"], "encoded-key");
     }
 
     #[tokio::test]
@@ -10959,7 +11071,8 @@ mod tests {
                 "sort": "REVERSE DATE",
                 "uidNext": "52",
                 "useThreads": "1",
-                "threadUid": "77"
+                "threadUid": "77",
+                "threadAlgorithm": "REFERENCES"
             }),
             &session,
             Duration::from_secs(1),
@@ -11004,6 +11117,7 @@ mod tests {
         assert_eq!(request.sort, "REVERSE DATE");
         assert_eq!(request.prev_uid_next, Some(52));
         assert_eq!(request.thread_uid, 77);
+        assert_eq!(request.thread_algorithm, "REFERENCES");
     }
 
     #[test]
@@ -11025,6 +11139,7 @@ mod tests {
                 sort: String::new(),
                 prev_uid_next: None,
                 thread_uid: 0,
+                thread_algorithm: String::new(),
             }
         );
 
@@ -11036,6 +11151,7 @@ mod tests {
             "sort": "DATE",
             "uidNext": "42",
             "threadUid": "77",
+            "threadAlgorithm": "ORDEREDSUBJECT",
             "useThreads": true
         }))
         .unwrap();
@@ -11046,6 +11162,7 @@ mod tests {
         assert_eq!(threaded.sort, "DATE");
         assert_eq!(threaded.prev_uid_next, Some(42));
         assert_eq!(threaded.thread_uid, 77);
+        assert_eq!(threaded.thread_algorithm, "ORDEREDSUBJECT");
 
         let negative = super::legacy_message_list_request_from_payload(&json!({
             "folder": "INBOX",
@@ -11066,6 +11183,99 @@ mod tests {
 
         assert_eq!(saturated.offset, u32::MAX);
         assert_eq!(saturated.limit, u32::MAX);
+    }
+
+    #[test]
+    fn legacy_message_list_raw_key_request_matches_get_branch() {
+        let raw_payload = json!({
+            "folder": "INBOX",
+            "offset": "15",
+            "limit": "25",
+            "search": "from:bob",
+            "sort": "REVERSE DATE",
+            "uidNext": "123",
+            "useThreads": 1,
+            "threadUid": "77",
+            "threadAlgorithm": "REFERENCES",
+            "hash": "folder-etag-account",
+            "accountHash": "account"
+        });
+        let raw_key = URL_SAFE_NO_PAD.encode(raw_payload.to_string());
+        let decoded = super::legacy_message_list_raw_key_request_from_payload(&json!({
+            "RawKey": raw_key
+        }))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(decoded.cache_hash, "folder-etag-account");
+        assert_eq!(decoded.request.mailbox, "INBOX");
+        assert_eq!(decoded.request.offset, 15);
+        assert_eq!(decoded.request.limit, 25);
+        assert_eq!(decoded.request.search, "from:bob");
+        assert_eq!(decoded.request.sort, "REVERSE DATE");
+        assert_eq!(decoded.request.prev_uid_next, Some(123));
+        assert_eq!(decoded.request.thread_uid, 77);
+        assert_eq!(decoded.request.thread_algorithm, "REFERENCES");
+    }
+
+    #[test]
+    fn legacy_message_list_raw_key_request_falls_back_like_legacy_decode() {
+        assert_eq!(
+            super::legacy_message_list_raw_key_request_from_payload(&json!({
+                "RawKey": "not-valid-base64"
+            }))
+            .unwrap(),
+            None
+        );
+
+        let short_payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "folder": "INBOX",
+                "offset": 0,
+                "limit": 10
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            super::legacy_message_list_raw_key_request_from_payload(&json!({
+                "RawKey": short_payload
+            }))
+            .unwrap(),
+            None
+        );
+
+        let missing_folder = URL_SAFE_NO_PAD.encode(
+            json!({
+                "offset": 0,
+                "limit": 10,
+                "search": "",
+                "sort": "",
+                "uidNext": 0,
+                "useThreads": 0,
+                "hash": "etag-account"
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            super::legacy_message_list_raw_key_request_from_payload(&json!({
+                "RawKey": missing_folder
+            })),
+            Err("folder required")
+        );
+    }
+
+    #[test]
+    fn legacy_message_list_raw_key_from_uri_matches_get_route_shape() {
+        let uri: Uri = "/?/Json/&q[]=/0/MessageList/&q[]=/encoded-key"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            super::legacy_message_list_raw_key_from_uri(&uri).as_deref(),
+            Some("encoded-key")
+        );
+
+        let other: Uri = "/?/Json/&q[]=/0/Message/&q[]=/encoded-key".parse().unwrap();
+        assert_eq!(super::legacy_message_list_raw_key_from_uri(&other), None);
     }
 
     #[test]
