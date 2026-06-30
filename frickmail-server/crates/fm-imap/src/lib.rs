@@ -191,6 +191,9 @@ pub struct LegacyMessageSummary {
     pub subject: String,
     pub encrypted: bool,
     pub message_id: String,
+    pub spam_score: u8,
+    pub spam_result: String,
+    pub is_spam: bool,
     pub in_reply_to: String,
     pub references: String,
     pub from: String,
@@ -1270,6 +1273,7 @@ fn legacy_message_summary_from_fetch<'a>(
         &header_value(header, "Content-Type").unwrap_or_default(),
         bodystructure,
     );
+    let spam = legacy_message_spam_metadata(header, &subject);
     let (date_timestamp, date_timestamp_source) =
         legacy_message_timestamp(&date, internal_timestamp);
     let flags = legacy_unique_flag_strings(flags.map(|flag| legacy_message_flag_string(&flag)));
@@ -1281,6 +1285,9 @@ fn legacy_message_summary_from_fetch<'a>(
         subject,
         encrypted,
         message_id,
+        spam_score: legacy_serialized_spam_score(&spam),
+        spam_result: spam.result,
+        is_spam: spam.is_spam,
         in_reply_to,
         references,
         from,
@@ -1321,6 +1328,207 @@ fn legacy_php_trim(value: &str) -> &str {
 
 fn legacy_message_subject(value: &str) -> String {
     legacy_php_trim(value).to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacySpamMetadata {
+    score: u8,
+    result: String,
+    is_spam: bool,
+}
+
+fn legacy_message_spam_metadata(header: &[u8], subject: &str) -> LegacySpamMetadata {
+    if let Some(spam) =
+        header_value(header, "X-Spamd-Result").filter(|value| legacy_php_truthy(value))
+    {
+        let mut metadata = LegacySpamMetadata {
+            score: 0,
+            result: String::new(),
+            is_spam: legacy_ascii_contains_ignore_case(subject, "*** SPAM ***"),
+        };
+        if let Some((score, threshold)) = legacy_parse_rspamd_score(&spam) {
+            let score_value = legacy_php_float(score);
+            let threshold_value = legacy_php_float(threshold);
+            if threshold_value != 0.0 {
+                metadata.score = legacy_spam_score(100.0 * score_value / threshold_value);
+                metadata.result = format!("{score} / {threshold}");
+            }
+        }
+        return metadata;
+    }
+
+    if let Some(spam) = header_value(header, "X-Bogosity").filter(|value| legacy_php_truthy(value))
+    {
+        let mut metadata = LegacySpamMetadata {
+            score: 0,
+            result: spam.clone(),
+            is_spam: !spam.contains("Ham"),
+        };
+        if let Some(spamicity) = legacy_number_after(&spam, "spamicity=", false) {
+            metadata.score = legacy_spam_score(100.0 * legacy_php_float(spamicity));
+        }
+        return metadata;
+    }
+
+    if let Some(spam) =
+        header_value(header, "X-Spam-Status").filter(|value| legacy_php_truthy(value))
+    {
+        let mut metadata = LegacySpamMetadata {
+            score: 0,
+            result: spam.clone(),
+            is_spam: spam.starts_with("Yes")
+                || header_value(header, "X-Spam-Flag")
+                    .is_some_and(|flag| legacy_ascii_contains_ignore_case(&flag, "YES")),
+        };
+
+        if let (Some(score), Some(threshold)) = (
+            legacy_number_after(&spam, "hits=", true)
+                .or_else(|| legacy_number_after(&spam, "score=", true)),
+            legacy_number_after(&spam, "required=", true),
+        ) {
+            let score_value = legacy_php_float(score);
+            let threshold_value = legacy_php_float(threshold);
+            if threshold_value != 0.0 {
+                metadata.score = legacy_spam_score(100.0 * score_value / threshold_value);
+                metadata.result = format!("{score} / {threshold}");
+            }
+        } else {
+            let ratio = legacy_parse_ratio(&spam)
+                .map(|(score, threshold)| (score.to_string(), threshold.to_string()))
+                .or_else(|| {
+                    header_value(header, "X-Spam-Info").and_then(|info| {
+                        legacy_parse_ratio(&info)
+                            .map(|(score, threshold)| (score.to_string(), threshold.to_string()))
+                    })
+                });
+            if let Some((score, threshold)) = ratio {
+                let score_value = legacy_php_float(&score);
+                let threshold_value = legacy_php_float(&threshold);
+                if threshold_value != 0.0 {
+                    metadata.score = legacy_spam_score(100.0 * score_value / threshold_value);
+                    metadata.result = format!("{score} / {threshold}");
+                }
+            }
+        }
+
+        return metadata;
+    }
+
+    LegacySpamMetadata {
+        score: 0,
+        result: String::new(),
+        is_spam: false,
+    }
+}
+
+fn legacy_serialized_spam_score(metadata: &LegacySpamMetadata) -> u8 {
+    if metadata.is_spam {
+        100
+    } else {
+        metadata.score
+    }
+}
+
+fn legacy_spam_score(value: f64) -> u8 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.clamp(0.0, 100.0) as u8
+}
+
+fn legacy_parse_rspamd_score(value: &str) -> Option<(&str, &str)> {
+    let start = value.find('[')? + '['.len_utf8();
+    let rest = &value[start..];
+    let slash = rest.find('/')?;
+    let score = legacy_php_trim(&rest[..slash]);
+    let rest = &rest[slash + '/'.len_utf8()..];
+    let end = rest.find("];")?;
+    let threshold = legacy_php_trim(&rest[..end]);
+    if !legacy_spam_score_token(score) || !legacy_spam_threshold_token(threshold) {
+        return None;
+    }
+    Some((score, threshold))
+}
+
+fn legacy_spam_score_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-'))
+}
+
+fn legacy_spam_threshold_token(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+fn legacy_number_after<'a>(value: &'a str, marker: &str, signed: bool) -> Option<&'a str> {
+    let start = value.find(marker)? + marker.len();
+    let rest = &value[start..];
+    let mut end = 0;
+    for (index, ch) in rest.char_indices() {
+        if ch.is_ascii_digit() || ch == '.' || (signed && ch == '-') {
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (end > 0).then_some(&rest[..end])
+}
+
+fn legacy_parse_ratio(value: &str) -> Option<(&str, &str)> {
+    for (index, ch) in value.char_indices() {
+        if !(ch.is_ascii_digit() || ch == '.') {
+            continue;
+        }
+        let first = &value[index..];
+        let first_end = first
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_ascii_digit() || *ch == '.')
+            .last()
+            .map(|(index, ch)| index + ch.len_utf8())?;
+        let rest = &first[first_end..];
+        let rest = rest.strip_prefix('/')?;
+        let second_end = rest
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_ascii_digit() || *ch == '.')
+            .last()
+            .map(|(index, ch)| index + ch.len_utf8())?;
+        if second_end > 0 {
+            return Some((&first[..first_end], &rest[..second_end]));
+        }
+    }
+    None
+}
+
+fn legacy_ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+fn legacy_php_truthy(value: &str) -> bool {
+    !value.is_empty() && value != "0"
+}
+
+fn legacy_php_float(value: &str) -> f64 {
+    let value = legacy_php_trim(value);
+    let mut end = 0;
+    let mut saw_digit = false;
+    for (index, ch) in value.char_indices() {
+        let allowed_sign = index == 0 && ch == '-';
+        if allowed_sign || ch.is_ascii_digit() || ch == '.' {
+            if ch.is_ascii_digit() {
+                saw_digit = true;
+            }
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if !saw_digit {
+        return 0.0;
+    }
+    value[..end].parse::<f64>().unwrap_or(0.0)
 }
 
 fn legacy_message_is_encrypted(
@@ -2700,6 +2908,147 @@ mod tests {
         assert_eq!(summary.date, "");
         assert_eq!(summary.date_timestamp, 0);
         assert_eq!(summary.date_timestamp_source, "internal");
+        assert_eq!(summary.spam_score, 0);
+        assert_eq!(summary.spam_result, "");
+        assert!(!summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_parses_rspamd_spam_metadata() {
+        let header = b"Subject: *** SPAM *** sale\r\nX-Spamd-Result: default: False [7.13 / 9.00]; BAYES_SPAM\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.spam_score, 100);
+        assert_eq!(summary.spam_result, "7.13 / 9.00");
+        assert!(summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_rejects_rspamd_exponent_score_like_php_regex() {
+        let header =
+            b"Subject: sale\r\nX-Spamd-Result: default: False [1e2 / 5.0]; BAYES_SPAM\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.spam_score, 0);
+        assert_eq!(summary.spam_result, "");
+        assert!(!summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_parses_bogofilter_spam_metadata() {
+        let header =
+            b"Subject: Bogosity\r\nX-Bogosity: Spam, tests=bogofilter, spamicity=0.42\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.spam_score, 100);
+        assert_eq!(
+            summary.spam_result,
+            "Spam, tests=bogofilter, spamicity=0.42"
+        );
+        assert!(summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_treats_zero_spam_header_as_php_falsey() {
+        let header = b"Subject: Falsey\r\nX-Spamd-Result: 0\r\nX-Bogosity: Ham, tests=bogofilter, spamicity=0.42\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.spam_score, 42);
+        assert_eq!(summary.spam_result, "Ham, tests=bogofilter, spamicity=0.42");
+        assert!(!summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_parses_spamassassin_score_and_flag_metadata() {
+        let header = b"Subject: SpamAssassin\r\nX-Spam-Status: No, score=3.0 required=5.0 tests=BAYES\r\nX-Spam-Flag: YES\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.spam_score, 100);
+        assert_eq!(summary.spam_result, "3.0 / 5.0");
+        assert!(summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_keeps_spamassassin_score_when_not_spam() {
+        let header = b"Subject: SpamAssassin\r\nX-Spam-Status: No, score=3.0 required=5.0 tests=BAYES\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.spam_score, 60);
+        assert_eq!(summary.spam_result, "3.0 / 5.0");
+        assert!(!summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_parses_spamassassin_info_ratio_metadata() {
+        let header = b"Subject: SpamAssassin\r\nX-Spam-Status: No, tests=BAYES\r\nX-Spam-Info: scanner result 2.5/5.0\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.spam_score, 50);
+        assert_eq!(summary.spam_result, "2.5 / 5.0");
+        assert!(!summary.is_spam);
     }
 
     #[test]
