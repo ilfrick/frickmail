@@ -200,6 +200,10 @@ pub struct LegacyMessageSummary {
     pub reply_to: String,
     pub to: String,
     pub cc: String,
+    pub bcc: String,
+    pub sender: String,
+    pub delivered_to: String,
+    pub read_receipt: String,
     pub date: String,
     pub date_timestamp: i64,
     pub date_timestamp_source: String,
@@ -1291,6 +1295,10 @@ fn legacy_message_summary_from_fetch<'a>(
     let reply_to = header_value(header, "Reply-To").unwrap_or_default();
     let to = header_value(header, "To").unwrap_or_default();
     let cc = header_value(header, "Cc").unwrap_or_default();
+    let bcc = header_value(header, "Bcc").unwrap_or_default();
+    let sender = header_value(header, "Sender").unwrap_or_default();
+    let delivered_to = header_value(header, "Delivered-To").unwrap_or_default();
+    let read_receipt = legacy_read_receipt(header);
     let date = header_value(header, "Date").unwrap_or_default();
     let encrypted = legacy_message_is_encrypted(
         &header_value(header, "Content-Type").unwrap_or_default(),
@@ -1318,6 +1326,10 @@ fn legacy_message_summary_from_fetch<'a>(
         reply_to,
         to,
         cc,
+        bcc,
+        sender,
+        delivered_to,
+        read_receipt,
         date,
         date_timestamp,
         date_timestamp_source: date_timestamp_source.to_string(),
@@ -1341,6 +1353,14 @@ fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64
     }
 
     (internal_timestamp.unwrap_or_default(), "internal")
+}
+
+fn legacy_read_receipt(header: &[u8]) -> String {
+    header_value(header, "Disposition-Notification-To")
+        .filter(|value| !legacy_php_trim(value).is_empty())
+        .or_else(|| header_value(header, "X-Confirm-Reading-To"))
+        .map(|value| legacy_php_trim(&value).to_string())
+        .unwrap_or_default()
 }
 
 fn legacy_strip_spaces(value: &str) -> String {
@@ -3241,6 +3261,77 @@ mod tests {
         );
 
         assert_eq!(summary.subject, "\u{00a0} Trimmed subject \u{00a0}");
+    }
+
+    #[test]
+    fn legacy_message_summary_parses_envelope_extra_headers_like_mailso() {
+        let header = b"Subject: Envelope\r\nBcc: Hidden <hidden@example.com>\r\nSender: Sender <sender@example.com>\r\nDelivered-To: delivered@example.com\r\nDisposition-Notification-To: Receipt <receipt@example.com>\r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.bcc, "Hidden <hidden@example.com>");
+        assert_eq!(summary.sender, "Sender <sender@example.com>");
+        assert_eq!(summary.delivered_to, "delivered@example.com");
+        assert_eq!(summary.read_receipt, "Receipt <receipt@example.com>");
+    }
+
+    #[test]
+    fn legacy_message_summary_falls_back_to_confirm_reading_receipt() {
+        let header = b"Subject: Receipt\r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.read_receipt, "fallback@example.com");
+    }
+
+    #[test]
+    fn legacy_message_summary_uses_confirm_receipt_when_primary_is_empty() {
+        let header = b"Subject: Receipt\r\nDisposition-Notification-To: \r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.read_receipt, "fallback@example.com");
+    }
+
+    #[test]
+    fn legacy_message_summary_keeps_display_name_only_read_receipt_like_mailso() {
+        let header = b"Subject: Receipt\r\nDisposition-Notification-To: Manual Receipt\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.read_receipt, "Manual Receipt");
     }
 
     #[test]
