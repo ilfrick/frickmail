@@ -5408,6 +5408,72 @@ fn legacy_new_message_json(message: &fm_imap::LegacyNewMessage) -> Value {
     })
 }
 
+#[allow(dead_code)]
+fn legacy_message_list_json(list: &fm_imap::LegacyMessageList) -> Value {
+    let mut folder = legacy_folder_information_json(&list.folder);
+    if let Some(folder) = folder.as_object_mut() {
+        folder.remove("messagesFlags");
+        folder.remove("newMessages");
+    }
+
+    json!({
+        "@Object": "Collection/MessageCollection",
+        "@Collection": list.messages.iter().map(legacy_message_summary_json).collect::<Vec<_>>(),
+        "totalEmails": list.total_emails,
+        "totalThreads": Value::Null,
+        "threadUid": list.thread_uid,
+        "newMessages": list.folder.new_messages.iter().map(legacy_new_message_json).collect::<Vec<_>>(),
+        "offset": list.offset,
+        "limit": list.limit,
+        "search": list.search,
+        "sort": list.sort,
+        "limited": list.limited,
+        "folder": folder,
+    })
+}
+
+#[allow(dead_code)]
+fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value {
+    let mut value = json!({
+        "@Object": "Object/Message",
+        "folder": message.folder,
+        "uid": message.uid,
+        "hash": message.hash,
+        "subject": message.subject,
+        "encrypted": message.encrypted,
+        "messageId": message.message_id,
+        "spamScore": message.spam_score,
+        "spamResult": message.spam_result,
+        "isSpam": message.is_spam,
+        "dateTimestamp": message.date_timestamp,
+        "dateTimestampSource": message.date_timestamp_source,
+        "from": legacy_email_collection(&message.from),
+        "replyTo": legacy_email_collection(&message.reply_to),
+        "to": legacy_email_collection(&message.to),
+        "cc": legacy_email_collection(&message.cc),
+        "bcc": legacy_email_collection(&message.bcc),
+        "sender": legacy_email_collection(&message.sender),
+        "deliveredTo": legacy_email_collection(&message.delivered_to),
+        "readReceipt": message.read_receipt,
+        "attachments": message.attachments,
+        "spf": [],
+        "dkim": [],
+        "dmarc": [],
+        "flags": message.flags,
+        "inReplyTo": message.in_reply_to,
+        "id": "",
+        "size": message.size,
+        "preview": message.preview.as_deref().unwrap_or_default(),
+        "headers": [],
+    });
+
+    if !message.references.is_empty() {
+        value["references"] = json!(message.references);
+    }
+
+    value
+}
+
 #[allow(clippy::too_many_arguments)]
 fn legacy_message_json(
     folder: &str,
@@ -7625,9 +7691,10 @@ mod tests {
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
         BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
-        ImapMoveOptions, LegacyFolderInformation, LegacyMessageFlags, LegacyNewMessage,
-        MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp,
-        RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
+        ImapMoveOptions, LegacyAttachmentSummary, LegacyFolderInformation, LegacyMessageFlags,
+        LegacyMessageList, LegacyMessageSummary, LegacyNewMessage, MailboxStatus,
+        RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp, RuleConditionsLogic,
+        RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
@@ -10773,6 +10840,84 @@ mod tests {
         assert_eq!(body["Result"]["uid"], 51);
         assert_eq!(body["Result"]["subject"], "Legacy body");
         assert_eq!(body["Result"]["plain"], "Hello legacy");
+    }
+
+    #[test]
+    fn legacy_message_list_json_matches_mailso_collection_shape() {
+        let list = LegacyMessageList {
+            folder: legacy_test_folder_information(),
+            total_emails: 12,
+            offset: 10,
+            limit: 50,
+            search: "from:alice".to_string(),
+            sort: "REVERSE DATE".to_string(),
+            limited: true,
+            thread_uid: 0,
+            messages: vec![legacy_test_message_summary()],
+        };
+
+        let value = super::legacy_message_list_json(&list);
+        let folder = value["folder"].as_object().unwrap();
+        let message = &value["@Collection"][0];
+        let attachment = &message["attachments"][0];
+
+        assert_eq!(value["@Object"], "Collection/MessageCollection");
+        assert_eq!(value["totalEmails"], 12);
+        assert_eq!(value["totalThreads"], Value::Null);
+        assert_eq!(value["threadUid"], 0);
+        assert_eq!(value["newMessages"][0]["uid"], 51);
+        assert_eq!(value["offset"], 10);
+        assert_eq!(value["limit"], 50);
+        assert_eq!(value["search"], "from:alice");
+        assert_eq!(value["sort"], "REVERSE DATE");
+        assert_eq!(value["limited"], true);
+        assert_eq!(folder["name"], "INBOX");
+        assert!(!folder.contains_key("newMessages"));
+        assert!(!folder.contains_key("messagesFlags"));
+
+        assert_eq!(message["@Object"], "Object/Message");
+        assert_eq!(message["folder"], "INBOX");
+        assert_eq!(message["uid"], 44);
+        assert_eq!(message["subject"], "Staged summary");
+        assert_eq!(message["encrypted"], true);
+        assert_eq!(message["messageId"], "<message@example.com>");
+        assert_eq!(message["spamScore"], 100);
+        assert_eq!(message["spamResult"], "7.13 / 9.00");
+        assert_eq!(message["isSpam"], true);
+        assert_eq!(message["dateTimestamp"], 1_057_049_557);
+        assert_eq!(message["dateTimestampSource"], "header");
+        assert_eq!(message["from"][0]["email"], "alice@example.com");
+        assert_eq!(message["replyTo"][0]["email"], "reply@example.com");
+        assert_eq!(message["to"][0]["email"], "bob@example.com");
+        assert_eq!(message["cc"][0]["email"], "carol@example.com");
+        assert_eq!(message["bcc"][0]["email"], "hidden@example.com");
+        assert_eq!(message["sender"][0]["email"], "sender@example.com");
+        assert_eq!(message["deliveredTo"][0]["email"], "delivered@example.com");
+        assert_eq!(message["readReceipt"], "Receipt <receipt@example.com>");
+        assert_eq!(message["flags"][0], "\\seen");
+        assert_eq!(message["inReplyTo"], "<previous@example.com>");
+        assert_eq!(message["references"], "<one@example> <two@example>");
+        assert_eq!(message["size"], 4096);
+        assert_eq!(message["preview"], "Preview text");
+
+        assert_eq!(attachment["@Object"], "Object/Attachment");
+        assert_eq!(attachment["mimeIndex"], "2");
+        assert_eq!(attachment["mimeType"], "application/pdf");
+        assert_eq!(attachment["fileName"], "report.pdf");
+        assert_eq!(attachment["estimatedSize"], 768);
+        assert_eq!(attachment["cId"], "<part@example.com>");
+        assert_eq!(attachment["contentLocation"], "cid:report");
+        assert_eq!(attachment["isInline"], true);
+    }
+
+    #[test]
+    fn legacy_message_summary_json_omits_empty_references_like_mailso() {
+        let mut message = legacy_test_message_summary();
+        message.references.clear();
+
+        let value = super::legacy_message_summary_json(&message);
+
+        assert!(!value.as_object().unwrap().contains_key("references"));
     }
 
     #[tokio::test]
@@ -14295,6 +14440,72 @@ mod tests {
                     .find(|line| line.trim_start().starts_with("Plugin"))
                     .map(|line| line.trim().to_string())
             })
+    }
+
+    fn legacy_test_folder_information() -> LegacyFolderInformation {
+        LegacyFolderInformation {
+            name: "INBOX".to_string(),
+            uid_next: Some(52),
+            uid_validity: Some(10),
+            total_emails: Some(12),
+            unread_emails: Some(3),
+            highest_modseq: Some(99),
+            permanent_flags: vec!["\\seen".to_string()],
+            etag: "etag-2".to_string(),
+            messages_flags: Some(vec![LegacyMessageFlags {
+                uid: 41,
+                flags: vec!["\\seen".to_string()],
+            }]),
+            new_messages: vec![LegacyNewMessage {
+                folder: "INBOX".to_string(),
+                uid: 51,
+                subject: "Fresh mail".to_string(),
+                from: "Fresh <fresh@example.com>".to_string(),
+            }],
+        }
+    }
+
+    fn legacy_test_message_summary() -> LegacyMessageSummary {
+        LegacyMessageSummary {
+            folder: "INBOX".to_string(),
+            uid: 44,
+            hash: "summary-hash".to_string(),
+            subject: "Staged summary".to_string(),
+            encrypted: true,
+            message_id: "<message@example.com>".to_string(),
+            spam_score: 100,
+            spam_result: "7.13 / 9.00".to_string(),
+            is_spam: true,
+            in_reply_to: "<previous@example.com>".to_string(),
+            references: "<one@example> <two@example>".to_string(),
+            from: "Alice <alice@example.com>".to_string(),
+            reply_to: "Reply <reply@example.com>".to_string(),
+            to: "Bob <bob@example.com>".to_string(),
+            cc: "Carol <carol@example.com>".to_string(),
+            bcc: "Hidden <hidden@example.com>".to_string(),
+            sender: "Sender <sender@example.com>".to_string(),
+            delivered_to: "delivered@example.com".to_string(),
+            read_receipt: "Receipt <receipt@example.com>".to_string(),
+            date: "Tue, 1 Jul 2003 10:52:37 +0200".to_string(),
+            date_timestamp: 1_057_049_557,
+            date_timestamp_source: "header".to_string(),
+            size: 4096,
+            flags: vec!["\\seen".to_string(), "$label1".to_string()],
+            has_attachments: true,
+            attachments: vec![LegacyAttachmentSummary {
+                object: "Object/Attachment".to_string(),
+                folder: "INBOX".to_string(),
+                uid: 44,
+                mime_index: "2".to_string(),
+                mime_type: "application/pdf".to_string(),
+                file_name: "report.pdf".to_string(),
+                estimated_size: 768,
+                c_id: "<part@example.com>".to_string(),
+                content_location: "cid:report".to_string(),
+                is_inline: true,
+            }],
+            preview: Some("Preview text".to_string()),
+        }
     }
 
     async fn read_json(response: axum::response::Response) -> Value {
