@@ -189,6 +189,7 @@ pub struct LegacyMessageSummary {
     pub uid: u32,
     pub hash: String,
     pub subject: String,
+    pub encrypted: bool,
     pub message_id: String,
     pub in_reply_to: String,
     pub references: String,
@@ -1265,6 +1266,10 @@ fn legacy_message_summary_from_fetch<'a>(
     let to = header_value(header, "To").unwrap_or_default();
     let cc = header_value(header, "Cc").unwrap_or_default();
     let date = header_value(header, "Date").unwrap_or_default();
+    let encrypted = legacy_message_is_encrypted(
+        &header_value(header, "Content-Type").unwrap_or_default(),
+        bodystructure,
+    );
     let (date_timestamp, date_timestamp_source) =
         legacy_message_timestamp(&date, internal_timestamp);
     let flags = legacy_unique_flag_strings(flags.map(|flag| legacy_message_flag_string(&flag)));
@@ -1274,6 +1279,7 @@ fn legacy_message_summary_from_fetch<'a>(
         uid,
         hash: legacy_message_hash(folder, uid),
         subject,
+        encrypted,
         message_id,
         in_reply_to,
         references,
@@ -1315,6 +1321,30 @@ fn legacy_php_trim(value: &str) -> &str {
 
 fn legacy_message_subject(value: &str) -> String {
     legacy_php_trim(value).to_string()
+}
+
+fn legacy_message_is_encrypted(
+    content_type: &str,
+    bodystructure: Option<&BodyStructure<'_>>,
+) -> bool {
+    legacy_header_content_type_value(content_type) == "multipart/encrypted"
+        || bodystructure.is_some_and(legacy_body_has_encrypted_part)
+}
+
+fn legacy_header_content_type_value(content_type: &str) -> &str {
+    legacy_php_trim(content_type.split(';').next().unwrap_or_default())
+}
+
+fn legacy_body_has_encrypted_part(body: &BodyStructure<'_>) -> bool {
+    legacy_body_is_pgp_encrypted(body)
+        || legacy_body_is_smime_encrypted(body)
+        || match body {
+            BodyStructure::Message { body, .. } => legacy_body_has_encrypted_part(body),
+            BodyStructure::Multipart { bodies, .. } => {
+                bodies.iter().any(legacy_body_has_encrypted_part)
+            }
+            _ => false,
+        }
 }
 
 fn legacy_body_has_attachments(body: &BodyStructure<'_>) -> bool {
@@ -1385,6 +1415,25 @@ fn legacy_body_type_eq(body: &BodyStructure<'_>, ty: &str, subtype: &str) -> boo
     legacy_body_content_type_eq(common, ty, subtype)
 }
 
+fn legacy_body_is_smime_encrypted(body: &BodyStructure<'_>) -> bool {
+    let common = match body {
+        BodyStructure::Basic { common, .. } => common,
+        _ => return false,
+    };
+
+    (legacy_body_content_type_eq(common, "application", "pkcs7-mime")
+        || legacy_body_content_type_eq(common, "application", "x-pkcs7-mime"))
+        && common.ty.params.as_ref().is_some_and(|params| {
+            params.iter().any(|(param_name, param_value)| {
+                param_name.eq_ignore_ascii_case("smime-type")
+                    && matches!(
+                        legacy_php_trim(param_value).to_ascii_lowercase().as_str(),
+                        "enveloped-data" | "authenveloped-data"
+                    )
+            })
+        })
+}
+
 fn legacy_body_content_type_eq(
     common: &imap_proto::BodyContentCommon<'_>,
     ty: &str,
@@ -1400,7 +1449,8 @@ fn legacy_body_param_eq(
 ) -> bool {
     common.ty.params.as_ref().is_some_and(|params| {
         params.iter().any(|(param_name, param_value)| {
-            param_name.eq_ignore_ascii_case(name) && param_value.trim().eq_ignore_ascii_case(value)
+            param_name.eq_ignore_ascii_case(name)
+                && legacy_php_trim(param_value).eq_ignore_ascii_case(value)
         })
     })
 }
@@ -2764,6 +2814,151 @@ mod tests {
         );
 
         assert!(!summary.has_attachments);
+    }
+
+    #[test]
+    fn legacy_message_summary_marks_top_level_encrypted_content_type() {
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            48,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            b"Subject: Encrypted\r\nContent-Type: multipart/encrypted\r\n\r\n",
+        );
+
+        assert!(summary.encrypted);
+    }
+
+    #[test]
+    fn legacy_message_summary_marks_parameterized_top_level_encrypted_content_type() {
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            48,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            b"Subject: Encrypted\r\nContent-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"\r\n\r\n",
+        );
+
+        assert!(summary.encrypted);
+    }
+
+    #[test]
+    fn legacy_message_summary_marks_pgp_encrypted_bodystructure() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common_with_params(
+                "multipart",
+                "encrypted",
+                None,
+                Some(vec![("protocol", " application/pgp-encrypted ")]),
+            ),
+            bodies: vec![
+                BodyStructure::Basic {
+                    common: test_body_common("application", "pgp-encrypted", None),
+                    other: test_body_single_part(11),
+                    extension: None,
+                },
+                BodyStructure::Basic {
+                    common: test_body_common("application", "octet-stream", None),
+                    other: test_body_single_part(1024),
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            49,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Encrypted\r\n\r\n",
+        );
+
+        assert!(summary.encrypted);
+    }
+
+    #[test]
+    fn legacy_message_summary_marks_smime_encrypted_bodystructure() {
+        let body = BodyStructure::Basic {
+            common: test_body_common_with_params(
+                "application",
+                "x-pkcs7-mime",
+                None,
+                Some(vec![("smime-type", " AuthEnveloped-Data ")]),
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            50,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Encrypted\r\n\r\n",
+        );
+
+        assert!(summary.encrypted);
+    }
+
+    #[test]
+    fn legacy_message_summary_does_not_mark_smime_signed_as_encrypted() {
+        let body = BodyStructure::Basic {
+            common: test_body_common_with_params(
+                "application",
+                "pkcs7-mime",
+                None,
+                Some(vec![("smime-type", "signed-data")]),
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            51,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Signed\r\n\r\n",
+        );
+
+        assert!(!summary.encrypted);
+    }
+
+    #[test]
+    fn legacy_message_summary_does_not_mark_non_pkcs7_smime_type_as_encrypted() {
+        let body = BodyStructure::Basic {
+            common: test_body_common_with_params(
+                "application",
+                "octet-stream",
+                None,
+                Some(vec![("smime-type", "enveloped-data")]),
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            52,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Not encrypted\r\n\r\n",
+        );
+
+        assert!(!summary.encrypted);
     }
 
     fn test_body_common(
