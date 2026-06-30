@@ -711,9 +711,7 @@ pub fn legacy_new_messages_mailbox_matches(mailbox: &str) -> bool {
 }
 
 pub fn legacy_message_list_search(search: &str) -> String {
-    search
-        .trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0b'))
-        .to_string()
+    legacy_php_trim(search).to_string()
 }
 
 pub fn legacy_message_list_sort(sort: &str, use_sort: bool) -> String {
@@ -876,7 +874,7 @@ fn header_value(raw: &[u8], name: &str) -> Option<String> {
         if line.starts_with(' ') || line.starts_with('\t') {
             if matched {
                 value.push(' ');
-                value.push_str(line.trim());
+                value.push_str(legacy_php_trim(line));
             }
             continue;
         }
@@ -884,8 +882,8 @@ fn header_value(raw: &[u8], name: &str) -> Option<String> {
         let Some((key, next)) = line.split_once(':') else {
             continue;
         };
-        if key.trim().eq_ignore_ascii_case(&wanted) {
-            value = next.trim().to_string();
+        if legacy_php_trim(key).eq_ignore_ascii_case(&wanted) {
+            value = legacy_php_trim(next).to_string();
             matched = true;
         }
     }
@@ -1239,7 +1237,7 @@ async fn fetch_legacy_new_messages(
         messages.push(LegacyNewMessage {
             folder: mailbox.to_string(),
             uid,
-            subject: header_value(header, "Subject").unwrap_or_default(),
+            subject: legacy_message_subject(&header_value(header, "Subject").unwrap_or_default()),
             from: header_value(header, "From").unwrap_or_default(),
         });
     }
@@ -1256,7 +1254,7 @@ fn legacy_message_summary_from_fetch<'a>(
     bodystructure: Option<&BodyStructure<'_>>,
     header: &[u8],
 ) -> LegacyMessageSummary {
-    let subject = header_value(header, "Subject").unwrap_or_default();
+    let subject = legacy_message_subject(&header_value(header, "Subject").unwrap_or_default());
     let message_id = header_value(header, "Message-ID")
         .or_else(|| header_value(header, "Message-Id"))
         .unwrap_or_default();
@@ -1309,6 +1307,14 @@ fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64
 
 fn legacy_strip_spaces(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn legacy_php_trim(value: &str) -> &str {
+    value.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0b'))
+}
+
+fn legacy_message_subject(value: &str) -> String {
+    legacy_php_trim(value).to_string()
 }
 
 fn legacy_body_has_attachments(body: &BodyStructure<'_>) -> bool {
@@ -2434,6 +2440,16 @@ mod tests {
     }
 
     #[test]
+    fn legacy_php_trim_matches_default_php_trim_chars() {
+        assert_eq!(legacy_php_trim(" \tHello\r\n"), "Hello");
+        assert_eq!(legacy_php_trim("\0\x0bHello\0"), "Hello");
+        assert_eq!(
+            legacy_php_trim("\u{00a0}Hello\u{00a0}"),
+            "\u{00a0}Hello\u{00a0}"
+        );
+    }
+
+    #[test]
     fn legacy_message_list_sort_matches_mailso_reported_sort() {
         assert_eq!(legacy_message_list_sort("", false), "");
         assert_eq!(legacy_message_list_sort("FROM", false), "");
@@ -2543,6 +2559,40 @@ mod tests {
             summary.references,
             "<one@example> <two@example> <three@example>"
         );
+    }
+
+    #[test]
+    fn legacy_message_summary_trims_subject_like_mailso() {
+        let header = b"Subject: \0\x0b Trimmed subject \x0b\0\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.subject, "Trimmed subject");
+    }
+
+    #[test]
+    fn legacy_message_summary_preserves_subject_nbsp_like_mailso() {
+        let header = b"Subject: \xc2\xa0 Trimmed subject \xc2\xa0 \r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.subject, "\u{00a0} Trimmed subject \u{00a0}");
     }
 
     #[test]
@@ -2818,6 +2868,15 @@ mod tests {
             Some("<id@example.com>".to_string())
         );
         assert_eq!(header_value(raw, "From"), None);
+    }
+
+    #[test]
+    fn header_value_preserves_non_php_trim_whitespace() {
+        let raw = b"Subject: \xc2\xa0first\xc2\xa0 \r\n\t \xc2\xa0continued\xc2\xa0 \r\n\r\n";
+        assert_eq!(
+            header_value(raw, "subject"),
+            Some("\u{00a0}first\u{00a0} \u{00a0}continued\u{00a0}".to_string())
+        );
     }
 
     #[test]
