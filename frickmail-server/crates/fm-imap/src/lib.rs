@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashSet, fmt, sync::Arc, time::Duration};
 
 use async_imap::{
     types::{Capabilities, Capability, Flag},
@@ -206,7 +206,30 @@ pub struct LegacyMessageSummary {
     pub size: u32,
     pub flags: Vec<String>,
     pub has_attachments: bool,
+    pub attachments: Vec<LegacyAttachmentSummary>,
     pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyAttachmentSummary {
+    #[serde(rename = "@Object")]
+    pub object: String,
+    pub folder: String,
+    pub uid: u32,
+    #[serde(rename = "mimeIndex")]
+    pub mime_index: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    #[serde(rename = "fileName")]
+    pub file_name: String,
+    #[serde(rename = "estimatedSize")]
+    pub estimated_size: u32,
+    #[serde(rename = "cId")]
+    pub c_id: String,
+    #[serde(rename = "contentLocation")]
+    pub content_location: String,
+    #[serde(rename = "isInline")]
+    pub is_inline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1277,6 +1300,7 @@ fn legacy_message_summary_from_fetch<'a>(
     let (date_timestamp, date_timestamp_source) =
         legacy_message_timestamp(&date, internal_timestamp);
     let flags = legacy_unique_flag_strings(flags.map(|flag| legacy_message_flag_string(&flag)));
+    let attachments = legacy_message_attachments(folder, uid, bodystructure);
 
     LegacyMessageSummary {
         folder: folder.to_string(),
@@ -1299,7 +1323,8 @@ fn legacy_message_summary_from_fetch<'a>(
         date_timestamp_source: date_timestamp_source.to_string(),
         size,
         flags,
-        has_attachments: bodystructure.is_some_and(legacy_body_has_attachments),
+        has_attachments: !attachments.is_empty(),
+        attachments,
         preview: None,
     }
 }
@@ -1555,30 +1580,6 @@ fn legacy_body_has_encrypted_part(body: &BodyStructure<'_>) -> bool {
         }
 }
 
-fn legacy_body_has_attachments(body: &BodyStructure<'_>) -> bool {
-    legacy_body_has_attachments_with_parent(body, false)
-}
-
-fn legacy_body_has_attachments_with_parent(
-    body: &BodyStructure<'_>,
-    parent_pgp_encrypted: bool,
-) -> bool {
-    let current_pgp_encrypted = legacy_body_is_pgp_encrypted(body);
-    if !parent_pgp_encrypted && legacy_body_part_is_attachment(body) {
-        return true;
-    }
-
-    match body {
-        BodyStructure::Message { body, .. } => {
-            legacy_body_has_attachments_with_parent(body, current_pgp_encrypted)
-        }
-        BodyStructure::Multipart { bodies, .. } => bodies
-            .iter()
-            .any(|child| legacy_body_has_attachments_with_parent(child, current_pgp_encrypted)),
-        _ => false,
-    }
-}
-
 fn legacy_body_part_is_attachment(body: &BodyStructure<'_>) -> bool {
     let common = match body {
         BodyStructure::Basic { common, .. }
@@ -1588,6 +1589,395 @@ fn legacy_body_part_is_attachment(body: &BodyStructure<'_>) -> bool {
     };
 
     is_attachment(common) || (!legacy_body_is_multipart(common) && !legacy_body_is_text(common))
+}
+
+fn legacy_message_attachments(
+    folder: &str,
+    uid: u32,
+    bodystructure: Option<&BodyStructure<'_>>,
+) -> Vec<LegacyAttachmentSummary> {
+    let mut attachments = Vec::new();
+    if let Some(bodystructure) = bodystructure {
+        legacy_collect_attachments(folder, uid, bodystructure, "", false, &mut attachments);
+    }
+    attachments
+}
+
+fn legacy_collect_attachments(
+    folder: &str,
+    uid: u32,
+    body: &BodyStructure<'_>,
+    part_id: &str,
+    parent_pgp_encrypted: bool,
+    attachments: &mut Vec<LegacyAttachmentSummary>,
+) {
+    let current_part_id = legacy_body_part_id(body, part_id);
+    let current_pgp_encrypted = legacy_body_is_pgp_encrypted(body);
+    let current_is_attachment = legacy_body_part_is_attachment(body);
+
+    if !parent_pgp_encrypted && current_is_attachment {
+        attachments.push(legacy_attachment_summary(
+            folder,
+            uid,
+            body,
+            &current_part_id,
+        ));
+    }
+
+    match body {
+        BodyStructure::Message { body, .. } if !current_is_attachment => {
+            legacy_collect_attachments(
+                folder,
+                uid,
+                body,
+                &current_part_id,
+                current_pgp_encrypted,
+                attachments,
+            );
+        }
+        BodyStructure::Multipart { bodies, .. } => {
+            let child_prefix = legacy_child_part_prefix(part_id);
+            for (index, child) in bodies.iter().enumerate() {
+                let child_part_id = format!("{}{index}", child_prefix, index = index + 1);
+                legacy_collect_attachments(
+                    folder,
+                    uid,
+                    child,
+                    &child_part_id,
+                    current_pgp_encrypted,
+                    attachments,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn legacy_body_part_id(body: &BodyStructure<'_>, part_id: &str) -> String {
+    if !part_id.is_empty() {
+        return part_id.to_string();
+    }
+
+    if matches!(body, BodyStructure::Multipart { .. }) {
+        "TEXT".to_string()
+    } else {
+        "1".to_string()
+    }
+}
+
+fn legacy_child_part_prefix(part_id: &str) -> String {
+    if part_id.is_empty() {
+        String::new()
+    } else {
+        format!("{part_id}.")
+    }
+}
+
+fn legacy_attachment_summary(
+    folder: &str,
+    uid: u32,
+    body: &BodyStructure<'_>,
+    part_id: &str,
+) -> LegacyAttachmentSummary {
+    let common = legacy_body_common(body);
+    let single = legacy_body_single_part(body);
+    let mime_type = legacy_body_mime_type(common);
+    let is_inline = legacy_body_is_inline(common, single);
+
+    LegacyAttachmentSummary {
+        object: "Object/Attachment".to_string(),
+        folder: folder.to_string(),
+        uid,
+        mime_index: part_id.to_string(),
+        mime_type: mime_type.clone(),
+        file_name: legacy_secure_file_name(&legacy_body_file_name(common, &mime_type, part_id)),
+        estimated_size: single.map_or(0, legacy_estimated_attachment_size),
+        c_id: single
+            .and_then(|single| single.id.as_ref())
+            .map_or_else(String::new, |id| id.trim().to_string()),
+        content_location: common
+            .location
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string),
+        is_inline,
+    }
+}
+
+fn legacy_body_common<'a>(body: &'a BodyStructure<'a>) -> &'a imap_proto::BodyContentCommon<'a> {
+    match body {
+        BodyStructure::Basic { common, .. }
+        | BodyStructure::Text { common, .. }
+        | BodyStructure::Message { common, .. }
+        | BodyStructure::Multipart { common, .. } => common,
+    }
+}
+
+fn legacy_body_single_part<'a>(
+    body: &'a BodyStructure<'a>,
+) -> Option<&'a imap_proto::BodyContentSinglePart<'a>> {
+    match body {
+        BodyStructure::Basic { other, .. }
+        | BodyStructure::Text { other, .. }
+        | BodyStructure::Message { other, .. } => Some(other),
+        BodyStructure::Multipart { .. } => None,
+    }
+}
+
+fn legacy_body_mime_type(common: &imap_proto::BodyContentCommon<'_>) -> String {
+    format!("{}/{}", common.ty.ty, common.ty.subtype)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn legacy_body_file_name(
+    common: &imap_proto::BodyContentCommon<'_>,
+    mime_type: &str,
+    part_id: &str,
+) -> String {
+    let content_name =
+        legacy_decode_body_attr_parameter(common.ty.params.as_deref(), "name").unwrap_or_default();
+    let configured = common
+        .disposition
+        .as_ref()
+        .and_then(|disposition| {
+            disposition.params.as_deref().map(|params| {
+                legacy_decode_body_attr_parameter(Some(params), "filename").unwrap_or_default()
+            })
+        })
+        .unwrap_or(content_name);
+    let configured = legacy_php_trim(&configured);
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+
+    legacy_default_attachment_file_name(common, mime_type, part_id)
+}
+
+fn legacy_decode_body_attr_parameter(
+    params: Option<&[(Cow<'_, str>, Cow<'_, str>)]>,
+    name: &str,
+) -> Option<String> {
+    let params = params?;
+    if let Some(value) = legacy_body_param_exact(params, name) {
+        return Some(value.to_string());
+    }
+
+    let encoded_name = format!("{name}*");
+    if let Some(value) = legacy_body_param_exact(params, &encoded_name) {
+        return Some(legacy_decode_rfc2231_value(value));
+    }
+
+    let mut segments = params
+        .iter()
+        .filter_map(|(key, value)| {
+            legacy_body_param_continuation_index(key, name).map(|index| (index, value.as_ref()))
+        })
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+    segments.sort_by_key(|(index, _)| *index);
+
+    let mut charset = None;
+    let mut charset_index = None;
+    let mut joined = String::new();
+    for (index, value) in segments {
+        let mut value = value;
+        if charset_index.is_none_or(|charset_index| charset_index < index) {
+            if let Some((candidate_charset, encoded)) = value.split_once("''") {
+                if !candidate_charset.is_empty() {
+                    charset = Some(candidate_charset.to_string());
+                    charset_index = Some(index);
+                    value = encoded;
+                }
+            }
+        }
+        joined.push_str(value);
+    }
+
+    Some(legacy_decode_percent_encoded(&joined, charset.as_deref()))
+}
+
+fn legacy_body_param_exact<'a>(
+    params: &'a [(Cow<'_, str>, Cow<'a, str>)],
+    name: &str,
+) -> Option<&'a str> {
+    params
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_ref()))
+}
+
+fn legacy_body_param_continuation_index(key: &str, name: &str) -> Option<usize> {
+    let rest = key.strip_prefix(name).or_else(|| {
+        key.get(..name.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+            .then(|| &key[name.len()..])
+    })?;
+    let rest = rest.strip_prefix('*')?;
+    let rest = rest.strip_suffix('*')?;
+    (!rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()))
+        .then(|| rest.parse::<usize>().ok())
+        .flatten()
+}
+
+fn legacy_decode_rfc2231_value(value: &str) -> String {
+    if let Some((charset, encoded)) = value.split_once("''") {
+        legacy_decode_percent_encoded(encoded, Some(charset))
+    } else {
+        legacy_decode_percent_encoded(value, None)
+    }
+}
+
+fn legacy_decode_percent_encoded(value: &str, charset: Option<&str>) -> String {
+    let bytes = legacy_percent_decode_bytes(value);
+    if charset.is_some_and(|charset| {
+        charset.eq_ignore_ascii_case("iso-8859-1") || charset.eq_ignore_ascii_case("latin1")
+    }) {
+        return bytes.into_iter().map(char::from).collect();
+    }
+
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn legacy_percent_decode_bytes(value: &str) -> Vec<u8> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (
+                legacy_hex_value(bytes[index + 1]),
+                legacy_hex_value(bytes[index + 2]),
+            ) {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    decoded
+}
+
+fn legacy_hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn legacy_default_attachment_file_name(
+    common: &imap_proto::BodyContentCommon<'_>,
+    mime_type: &str,
+    part_id: &str,
+) -> String {
+    let suffix = format!("-{part_id}");
+    if mime_type == "message/rfc822" {
+        return format!("message{suffix}.eml");
+    }
+    if mime_type == "text/calendar" {
+        return format!("calendar{suffix}.ics");
+    }
+    if mime_type == "text/plain" {
+        return format!("part{suffix}.txt");
+    }
+
+    let ty = common.ty.ty.as_ref().to_ascii_lowercase();
+    let subtype = common.ty.subtype.as_ref().to_ascii_lowercase();
+    if ty == "text"
+        && matches!(
+            subtype.as_str(),
+            "vcard" | "html" | "csv" | "xml" | "css" | "asp"
+        )
+    {
+        return format!("part{suffix}.{subtype}");
+    }
+    if ty == "image"
+        && matches!(
+            subtype.as_str(),
+            "png" | "jpeg" | "gif" | "bmp" | "cgm" | "ief" | "tiff" | "webp"
+        )
+    {
+        return format!("part{suffix}.{subtype}");
+    }
+    if !mime_type.is_empty() {
+        return mime_type.replace('/', &format!("{suffix}."));
+    }
+
+    format!(
+        "{}{suffix}",
+        if legacy_body_is_inline(common, None) {
+            "inline"
+        } else {
+            "part"
+        }
+    )
+}
+
+fn legacy_estimated_attachment_size(single: &imap_proto::BodyContentSinglePart<'_>) -> u32 {
+    let coefficient = match &single.transfer_encoding {
+        imap_proto::ContentEncoding::Base64 => 0.75,
+        imap_proto::ContentEncoding::QuotedPrintable => 0.44,
+        _ => 1.0,
+    };
+    (f64::from(single.octets) * coefficient) as u32
+}
+
+fn legacy_body_is_inline(
+    common: &imap_proto::BodyContentCommon<'_>,
+    single: Option<&imap_proto::BodyContentSinglePart<'_>>,
+) -> bool {
+    common
+        .disposition
+        .as_ref()
+        .is_some_and(|disposition| disposition.ty.eq_ignore_ascii_case("inline"))
+        || single
+            .and_then(|single| single.id.as_ref())
+            .is_some_and(|id| !id.trim().is_empty())
+}
+
+fn legacy_secure_file_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if legacy_unicode_other(ch)
+                || matches!(
+                    ch,
+                    '|' | '\\' | '?' | '*' | '<' | '"' | ':' | '>' | '+' | '[' | ']' | '/' | '&'
+                )
+            {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn legacy_unicode_other(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{00ad}'
+                | '\u{034f}'
+                | '\u{061c}'
+                | '\u{115f}'..='\u{1160}'
+                | '\u{17b4}'..='\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{e000}'..='\u{f8ff}'
+                | '\u{f0000}'..='\u{ffffd}'
+                | '\u{100000}'..='\u{10fffd}'
+        )
 }
 
 fn legacy_body_is_text(common: &imap_proto::BodyContentCommon<'_>) -> bool {
@@ -3086,6 +3476,207 @@ mod tests {
     }
 
     #[test]
+    fn legacy_message_summary_collects_attachment_metadata_like_mailso() {
+        let attachment = BodyStructure::Basic {
+            common: test_body_common_full(
+                "application",
+                "pdf",
+                Some(vec![("name", "content-name.pdf")]),
+                Some("attachment"),
+                Some(vec![("filename", "report/final?.pdf")]),
+                Some("cid:report"),
+            ),
+            other: test_body_single_part_full(
+                1024,
+                imap_proto::ContentEncoding::Base64,
+                Some(" <part-id@example> "),
+            ),
+            extension: None,
+        };
+        let body = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", None),
+                    other: test_body_single_part(42),
+                    lines: 1,
+                    extension: None,
+                },
+                attachment,
+            ],
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: Attachment\r\n\r\n",
+        );
+
+        assert!(summary.has_attachments);
+        assert_eq!(summary.attachments.len(), 1);
+        let attachment = &summary.attachments[0];
+        assert_eq!(attachment.object, "Object/Attachment");
+        assert_eq!(attachment.folder, "INBOX");
+        assert_eq!(attachment.uid, 44);
+        assert_eq!(attachment.mime_index, "2");
+        assert_eq!(attachment.mime_type, "application/pdf");
+        assert_eq!(attachment.file_name, "report-final-.pdf");
+        assert_eq!(attachment.estimated_size, 768);
+        assert_eq!(attachment.c_id, "<part-id@example>");
+        assert_eq!(attachment.content_location, "cid:report");
+        assert!(attachment.is_inline);
+    }
+
+    #[test]
+    fn legacy_message_summary_keeps_content_name_without_disposition_params() {
+        let body = BodyStructure::Basic {
+            common: test_body_common_full(
+                "application",
+                "pdf",
+                Some(vec![("name", "invoice.pdf")]),
+                Some("attachment"),
+                None,
+                None,
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            46,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: PDF\r\n\r\n",
+        );
+
+        assert_eq!(summary.attachments.len(), 1);
+        assert_eq!(summary.attachments[0].file_name, "invoice.pdf");
+    }
+
+    #[test]
+    fn legacy_message_summary_decodes_rfc2231_attachment_names() {
+        let body = BodyStructure::Basic {
+            common: test_body_common_full(
+                "application",
+                "octet-stream",
+                None,
+                Some("attachment"),
+                Some(vec![("filename*", "UTF-8''invoice%20%E2%82%AC.pdf")]),
+                None,
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            46,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: PDF\r\n\r\n",
+        );
+
+        assert_eq!(summary.attachments.len(), 1);
+        assert_eq!(summary.attachments[0].file_name, "invoice €.pdf");
+    }
+
+    #[test]
+    fn legacy_message_summary_decodes_continued_rfc2231_attachment_names() {
+        let body = BodyStructure::Basic {
+            common: test_body_common_full(
+                "application",
+                "octet-stream",
+                None,
+                Some("attachment"),
+                Some(vec![
+                    ("filename*1*", "name.txt"),
+                    ("filename*0*", "UTF-8''long%20"),
+                ]),
+                None,
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            46,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: PDF\r\n\r\n",
+        );
+
+        assert_eq!(summary.attachments.len(), 1);
+        assert_eq!(summary.attachments[0].file_name, "long name.txt");
+    }
+
+    #[test]
+    fn legacy_message_summary_secures_attachment_names_like_mailso() {
+        let body = BodyStructure::Basic {
+            common: test_body_common_full(
+                "application",
+                "pdf",
+                None,
+                Some("attachment"),
+                Some(vec![("filename", "bad\u{200b}\u{e000}&name?.pdf")]),
+                None,
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            46,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: PDF\r\n\r\n",
+        );
+
+        assert_eq!(summary.attachments.len(), 1);
+        assert_eq!(summary.attachments[0].file_name, "bad---name-.pdf");
+    }
+
+    #[test]
+    fn legacy_message_summary_generates_default_attachment_names_like_mailso() {
+        let body = BodyStructure::Basic {
+            common: test_body_common("application", "pdf", None),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            46,
+            None,
+            1024,
+            Vec::<Flag<'_>>::new().into_iter(),
+            Some(&body),
+            b"Subject: PDF\r\n\r\n",
+        );
+
+        assert_eq!(summary.attachments.len(), 1);
+        assert_eq!(summary.attachments[0].mime_index, "1");
+        assert_eq!(summary.attachments[0].file_name, "application-1.pdf");
+        assert_eq!(summary.attachments[0].estimated_size, 1024);
+        assert!(!summary.attachments[0].is_inline);
+    }
+
+    #[test]
     fn legacy_message_summary_keeps_inline_bodystructure_unattached() {
         let body = BodyStructure::Text {
             common: test_body_common("text", "plain", None),
@@ -3105,6 +3696,7 @@ mod tests {
         );
 
         assert!(!summary.has_attachments);
+        assert!(summary.attachments.is_empty());
     }
 
     #[test]
@@ -3126,6 +3718,8 @@ mod tests {
         );
 
         assert!(summary.has_attachments);
+        assert_eq!(summary.attachments.len(), 1);
+        assert_eq!(summary.attachments[0].file_name, "application-1.pdf");
     }
 
     #[test]
@@ -3163,6 +3757,7 @@ mod tests {
         );
 
         assert!(!summary.has_attachments);
+        assert!(summary.attachments.is_empty());
     }
 
     #[test]
@@ -3324,6 +3919,17 @@ mod tests {
         disposition: Option<&'static str>,
         params: Option<Vec<(&'static str, &'static str)>>,
     ) -> imap_proto::BodyContentCommon<'static> {
+        test_body_common_full(ty, subtype, params, disposition, None, None)
+    }
+
+    fn test_body_common_full(
+        ty: &'static str,
+        subtype: &'static str,
+        params: Option<Vec<(&'static str, &'static str)>>,
+        disposition: Option<&'static str>,
+        disposition_params: Option<Vec<(&'static str, &'static str)>>,
+        location: Option<&'static str>,
+    ) -> imap_proto::BodyContentCommon<'static> {
         imap_proto::BodyContentCommon {
             ty: imap_proto::ContentType {
                 ty: Cow::Borrowed(ty),
@@ -3337,19 +3943,32 @@ mod tests {
             },
             disposition: disposition.map(|ty| imap_proto::ContentDisposition {
                 ty: Cow::Borrowed(ty),
-                params: None,
+                params: disposition_params.map(|params| {
+                    params
+                        .into_iter()
+                        .map(|(name, value)| (Cow::Borrowed(name), Cow::Borrowed(value)))
+                        .collect()
+                }),
             }),
             language: None,
-            location: None,
+            location: location.map(Cow::Borrowed),
         }
     }
 
     fn test_body_single_part(octets: u32) -> imap_proto::BodyContentSinglePart<'static> {
+        test_body_single_part_full(octets, imap_proto::ContentEncoding::SevenBit, None)
+    }
+
+    fn test_body_single_part_full(
+        octets: u32,
+        transfer_encoding: imap_proto::ContentEncoding<'static>,
+        id: Option<&'static str>,
+    ) -> imap_proto::BodyContentSinglePart<'static> {
         imap_proto::BodyContentSinglePart {
-            id: None,
+            id: id.map(Cow::Borrowed),
             md5: None,
             description: None,
-            transfer_encoding: imap_proto::ContentEncoding::SevenBit,
+            transfer_encoding,
             octets,
         }
     }
