@@ -1261,7 +1261,7 @@ fn legacy_message_summary_from_fetch<'a>(
         .or_else(|| header_value(header, "Message-Id"))
         .unwrap_or_default();
     let in_reply_to = header_value(header, "In-Reply-To").unwrap_or_default();
-    let references = header_value(header, "References").unwrap_or_default();
+    let references = legacy_strip_spaces(&header_value(header, "References").unwrap_or_default());
     let from = header_value(header, "From").unwrap_or_default();
     let reply_to = header_value(header, "Reply-To").unwrap_or_default();
     let to = header_value(header, "To").unwrap_or_default();
@@ -1305,6 +1305,10 @@ fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64
     }
 
     (internal_timestamp.unwrap_or_default(), "internal")
+}
+
+fn legacy_strip_spaces(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn legacy_body_has_attachments(body: &BodyStructure<'_>) -> bool {
@@ -2504,6 +2508,41 @@ mod tests {
             "$replied"
         );
         assert_eq!(legacy_flag_string(&Flag::Answered), "\\answered");
+    }
+
+    #[test]
+    fn legacy_strip_spaces_matches_mailso_whitespace_collapse() {
+        assert_eq!(legacy_strip_spaces(""), "");
+        assert_eq!(legacy_strip_spaces(" \t\r\n "), "");
+        assert_eq!(
+            legacy_strip_spaces(" <one@example> \r\n\t <two@example>   <three@example> "),
+            "<one@example> <two@example> <three@example>"
+        );
+        assert_eq!(
+            legacy_strip_spaces("<one@example>\u{00a0}<two@example>\u{2003}<three@example>"),
+            "<one@example> <two@example> <three@example>"
+        );
+    }
+
+    #[test]
+    fn legacy_message_summary_strips_references_like_mailso() {
+        let header =
+            b"Subject: Refs\r\nReferences: <one@example>\r\n\t <two@example>   <three@example>\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(
+            summary.references,
+            "<one@example> <two@example> <three@example>"
+        );
     }
 
     #[test]
