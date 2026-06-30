@@ -26,12 +26,12 @@ use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, copy_messages,
     delete_messages, fetch_legacy_folder_information, fetch_legacy_message_list,
     fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
-    legacy_message_hash, move_messages, store_message_flag, store_message_keyword,
-    store_seen_to_all, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
-    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation, LegacyMessageList,
-    LegacyMessageListRequest, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
-    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-    RuleExecutionReport,
+    legacy_message_hash, legacy_message_list_cache_key, legacy_message_list_params_hash,
+    move_messages, store_message_flag, store_message_keyword, store_seen_to_all, validate_eml,
+    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
+    ImapMoveOptions, LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest,
+    MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField,
+    RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::parse_body;
 use fm_plugin_compat::{
@@ -94,6 +94,13 @@ struct LongPollNewMailTiming {
 struct LegacyMessageListRawKeyRequest {
     request: LegacyMessageListRequest,
     cache_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyMessageListRawCacheState {
+    request_hash_validator: String,
+    current_cache_key: String,
+    verify_existing_cache: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -4793,38 +4800,71 @@ where
     F: FnOnce(ImapConnectionConfig, String, LegacyMessageListRequest) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<LegacyMessageList>>,
 {
-    let (config, password) =
-        match legacy_imap_connection_context(state, original_action, payload, session).await {
-            Ok(connection) => connection,
-            Err(response) => return response,
-        };
-    let request = match legacy_message_list_raw_key_request_from_payload(payload) {
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let hide_deleted = match legacy_message_list_hide_deleted_setting(
+        state,
+        original_action,
+        user.user_id,
+    )
+    .await
+    {
+        Ok(hide_deleted) => hide_deleted,
+        Err(response) => return response,
+    };
+    let (config, password) = match imap_action_connection_for_selected_or_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+    let (request, raw_cache_hash) = match legacy_message_list_raw_key_request_from_payload(payload)
+    {
         Ok(Some(raw_key_request)) => {
             let LegacyMessageListRawKeyRequest {
                 request,
-                cache_hash: _cache_hash,
+                cache_hash,
             } = raw_key_request;
-            request
+            (request, Some(cache_hash))
         }
         Ok(None) => match legacy_message_list_request_from_payload(payload) {
-            Ok(request) => request,
+            Ok(request) => (request, None),
             Err(message) => return json_result_error(original_action, message),
         },
         Err(message) => return json_result_error(original_action, message),
     };
 
-    let result = tokio::time::timeout(fetch_deadline, fetcher(config, password, request))
+    let result = tokio::time::timeout(fetch_deadline, fetcher(config, password, request.clone()))
         .await
         .map_err(|_| FrickmailError::Upstream("Message list fetch timed out".to_string()));
 
     match result {
-        Ok(Ok(list)) => json_value_envelope(
-            StatusCode::OK,
-            original_action,
-            json!({
-                "Result": legacy_message_list_json(&list)
-            }),
-        ),
+        Ok(Ok(list)) => {
+            let _raw_cache_state = raw_cache_hash.as_deref().and_then(|cache_hash| {
+                legacy_message_list_raw_cache_state(
+                    cache_hash,
+                    &request,
+                    &list.folder.etag,
+                    hide_deleted,
+                )
+            });
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({
+                    "Result": legacy_message_list_json(&list)
+                }),
+            )
+        }
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
 }
@@ -4856,6 +4896,7 @@ fn legacy_message_list_request_from_payload(
         search: payload_string(payload, "search").unwrap_or_default(),
         sort: payload_string(payload, "sort").unwrap_or_default(),
         prev_uid_next,
+        use_threads,
         thread_uid,
         thread_algorithm,
     })
@@ -4916,6 +4957,77 @@ fn legacy_raw_key_json(raw_key: &str) -> Option<Value> {
         .or_else(|_| URL_SAFE.decode(raw_key))
         .ok()?;
     serde_json::from_slice::<Value>(&decoded).ok()
+}
+
+fn legacy_message_list_raw_cache_state(
+    request_cache_hash: &str,
+    request: &LegacyMessageListRequest,
+    current_folder_etag: &str,
+    hide_deleted: bool,
+) -> Option<LegacyMessageListRawCacheState> {
+    if request_cache_hash.is_empty() || current_folder_etag.is_empty() {
+        return None;
+    }
+
+    let request_hash_validator = legacy_message_list_request_hash_validator(request_cache_hash)?;
+    let params_hash = legacy_message_list_params_hash(request, hide_deleted, false, true);
+    let current_cache_key = legacy_message_list_cache_key(&params_hash, current_folder_etag);
+
+    Some(LegacyMessageListRawCacheState {
+        verify_existing_cache: request_hash_validator == current_folder_etag,
+        request_hash_validator,
+        current_cache_key,
+    })
+}
+
+fn legacy_message_list_request_hash_validator(request_cache_hash: &str) -> Option<String> {
+    request_cache_hash
+        .split('-')
+        .nth(1)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+async fn legacy_message_list_hide_deleted_setting(
+    state: &AppState,
+    original_action: &str,
+    user_id: i64,
+) -> Result<bool, Response> {
+    let Some(pool) = state.db_pool() else {
+        return Ok(true);
+    };
+
+    match SqlxUserRepository::find_by_id(pool, user_id).await {
+        Ok(Some(user)) => Ok(legacy_message_list_hide_deleted_from_settings(
+            &user.settings,
+        )),
+        Ok(None) => Err(json_result_error(original_action, "Not authenticated")),
+        Err(err) => Err(json_result_error(original_action, &err.public_message())),
+    }
+}
+
+fn legacy_message_list_hide_deleted_from_settings(settings: &Value) -> bool {
+    settings
+        .get("HideDeleted")
+        .or_else(|| settings.get("hideDeleted"))
+        .map(legacy_php_truthy)
+        .unwrap_or(true)
+}
+
+fn legacy_php_truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::Null => false,
+        Value::Number(number) => number
+            .as_i64()
+            .map(|value| value != 0)
+            .or_else(|| number.as_u64().map(|value| value != 0))
+            .or_else(|| number.as_f64().map(|value| value != 0.0))
+            .unwrap_or(false),
+        Value::String(value) => !value.is_empty() && value != "0",
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+    }
 }
 
 async fn native_legacy_folder_information(
@@ -11116,6 +11228,7 @@ mod tests {
         assert_eq!(request.search, "from:alice");
         assert_eq!(request.sort, "REVERSE DATE");
         assert_eq!(request.prev_uid_next, Some(52));
+        assert!(request.use_threads);
         assert_eq!(request.thread_uid, 77);
         assert_eq!(request.thread_algorithm, "REFERENCES");
     }
@@ -11138,6 +11251,7 @@ mod tests {
                 search: String::new(),
                 sort: String::new(),
                 prev_uid_next: None,
+                use_threads: false,
                 thread_uid: 0,
                 thread_algorithm: String::new(),
             }
@@ -11161,6 +11275,7 @@ mod tests {
         assert_eq!(threaded.search, "subject:test");
         assert_eq!(threaded.sort, "DATE");
         assert_eq!(threaded.prev_uid_next, Some(42));
+        assert!(threaded.use_threads);
         assert_eq!(threaded.thread_uid, 77);
         assert_eq!(threaded.thread_algorithm, "ORDEREDSUBJECT");
 
@@ -11214,8 +11329,90 @@ mod tests {
         assert_eq!(decoded.request.search, "from:bob");
         assert_eq!(decoded.request.sort, "REVERSE DATE");
         assert_eq!(decoded.request.prev_uid_next, Some(123));
+        assert!(decoded.request.use_threads);
         assert_eq!(decoded.request.thread_uid, 77);
         assert_eq!(decoded.request.thread_algorithm, "REFERENCES");
+    }
+
+    #[test]
+    fn legacy_message_list_raw_cache_state_matches_mailso_key_rules() {
+        let request = LegacyMessageListRequest {
+            mailbox: "INBOX".to_string(),
+            offset: 15,
+            limit: 25,
+            search: "from:bob".to_string(),
+            sort: "REVERSE DATE".to_string(),
+            prev_uid_next: Some(123),
+            use_threads: true,
+            thread_uid: 77,
+            thread_algorithm: "REFERENCES".to_string(),
+        };
+
+        let state = super::legacy_message_list_raw_cache_state(
+            "previous-etag-account",
+            &request,
+            "etag",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(state.request_hash_validator, "etag");
+        assert!(state.verify_existing_cache);
+        assert_eq!(
+            state.current_cache_key,
+            "8ae7bf17ace2089e3708d4eda1bb88ff-etag"
+        );
+        assert_eq!(
+            super::legacy_message_list_raw_cache_state(
+                "previous-etag-account",
+                &request,
+                "etag",
+                false,
+            )
+            .unwrap()
+            .current_cache_key,
+            "d7e2e978346bca7156523bceddb5b45d-etag"
+        );
+
+        let frontend_shape =
+            super::legacy_message_list_raw_cache_state("etag-account", &request, "etag", true)
+                .unwrap();
+        assert_eq!(frontend_shape.request_hash_validator, "account");
+        assert!(!frontend_shape.verify_existing_cache);
+
+        let stale = super::legacy_message_list_raw_cache_state(
+            "previous-oldetag-account",
+            &request,
+            "etag",
+            true,
+        )
+        .unwrap();
+        assert!(!stale.verify_existing_cache);
+        assert_eq!(
+            stale.current_cache_key,
+            "8ae7bf17ace2089e3708d4eda1bb88ff-etag"
+        );
+
+        assert_eq!(
+            super::legacy_message_list_raw_cache_state("notenoughparts", &request, "etag", true),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_message_list_hide_deleted_setting_matches_php_default() {
+        assert!(super::legacy_message_list_hide_deleted_from_settings(
+            &json!({})
+        ));
+        assert!(super::legacy_message_list_hide_deleted_from_settings(
+            &json!({"HideDeleted": 1})
+        ));
+        assert!(!super::legacy_message_list_hide_deleted_from_settings(
+            &json!({"HideDeleted": "0"})
+        ));
+        assert!(!super::legacy_message_list_hide_deleted_from_settings(
+            &json!({"hideDeleted": false})
+        ));
     }
 
     #[test]

@@ -244,6 +244,7 @@ pub struct LegacyMessageListRequest {
     pub search: String,
     pub sort: String,
     pub prev_uid_next: Option<u32>,
+    pub use_threads: bool,
     pub thread_uid: u32,
     pub thread_algorithm: String,
 }
@@ -845,6 +846,45 @@ pub fn legacy_new_uid_range(prev_uid_next: Option<u32>, uid_next: Option<u32>) -
 
 pub fn legacy_message_hash(folder: &str, uid: u32) -> String {
     md5_hex(format!("{folder}{uid}"))
+}
+
+pub fn legacy_message_list_params_hash(
+    request: &LegacyMessageListRequest,
+    hide_deleted: bool,
+    search_fuzzy: bool,
+    use_sort: bool,
+) -> String {
+    md5_hex(
+        [
+            request.mailbox.clone(),
+            request.offset.to_string(),
+            request.limit.to_string(),
+            if hide_deleted { "1" } else { "0" }.to_string(),
+            request.search.clone(),
+            if search_fuzzy { "1" } else { "0" }.to_string(),
+            if use_sort {
+                request.sort.clone()
+            } else {
+                "0".to_string()
+            },
+            if request.use_threads {
+                request.thread_uid.to_string()
+            } else {
+                String::new()
+            },
+            if request.use_threads {
+                request.thread_algorithm.clone()
+            } else {
+                String::new()
+            },
+            request.prev_uid_next.unwrap_or_default().to_string(),
+        ]
+        .join("-"),
+    )
+}
+
+pub fn legacy_message_list_cache_key(params_hash: &str, folder_etag: &str) -> String {
+    format!("{params_hash}-{folder_etag}")
 }
 
 fn md5_hex(input: impl AsRef<[u8]>) -> String {
@@ -4094,6 +4134,28 @@ mod tests {
         assert_eq!(
             legacy_message_hash("INBOX", 44),
             "2a7cf377296d50a49291639593793425"
+        );
+        let request = LegacyMessageListRequest {
+            mailbox: "INBOX".to_string(),
+            offset: 15,
+            limit: 25,
+            search: "from:bob".to_string(),
+            sort: "REVERSE DATE".to_string(),
+            prev_uid_next: Some(123),
+            use_threads: true,
+            thread_uid: 77,
+            thread_algorithm: "REFERENCES".to_string(),
+        };
+        assert_eq!(
+            legacy_message_list_params_hash(&request, true, false, true),
+            "8ae7bf17ace2089e3708d4eda1bb88ff"
+        );
+        assert_eq!(
+            legacy_message_list_cache_key(
+                &legacy_message_list_params_hash(&request, true, false, true),
+                "etag"
+            ),
+            "8ae7bf17ace2089e3708d4eda1bb88ff-etag"
         );
         assert_eq!(
             legacy_uid_sequence_set(&[42, 41, 42, 0]),
