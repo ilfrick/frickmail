@@ -5680,13 +5680,21 @@ fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
         "name": info.name,
         "uidNext": info.uid_next,
         "uidValidity": info.uid_validity,
-        "totalEmails": info.total_emails,
-        "unreadEmails": info.unread_emails,
-        "highestModSeq": info.highest_modseq,
-        "etag": info.etag,
-        "permanentFlags": info.permanent_flags,
         "newMessages": info.new_messages.iter().map(legacy_new_message_json).collect::<Vec<_>>(),
     });
+    if let Some(total_emails) = info.total_emails {
+        value["totalEmails"] = json!(total_emails);
+        value["unreadEmails"] = json!(info.unread_emails);
+    }
+    if let Some(highest_modseq) = info.highest_modseq {
+        value["highestModSeq"] = json!(highest_modseq);
+    }
+    if !info.etag.is_empty() {
+        value["etag"] = json!(info.etag);
+    }
+    if !info.permanent_flags.is_empty() {
+        value["permanentFlags"] = json!(info.permanent_flags);
+    }
     if let Some(messages_flags) = &info.messages_flags {
         value["messagesFlags"] = json!(messages_flags
             .iter()
@@ -11525,6 +11533,61 @@ mod tests {
         assert!(!super::legacy_message_list_hide_deleted_from_settings(
             &json!({"hideDeleted": false})
         ));
+    }
+
+    #[test]
+    fn legacy_folder_information_json_omits_php_optional_fields() {
+        let value = super::legacy_folder_information_json(&LegacyFolderInformation {
+            name: "Archive".to_string(),
+            uid_next: Some(9),
+            uid_validity: Some(4),
+            total_emails: None,
+            unread_emails: None,
+            highest_modseq: None,
+            permanent_flags: Vec::new(),
+            etag: String::new(),
+            messages_flags: None,
+            new_messages: Vec::new(),
+        });
+        let object = value.as_object().unwrap();
+
+        assert_eq!(value["id"], Value::Null);
+        assert_eq!(value["name"], "Archive");
+        assert_eq!(value["uidNext"], 9);
+        assert_eq!(value["uidValidity"], 4);
+        assert!(object.contains_key("newMessages"));
+        assert!(!object.contains_key("totalEmails"));
+        assert!(!object.contains_key("unreadEmails"));
+        assert!(!object.contains_key("highestModSeq"));
+        assert!(!object.contains_key("etag"));
+        assert!(!object.contains_key("permanentFlags"));
+        assert!(!object.contains_key("messagesFlags"));
+
+        let counts_with_unknown_unread =
+            super::legacy_folder_information_json(&LegacyFolderInformation {
+                name: "Archive".to_string(),
+                uid_next: Some(9),
+                uid_validity: Some(4),
+                total_emails: Some(7),
+                unread_emails: None,
+                highest_modseq: None,
+                permanent_flags: Vec::new(),
+                etag: String::new(),
+                messages_flags: None,
+                new_messages: Vec::new(),
+            });
+
+        assert_eq!(counts_with_unknown_unread["totalEmails"], 7);
+        assert_eq!(counts_with_unknown_unread["unreadEmails"], Value::Null);
+
+        let populated = super::legacy_folder_information_json(&legacy_test_folder_information());
+        let populated = populated.as_object().unwrap();
+        assert!(populated.contains_key("totalEmails"));
+        assert!(populated.contains_key("unreadEmails"));
+        assert!(populated.contains_key("highestModSeq"));
+        assert!(populated.contains_key("etag"));
+        assert!(populated.contains_key("permanentFlags"));
+        assert!(populated.contains_key("messagesFlags"));
     }
 
     #[test]
