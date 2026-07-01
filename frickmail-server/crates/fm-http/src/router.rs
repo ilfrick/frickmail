@@ -4827,21 +4827,22 @@ where
         Ok(connection) => connection,
         Err(response) => return response,
     };
-    let (request, raw_cache_hash) = match legacy_message_list_raw_key_request_from_payload(payload)
-    {
-        Ok(Some(raw_key_request)) => {
-            let LegacyMessageListRawKeyRequest {
-                request,
-                cache_hash,
-            } = raw_key_request;
-            (request, Some(cache_hash))
-        }
-        Ok(None) => match legacy_message_list_request_from_payload(payload) {
-            Ok(request) => (request, None),
+    let (mut request, raw_cache_hash) =
+        match legacy_message_list_raw_key_request_from_payload(payload) {
+            Ok(Some(raw_key_request)) => {
+                let LegacyMessageListRawKeyRequest {
+                    request,
+                    cache_hash,
+                } = raw_key_request;
+                (request, Some(cache_hash))
+            }
+            Ok(None) => match legacy_message_list_request_from_payload(payload) {
+                Ok(request) => (request, None),
+                Err(message) => return json_result_error(original_action, message),
+            },
             Err(message) => return json_result_error(original_action, message),
-        },
-        Err(message) => return json_result_error(original_action, message),
-    };
+        };
+    request.hide_deleted = hide_deleted;
 
     let result = tokio::time::timeout(fetch_deadline, fetcher(config, password, request.clone()))
         .await
@@ -4850,12 +4851,7 @@ where
     match result {
         Ok(Ok(list)) => {
             let _raw_cache_state = raw_cache_hash.as_deref().and_then(|cache_hash| {
-                legacy_message_list_raw_cache_state(
-                    cache_hash,
-                    &request,
-                    &list.folder.etag,
-                    hide_deleted,
-                )
+                legacy_message_list_raw_cache_state(cache_hash, &request, &list.folder.etag)
             });
             json_value_envelope(
                 StatusCode::OK,
@@ -4896,6 +4892,7 @@ fn legacy_message_list_request_from_payload(
         search: payload_string(payload, "search").unwrap_or_default(),
         sort: payload_string(payload, "sort").unwrap_or_default(),
         prev_uid_next,
+        hide_deleted: true,
         use_threads,
         thread_uid,
         thread_algorithm,
@@ -4963,14 +4960,13 @@ fn legacy_message_list_raw_cache_state(
     request_cache_hash: &str,
     request: &LegacyMessageListRequest,
     current_folder_etag: &str,
-    hide_deleted: bool,
 ) -> Option<LegacyMessageListRawCacheState> {
     if request_cache_hash.is_empty() || current_folder_etag.is_empty() {
         return None;
     }
 
     let request_hash_validator = legacy_message_list_request_hash_validator(request_cache_hash)?;
-    let params_hash = legacy_message_list_params_hash(request, hide_deleted, false, true);
+    let params_hash = legacy_message_list_params_hash(request, false, true);
     let current_cache_key = legacy_message_list_cache_key(&params_hash, current_folder_etag);
 
     Some(LegacyMessageListRawCacheState {
@@ -11228,9 +11224,54 @@ mod tests {
         assert_eq!(request.search, "from:alice");
         assert_eq!(request.sort, "REVERSE DATE");
         assert_eq!(request.prev_uid_next, Some(52));
+        assert!(request.hide_deleted);
         assert!(request.use_threads);
         assert_eq!(request.thread_uid, 77);
         assert_eq!(request.thread_algorithm, "REFERENCES");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_uses_hide_deleted_setting() {
+        let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_settings(1826, 1827, &key, json!({"HideDeleted": false}))
+                .await;
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_fetch = Arc::clone(&captured);
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({
+                "account_id": 1827,
+                "folder": "INBOX"
+            }),
+            &session,
+            Duration::from_secs(1),
+            move |_config, _password, request| {
+                let captured = Arc::clone(&captured_for_fetch);
+                async move {
+                    *captured.lock().unwrap() = Some(request.clone());
+                    Ok(LegacyMessageList {
+                        folder: legacy_test_folder_information(),
+                        total_emails: 1,
+                        offset: request.offset,
+                        limit: request.limit,
+                        search: request.search,
+                        sort: request.sort,
+                        limited: false,
+                        thread_uid: request.thread_uid,
+                        messages: Vec::new(),
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"]["@Object"], "Collection/MessageCollection");
+        assert!(!captured.lock().unwrap().clone().unwrap().hide_deleted);
     }
 
     #[test]
@@ -11251,6 +11292,7 @@ mod tests {
                 search: String::new(),
                 sort: String::new(),
                 prev_uid_next: None,
+                hide_deleted: true,
                 use_threads: false,
                 thread_uid: 0,
                 thread_algorithm: String::new(),
@@ -11343,18 +11385,15 @@ mod tests {
             search: "from:bob".to_string(),
             sort: "REVERSE DATE".to_string(),
             prev_uid_next: Some(123),
+            hide_deleted: true,
             use_threads: true,
             thread_uid: 77,
             thread_algorithm: "REFERENCES".to_string(),
         };
 
-        let state = super::legacy_message_list_raw_cache_state(
-            "previous-etag-account",
-            &request,
-            "etag",
-            true,
-        )
-        .unwrap();
+        let state =
+            super::legacy_message_list_raw_cache_state("previous-etag-account", &request, "etag")
+                .unwrap();
 
         assert_eq!(state.request_hash_validator, "etag");
         assert!(state.verify_existing_cache);
@@ -11363,20 +11402,22 @@ mod tests {
             "8ae7bf17ace2089e3708d4eda1bb88ff-etag"
         );
         assert_eq!(
-            super::legacy_message_list_raw_cache_state(
-                "previous-etag-account",
-                &request,
-                "etag",
-                false,
-            )
-            .unwrap()
-            .current_cache_key,
+            {
+                let mut visible_deleted = request.clone();
+                visible_deleted.hide_deleted = false;
+                super::legacy_message_list_raw_cache_state(
+                    "previous-etag-account",
+                    &visible_deleted,
+                    "etag",
+                )
+                .unwrap()
+                .current_cache_key
+            },
             "d7e2e978346bca7156523bceddb5b45d-etag"
         );
 
         let frontend_shape =
-            super::legacy_message_list_raw_cache_state("etag-account", &request, "etag", true)
-                .unwrap();
+            super::legacy_message_list_raw_cache_state("etag-account", &request, "etag").unwrap();
         assert_eq!(frontend_shape.request_hash_validator, "account");
         assert!(!frontend_shape.verify_existing_cache);
 
@@ -11384,7 +11425,6 @@ mod tests {
             "previous-oldetag-account",
             &request,
             "etag",
-            true,
         )
         .unwrap();
         assert!(!stale.verify_existing_cache);
@@ -11394,7 +11434,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::legacy_message_list_raw_cache_state("notenoughparts", &request, "etag", true),
+            super::legacy_message_list_raw_cache_state("notenoughparts", &request, "etag"),
             None
         );
     }
@@ -14149,8 +14189,30 @@ mod tests {
         account_id: i64,
         credential_key: &[u8],
     ) -> (AppState, Session) {
-        message_body_test_state_with_config(user_id, account_id, credential_key, test_config(None))
-            .await
+        message_body_test_state_with_config_and_settings(
+            user_id,
+            account_id,
+            credential_key,
+            test_config(None),
+            json!({}),
+        )
+        .await
+    }
+
+    async fn message_body_test_state_with_settings(
+        user_id: i64,
+        account_id: i64,
+        credential_key: &[u8],
+        settings: Value,
+    ) -> (AppState, Session) {
+        message_body_test_state_with_config_and_settings(
+            user_id,
+            account_id,
+            credential_key,
+            test_config(None),
+            settings,
+        )
+        .await
     }
 
     async fn message_body_test_state_with_config(
@@ -14159,13 +14221,31 @@ mod tests {
         credential_key: &[u8],
         config: FrickmailConfig,
     ) -> (AppState, Session) {
+        message_body_test_state_with_config_and_settings(
+            user_id,
+            account_id,
+            credential_key,
+            config,
+            json!({}),
+        )
+        .await
+    }
+
+    async fn message_body_test_state_with_config_and_settings(
+        user_id: i64,
+        account_id: i64,
+        credential_key: &[u8],
+        config: FrickmailConfig,
+        settings: Value,
+    ) -> (AppState, Session) {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
-        seed_user(
+        seed_user_with_settings(
             &pool,
             user_id,
             &format!("viewer{user_id}"),
             Some(&format!("viewer{user_id}@example.com")),
+            settings,
         )
         .await;
         seed_mail_account(&pool, account_id, user_id, "Work", true).await;

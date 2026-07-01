@@ -244,6 +244,7 @@ pub struct LegacyMessageListRequest {
     pub search: String,
     pub sort: String,
     pub prev_uid_next: Option<u32>,
+    pub hide_deleted: bool,
     pub use_threads: bool,
     pub thread_uid: u32,
     pub thread_algorithm: String,
@@ -850,7 +851,6 @@ pub fn legacy_message_hash(folder: &str, uid: u32) -> String {
 
 pub fn legacy_message_list_params_hash(
     request: &LegacyMessageListRequest,
-    hide_deleted: bool,
     search_fuzzy: bool,
     use_sort: bool,
 ) -> String {
@@ -859,7 +859,7 @@ pub fn legacy_message_list_params_hash(
             request.mailbox.clone(),
             request.offset.to_string(),
             request.limit.to_string(),
-            if hide_deleted { "1" } else { "0" }.to_string(),
+            if request.hide_deleted { "1" } else { "0" }.to_string(),
             request.search.clone(),
             if search_fuzzy { "1" } else { "0" }.to_string(),
             if use_sort {
@@ -1176,7 +1176,7 @@ async fn legacy_message_list_in_session(
                 fetch.bodystructure(),
                 header,
             );
-            if legacy_message_list_keeps_flags(&summary.flags, true) {
+            if legacy_message_list_keeps_flags(&summary.flags, request.hide_deleted) {
                 messages.push(summary);
             }
         }
@@ -4142,17 +4142,18 @@ mod tests {
             search: "from:bob".to_string(),
             sort: "REVERSE DATE".to_string(),
             prev_uid_next: Some(123),
+            hide_deleted: true,
             use_threads: true,
             thread_uid: 77,
             thread_algorithm: "REFERENCES".to_string(),
         };
         assert_eq!(
-            legacy_message_list_params_hash(&request, true, false, true),
+            legacy_message_list_params_hash(&request, false, true),
             "8ae7bf17ace2089e3708d4eda1bb88ff"
         );
         assert_eq!(
             legacy_message_list_cache_key(
-                &legacy_message_list_params_hash(&request, true, false, true),
+                &legacy_message_list_params_hash(&request, false, true),
                 "etag"
             ),
             "8ae7bf17ace2089e3708d4eda1bb88ff-etag"
