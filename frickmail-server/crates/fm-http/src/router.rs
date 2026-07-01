@@ -4871,7 +4871,7 @@ fn legacy_message_list_request_from_payload(
 ) -> Result<LegacyMessageListRequest, &'static str> {
     let mailbox = required_payload_string(payload, "folder", "folder required")?;
     let offset = payload_clamped_u32(payload, "offset");
-    let limit = payload_clamped_u32(payload, "limit");
+    let limit = legacy_message_list_payload_limit(payload);
     let prev_uid_next = payload_optional_u32(payload, "uidNext");
     let use_threads = payload_bool(payload, "useThreads");
     let thread_uid = if use_threads {
@@ -4897,6 +4897,14 @@ fn legacy_message_list_request_from_payload(
         thread_uid,
         thread_algorithm,
     })
+}
+
+fn legacy_message_list_payload_limit(payload: &Value) -> u32 {
+    if payload.get("limit").is_some() {
+        payload_clamped_u32(payload, "limit")
+    } else {
+        10
+    }
 }
 
 #[allow(dead_code)]
@@ -11288,7 +11296,7 @@ mod tests {
             LegacyMessageListRequest {
                 mailbox: "INBOX".to_string(),
                 offset: 0,
-                limit: 0,
+                limit: 10,
                 search: String::new(),
                 sort: String::new(),
                 prev_uid_next: None,
@@ -11330,6 +11338,22 @@ mod tests {
 
         assert_eq!(negative.offset, 0);
         assert_eq!(negative.limit, 0);
+
+        let zero_limit = super::legacy_message_list_request_from_payload(&json!({
+            "folder": "INBOX",
+            "limit": 0
+        }))
+        .unwrap();
+
+        assert_eq!(zero_limit.limit, 0);
+
+        let missing_limit = super::legacy_message_list_request_from_payload(&json!({
+            "folder": "INBOX",
+            "offset": 1
+        }))
+        .unwrap();
+
+        assert_eq!(missing_limit.limit, 10);
 
         let saturated = super::legacy_message_list_request_from_payload(&json!({
             "folder": "INBOX",
