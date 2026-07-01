@@ -763,6 +763,10 @@ pub fn legacy_message_list_sort(sort: &str, use_sort: bool) -> String {
     sort_types.join(" ")
 }
 
+pub fn legacy_message_list_reported_sort(sort: &str) -> String {
+    legacy_message_list_sort(sort, true)
+}
+
 pub fn legacy_message_list_limited(uses_optimized_fetch: bool) -> bool {
     uses_optimized_fetch
 }
@@ -1189,7 +1193,7 @@ async fn legacy_message_list_in_session(
         offset: request.offset,
         limit,
         search: legacy_message_list_search(&request.search),
-        sort: legacy_message_list_sort(&request.sort, false),
+        sort: legacy_message_list_reported_sort(&request.sort),
         limited: legacy_message_list_limited(false),
         thread_uid: request.thread_uid,
         messages,
@@ -3164,6 +3168,11 @@ mod tests {
         assert_eq!(legacy_message_list_sort("FROM", false), "");
         assert_eq!(legacy_message_list_sort("", true), "REVERSE DATE");
         assert_eq!(legacy_message_list_sort("FROM", true), "FROM REVERSE DATE");
+        assert_eq!(legacy_message_list_reported_sort(""), "REVERSE DATE");
+        assert_eq!(
+            legacy_message_list_reported_sort("FROM"),
+            "FROM REVERSE DATE"
+        );
         assert_eq!(
             legacy_message_list_sort("REVERSE DATE", true),
             "REVERSE DATE"
