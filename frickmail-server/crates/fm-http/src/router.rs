@@ -4869,9 +4869,22 @@ where
 fn legacy_message_list_request_from_payload(
     payload: &Value,
 ) -> Result<LegacyMessageListRequest, &'static str> {
+    legacy_message_list_request_from_payload_with_limit_default(payload, 10)
+}
+
+fn legacy_message_list_raw_key_request_from_payload_values(
+    payload: &Value,
+) -> Result<LegacyMessageListRequest, &'static str> {
+    legacy_message_list_request_from_payload_with_limit_default(payload, 0)
+}
+
+fn legacy_message_list_request_from_payload_with_limit_default(
+    payload: &Value,
+    missing_limit: u32,
+) -> Result<LegacyMessageListRequest, &'static str> {
     let mailbox = required_payload_string(payload, "folder", "folder required")?;
     let offset = payload_clamped_u32(payload, "offset");
-    let limit = legacy_message_list_payload_limit(payload);
+    let limit = legacy_message_list_payload_limit(payload, missing_limit);
     let prev_uid_next = payload_optional_u32(payload, "uidNext");
     let use_threads = payload_bool(payload, "useThreads");
     let thread_uid = if use_threads {
@@ -4899,11 +4912,11 @@ fn legacy_message_list_request_from_payload(
     })
 }
 
-fn legacy_message_list_payload_limit(payload: &Value) -> u32 {
+fn legacy_message_list_payload_limit(payload: &Value, missing_limit: u32) -> u32 {
     if payload.get("limit").is_some() {
         payload_clamped_u32(payload, "limit")
     } else {
-        10
+        missing_limit
     }
 }
 
@@ -4949,7 +4962,7 @@ fn legacy_message_list_raw_key_request_from_payload(
 
     Ok(Some(LegacyMessageListRawKeyRequest {
         cache_hash: payload_string(&raw_payload, "hash").unwrap_or_default(),
-        request: legacy_message_list_request_from_payload(&raw_payload)?,
+        request: legacy_message_list_raw_key_request_from_payload_values(&raw_payload)?,
     }))
 }
 
@@ -11398,6 +11411,28 @@ mod tests {
         assert!(decoded.request.use_threads);
         assert_eq!(decoded.request.thread_uid, 77);
         assert_eq!(decoded.request.thread_algorithm, "REFERENCES");
+
+        let raw_missing_limit = URL_SAFE_NO_PAD.encode(
+            json!({
+                "folder": "INBOX",
+                "offset": 15,
+                "search": "",
+                "sort": "",
+                "uidNext": 123,
+                "useThreads": 0,
+                "hash": "folder-etag-account",
+                "accountHash": "account"
+            })
+            .to_string(),
+        );
+        let decoded_missing_limit =
+            super::legacy_message_list_raw_key_request_from_payload(&json!({
+                "RawKey": raw_missing_limit
+            }))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(decoded_missing_limit.request.limit, 0);
     }
 
     #[test]
