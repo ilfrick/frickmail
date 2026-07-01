@@ -4885,7 +4885,7 @@ fn legacy_message_list_request_from_payload_with_limit_default(
     let mailbox = required_payload_string(payload, "folder", "folder required")?;
     let offset = payload_clamped_u32(payload, "offset");
     let limit = legacy_message_list_payload_limit(payload, missing_limit);
-    let prev_uid_next = payload_optional_u32(payload, "uidNext");
+    let prev_uid_next = Some(legacy_message_list_payload_uid_next(payload));
     let use_threads = payload_bool(payload, "useThreads");
     let thread_uid = if use_threads {
         payload_optional_u32(payload, "threadUid").unwrap_or_default()
@@ -4918,6 +4918,10 @@ fn legacy_message_list_payload_limit(payload: &Value, missing_limit: u32) -> u32
     } else {
         missing_limit
     }
+}
+
+fn legacy_message_list_payload_uid_next(payload: &Value) -> u32 {
+    payload_optional_u32(payload, "uidNext").unwrap_or_default()
 }
 
 #[allow(dead_code)]
@@ -11312,7 +11316,7 @@ mod tests {
                 limit: 10,
                 search: String::new(),
                 sort: String::new(),
-                prev_uid_next: None,
+                prev_uid_next: Some(0),
                 hide_deleted: true,
                 use_threads: false,
                 thread_uid: 0,
@@ -11351,6 +11355,15 @@ mod tests {
 
         assert_eq!(negative.offset, 0);
         assert_eq!(negative.limit, 0);
+        assert_eq!(negative.prev_uid_next, Some(0));
+
+        let malformed_uid_next = super::legacy_message_list_request_from_payload(&json!({
+            "folder": "INBOX",
+            "uidNext": "abc"
+        }))
+        .unwrap();
+
+        assert_eq!(malformed_uid_next.prev_uid_next, Some(0));
 
         let zero_limit = super::legacy_message_list_request_from_payload(&json!({
             "folder": "INBOX",
@@ -11418,7 +11431,6 @@ mod tests {
                 "offset": 15,
                 "search": "",
                 "sort": "",
-                "uidNext": 123,
                 "useThreads": 0,
                 "hash": "folder-etag-account",
                 "accountHash": "account"
@@ -11433,6 +11445,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(decoded_missing_limit.request.limit, 0);
+        assert_eq!(decoded_missing_limit.request.prev_uid_next, Some(0));
     }
 
     #[test]
