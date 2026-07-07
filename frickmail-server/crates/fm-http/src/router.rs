@@ -5689,6 +5689,12 @@ fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
     if let Some(highest_modseq) = info.highest_modseq {
         value["highestModSeq"] = json!(highest_modseq);
     }
+    if let Some(append_limit) = info.append_limit {
+        value["appendLimit"] = json!(append_limit);
+    }
+    if let Some(size) = info.size {
+        value["size"] = json!(size);
+    }
     if !info.etag.is_empty() {
         value["etag"] = json!(info.etag);
     }
@@ -11544,6 +11550,8 @@ mod tests {
             total_emails: None,
             unread_emails: None,
             highest_modseq: None,
+            append_limit: None,
+            size: None,
             permanent_flags: Vec::new(),
             etag: String::new(),
             messages_flags: None,
@@ -11559,6 +11567,8 @@ mod tests {
         assert!(!object.contains_key("totalEmails"));
         assert!(!object.contains_key("unreadEmails"));
         assert!(!object.contains_key("highestModSeq"));
+        assert!(!object.contains_key("appendLimit"));
+        assert!(!object.contains_key("size"));
         assert!(!object.contains_key("etag"));
         assert!(!object.contains_key("permanentFlags"));
         assert!(!object.contains_key("messagesFlags"));
@@ -11571,6 +11581,8 @@ mod tests {
                 total_emails: Some(7),
                 unread_emails: None,
                 highest_modseq: None,
+                append_limit: Some(10_485_760),
+                size: Some(123_456),
                 permanent_flags: Vec::new(),
                 etag: String::new(),
                 messages_flags: None,
@@ -11579,6 +11591,8 @@ mod tests {
 
         assert_eq!(counts_with_unknown_unread["totalEmails"], 7);
         assert_eq!(counts_with_unknown_unread["unreadEmails"], Value::Null);
+        assert_eq!(counts_with_unknown_unread["appendLimit"], 10_485_760);
+        assert_eq!(counts_with_unknown_unread["size"], 123_456);
 
         let populated = super::legacy_folder_information_json(&legacy_test_folder_information());
         let populated = populated.as_object().unwrap();
@@ -11758,6 +11772,8 @@ mod tests {
                         total_emails: Some(8),
                         unread_emails: Some(3),
                         highest_modseq: Some(99),
+                        append_limit: None,
+                        size: None,
                         permanent_flags: vec!["\\seen".to_string()],
                         etag: "etag-2".to_string(),
                         messages_flags: Some(vec![LegacyMessageFlags {
@@ -15298,6 +15314,8 @@ mod tests {
             total_emails: Some(12),
             unread_emails: Some(3),
             highest_modseq: Some(99),
+            append_limit: None,
+            size: None,
             permanent_flags: vec!["\\seen".to_string()],
             etag: "etag-2".to_string(),
             messages_flags: Some(vec![LegacyMessageFlags {
