@@ -94,11 +94,13 @@ struct LongPollNewMailTiming {
 struct LegacyMessageListRawKeyRequest {
     request: LegacyMessageListRequest,
     cache_hash: String,
+    account_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LegacyMessageListRawCacheState {
     request_hash_validator: String,
+    account_hash: String,
     current_cache_key: String,
     verify_existing_cache: bool,
 }
@@ -4833,6 +4835,7 @@ where
                 let LegacyMessageListRawKeyRequest {
                     request,
                     cache_hash,
+                    account_hash: _account_hash,
                 } = raw_key_request;
                 (request, Some(cache_hash))
             }
@@ -4964,8 +4967,12 @@ fn legacy_message_list_raw_key_request_from_payload(
         return Ok(None);
     }
 
+    let cache_hash = payload_string(&raw_payload, "hash").unwrap_or_default();
+    let account_hash = legacy_message_list_raw_key_account_hash(&raw_payload, &cache_hash);
+
     Ok(Some(LegacyMessageListRawKeyRequest {
-        cache_hash: payload_string(&raw_payload, "hash").unwrap_or_default(),
+        cache_hash,
+        account_hash,
         request: legacy_message_list_raw_key_request_from_payload_values(&raw_payload)?,
     }))
 }
@@ -4991,12 +4998,15 @@ fn legacy_message_list_raw_cache_state(
     }
 
     let request_hash_validator = legacy_message_list_request_hash_validator(request_cache_hash)?;
+    let account_hash =
+        legacy_message_list_cache_hash_account(request_cache_hash).unwrap_or_default();
     let params_hash = legacy_message_list_params_hash(request, false, true);
     let current_cache_key = legacy_message_list_cache_key(&params_hash, current_folder_etag);
 
     Some(LegacyMessageListRawCacheState {
         verify_existing_cache: request_hash_validator == current_folder_etag,
         request_hash_validator,
+        account_hash,
         current_cache_key,
     })
 }
@@ -5005,6 +5015,23 @@ fn legacy_message_list_request_hash_validator(request_cache_hash: &str) -> Optio
     request_cache_hash
         .split('-')
         .nth(1)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn legacy_message_list_raw_key_account_hash(
+    raw_payload: &Value,
+    request_cache_hash: &str,
+) -> String {
+    payload_string(raw_payload, "accountHash")
+        .or_else(|| legacy_message_list_cache_hash_account(request_cache_hash))
+        .unwrap_or_default()
+}
+
+fn legacy_message_list_cache_hash_account(request_cache_hash: &str) -> Option<String> {
+    request_cache_hash
+        .rsplit_once('-')
+        .map(|(_, account_hash)| account_hash)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
 }
@@ -11429,6 +11456,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded.cache_hash, "folder-etag-account");
+        assert_eq!(decoded.account_hash, "account");
         assert_eq!(decoded.request.mailbox, "INBOX");
         assert_eq!(decoded.request.offset, 15);
         assert_eq!(decoded.request.limit, 25);
@@ -11443,11 +11471,11 @@ mod tests {
             json!({
                 "folder": "INBOX",
                 "offset": 15,
+                "uidNext": 0,
                 "search": "",
                 "sort": "",
                 "useThreads": 0,
-                "hash": "folder-etag-account",
-                "accountHash": "account"
+                "hash": "folder-etag-account"
             })
             .to_string(),
         );
@@ -11458,6 +11486,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        assert_eq!(decoded_missing_limit.account_hash, "account");
         assert_eq!(decoded_missing_limit.request.limit, 0);
         assert_eq!(decoded_missing_limit.request.prev_uid_next, Some(0));
     }
@@ -11482,6 +11511,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(state.request_hash_validator, "etag");
+        assert_eq!(state.account_hash, "account");
         assert!(state.verify_existing_cache);
         assert_eq!(
             state.current_cache_key,
@@ -11505,6 +11535,7 @@ mod tests {
         let frontend_shape =
             super::legacy_message_list_raw_cache_state("etag-account", &request, "etag").unwrap();
         assert_eq!(frontend_shape.request_hash_validator, "account");
+        assert_eq!(frontend_shape.account_hash, "account");
         assert!(!frontend_shape.verify_existing_cache);
 
         let stale = super::legacy_message_list_raw_cache_state(
@@ -11514,6 +11545,7 @@ mod tests {
         )
         .unwrap();
         assert!(!stale.verify_existing_cache);
+        assert_eq!(stale.account_hash, "account");
         assert_eq!(
             stale.current_cache_key,
             "8ae7bf17ace2089e3708d4eda1bb88ff-etag"
