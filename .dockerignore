@@ -4,3 +4,5 @@
 /postgres
 /build/dist
 /.claude
+/.docker/dev/.cache
+/frickmail-server/target
