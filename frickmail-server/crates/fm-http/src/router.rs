@@ -5931,7 +5931,7 @@ fn legacy_message_json(
         "spamResult": "",
         "isSpam": false,
         "dateTimestamp": 0,
-        "dateTimestampSource": "header",
+        "dateTimestampSource": "internal",
         "from": legacy_email_collection(from),
         "replyTo": legacy_email_collection(reply_to),
         "to": legacy_email_collection(to),
@@ -11349,6 +11349,8 @@ mod tests {
         assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Legacy body");
         assert_eq!(body["Result"]["preview"], Value::Null);
+        assert_eq!(body["Result"]["dateTimestamp"], 0);
+        assert_eq!(body["Result"]["dateTimestampSource"], "internal");
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_some());
         assert_eq!(body["Result"]["plain"], "Hello legacy");
@@ -11416,6 +11418,8 @@ mod tests {
         assert_eq!(message["html"], "<p>Hello</p>");
         assert_eq!(message["plain"], "");
         assert_eq!(message["preview"], Value::Null);
+        assert_eq!(message["dateTimestamp"], 0);
+        assert_eq!(message["dateTimestampSource"], "internal");
         assert!(message.get("date").is_none());
         assert!(message.get("threads").is_none());
         assert!(message.get("threadUnseen").is_none());
