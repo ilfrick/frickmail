@@ -5908,7 +5908,6 @@ fn legacy_message_json(
     reply_to: &str,
     to: &str,
     cc: &str,
-    date: &str,
     size: u32,
     flags: &[String],
     preview: Option<&str>,
@@ -5924,7 +5923,6 @@ fn legacy_message_json(
         "spamScore": 0,
         "spamResult": "",
         "isSpam": false,
-        "date": date,
         "dateTimestamp": 0,
         "dateTimestampSource": "header",
         "from": legacy_email_collection(from),
@@ -6013,7 +6011,6 @@ fn legacy_message_body_response(
                 &subject,
                 &html,
                 &plain,
-                "",
                 "",
                 "",
                 "",
@@ -11340,6 +11337,7 @@ mod tests {
         assert_eq!(body["Result"]["folder"], "INBOX");
         assert_eq!(body["Result"]["uid"], 51);
         assert_eq!(body["Result"]["subject"], "Legacy body");
+        assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_some());
         assert_eq!(body["Result"]["plain"], "Hello legacy");
         assert!(body["Result"].get("references").is_none());
@@ -11371,6 +11369,7 @@ mod tests {
         assert_eq!(body["Action"], "Message");
         assert_eq!(body["Result"]["@Object"], "Object/Message");
         assert_eq!(body["Result"]["subject"], "Metadata only");
+        assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_none());
         assert!(body["Result"].get("plain").is_none());
         assert!(body["Result"].get("references").is_none());
@@ -11394,7 +11393,6 @@ mod tests {
             "",
             "",
             "",
-            "",
             0,
             &[],
             None,
@@ -11403,6 +11401,7 @@ mod tests {
         assert_eq!(message["references"], "<root@example>");
         assert_eq!(message["html"], "<p>Hello</p>");
         assert_eq!(message["plain"], "");
+        assert!(message.get("date").is_none());
         assert!(message.get("threads").is_none());
         assert!(message.get("threadUnseen").is_none());
     }
