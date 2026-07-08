@@ -5911,10 +5911,10 @@ fn legacy_message_json(
     message_id: &str,
     in_reply_to: &str,
     references: &str,
-    from: &str,
-    reply_to: &str,
-    to: &str,
-    cc: &str,
+    from: Option<&str>,
+    reply_to: Option<&str>,
+    to: Option<&str>,
+    cc: Option<&str>,
     size: u32,
     flags: &[String],
     preview: Option<&str>,
@@ -5932,13 +5932,13 @@ fn legacy_message_json(
         "isSpam": false,
         "dateTimestamp": 0,
         "dateTimestampSource": "internal",
-        "from": legacy_email_collection(from),
-        "replyTo": legacy_email_collection(reply_to),
-        "to": legacy_email_collection(to),
-        "cc": legacy_email_collection(cc),
-        "bcc": [],
-        "sender": [],
-        "deliveredTo": [],
+        "from": legacy_optional_email_collection(from),
+        "replyTo": legacy_optional_email_collection(reply_to),
+        "to": legacy_optional_email_collection(to),
+        "cc": legacy_optional_email_collection(cc),
+        "bcc": Value::Null,
+        "sender": Value::Null,
+        "deliveredTo": Value::Null,
         "readReceipt": "",
         "attachments": Value::Null,
         "spf": [],
@@ -6021,10 +6021,10 @@ fn legacy_message_body_response(
                 "",
                 "",
                 "",
-                "",
-                "",
-                "",
-                "",
+                None,
+                None,
+                None,
+                None,
                 0,
                 &[],
                 None,
@@ -6034,6 +6034,11 @@ fn legacy_message_body_response(
 }
 
 const LEGACY_EMAIL_COLLECTION_JSON_LIMIT: usize = 100;
+
+fn legacy_optional_email_collection(raw: Option<&str>) -> Value {
+    raw.map(|raw| json!(legacy_email_collection(raw)))
+        .unwrap_or(Value::Null)
+}
 
 fn legacy_email_collection(raw: &str) -> Vec<Value> {
     raw.split(',')
@@ -11349,6 +11354,13 @@ mod tests {
         assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Legacy body");
         assert_eq!(body["Result"]["preview"], Value::Null);
+        assert_eq!(body["Result"]["from"], Value::Null);
+        assert_eq!(body["Result"]["replyTo"], Value::Null);
+        assert_eq!(body["Result"]["to"], Value::Null);
+        assert_eq!(body["Result"]["cc"], Value::Null);
+        assert_eq!(body["Result"]["bcc"], Value::Null);
+        assert_eq!(body["Result"]["sender"], Value::Null);
+        assert_eq!(body["Result"]["deliveredTo"], Value::Null);
         assert_eq!(body["Result"]["attachments"], Value::Null);
         assert_eq!(body["Result"]["headers"], Value::Null);
         assert_eq!(body["Result"]["dateTimestamp"], 0);
@@ -11407,10 +11419,10 @@ mod tests {
             "",
             "",
             "<root@example>",
-            "",
-            "",
-            "",
-            "",
+            Some("Sender <sender@example.com>"),
+            Some("reply@example.com"),
+            Some("Recipient <recipient@example.com>"),
+            Some("cc@example.com"),
             0,
             &[],
             None,
@@ -11420,6 +11432,15 @@ mod tests {
         assert_eq!(message["html"], "<p>Hello</p>");
         assert_eq!(message["plain"], "");
         assert_eq!(message["preview"], Value::Null);
+        assert_eq!(message["from"][0]["name"], "Sender");
+        assert_eq!(message["from"][0]["email"], "sender@example.com");
+        assert_eq!(message["replyTo"][0]["email"], "reply@example.com");
+        assert_eq!(message["to"][0]["name"], "Recipient");
+        assert_eq!(message["to"][0]["email"], "recipient@example.com");
+        assert_eq!(message["cc"][0]["email"], "cc@example.com");
+        assert_eq!(message["bcc"], Value::Null);
+        assert_eq!(message["sender"], Value::Null);
+        assert_eq!(message["deliveredTo"], Value::Null);
         assert_eq!(message["attachments"], Value::Null);
         assert_eq!(message["headers"], Value::Null);
         assert_eq!(message["dateTimestamp"], 0);
@@ -12046,6 +12067,12 @@ mod tests {
         assert_eq!(super::legacy_nullable_string(Some("")), Value::Null);
         assert_eq!(super::legacy_nullable_string(Some("0")), Value::Null);
         assert_eq!(super::legacy_nullable_string(Some("Preview")), "Preview");
+    }
+
+    #[test]
+    fn legacy_optional_email_collection_separates_unavailable_from_empty() {
+        assert_eq!(super::legacy_optional_email_collection(None), Value::Null);
+        assert_eq!(super::legacy_optional_email_collection(Some("")), json!([]));
     }
 
     #[test]
