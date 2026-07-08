@@ -6026,9 +6026,12 @@ fn legacy_message_body_response(
     )
 }
 
+const LEGACY_EMAIL_COLLECTION_JSON_LIMIT: usize = 100;
+
 fn legacy_email_collection(raw: &str) -> Vec<Value> {
     raw.split(',')
         .filter_map(|item| legacy_email_json(item.trim()))
+        .take(LEGACY_EMAIL_COLLECTION_JSON_LIMIT)
         .collect()
 }
 
@@ -12003,6 +12006,17 @@ mod tests {
         assert_eq!(attachment["cId"], "<part@example.com>");
         assert_eq!(attachment["contentLocation"], "cid:report");
         assert_eq!(attachment["isInline"], true);
+    }
+
+    #[test]
+    fn legacy_email_collection_caps_serialized_entries_like_mailso() {
+        let mut addresses = vec![String::new()];
+        addresses.extend((0..105).map(|index| format!("User {index} <user{index}@example.com>")));
+        let value = super::legacy_email_collection(&addresses.join(","));
+
+        assert_eq!(value.len(), super::LEGACY_EMAIL_COLLECTION_JSON_LIMIT);
+        assert_eq!(value[0]["email"], "user0@example.com");
+        assert_eq!(value[99]["email"], "user99@example.com");
     }
 
     #[test]
