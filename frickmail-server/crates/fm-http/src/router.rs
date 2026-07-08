@@ -5839,7 +5839,7 @@ fn legacy_message_list_json(list: &fm_imap::LegacyMessageList) -> Value {
         "@Object": "Collection/MessageCollection",
         "@Collection": list.messages.iter().map(legacy_message_summary_json).collect::<Vec<_>>(),
         "totalEmails": list.total_emails,
-        "totalThreads": Value::Null,
+        "totalThreads": list.total_threads,
         "threadUid": list.thread_uid,
         "newMessages": list.folder.new_messages.iter().map(legacy_new_message_json).collect::<Vec<_>>(),
         "offset": list.offset,
@@ -11486,6 +11486,7 @@ mod tests {
                     Ok(LegacyMessageList {
                         folder: legacy_test_folder_information(),
                         total_emails: 12,
+                        total_threads: Some(6),
                         offset: request.offset,
                         limit: request.limit,
                         search: request.search,
@@ -11507,6 +11508,7 @@ mod tests {
         assert_eq!(body["Result"]["limit"], 50);
         assert_eq!(body["Result"]["search"], "from:alice");
         assert_eq!(body["Result"]["sort"], "REVERSE DATE");
+        assert_eq!(body["Result"]["totalThreads"], 6);
         assert_eq!(body["Result"]["threadUid"], 77);
 
         let (config, password, request) = captured.lock().unwrap().clone().unwrap();
@@ -11550,6 +11552,7 @@ mod tests {
                     Ok(LegacyMessageList {
                         folder: legacy_test_folder_information(),
                         total_emails: 1,
+                        total_threads: None,
                         offset: request.offset,
                         limit: request.limit,
                         search: request.search,
@@ -11566,6 +11569,7 @@ mod tests {
 
         assert_eq!(body["Action"], "MessageList");
         assert_eq!(body["Result"]["@Object"], "Collection/MessageCollection");
+        assert_eq!(body["Result"]["totalThreads"], Value::Null);
         assert!(!captured.lock().unwrap().clone().unwrap().hide_deleted);
     }
 
@@ -11938,6 +11942,7 @@ mod tests {
         let list = LegacyMessageList {
             folder: legacy_test_folder_information(),
             total_emails: 12,
+            total_threads: Some(5),
             offset: 10,
             limit: 50,
             search: "from:alice".to_string(),
@@ -11954,7 +11959,7 @@ mod tests {
 
         assert_eq!(value["@Object"], "Collection/MessageCollection");
         assert_eq!(value["totalEmails"], 12);
-        assert_eq!(value["totalThreads"], Value::Null);
+        assert_eq!(value["totalThreads"], 5);
         assert_eq!(value["threadUid"], 0);
         assert_eq!(value["newMessages"][0]["uid"], 51);
         assert_eq!(value["offset"], 10);

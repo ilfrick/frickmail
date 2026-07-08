@@ -176,6 +176,7 @@ pub struct LegacyNewMessage {
 pub struct LegacyMessageList {
     pub folder: LegacyFolderInformation,
     pub total_emails: u32,
+    pub total_threads: Option<u32>,
     pub offset: u32,
     pub limit: u32,
     pub search: String,
@@ -1192,6 +1193,7 @@ async fn legacy_message_list_in_session(
     Ok(LegacyMessageList {
         folder,
         total_emails: total,
+        total_threads: None,
         offset: request.offset,
         limit,
         search: legacy_message_list_search(&request.search),
