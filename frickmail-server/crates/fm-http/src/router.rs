@@ -5827,6 +5827,13 @@ fn legacy_new_message_json(message: &fm_imap::LegacyNewMessage) -> Value {
     })
 }
 
+fn legacy_nullable_string(value: Option<&str>) -> Value {
+    value
+        .filter(|value| !value.is_empty() && *value != "0")
+        .map(|value| json!(value))
+        .unwrap_or(Value::Null)
+}
+
 #[allow(dead_code)]
 fn legacy_message_list_json(list: &fm_imap::LegacyMessageList) -> Value {
     let mut folder = legacy_folder_information_json(&list.folder);
@@ -5882,7 +5889,7 @@ fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value
         "inReplyTo": message.in_reply_to,
         "id": Value::Null,
         "size": message.size,
-        "preview": message.preview.as_deref().unwrap_or_default(),
+        "preview": legacy_nullable_string(message.preview.as_deref()),
         "headers": [],
     });
 
@@ -5941,7 +5948,7 @@ fn legacy_message_json(
         "inReplyTo": in_reply_to,
         "id": Value::Null,
         "size": size,
-        "preview": preview.unwrap_or_default(),
+        "preview": legacy_nullable_string(preview),
         "headers": [],
     });
 
@@ -11341,6 +11348,7 @@ mod tests {
         assert_eq!(body["Result"]["uid"], 51);
         assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Legacy body");
+        assert_eq!(body["Result"]["preview"], Value::Null);
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_some());
         assert_eq!(body["Result"]["plain"], "Hello legacy");
@@ -11374,6 +11382,7 @@ mod tests {
         assert_eq!(body["Result"]["@Object"], "Object/Message");
         assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Metadata only");
+        assert_eq!(body["Result"]["preview"], Value::Null);
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_none());
         assert!(body["Result"].get("plain").is_none());
@@ -11406,6 +11415,7 @@ mod tests {
         assert_eq!(message["references"], "<root@example>");
         assert_eq!(message["html"], "<p>Hello</p>");
         assert_eq!(message["plain"], "");
+        assert_eq!(message["preview"], Value::Null);
         assert!(message.get("date").is_none());
         assert!(message.get("threads").is_none());
         assert!(message.get("threadUnseen").is_none());
@@ -12020,6 +12030,14 @@ mod tests {
         assert_eq!(value.len(), super::LEGACY_EMAIL_COLLECTION_JSON_LIMIT);
         assert_eq!(value[0]["email"], "user0@example.com");
         assert_eq!(value[99]["email"], "user99@example.com");
+    }
+
+    #[test]
+    fn legacy_nullable_string_matches_mailso_preview_falsey_rule() {
+        assert_eq!(super::legacy_nullable_string(None), Value::Null);
+        assert_eq!(super::legacy_nullable_string(Some("")), Value::Null);
+        assert_eq!(super::legacy_nullable_string(Some("0")), Value::Null);
+        assert_eq!(super::legacy_nullable_string(Some("Preview")), "Preview");
     }
 
     #[test]
