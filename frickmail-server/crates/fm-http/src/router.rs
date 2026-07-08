@@ -5880,7 +5880,7 @@ fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value
         "dmarc": [],
         "flags": message.flags,
         "inReplyTo": message.in_reply_to,
-        "id": "",
+        "id": Value::Null,
         "size": message.size,
         "preview": message.preview.as_deref().unwrap_or_default(),
         "headers": [],
@@ -5939,7 +5939,7 @@ fn legacy_message_json(
         "dmarc": [],
         "flags": flags,
         "inReplyTo": in_reply_to,
-        "id": "",
+        "id": Value::Null,
         "size": size,
         "preview": preview.unwrap_or_default(),
         "headers": [],
@@ -11339,6 +11339,7 @@ mod tests {
         assert_eq!(body["Result"]["@Object"], "Object/Message");
         assert_eq!(body["Result"]["folder"], "INBOX");
         assert_eq!(body["Result"]["uid"], 51);
+        assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Legacy body");
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_some());
@@ -11371,6 +11372,7 @@ mod tests {
 
         assert_eq!(body["Action"], "Message");
         assert_eq!(body["Result"]["@Object"], "Object/Message");
+        assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Metadata only");
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_none());
@@ -11976,6 +11978,7 @@ mod tests {
         assert_eq!(message["@Object"], "Object/Message");
         assert_eq!(message["folder"], "INBOX");
         assert_eq!(message["uid"], 44);
+        assert_eq!(message["id"], Value::Null);
         assert_eq!(message["subject"], "Staged summary");
         assert_eq!(message["encrypted"], true);
         assert_eq!(message["messageId"], "<message@example.com>");
