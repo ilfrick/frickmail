@@ -105,6 +105,14 @@ struct LegacyMessageListRawCacheState {
     verify_existing_cache: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyMessageRawKeyRequest {
+    folder: String,
+    uid: u32,
+    use_threads: bool,
+    account_hash: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DiscoveredService {
     id: String,
@@ -321,7 +329,7 @@ async fn json_api_request(
     let request = match plugin_request_from_http(&query, &headers, &body, legacy_json_action(&uri))
     {
         Ok(request) => {
-            let request = attach_legacy_message_list_raw_key(request, &uri);
+            let request = attach_legacy_json_raw_key(request, &uri);
             if let Some(response) = bridge_json_request(
                 &state,
                 &method,
@@ -757,7 +765,7 @@ async fn native_compat_response(
             })
             .await
         }
-        "Message" if payload.get("folder").is_some() && payload.get("uid").is_some() => {
+        "Message" if legacy_message_payload_is_native_candidate(payload) => {
             Some(native_legacy_message(state, original_action, payload, session).await)
         }
         "FolderInformation" => {
@@ -4744,29 +4752,95 @@ where
             Ok(connection) => connection,
             Err(response) => return response,
         };
-    let folder = match required_payload_string(payload, "folder", "folder required") {
-        Ok(folder) => folder,
+    let message_request = match legacy_message_request_from_payload(payload) {
+        Ok(request) => request,
         Err(message) => return json_result_error(original_action, message),
     };
-    let uid = payload_i64(payload, "uid");
-    if uid <= 0 || uid > u32::MAX as i64 {
-        return json_result_error(original_action, "uid required");
-    }
 
     let result = tokio::time::timeout(
         fetch_deadline,
-        fetcher(config, password, folder.clone(), uid as u32),
+        fetcher(
+            config,
+            password,
+            message_request.folder.clone(),
+            message_request.uid,
+        ),
     )
     .await
     .map_err(|_| FrickmailError::Upstream("Message fetch timed out".to_string()));
 
     match result {
-        Ok(Ok(Some(parts))) => {
-            legacy_message_body_response(original_action, &folder, uid as u32, parts)
-        }
+        Ok(Ok(Some(parts))) => legacy_message_body_response(
+            original_action,
+            &message_request.folder,
+            message_request.uid,
+            parts,
+        ),
         Ok(Ok(None)) => json_result_error(original_action, "Message not found"),
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
+}
+
+fn legacy_message_payload_is_native_candidate(payload: &Value) -> bool {
+    (payload.get("folder").is_some() && payload.get("uid").is_some())
+        || legacy_message_raw_key_request_from_payload(payload)
+            .ok()
+            .flatten()
+            .is_some()
+}
+
+fn legacy_message_request_from_payload(
+    payload: &Value,
+) -> Result<LegacyMessageRawKeyRequest, &'static str> {
+    if let Some(raw_key_request) = legacy_message_raw_key_request_from_payload(payload)? {
+        return Ok(raw_key_request);
+    }
+
+    let folder = required_payload_string(payload, "folder", "folder required")?;
+    let uid = payload_i64(payload, "uid");
+    if uid <= 0 || uid > u32::MAX as i64 {
+        return Err("uid required");
+    }
+
+    Ok(LegacyMessageRawKeyRequest {
+        folder,
+        uid: uid as u32,
+        use_threads: payload_bool(payload, "useThreads"),
+        account_hash: payload_string(payload, "accountHash").unwrap_or_default(),
+    })
+}
+
+fn legacy_message_raw_key_request_from_payload(
+    payload: &Value,
+) -> Result<Option<LegacyMessageRawKeyRequest>, &'static str> {
+    let Some(raw_key) = payload_optional_string(payload, "RawKey") else {
+        return Ok(None);
+    };
+    let Some(raw_payload) = legacy_raw_key_json(&raw_key) else {
+        return Ok(None);
+    };
+    let Some(values) = raw_payload.as_array() else {
+        return Ok(None);
+    };
+    if values.len() < 2 {
+        return Ok(None);
+    }
+
+    let folder = value_to_php_string(&values[0]);
+    if folder.is_empty() {
+        return Err("folder required");
+    }
+    let uid = value_to_php_i64(&values[1]);
+    if uid <= 0 || uid > u32::MAX as i64 {
+        return Err("uid required");
+    }
+
+    Ok(Some(LegacyMessageRawKeyRequest {
+        folder,
+        uid: uid as u32,
+        use_threads: values.get(2).map(legacy_php_truthy).unwrap_or(false),
+        account_hash: values.get(3).map(value_to_php_string).unwrap_or_default(),
+    }))
 }
 
 #[allow(dead_code)]
@@ -4929,13 +5003,17 @@ fn legacy_message_list_payload_uid_next(payload: &Value) -> u32 {
 
 #[allow(dead_code)]
 fn legacy_message_list_raw_key_from_uri(uri: &Uri) -> Option<String> {
+    legacy_action_raw_key_from_uri(uri, "MessageList")
+}
+
+fn legacy_action_raw_key_from_uri(uri: &Uri, action: &str) -> Option<String> {
     let query = uri.query()?;
     if !is_legacy_json_request(uri) {
         return None;
     }
     let tail = query.split_once("/0/")?.1.trim_start_matches('/');
     let mut parts = tail.split('/');
-    if parts.next()? != "MessageList" {
+    if parts.next()? != action {
         return None;
     }
 
@@ -6602,11 +6680,14 @@ fn plugin_request_from_http(
     Ok(PluginRequest { action, payload })
 }
 
-fn attach_legacy_message_list_raw_key(mut request: PluginRequest, uri: &Uri) -> PluginRequest {
-    if request.action == "MessageList" {
-        if let Some(raw_key) = legacy_message_list_raw_key_from_uri(uri) {
-            request.payload = merge_payload(request.payload, json!({ "RawKey": raw_key }));
-        }
+fn attach_legacy_json_raw_key(mut request: PluginRequest, uri: &Uri) -> PluginRequest {
+    let raw_key = match request.action.as_str() {
+        "MessageList" => legacy_action_raw_key_from_uri(uri, "MessageList"),
+        "Message" => legacy_action_raw_key_from_uri(uri, "Message"),
+        _ => None,
+    };
+    if let Some(raw_key) = raw_key {
+        request.payload = merge_payload(request.payload, json!({ "RawKey": raw_key }));
     }
     request
 }
@@ -7792,6 +7873,23 @@ fn value_to_php_string(value: &Value) -> String {
         Value::Number(number) => number.to_string(),
         Value::String(value) => value.clone(),
         _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn value_to_php_i64(value: &Value) -> i64 {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_u64()
+                    .map(|value| value.min(i64::MAX as u64) as i64)
+            })
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .unwrap_or_default(),
+        Value::Bool(value) => i64::from(*value),
+        Value::String(value) => value.trim().parse::<i64>().unwrap_or_default(),
+        _ => 0,
     }
 }
 
@@ -9009,7 +9107,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_message_list_get_plugin_request_includes_raw_key_payload() {
+    fn legacy_get_plugin_request_includes_raw_key_payload() {
         let uri: Uri = "/?/Json/&q[]=/0/MessageList/&q[]=/encoded-key"
             .parse()
             .unwrap();
@@ -9021,10 +9119,24 @@ mod tests {
             super::legacy_json_action(&uri),
         )
         .unwrap();
-        let request = super::attach_legacy_message_list_raw_key(request, &uri);
+        let request = super::attach_legacy_json_raw_key(request, &uri);
 
         assert_eq!(request.action, "MessageList");
         assert_eq!(request.payload["RawKey"], "encoded-key");
+
+        let uri: Uri = "/?/Json/&q[]=/0/Message/&q[]=/message-key".parse().unwrap();
+        let query = super::query_map(&uri);
+        let request = super::plugin_request_from_http(
+            &query,
+            &HeaderMap::new(),
+            &[],
+            super::legacy_json_action(&uri),
+        )
+        .unwrap();
+        let request = super::attach_legacy_json_raw_key(request, &uri);
+
+        assert_eq!(request.action, "Message");
+        assert_eq!(request.payload["RawKey"], "message-key");
     }
 
     #[tokio::test]
@@ -11227,6 +11339,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_legacy_message_decodes_legacy_raw_key_get_shape() {
+        let key = [49_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1816, 1817, &key).await;
+        let raw_key = URL_SAFE_NO_PAD.encode(json!(["INBOX", "52", 1, "account"]).to_string());
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_fetch = Arc::clone(&captured);
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1817, "RawKey": raw_key}),
+            &session,
+            Duration::from_secs(1),
+            move |_config, _password, folder, uid| {
+                let captured = Arc::clone(&captured_for_fetch);
+                async move {
+                    *captured.lock().unwrap() = Some((folder, uid));
+                    Ok(Some(vec![BodyPreviewPart {
+                        kind: BodyPartKind::RawMessage,
+                        raw: b"Subject: RawKey body\r\n\r\nHello from raw key".to_vec(),
+                    }]))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["folder"], "INBOX");
+        assert_eq!(body["Result"]["uid"], 52);
+        assert_eq!(body["Result"]["subject"], "RawKey body");
+        assert_eq!(body["Result"]["plain"], "Hello from raw key");
+        assert_eq!(
+            captured.lock().unwrap().clone().unwrap(),
+            ("INBOX".to_string(), 52)
+        );
+
+        let parsed = super::legacy_message_request_from_payload(&json!({
+            "RawKey": URL_SAFE_NO_PAD.encode(json!(["Archive", 53, 0, "account-2"]).to_string())
+        }))
+        .unwrap();
+        assert_eq!(parsed.folder, "Archive");
+        assert_eq!(parsed.uid, 53);
+        assert!(!parsed.use_threads);
+        assert_eq!(parsed.account_hash, "account-2");
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_list_builds_request_and_returns_collection_shape() {
         let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1820, 1821, &key).await;
@@ -11691,9 +11851,17 @@ mod tests {
             super::legacy_message_list_raw_key_from_uri(&uri).as_deref(),
             Some("encoded-key")
         );
+        assert_eq!(
+            super::legacy_action_raw_key_from_uri(&uri, "MessageList").as_deref(),
+            Some("encoded-key")
+        );
 
-        let other: Uri = "/?/Json/&q[]=/0/Message/&q[]=/encoded-key".parse().unwrap();
-        assert_eq!(super::legacy_message_list_raw_key_from_uri(&other), None);
+        let message: Uri = "/?/Json/&q[]=/0/Message/&q[]=/message-key".parse().unwrap();
+        assert_eq!(
+            super::legacy_action_raw_key_from_uri(&message, "Message").as_deref(),
+            Some("message-key")
+        );
+        assert_eq!(super::legacy_message_list_raw_key_from_uri(&message), None);
     }
 
     #[test]
