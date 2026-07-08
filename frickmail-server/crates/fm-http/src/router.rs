@@ -5913,7 +5913,7 @@ fn legacy_message_json(
     flags: &[String],
     preview: Option<&str>,
 ) -> Value {
-    json!({
+    let mut value = json!({
         "@Object": "Object/Message",
         "folder": folder,
         "uid": uid,
@@ -5945,12 +5945,17 @@ fn legacy_message_json(
         "size": size,
         "preview": preview.unwrap_or_default(),
         "headers": [],
-        "references": references,
-        "html": html,
-        "plain": plain,
-        "threads": [],
-        "threadUnseen": []
-    })
+    });
+
+    if !references.is_empty() {
+        value["references"] = json!(references);
+    }
+    if !html.is_empty() || !plain.is_empty() {
+        value["html"] = json!(html);
+        value["plain"] = json!(plain);
+    }
+
+    value
 }
 
 fn legacy_message_body_response(
@@ -11335,7 +11340,71 @@ mod tests {
         assert_eq!(body["Result"]["folder"], "INBOX");
         assert_eq!(body["Result"]["uid"], 51);
         assert_eq!(body["Result"]["subject"], "Legacy body");
+        assert!(body["Result"].get("html").is_some());
         assert_eq!(body["Result"]["plain"], "Hello legacy");
+        assert!(body["Result"].get("references").is_none());
+        assert!(body["Result"].get("threads").is_none());
+        assert!(body["Result"].get("threadUnseen").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_omits_empty_body_fields_like_php() {
+        let key = [47_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1814, 1815, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1815, "folder": "INBOX", "uid": 52}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"Subject: Metadata only\r\n\r\n".to_vec(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["@Object"], "Object/Message");
+        assert_eq!(body["Result"]["subject"], "Metadata only");
+        assert!(body["Result"].get("html").is_none());
+        assert!(body["Result"].get("plain").is_none());
+        assert!(body["Result"].get("references").is_none());
+        assert!(body["Result"].get("threads").is_none());
+        assert!(body["Result"].get("threadUnseen").is_none());
+    }
+
+    #[test]
+    fn legacy_message_json_keeps_nonempty_optional_body_fields() {
+        let message = super::legacy_message_json(
+            "INBOX",
+            54,
+            "hash",
+            "Optional fields",
+            "<p>Hello</p>",
+            "",
+            "",
+            "",
+            "<root@example>",
+            "",
+            "",
+            "",
+            "",
+            "",
+            0,
+            &[],
+            None,
+        );
+
+        assert_eq!(message["references"], "<root@example>");
+        assert_eq!(message["html"], "<p>Hello</p>");
+        assert_eq!(message["plain"], "");
+        assert!(message.get("threads").is_none());
+        assert!(message.get("threadUnseen").is_none());
     }
 
     #[tokio::test]
