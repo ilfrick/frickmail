@@ -16,6 +16,7 @@ pub struct ParsedMessageBody {
     pub message_id: String,
     pub in_reply_to: String,
     pub references: String,
+    pub read_receipt: String,
     pub from: Vec<String>,
     pub reply_to: Vec<String>,
     pub to: Vec<String>,
@@ -53,9 +54,11 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         .map(|body| body.into_owned())
         .unwrap_or_default();
     let subject = message.subject().map(ToOwned::to_owned);
-    let message_id = format_identity_header(&message, "Message-ID");
-    let in_reply_to = format_identity_header(&message, "In-Reply-To");
-    let references = collapse_header_whitespace(&format_identity_header(&message, "References"));
+    let message_id = format_legacy_header_value(&message, "Message-ID");
+    let in_reply_to = format_legacy_header_value(&message, "In-Reply-To");
+    let references =
+        collapse_header_whitespace(&format_legacy_header_value(&message, "References"));
+    let read_receipt = format_read_receipt(&message);
     let from = format_header_addresses(&message, "From");
     let reply_to = format_header_addresses(&message, "Reply-To");
     let to = format_header_addresses(&message, "To");
@@ -70,6 +73,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         && message_id.is_empty()
         && in_reply_to.is_empty()
         && references.is_empty()
+        && read_receipt.is_empty()
         && from.is_empty()
         && reply_to.is_empty()
         && to.is_empty()
@@ -88,6 +92,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         message_id,
         in_reply_to,
         references,
+        read_receipt,
         from,
         reply_to,
         to,
@@ -111,7 +116,7 @@ fn format_header_addresses(message: &mail_parser::Message<'_>, header: &str) -> 
         .unwrap_or_default()
 }
 
-fn format_identity_header(message: &mail_parser::Message<'_>, header: &str) -> String {
+fn format_legacy_header_value(message: &mail_parser::Message<'_>, header: &str) -> String {
     let raw = message
         .header_as(header, HeaderForm::Raw)
         .into_iter()
@@ -134,6 +139,81 @@ fn format_identity_header(message: &mail_parser::Message<'_>, header: &str) -> S
     } else {
         raw
     }
+}
+
+fn format_read_receipt(message: &mail_parser::Message<'_>) -> String {
+    let primary = format_legacy_header_value(message, "Disposition-Notification-To");
+    let (header, selected) = if primary.is_empty() {
+        (
+            "X-Confirm-Reading-To",
+            format_legacy_header_value(message, "X-Confirm-Reading-To"),
+        )
+    } else {
+        ("Disposition-Notification-To", primary)
+    };
+    if selected.is_empty()
+        || !has_non_comment_email_content(&selected)
+        || format_header_addresses(message, header).is_empty()
+    {
+        String::new()
+    } else {
+        selected
+    }
+}
+
+fn has_non_comment_email_content(value: &str) -> bool {
+    let mut output = String::with_capacity(value.len());
+    let mut comment = String::new();
+    let mut in_comment = false;
+    let mut in_quote = false;
+    let mut in_address = false;
+    let mut escaped = false;
+
+    for ch in value.chars() {
+        if escaped {
+            if in_comment {
+                comment.push(ch);
+            } else {
+                output.push(ch);
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            if in_comment {
+                comment.push(ch);
+            } else {
+                output.push(ch);
+            }
+            escaped = true;
+            continue;
+        }
+        if in_comment {
+            comment.push(ch);
+            if ch == ')' {
+                comment.clear();
+                in_comment = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' if !in_address => in_quote = !in_quote,
+            '<' if !in_quote => in_address = true,
+            '>' if in_address => in_address = false,
+            '(' if !in_quote && !in_address => {
+                comment.push(ch);
+                in_comment = true;
+                continue;
+            }
+            _ => {}
+        }
+        output.push(ch);
+    }
+    if in_comment {
+        output.push_str(&comment);
+    }
+
+    !output.trim().is_empty()
 }
 
 fn unfold_identity_header(value: &str) -> String {
@@ -260,6 +340,8 @@ Message-ID: <message@example.com>
 In-Reply-To: <parent@example.com>
 References: <root@example.com>
  <parent@example.com>
+Disposition-Notification-To: primary@example.com
+X-Confirm-Reading-To: fallback@example.com
 Subject: Address body
 
 Hello.
@@ -271,6 +353,7 @@ Hello.
         assert_eq!(body.message_id, "<message@example.com>");
         assert_eq!(body.in_reply_to, "<parent@example.com>");
         assert_eq!(body.references, "<root@example.com> <parent@example.com>");
+        assert_eq!(body.read_receipt, "primary@example.com");
         assert_eq!(body.from, vec!["Sender <sender@example.com>"]);
         assert_eq!(body.reply_to, vec!["Reply <reply@example.com>"]);
         assert_eq!(body.to, vec!["Recipient <recipient@example.com>"]);
@@ -284,7 +367,9 @@ Hello.
     fn parses_header_only_identity_metadata() {
         let raw = b"Message-ID: =?UTF-8?Q?<m=C3=A9ssage@example.com>?=\r\n\
 In-Reply-To: <first@example.com>\r\n  <second@example.com>\r\n\
-References: <root@example.com>\r\n\t<first@example.com>\r\n\r\n";
+References: <root@example.com>\r\n\t<first@example.com>\r\n\
+Disposition-Notification-To:   \r\n\
+X-Confirm-Reading-To: fallback@example.com\r\n\r\n";
 
         let body = parse_body(raw).unwrap();
 
@@ -297,6 +382,25 @@ References: <root@example.com>\r\n\t<first@example.com>\r\n\r\n";
             "<first@example.com>   <second@example.com>"
         );
         assert_eq!(body.references, "<root@example.com> <first@example.com>");
+        assert_eq!(body.read_receipt, "fallback@example.com");
+    }
+
+    #[test]
+    fn invalid_primary_read_receipt_does_not_use_fallback() {
+        let raw = b"Disposition-Notification-To: <>\r\n\
+X-Confirm-Reading-To: fallback@example.com\r\n\
+Subject: Invalid receipt\r\n\r\n";
+
+        let body = parse_body(raw).unwrap();
+
+        assert!(body.read_receipt.is_empty());
+
+        let comment_only = b"Disposition-Notification-To: (comment)\r\n\
+X-Confirm-Reading-To: fallback@example.com\r\n\
+Subject: Comment-only receipt\r\n\r\n";
+        let body = parse_body(comment_only).unwrap();
+
+        assert!(body.read_receipt.is_empty());
     }
 
     #[test]
