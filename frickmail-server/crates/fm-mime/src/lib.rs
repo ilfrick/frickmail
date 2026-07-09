@@ -1,3 +1,4 @@
+use mail_parser::{Address, HeaderForm, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -12,6 +13,13 @@ pub struct ParsedMessageBody {
     pub html: String,
     pub plain: String,
     pub subject: Option<String>,
+    pub from: Vec<String>,
+    pub reply_to: Vec<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub sender: Vec<String>,
+    pub delivered_to: Vec<String>,
 }
 
 pub fn parse_summary(raw: &[u8]) -> ParsedMessageSummary {
@@ -25,10 +33,7 @@ pub fn parse_summary(raw: &[u8]) -> ParsedMessageSummary {
 
     ParsedMessageSummary {
         subject: message.subject().map(ToOwned::to_owned),
-        from: message
-            .from()
-            .map(|from| from.iter().map(format_addr).collect())
-            .unwrap_or_default(),
+        from: format_address_list(message.from()),
         has_attachments: message.attachment_count() > 0,
     }
 }
@@ -54,7 +59,45 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         html,
         plain,
         subject,
+        from: format_header_addresses(&message, "From"),
+        reply_to: format_header_addresses(&message, "Reply-To"),
+        to: format_header_addresses(&message, "To"),
+        cc: format_header_addresses(&message, "Cc"),
+        bcc: format_header_addresses(&message, "Bcc"),
+        sender: format_header_addresses(&message, "Sender"),
+        delivered_to: format_header_addresses(&message, "Delivered-To"),
     })
+}
+
+fn format_address_list(addresses: Option<&Address<'_>>) -> Vec<String> {
+    addresses.map(format_address_value).unwrap_or_default()
+}
+
+fn format_header_addresses(message: &mail_parser::Message<'_>, header: &str) -> Vec<String> {
+    message
+        .header_as(header, HeaderForm::Addresses)
+        .into_iter()
+        .next()
+        .map(format_header_address_value)
+        .unwrap_or_default()
+}
+
+fn format_header_address_value(value: HeaderValue<'_>) -> Vec<String> {
+    match value {
+        HeaderValue::Address(address) => format_address_value(&address),
+        _ => Vec::new(),
+    }
+}
+
+fn format_address_value(addresses: &Address<'_>) -> Vec<String> {
+    match addresses {
+        Address::List(list) => list.iter().map(format_addr).collect(),
+        Address::Group(groups) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter())
+            .map(format_addr)
+            .collect(),
+    }
 }
 
 fn format_addr(addr: &mail_parser::Addr<'_>) -> String {
@@ -121,10 +164,52 @@ Content-Type: text/html; charset=utf-8
         let body = parse_body(raw).unwrap();
 
         assert_eq!(body.subject.as_deref(), Some("Body message"));
+        assert_eq!(body.from, vec!["sender@example.com"]);
         assert_eq!(body.plain.trim(), "Plain body.");
         assert_eq!(body.html.trim(), "<p>HTML body.</p>");
         assert!(!body.html.contains("script"));
         assert!(!body.html.contains("onclick"));
+    }
+
+    #[test]
+    fn parses_body_address_headers() {
+        let raw = br#"From: Sender <sender@example.com>
+Reply-To: Reply <reply@example.com>
+To: Recipient <recipient@example.com>
+Cc: CC <cc@example.com>
+Bcc: Hidden <hidden@example.com>
+Sender: Actual Sender <actual@example.com>
+Delivered-To: delivered@example.com
+Delivered-To: ignored-delivery@example.com
+Subject: Address body
+
+Hello.
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert_eq!(body.subject.as_deref(), Some("Address body"));
+        assert_eq!(body.from, vec!["Sender <sender@example.com>"]);
+        assert_eq!(body.reply_to, vec!["Reply <reply@example.com>"]);
+        assert_eq!(body.to, vec!["Recipient <recipient@example.com>"]);
+        assert_eq!(body.cc, vec!["CC <cc@example.com>"]);
+        assert_eq!(body.bcc, vec!["Hidden <hidden@example.com>"]);
+        assert_eq!(body.sender, vec!["Actual Sender <actual@example.com>"]);
+        assert_eq!(body.delivered_to, vec!["delivered@example.com"]);
+    }
+
+    #[test]
+    fn body_address_headers_use_first_duplicate_like_php() {
+        let raw = br#"From: First <first@example.com>
+From: Second <second@example.com>
+Subject: Duplicate address
+
+Hello.
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert_eq!(body.from, vec!["First <first@example.com>"]);
     }
 
     #[test]

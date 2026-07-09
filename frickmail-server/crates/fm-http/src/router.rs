@@ -5911,10 +5911,13 @@ fn legacy_message_json(
     message_id: &str,
     in_reply_to: &str,
     references: &str,
-    from: Option<&str>,
-    reply_to: Option<&str>,
-    to: Option<&str>,
-    cc: Option<&str>,
+    from: Option<&[String]>,
+    reply_to: Option<&[String]>,
+    to: Option<&[String]>,
+    cc: Option<&[String]>,
+    bcc: Option<&[String]>,
+    sender: Option<&[String]>,
+    delivered_to: Option<&[String]>,
     size: u32,
     flags: &[String],
     preview: Option<&str>,
@@ -5936,9 +5939,9 @@ fn legacy_message_json(
         "replyTo": legacy_optional_email_collection(reply_to),
         "to": legacy_optional_email_collection(to),
         "cc": legacy_optional_email_collection(cc),
-        "bcc": Value::Null,
-        "sender": Value::Null,
-        "deliveredTo": Value::Null,
+        "bcc": legacy_optional_email_collection(bcc),
+        "sender": legacy_optional_email_collection(sender),
+        "deliveredTo": legacy_optional_email_collection(delivered_to),
         "readReceipt": "",
         "attachments": Value::Null,
         "spf": [],
@@ -5972,6 +5975,13 @@ fn legacy_message_body_response(
     let mut html = String::new();
     let mut plain = String::new();
     let mut subject = String::new();
+    let mut from = None;
+    let mut reply_to = None;
+    let mut to = None;
+    let mut cc = None;
+    let mut bcc = None;
+    let mut sender = None;
+    let mut delivered_to = None;
 
     for part in parts {
         let Some(body) = parse_body(&part.raw) else {
@@ -5989,6 +5999,27 @@ fn legacy_message_body_response(
                 }
             }
             fm_imap::BodyPartKind::RawMessage => {
+                if from.is_none() {
+                    from = Some(body.from.clone());
+                }
+                if reply_to.is_none() {
+                    reply_to = Some(body.reply_to.clone());
+                }
+                if to.is_none() {
+                    to = Some(body.to.clone());
+                }
+                if cc.is_none() {
+                    cc = Some(body.cc.clone());
+                }
+                if bcc.is_none() {
+                    bcc = Some(body.bcc.clone());
+                }
+                if sender.is_none() {
+                    sender = Some(body.sender.clone());
+                }
+                if delivered_to.is_none() {
+                    delivered_to = Some(body.delivered_to.clone());
+                }
                 if html.is_empty() && !body.html.is_empty() {
                     html = body.html;
                 }
@@ -6021,10 +6052,13 @@ fn legacy_message_body_response(
                 "",
                 "",
                 "",
-                None,
-                None,
-                None,
-                None,
+                from.as_deref(),
+                reply_to.as_deref(),
+                to.as_deref(),
+                cc.as_deref(),
+                bcc.as_deref(),
+                sender.as_deref(),
+                delivered_to.as_deref(),
                 0,
                 &[],
                 None,
@@ -6035,9 +6069,18 @@ fn legacy_message_body_response(
 
 const LEGACY_EMAIL_COLLECTION_JSON_LIMIT: usize = 100;
 
-fn legacy_optional_email_collection(raw: Option<&str>) -> Value {
-    raw.map(|raw| json!(legacy_email_collection(raw)))
+fn legacy_optional_email_collection(addresses: Option<&[String]>) -> Value {
+    addresses
+        .map(|addresses| json!(legacy_email_collection_from_strings(addresses)))
         .unwrap_or(Value::Null)
+}
+
+fn legacy_email_collection_from_strings(addresses: &[String]) -> Vec<Value> {
+    addresses
+        .iter()
+        .filter_map(|item| legacy_email_json(item.trim()))
+        .take(LEGACY_EMAIL_COLLECTION_JSON_LIMIT)
+        .collect()
 }
 
 fn legacy_email_collection(raw: &str) -> Vec<Value> {
@@ -11340,7 +11383,7 @@ mod tests {
                 assert_eq!(uid, 51);
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
-                    raw: b"Subject: Legacy body\r\n\r\nHello legacy".to_vec(),
+                    raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
                 }]))
             },
         )
@@ -11354,13 +11397,19 @@ mod tests {
         assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Legacy body");
         assert_eq!(body["Result"]["preview"], Value::Null);
-        assert_eq!(body["Result"]["from"], Value::Null);
-        assert_eq!(body["Result"]["replyTo"], Value::Null);
-        assert_eq!(body["Result"]["to"], Value::Null);
-        assert_eq!(body["Result"]["cc"], Value::Null);
-        assert_eq!(body["Result"]["bcc"], Value::Null);
-        assert_eq!(body["Result"]["sender"], Value::Null);
-        assert_eq!(body["Result"]["deliveredTo"], Value::Null);
+        assert_eq!(body["Result"]["from"][0]["name"], "Sender, Example");
+        assert_eq!(body["Result"]["from"][0]["email"], "sender@example.com");
+        assert_eq!(body["Result"]["replyTo"][0]["email"], "reply@example.com");
+        assert_eq!(body["Result"]["to"][0]["name"], "Recipient");
+        assert_eq!(body["Result"]["to"][0]["email"], "recipient@example.com");
+        assert_eq!(body["Result"]["cc"][0]["email"], "cc@example.com");
+        assert_eq!(body["Result"]["bcc"][0]["email"], "hidden@example.com");
+        assert_eq!(body["Result"]["sender"][0]["name"], "Actual");
+        assert_eq!(body["Result"]["sender"][0]["email"], "actual@example.com");
+        assert_eq!(
+            body["Result"]["deliveredTo"][0]["email"],
+            "delivered@example.com"
+        );
         assert_eq!(body["Result"]["attachments"], Value::Null);
         assert_eq!(body["Result"]["headers"], Value::Null);
         assert_eq!(body["Result"]["dateTimestamp"], 0);
@@ -11371,6 +11420,38 @@ mod tests {
         assert!(body["Result"].get("references").is_none());
         assert!(body["Result"].get("threads").is_none());
         assert!(body["Result"].get("threadUnseen").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_keeps_part_only_email_collections_unavailable() {
+        let key = [49_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1818, 1819, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1819, "folder": "INBOX", "uid": 53}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::Plain,
+                    raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nPart-only body".to_vec(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["plain"], "Part-only body");
+        assert_eq!(body["Result"]["from"], Value::Null);
+        assert_eq!(body["Result"]["replyTo"], Value::Null);
+        assert_eq!(body["Result"]["to"], Value::Null);
+        assert_eq!(body["Result"]["cc"], Value::Null);
+        assert_eq!(body["Result"]["bcc"], Value::Null);
+        assert_eq!(body["Result"]["sender"], Value::Null);
+        assert_eq!(body["Result"]["deliveredTo"], Value::Null);
     }
 
     #[tokio::test]
@@ -11409,6 +11490,13 @@ mod tests {
 
     #[test]
     fn legacy_message_json_keeps_nonempty_optional_body_fields() {
+        let from = vec!["Sender <sender@example.com>".to_string()];
+        let reply_to = vec!["reply@example.com".to_string()];
+        let to = vec!["Recipient <recipient@example.com>".to_string()];
+        let cc = vec!["cc@example.com".to_string()];
+        let bcc = vec!["hidden@example.com".to_string()];
+        let sender = vec!["Actual <actual@example.com>".to_string()];
+        let delivered_to = vec!["delivered@example.com".to_string()];
         let message = super::legacy_message_json(
             "INBOX",
             54,
@@ -11419,10 +11507,13 @@ mod tests {
             "",
             "",
             "<root@example>",
-            Some("Sender <sender@example.com>"),
-            Some("reply@example.com"),
-            Some("Recipient <recipient@example.com>"),
-            Some("cc@example.com"),
+            Some(from.as_slice()),
+            Some(reply_to.as_slice()),
+            Some(to.as_slice()),
+            Some(cc.as_slice()),
+            Some(bcc.as_slice()),
+            Some(sender.as_slice()),
+            Some(delivered_to.as_slice()),
             0,
             &[],
             None,
@@ -11438,9 +11529,10 @@ mod tests {
         assert_eq!(message["to"][0]["name"], "Recipient");
         assert_eq!(message["to"][0]["email"], "recipient@example.com");
         assert_eq!(message["cc"][0]["email"], "cc@example.com");
-        assert_eq!(message["bcc"], Value::Null);
-        assert_eq!(message["sender"], Value::Null);
-        assert_eq!(message["deliveredTo"], Value::Null);
+        assert_eq!(message["bcc"][0]["email"], "hidden@example.com");
+        assert_eq!(message["sender"][0]["name"], "Actual");
+        assert_eq!(message["sender"][0]["email"], "actual@example.com");
+        assert_eq!(message["deliveredTo"][0]["email"], "delivered@example.com");
         assert_eq!(message["attachments"], Value::Null);
         assert_eq!(message["headers"], Value::Null);
         assert_eq!(message["dateTimestamp"], 0);
@@ -12071,8 +12163,12 @@ mod tests {
 
     #[test]
     fn legacy_optional_email_collection_separates_unavailable_from_empty() {
+        let empty = Vec::new();
         assert_eq!(super::legacy_optional_email_collection(None), Value::Null);
-        assert_eq!(super::legacy_optional_email_collection(Some("")), json!([]));
+        assert_eq!(
+            super::legacy_optional_email_collection(Some(empty.as_slice())),
+            json!([])
+        );
     }
 
     #[test]
