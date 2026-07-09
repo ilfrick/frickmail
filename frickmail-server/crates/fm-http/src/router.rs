@@ -5912,6 +5912,7 @@ fn legacy_message_json(
     in_reply_to: &str,
     references: &str,
     read_receipt: &str,
+    header_timestamp: Option<i64>,
     from: Option<&[String]>,
     reply_to: Option<&[String]>,
     to: Option<&[String]>,
@@ -5923,6 +5924,11 @@ fn legacy_message_json(
     flags: &[String],
     preview: Option<&str>,
 ) -> Value {
+    let date_timestamp_source = if header_timestamp.is_some() {
+        "header"
+    } else {
+        "internal"
+    };
     let mut value = json!({
         "@Object": "Object/Message",
         "folder": folder,
@@ -5934,8 +5940,8 @@ fn legacy_message_json(
         "spamScore": 0,
         "spamResult": "",
         "isSpam": false,
-        "dateTimestamp": 0,
-        "dateTimestampSource": "internal",
+        "dateTimestamp": header_timestamp.unwrap_or_default(),
+        "dateTimestampSource": date_timestamp_source,
         "from": legacy_optional_email_collection(from),
         "replyTo": legacy_optional_email_collection(reply_to),
         "to": legacy_optional_email_collection(to),
@@ -5980,6 +5986,7 @@ fn legacy_message_body_response(
     let mut in_reply_to = String::new();
     let mut references = String::new();
     let mut read_receipt = String::new();
+    let mut header_timestamp = None;
     let mut from = None;
     let mut reply_to = None;
     let mut to = None;
@@ -6015,6 +6022,9 @@ fn legacy_message_body_response(
                 }
                 if read_receipt.is_empty() {
                     read_receipt = body.read_receipt.clone();
+                }
+                if header_timestamp.is_none() {
+                    header_timestamp = body.header_timestamp;
                 }
                 if from.is_none() {
                     from = Some(body.from.clone());
@@ -6057,6 +6067,7 @@ fn legacy_message_body_response(
         && in_reply_to.is_empty()
         && references.is_empty()
         && read_receipt.is_empty()
+        && header_timestamp.is_none()
         && from.is_none()
         && reply_to.is_none()
         && to.is_none()
@@ -6084,6 +6095,7 @@ fn legacy_message_body_response(
                 &in_reply_to,
                 &references,
                 &read_receipt,
+                header_timestamp,
                 from.as_deref(),
                 reply_to.as_deref(),
                 to.as_deref(),
@@ -11415,7 +11427,7 @@ mod tests {
                 assert_eq!(uid, 51);
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
-                    raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nDisposition-Notification-To: receipt@example.com\r\nX-Confirm-Reading-To: fallback@example.com\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
+                    raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nDisposition-Notification-To: receipt@example.com\r\nX-Confirm-Reading-To: fallback@example.com\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
                 }]))
             },
         )
@@ -11451,8 +11463,8 @@ mod tests {
         );
         assert_eq!(body["Result"]["attachments"], Value::Null);
         assert_eq!(body["Result"]["headers"], Value::Null);
-        assert_eq!(body["Result"]["dateTimestamp"], 0);
-        assert_eq!(body["Result"]["dateTimestampSource"], "internal");
+        assert_eq!(body["Result"]["dateTimestamp"], 1_057_049_557);
+        assert_eq!(body["Result"]["dateTimestampSource"], "header");
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_some());
         assert_eq!(body["Result"]["plain"], "Hello legacy");
@@ -11495,6 +11507,36 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
         );
         assert_eq!(body["Result"]["readReceipt"], "fallback@example.com");
         assert_eq!(body["Result"]["from"][0]["email"], "sender@example.com");
+        assert_eq!(body["Result"]["dateTimestamp"], 0);
+        assert_eq!(body["Result"]["dateTimestampSource"], "internal");
+        assert!(body["Result"].get("html").is_none());
+        assert!(body["Result"].get("plain").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_accepts_malformed_date_only_raw_message() {
+        let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1920, 1921, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1921, "folder": "INBOX", "uid": 56}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"Date: definitely not a date\r\n\r\n".to_vec(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["dateTimestamp"], 0);
+        assert_eq!(body["Result"]["dateTimestampSource"], "internal");
         assert!(body["Result"].get("html").is_none());
         assert!(body["Result"].get("plain").is_none());
     }
@@ -11513,7 +11555,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::Plain,
-                    raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nPart-only body".to_vec(),
+                    raw: b"Content-Type: text/plain; charset=utf-8\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\n\r\nPart-only body".to_vec(),
                 }]))
             },
         )
@@ -11525,6 +11567,8 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
         assert_eq!(body["Result"]["messageId"], "");
         assert_eq!(body["Result"]["inReplyTo"], "");
         assert_eq!(body["Result"]["readReceipt"], "");
+        assert_eq!(body["Result"]["dateTimestamp"], 0);
+        assert_eq!(body["Result"]["dateTimestampSource"], "internal");
         assert!(body["Result"].get("references").is_none());
         assert_eq!(body["Result"]["from"], Value::Null);
         assert_eq!(body["Result"]["replyTo"], Value::Null);
@@ -11589,6 +11633,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
             "",
             "<root@example>",
             "receipt@example.com",
+            None,
             Some(from.as_slice()),
             Some(reply_to.as_slice()),
             Some(to.as_slice()),

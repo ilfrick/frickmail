@@ -4,7 +4,6 @@ use async_imap::{
     types::{Capabilities, Capability, Flag},
     Client, Session,
 };
-use chrono::DateTime;
 use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
@@ -1393,9 +1392,7 @@ fn legacy_message_summary_from_fetch<'a>(
 }
 
 fn legacy_header_timestamp(date: &str) -> Option<i64> {
-    DateTime::parse_from_rfc2822(date)
-        .ok()
-        .map(|value| value.timestamp())
+    fm_core::legacy_rfc2822_timestamp(date)
 }
 
 fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64, &'static str) {
@@ -3392,7 +3389,7 @@ mod tests {
 
     #[test]
     fn legacy_message_summary_parses_date_header_timestamp() {
-        let header = b"Subject: Timestamped\r\nDate: Tue, 1 Jul 2003 10:52:37 +0200\r\n\r\n";
+        let header = b"Subject: Timestamped\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\n\r\n";
 
         let summary = legacy_message_summary_from_fetch(
             "INBOX",
@@ -3404,7 +3401,7 @@ mod tests {
             header,
         );
 
-        assert_eq!(summary.date, "Tue, 1 Jul 2003 10:52:37 +0200");
+        assert_eq!(summary.date, "Tue, 1 Jul 2003 10:52:37 CEST");
         assert_eq!(summary.date_timestamp, 1_057_049_557);
         assert_eq!(summary.date_timestamp_source, "header");
     }

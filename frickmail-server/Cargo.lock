@@ -881,6 +881,7 @@ dependencies = [
 name = "fm-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "config",
  "http",
  "serde",
@@ -933,7 +934,6 @@ name = "fm-imap"
 version = "0.1.0"
 dependencies = [
  "async-imap",
- "chrono",
  "fm-core",
  "futures",
  "imap-proto",
@@ -951,6 +951,7 @@ name = "fm-mime"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "fm-core",
  "mail-builder",
  "mail-parser",
  "serde",

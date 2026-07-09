@@ -17,6 +17,8 @@ pub struct ParsedMessageBody {
     pub in_reply_to: String,
     pub references: String,
     pub read_receipt: String,
+    pub header_timestamp: Option<i64>,
+    pub date_header_present: bool,
     pub from: Vec<String>,
     pub reply_to: Vec<String>,
     pub to: Vec<String>,
@@ -59,6 +61,12 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
     let references =
         collapse_header_whitespace(&format_legacy_header_value(&message, "References"));
     let read_receipt = format_read_receipt(&message);
+    let date_header_present = message
+        .headers()
+        .iter()
+        .any(|header| header.name().eq_ignore_ascii_case("Date"));
+    let header_timestamp =
+        fm_core::legacy_rfc2822_timestamp(&format_legacy_header_value(&message, "Date"));
     let from = format_header_addresses(&message, "From");
     let reply_to = format_header_addresses(&message, "Reply-To");
     let to = format_header_addresses(&message, "To");
@@ -74,6 +82,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         && in_reply_to.is_empty()
         && references.is_empty()
         && read_receipt.is_empty()
+        && !date_header_present
         && from.is_empty()
         && reply_to.is_empty()
         && to.is_empty()
@@ -93,6 +102,8 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         in_reply_to,
         references,
         read_receipt,
+        header_timestamp,
+        date_header_present,
         from,
         reply_to,
         to,
@@ -342,6 +353,7 @@ References: <root@example.com>
  <parent@example.com>
 Disposition-Notification-To: primary@example.com
 X-Confirm-Reading-To: fallback@example.com
+Date: Tue, 1 Jul 2003 10:52:37 CEST
 Subject: Address body
 
 Hello.
@@ -354,6 +366,8 @@ Hello.
         assert_eq!(body.in_reply_to, "<parent@example.com>");
         assert_eq!(body.references, "<root@example.com> <parent@example.com>");
         assert_eq!(body.read_receipt, "primary@example.com");
+        assert_eq!(body.header_timestamp, Some(1_057_049_557));
+        assert!(body.date_header_present);
         assert_eq!(body.from, vec!["Sender <sender@example.com>"]);
         assert_eq!(body.reply_to, vec!["Reply <reply@example.com>"]);
         assert_eq!(body.to, vec!["Recipient <recipient@example.com>"]);
@@ -383,6 +397,8 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n";
         );
         assert_eq!(body.references, "<root@example.com> <first@example.com>");
         assert_eq!(body.read_receipt, "fallback@example.com");
+        assert_eq!(body.header_timestamp, None);
+        assert!(!body.date_header_present);
     }
 
     #[test]
@@ -409,6 +425,8 @@ Subject: Comment-only receipt\r\n\r\n";
 From: Second <second@example.com>
 Message-ID: <first@example.com>
 Message-ID: <second@example.com>
+Date: definitely not a date
+Date: Wed, 2 Jul 2003 10:52:37 +0200
 Subject: Duplicate address
 
 Hello.
@@ -418,6 +436,19 @@ Hello.
 
         assert_eq!(body.from, vec!["First <first@example.com>"]);
         assert_eq!(body.message_id, "<first@example.com>");
+        assert_eq!(body.header_timestamp, None);
+        assert!(body.date_header_present);
+    }
+
+    #[test]
+    fn parses_malformed_date_only_as_available_metadata() {
+        let body = parse_body(b"Date: definitely not a date\r\n\r\n").unwrap();
+
+        assert_eq!(body.header_timestamp, None);
+        assert!(body.date_header_present);
+        assert!(body.html.is_empty());
+        assert!(body.plain.is_empty());
+        assert!(body.subject.is_none());
     }
 
     #[test]

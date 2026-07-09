@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 ammonia.workspace = true
+fm-core = { path = "../fm-core" }
 mail-builder.workspace = true
 mail-parser.workspace = true
 serde.workspace = true
