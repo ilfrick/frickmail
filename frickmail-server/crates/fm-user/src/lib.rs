@@ -3314,7 +3314,7 @@ fn validate_rule_actions(actions: &[Value]) -> Result<()> {
 }
 
 fn optional_non_empty_string(value: Option<String>) -> Option<String> {
-    value.and_then(|value| if value.is_empty() { None } else { Some(value) })
+    value.filter(|value| !value.is_empty())
 }
 
 fn trim_non_empty(value: Option<String>) -> Option<String> {
