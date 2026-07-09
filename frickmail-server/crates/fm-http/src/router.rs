@@ -33,7 +33,7 @@ use fm_imap::{
     MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField,
     RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
-use fm_mime::parse_body;
+use fm_mime::{parse_body, ParsedMessageAttachment};
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
@@ -5913,6 +5913,7 @@ fn legacy_message_json(
     references: &str,
     read_receipt: &str,
     header_timestamp: Option<i64>,
+    attachments: Option<&[ParsedMessageAttachment]>,
     from: Option<&[String]>,
     reply_to: Option<&[String]>,
     to: Option<&[String]>,
@@ -5950,7 +5951,7 @@ fn legacy_message_json(
         "sender": legacy_optional_email_collection(sender),
         "deliveredTo": legacy_optional_email_collection(delivered_to),
         "readReceipt": read_receipt,
-        "attachments": Value::Null,
+        "attachments": legacy_parsed_attachments_json(folder, uid, attachments),
         "spf": [],
         "dkim": [],
         "dmarc": [],
@@ -5973,6 +5974,36 @@ fn legacy_message_json(
     value
 }
 
+fn legacy_parsed_attachments_json(
+    folder: &str,
+    uid: u32,
+    attachments: Option<&[ParsedMessageAttachment]>,
+) -> Value {
+    let Some(attachments) = attachments else {
+        return Value::Null;
+    };
+
+    Value::Array(
+        attachments
+            .iter()
+            .map(|attachment| {
+                json!({
+                    "@Object": "Object/Attachment",
+                    "folder": folder,
+                    "uid": uid,
+                    "mimeIndex": attachment.mime_index,
+                    "mimeType": attachment.mime_type,
+                    "fileName": attachment.file_name,
+                    "estimatedSize": attachment.estimated_size,
+                    "cId": attachment.c_id,
+                    "contentLocation": attachment.content_location,
+                    "isInline": attachment.is_inline,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn legacy_message_body_response(
     action: &str,
     folder: &str,
@@ -5987,6 +6018,7 @@ fn legacy_message_body_response(
     let mut references = String::new();
     let mut read_receipt = String::new();
     let mut header_timestamp = None;
+    let mut attachments = None;
     let mut from = None;
     let mut reply_to = None;
     let mut to = None;
@@ -6025,6 +6057,9 @@ fn legacy_message_body_response(
                 }
                 if header_timestamp.is_none() {
                     header_timestamp = body.header_timestamp;
+                }
+                if part.is_complete && attachments.is_none() && !body.attachments.is_empty() {
+                    attachments = Some(body.attachments.clone());
                 }
                 if from.is_none() {
                     from = Some(body.from.clone());
@@ -6068,6 +6103,7 @@ fn legacy_message_body_response(
         && references.is_empty()
         && read_receipt.is_empty()
         && header_timestamp.is_none()
+        && attachments.is_none()
         && from.is_none()
         && reply_to.is_none()
         && to.is_none()
@@ -6096,6 +6132,7 @@ fn legacy_message_body_response(
                 &references,
                 &read_receipt,
                 header_timestamp,
+                attachments.as_deref(),
                 from.as_deref(),
                 reply_to.as_deref(),
                 to.as_deref(),
@@ -11284,10 +11321,12 @@ mod tests {
                         )
                         .as_bytes()
                         .to_vec(),
+                        is_complete: false,
                     },
                     BodyPreviewPart {
                         kind: BodyPartKind::Plain,
                         raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nPlain body.".to_vec(),
+                        is_complete: false,
                     },
                 ]))
             },
@@ -11356,6 +11395,7 @@ mod tests {
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::Plain,
                     raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nSelected body.".to_vec(),
+                    is_complete: false,
                 }]))
             },
         )
@@ -11428,6 +11468,7 @@ mod tests {
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
                     raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nDisposition-Notification-To: receipt@example.com\r\nX-Confirm-Reading-To: fallback@example.com\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
+                    is_complete: true,
                 }]))
             },
         )
@@ -11492,6 +11533,7 @@ In-Reply-To: <parent@example.com>\r\n\
 References: <root@example.com>\r\n <parent@example.com>\r\n\
 X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                         .to_vec(),
+                    is_complete: true,
                 }]))
             },
         )
@@ -11528,6 +11570,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
                     raw: b"Date: definitely not a date\r\n\r\n".to_vec(),
+                    is_complete: true,
                 }]))
             },
         )
@@ -11539,6 +11582,112 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
         assert_eq!(body["Result"]["dateTimestampSource"], "internal");
         assert!(body["Result"].get("html").is_none());
         assert!(body["Result"].get("plain").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_populates_raw_message_attachments() {
+        let key = [52_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1930, 1931, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1931, "folder": "INBOX", "uid": 57}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: br#"Subject: Attachment message
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b"
+
+--b
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset=utf-8
+
+Body.
+--alt
+Content-Type: text/html; charset=utf-8
+
+<p>Body.</p>
+--alt--
+--b
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="../report?.pdf"
+Content-ID: <part@example.com>
+Content-Location: cid:report
+Content-Transfer-Encoding: base64
+
+UERGREFUQQ==
+--b--
+"#
+                    .to_vec(),
+                    is_complete: true,
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let attachment = &body["Result"]["attachments"][0];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["attachments"].as_array().unwrap().len(), 1);
+        assert_eq!(attachment["@Object"], "Object/Attachment");
+        assert_eq!(attachment["folder"], "INBOX");
+        assert_eq!(attachment["uid"], 57);
+        assert_eq!(attachment["mimeIndex"], "2");
+        assert_eq!(attachment["mimeType"], "application/pdf");
+        assert_eq!(attachment["fileName"], "..-report-.pdf");
+        assert_eq!(attachment["estimatedSize"], 9);
+        assert_eq!(attachment["cId"], "part@example.com");
+        assert_eq!(attachment["contentLocation"], "cid:report");
+        assert_eq!(attachment["isInline"], true);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_keeps_incomplete_raw_preview_attachments_unavailable() {
+        let key = [53_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1932, 1933, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1933, "folder": "INBOX", "uid": 58}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: br#"Subject: Attachment preview
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b"
+
+--b
+Content-Type: text/plain; charset=utf-8
+
+Body from capped preview.
+--b
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+UERGREFUQQ==
+"#
+                    .to_vec(),
+                    is_complete: false,
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["subject"], "Attachment preview");
+        assert_eq!(body["Result"]["plain"], "Body from capped preview.");
+        assert_eq!(body["Result"]["attachments"], Value::Null);
     }
 
     #[tokio::test]
@@ -11556,6 +11705,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::Plain,
                     raw: b"Content-Type: text/plain; charset=utf-8\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\n\r\nPart-only body".to_vec(),
+                    is_complete: false,
                 }]))
             },
         )
@@ -11594,6 +11744,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
                     raw: b"Subject: Metadata only\r\n\r\n".to_vec(),
+                    is_complete: true,
                 }]))
             },
         )
@@ -11633,6 +11784,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
             "",
             "<root@example>",
             "receipt@example.com",
+            None,
             None,
             Some(from.as_slice()),
             Some(reply_to.as_slice()),
@@ -11691,6 +11843,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                     Ok(Some(vec![BodyPreviewPart {
                         kind: BodyPartKind::RawMessage,
                         raw: b"Subject: RawKey body\r\n\r\nHello from raw key".to_vec(),
+                        is_complete: true,
                     }]))
                 }
             },
@@ -12676,6 +12829,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
                     raw: b"\0".to_vec(),
+                    is_complete: true,
                 }]))
             },
         )

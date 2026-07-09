@@ -133,6 +133,7 @@ pub async fn probe_login(probe: ImapLoginProbe, password: &str) -> Result<()> {
 pub struct BodyPreviewPart {
     pub kind: BodyPartKind,
     pub raw: Vec<u8>,
+    pub is_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2416,7 +2417,7 @@ async fn fetch_body_part_specs(
                 path: None,
                 depth: 0,
                 kind: BodyPartKind::RawMessage,
-                octets: BODY_PREVIEW_PART_LIMIT_BYTES as u32,
+                octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
             }]));
         };
         let specs = body_preview_part_specs(bodystructure);
@@ -2465,6 +2466,7 @@ async fn fetch_preview_parts(
                         parts.push(BodyPreviewPart {
                             kind: spec.kind,
                             raw: join_mime_part(mime, body),
+                            is_complete: false,
                         });
                     }
                 }
@@ -2473,6 +2475,7 @@ async fn fetch_preview_parts(
                         parts.push(BodyPreviewPart {
                             kind: BodyPartKind::RawMessage,
                             raw: body.to_vec(),
+                            is_complete: raw_message_preview_is_complete(body, spec.octets),
                         });
                     }
                 }
@@ -2483,6 +2486,11 @@ async fn fetch_preview_parts(
     }
 
     Ok(Vec::new())
+}
+
+fn raw_message_preview_is_complete(body: &[u8], expected_octets: u32) -> bool {
+    expected_octets < BODY_PREVIEW_PART_LIMIT_BYTES as u32
+        && usize::try_from(expected_octets).is_ok_and(|expected| body.len() >= expected)
 }
 
 fn body_preview_part_specs(body: &BodyStructure<'_>) -> Vec<BodyPartSpec> {
@@ -3013,6 +3021,16 @@ mod tests {
             "(UID BODY.PEEK[1.MIME] BODY.PEEK[1]<0.262144>)"
         );
         assert!(!body_preview_fetch_query(&specs).contains("RFC822"));
+    }
+
+    #[test]
+    fn raw_message_preview_completeness_requires_full_uncapped_body() {
+        assert!(raw_message_preview_is_complete(b"abcd", 4));
+        assert!(!raw_message_preview_is_complete(b"abc", 4));
+        assert!(!raw_message_preview_is_complete(
+            b"abcd",
+            BODY_PREVIEW_PART_LIMIT_BYTES as u32,
+        ));
     }
 
     #[test]

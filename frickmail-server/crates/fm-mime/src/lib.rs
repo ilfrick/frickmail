@@ -1,4 +1,6 @@
-use mail_parser::{Address, HeaderForm, HeaderValue};
+use std::collections::HashMap;
+
+use mail_parser::{Address, Encoding, HeaderForm, HeaderValue, MessagePart, MimeHeaders, PartType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,6 +28,18 @@ pub struct ParsedMessageBody {
     pub bcc: Vec<String>,
     pub sender: Vec<String>,
     pub delivered_to: Vec<String>,
+    pub attachments: Vec<ParsedMessageAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedMessageAttachment {
+    pub mime_index: String,
+    pub mime_type: String,
+    pub file_name: String,
+    pub estimated_size: u32,
+    pub c_id: String,
+    pub content_location: String,
+    pub is_inline: bool,
 }
 
 pub fn parse_summary(raw: &[u8]) -> ParsedMessageSummary {
@@ -74,6 +88,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
     let bcc = format_header_addresses(&message, "Bcc");
     let sender = format_header_addresses(&message, "Sender");
     let delivered_to = format_header_addresses(&message, "Delivered-To");
+    let attachments = format_attachments(&message);
 
     if html.is_empty()
         && plain.is_empty()
@@ -90,6 +105,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         && bcc.is_empty()
         && sender.is_empty()
         && delivered_to.is_empty()
+        && attachments.is_empty()
     {
         return None;
     }
@@ -111,7 +127,195 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         bcc,
         sender,
         delivered_to,
+        attachments,
     })
+}
+
+fn format_attachments(message: &mail_parser::Message<'_>) -> Vec<ParsedMessageAttachment> {
+    let mime_indexes = legacy_mime_part_indexes(message);
+    message
+        .attachments
+        .iter()
+        .filter_map(|part_id| {
+            let part = message.part(*part_id)?;
+            let mime_index = mime_indexes
+                .get(part_id)
+                .cloned()
+                .unwrap_or_else(|| part_id.to_string());
+            Some(format_attachment(message, part, &mime_index))
+        })
+        .collect()
+}
+
+fn legacy_mime_part_indexes(message: &mail_parser::Message<'_>) -> HashMap<usize, String> {
+    let mut indexes = HashMap::new();
+    if !message.parts.is_empty() {
+        collect_legacy_mime_part_indexes(message, 0, "", &mut indexes);
+    }
+    indexes
+}
+
+fn collect_legacy_mime_part_indexes(
+    message: &mail_parser::Message<'_>,
+    part_index: usize,
+    part_id: &str,
+    indexes: &mut HashMap<usize, String>,
+) {
+    let Some(part) = message.part(part_index) else {
+        return;
+    };
+    let current_part_id = if !part_id.is_empty() {
+        part_id.to_string()
+    } else if matches!(part.body, PartType::Multipart(_)) {
+        "TEXT".to_string()
+    } else {
+        "1".to_string()
+    };
+    indexes.insert(part_index, current_part_id);
+
+    if let PartType::Multipart(children) = &part.body {
+        let child_prefix = if part_id.is_empty() {
+            String::new()
+        } else {
+            format!("{part_id}.")
+        };
+        for (index, child) in children.iter().enumerate() {
+            collect_legacy_mime_part_indexes(
+                message,
+                *child,
+                &format!("{}{index}", child_prefix, index = index + 1),
+                indexes,
+            );
+        }
+    }
+}
+
+fn format_attachment(
+    message: &mail_parser::Message<'_>,
+    part: &MessagePart<'_>,
+    mime_index: &str,
+) -> ParsedMessageAttachment {
+    let mime_type = attachment_mime_type(part);
+    let is_inline = attachment_is_inline(part);
+    let file_name = part
+        .attachment_name()
+        .map(legacy_php_trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_attachment_file_name(&mime_type, mime_index, is_inline));
+
+    ParsedMessageAttachment {
+        mime_index: mime_index.to_string(),
+        mime_type,
+        file_name: secure_attachment_file_name(&file_name),
+        estimated_size: estimated_attachment_size(message, part),
+        c_id: legacy_attachment_content_id(part),
+        content_location: part.content_location().unwrap_or_default().to_string(),
+        is_inline,
+    }
+}
+
+fn legacy_attachment_content_id(part: &MessagePart<'_>) -> String {
+    part.content_id().unwrap_or_default().trim().to_string()
+}
+
+fn estimated_attachment_size(message: &mail_parser::Message<'_>, part: &MessagePart<'_>) -> u32 {
+    let raw_len = message
+        .raw_message
+        .get(part.offset_body..part.offset_end)
+        .map(trim_ascii_whitespace)
+        .map_or_else(|| part.body.len(), <[u8]>::len);
+    let coefficient = match part.encoding {
+        Encoding::Base64 => 0.75,
+        Encoding::QuotedPrintable => 0.44,
+        _ => 1.0,
+    };
+
+    ((raw_len as f64) * coefficient) as u32
+}
+
+fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = value.len();
+    while start < end && value[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && value[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &value[start..end]
+}
+
+fn attachment_mime_type(part: &MessagePart<'_>) -> String {
+    if let Some(content_type) = part.content_type() {
+        return format!(
+            "{}/{}",
+            content_type.ctype(),
+            content_type.subtype().unwrap_or_default()
+        )
+        .trim()
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    }
+
+    match &part.body {
+        PartType::Text(_) => "text/plain",
+        PartType::Html(_) => "text/html",
+        PartType::Message(_) => "message/rfc822",
+        PartType::Multipart(_) => "multipart/mixed",
+        PartType::Binary(_) | PartType::InlineBinary(_) => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn attachment_is_inline(part: &MessagePart<'_>) -> bool {
+    part.content_disposition()
+        .is_some_and(|disposition| disposition.ctype().eq_ignore_ascii_case("inline"))
+        || matches!(part.body, PartType::InlineBinary(_))
+        || part
+            .content_id()
+            .is_some_and(|content_id| !content_id.trim().is_empty())
+}
+
+fn default_attachment_file_name(mime_type: &str, mime_index: &str, is_inline: bool) -> String {
+    let suffix = format!("-{mime_index}");
+    match mime_type {
+        "message/rfc822" => format!("message{suffix}.eml"),
+        "text/calendar" => format!("calendar{suffix}.ics"),
+        "text/plain" => format!("part{suffix}.txt"),
+        "text/vcard" | "text/html" | "text/csv" | "text/xml" | "text/css" | "text/asp" => {
+            format!("part{suffix}.{}", mime_type.trim_start_matches("text/"))
+        }
+        "image/png" | "image/jpeg" | "image/gif" | "image/bmp" | "image/cgm" | "image/ief"
+        | "image/tiff" | "image/webp" => {
+            format!("part{suffix}.{}", mime_type.trim_start_matches("image/"))
+        }
+        _ if !mime_type.is_empty() => mime_type.replace('/', &format!("{suffix}.")),
+        _ if is_inline => format!("inline{suffix}"),
+        _ => format!("part{suffix}"),
+    }
+}
+
+fn secure_attachment_file_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_control()
+                || matches!(
+                    ch,
+                    '|' | '\\' | '?' | '*' | '<' | '"' | ':' | '>' | '+' | '[' | ']' | '/' | '&'
+                )
+            {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn legacy_php_trim(value: &str) -> &str {
+    value.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0b'))
 }
 
 fn format_address_list(addresses: Option<&Address<'_>>) -> Vec<String> {
@@ -307,6 +511,48 @@ Attachment text.
         assert_eq!(summary.subject.as_deref(), Some("Test message"));
         assert_eq!(summary.from, vec!["Sender <sender@example.com>"]);
         assert!(summary.has_attachments);
+    }
+
+    #[test]
+    fn parses_raw_message_attachment_metadata() {
+        let raw = br#"Subject: Attachment message
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b"
+
+--b
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset=utf-8
+
+Body.
+--alt
+Content-Type: text/html; charset=utf-8
+
+<p>Body.</p>
+--alt--
+--b
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="../report?.pdf"
+Content-ID: <part@example.com>
+Content-Location: cid:report
+Content-Transfer-Encoding: base64
+
+UERGREFUQQ==
+--b--
+"#;
+
+        let body = parse_body(raw).unwrap();
+        let attachment = &body.attachments[0];
+
+        assert_eq!(body.attachments.len(), 1);
+        assert_eq!(attachment.mime_index, "2");
+        assert_eq!(attachment.mime_type, "application/pdf");
+        assert_eq!(attachment.file_name, "..-report-.pdf");
+        assert_eq!(attachment.estimated_size, 9);
+        assert_eq!(attachment.c_id, "part@example.com");
+        assert_eq!(attachment.content_location, "cid:report");
+        assert!(attachment.is_inline);
     }
 
     #[test]
