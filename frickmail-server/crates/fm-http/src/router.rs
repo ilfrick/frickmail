@@ -5975,6 +5975,9 @@ fn legacy_message_body_response(
     let mut html = String::new();
     let mut plain = String::new();
     let mut subject = String::new();
+    let mut message_id = String::new();
+    let mut in_reply_to = String::new();
+    let mut references = String::new();
     let mut from = None;
     let mut reply_to = None;
     let mut to = None;
@@ -5999,6 +6002,15 @@ fn legacy_message_body_response(
                 }
             }
             fm_imap::BodyPartKind::RawMessage => {
+                if message_id.is_empty() {
+                    message_id = body.message_id.clone();
+                }
+                if in_reply_to.is_empty() {
+                    in_reply_to = body.in_reply_to.clone();
+                }
+                if references.is_empty() {
+                    references = body.references.clone();
+                }
                 if from.is_none() {
                     from = Some(body.from.clone());
                 }
@@ -6033,7 +6045,20 @@ fn legacy_message_body_response(
         }
     }
 
-    if html.is_empty() && plain.is_empty() && subject.is_empty() {
+    if html.is_empty()
+        && plain.is_empty()
+        && subject.is_empty()
+        && message_id.is_empty()
+        && in_reply_to.is_empty()
+        && references.is_empty()
+        && from.is_none()
+        && reply_to.is_none()
+        && to.is_none()
+        && cc.is_none()
+        && bcc.is_none()
+        && sender.is_none()
+        && delivered_to.is_none()
+    {
         return json_result_error(action, "Message body could not be parsed");
     }
 
@@ -6049,9 +6074,9 @@ fn legacy_message_body_response(
                 &subject,
                 &html,
                 &plain,
-                "",
-                "",
-                "",
+                &message_id,
+                &in_reply_to,
+                &references,
                 from.as_deref(),
                 reply_to.as_deref(),
                 to.as_deref(),
@@ -11383,7 +11408,7 @@ mod tests {
                 assert_eq!(uid, 51);
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
-                    raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
+                    raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
                 }]))
             },
         )
@@ -11396,6 +11421,12 @@ mod tests {
         assert_eq!(body["Result"]["uid"], 51);
         assert_eq!(body["Result"]["id"], Value::Null);
         assert_eq!(body["Result"]["subject"], "Legacy body");
+        assert_eq!(body["Result"]["messageId"], "<message@example.com>");
+        assert_eq!(body["Result"]["inReplyTo"], "<parent@example.com>");
+        assert_eq!(
+            body["Result"]["references"],
+            "<root@example.com> <parent@example.com>"
+        );
         assert_eq!(body["Result"]["preview"], Value::Null);
         assert_eq!(body["Result"]["from"][0]["name"], "Sender, Example");
         assert_eq!(body["Result"]["from"][0]["email"], "sender@example.com");
@@ -11417,9 +11448,45 @@ mod tests {
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_some());
         assert_eq!(body["Result"]["plain"], "Hello legacy");
-        assert!(body["Result"].get("references").is_none());
         assert!(body["Result"].get("threads").is_none());
         assert!(body["Result"].get("threadUnseen").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_accepts_header_only_raw_message() {
+        let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1918, 1919, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1919, "folder": "INBOX", "uid": 55}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"From: sender@example.com\r\n\
+Message-ID: <message@example.com>\r\n\
+In-Reply-To: <parent@example.com>\r\n\
+References: <root@example.com>\r\n <parent@example.com>\r\n\r\n"
+                        .to_vec(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["messageId"], "<message@example.com>");
+        assert_eq!(body["Result"]["inReplyTo"], "<parent@example.com>");
+        assert_eq!(
+            body["Result"]["references"],
+            "<root@example.com> <parent@example.com>"
+        );
+        assert_eq!(body["Result"]["from"][0]["email"], "sender@example.com");
+        assert!(body["Result"].get("html").is_none());
+        assert!(body["Result"].get("plain").is_none());
     }
 
     #[tokio::test]
@@ -11445,6 +11512,9 @@ mod tests {
 
         assert_eq!(body["Action"], "Message");
         assert_eq!(body["Result"]["plain"], "Part-only body");
+        assert_eq!(body["Result"]["messageId"], "");
+        assert_eq!(body["Result"]["inReplyTo"], "");
+        assert!(body["Result"].get("references").is_none());
         assert_eq!(body["Result"]["from"], Value::Null);
         assert_eq!(body["Result"]["replyTo"], Value::Null);
         assert_eq!(body["Result"]["to"], Value::Null);
