@@ -7842,13 +7842,7 @@ fn payload_optional_i64(payload: &Value, key: &str) -> Option<i64> {
         Some(Value::Bool(false)) => None,
         Some(Value::Bool(true)) => Some(1),
         Some(Value::String(value)) if value.trim().is_empty() => None,
-        Some(Value::String(value)) => {
-            value
-                .trim()
-                .parse::<i64>()
-                .ok()
-                .and_then(|value| if value > 0 { Some(value) } else { None })
-        }
+        Some(Value::String(value)) => value.trim().parse::<i64>().ok().filter(|&value| value > 0),
         Some(Value::Number(number)) => number
             .as_i64()
             .or_else(|| {
@@ -7857,7 +7851,7 @@ fn payload_optional_i64(payload: &Value, key: &str) -> Option<i64> {
                     .map(|value| value.min(i64::MAX as u64) as i64)
             })
             .or_else(|| number.as_f64().map(|value| value as i64))
-            .and_then(|value| if value > 0 { Some(value) } else { None }),
+            .filter(|&value| value > 0),
         _ => None,
     }
 }
@@ -8112,7 +8106,7 @@ fn mbox_escape_from_lines(raw: &[u8]) -> Vec<u8> {
 }
 
 fn payload_optional_string(payload: &Value, key: &str) -> Option<String> {
-    payload_string(payload, key).and_then(|value| if value.is_empty() { None } else { Some(value) })
+    payload_string(payload, key).filter(|value| !value.is_empty())
 }
 
 fn payload_array(payload: &Value, key: &str) -> Vec<Value> {
