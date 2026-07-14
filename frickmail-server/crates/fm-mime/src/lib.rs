@@ -185,8 +185,7 @@ fn legacy_header_collection_value(
     header: &Header<'_>,
 ) -> String {
     match &header.value {
-        HeaderValue::Text(value) => legacy_php_trim(value).to_string(),
-        HeaderValue::Address(_) | HeaderValue::TextList(_) => {
+        HeaderValue::Text(_) | HeaderValue::Address(_) | HeaderValue::TextList(_) => {
             legacy_decode_raw_header_value(&legacy_raw_header_value(message, header))
         }
         HeaderValue::ContentType(content_type) => legacy_content_type_value(content_type),
@@ -205,7 +204,7 @@ fn legacy_raw_header_value(message: &mail_parser::Message<'_>, header: &Header<'
 }
 
 fn legacy_decode_raw_header_value(value: &str) -> String {
-    let value = value.replace(['\r', '\n', '\t'], " ");
+    let value = legacy_unfold_encoded_header_value(value);
     let mut decoded = String::with_capacity(value.len());
     let mut index = 0;
 
@@ -221,7 +220,6 @@ fn legacy_decode_raw_header_value(value: &str) -> String {
             let whitespace_len = value[index..]
                 .chars()
                 .take_while(|ch| ch.is_ascii_whitespace())
-                .take(5)
                 .map(char::len_utf8)
                 .sum::<usize>();
             if whitespace_len > 0 && value[index + whitespace_len..].starts_with("=?") {
@@ -234,7 +232,26 @@ fn legacy_decode_raw_header_value(value: &str) -> String {
     }
 
     decoded.push_str(&value[index..]);
-    decoded
+    legacy_php_trim(&decoded).to_string()
+}
+
+fn legacy_unfold_encoded_header_value(value: &str) -> String {
+    let mut unfolded = String::with_capacity(value.len());
+    let mut in_fold = false;
+
+    for ch in value.chars() {
+        if matches!(ch, '\r' | '\n' | '\t') {
+            if !in_fold {
+                unfolded.push(' ');
+                in_fold = true;
+            }
+        } else {
+            unfolded.push(ch);
+            in_fold = false;
+        }
+    }
+
+    unfolded
 }
 
 fn legacy_header_collection_parameters(header: &Header<'_>) -> Vec<ParsedMessageHeaderParameter> {
@@ -760,9 +777,11 @@ UERGREFUQQ==
 
     #[test]
     fn parses_raw_message_header_collection_metadata() {
-        let raw = br#"Subject: Header message
+        let raw = br#"Subject: =?UTF-8?Q?_Header?=
+          =?UTF-8?Q?_message_=C3=84_?=
 Content-Type: text/plain; charset=utf-8; format=flowed
-X-Custom: custom value
+X-Custom: folded
+	value
 References: <root@example.com>
  <parent@example.com>
 Received: from mx.example
@@ -775,7 +794,7 @@ Body.
 
         assert_eq!(body.headers.len(), 5);
         assert_eq!(body.headers[0].name, "Subject");
-        assert_eq!(body.headers[0].value, "Header message");
+        assert_eq!(body.headers[0].value, "Header message Ä");
         assert_eq!(body.headers[1].name, "Content-Type");
         assert_eq!(body.headers[1].value, "text/plain");
         assert_eq!(body.headers[1].parameters.len(), 2);
@@ -784,7 +803,7 @@ Body.
         assert_eq!(body.headers[1].parameters[1].name, "format");
         assert_eq!(body.headers[1].parameters[1].value, "flowed");
         assert_eq!(body.headers[2].name, "X-Custom");
-        assert_eq!(body.headers[2].value, "custom value");
+        assert_eq!(body.headers[2].value, "folded value");
         assert_eq!(body.headers[3].name, "References");
         assert_eq!(
             body.headers[3].value,

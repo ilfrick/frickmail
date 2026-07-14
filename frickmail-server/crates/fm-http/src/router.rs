@@ -11669,6 +11669,46 @@ Body.
     }
 
     #[tokio::test]
+    async fn native_legacy_message_decodes_raw_scalar_header_values() {
+        let key = [61_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1928, 1929, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1929, "folder": "INBOX", "uid": 62}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: br#"Subject: =?UTF-8?Q?_Header?=
+          =?UTF-8?Q?_message_=C3=84_?=
+X-Custom: folded
+	value
+
+Body.
+"#
+                    .to_vec(),
+                    is_complete: true,
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(
+            body["Result"]["headers"]["@Collection"][0]["value"],
+            "Header message Ä"
+        );
+        assert_eq!(
+            body["Result"]["headers"]["@Collection"][1]["value"],
+            "folded value"
+        );
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_accepts_malformed_date_only_raw_message() {
         let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1920, 1921, &key).await;
