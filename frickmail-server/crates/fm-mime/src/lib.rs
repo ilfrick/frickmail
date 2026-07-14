@@ -49,6 +49,13 @@ pub struct ParsedMessageAttachment {
 pub struct ParsedMessageHeader {
     pub name: String,
     pub value: String,
+    pub parameters: Vec<ParsedMessageHeaderParameter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedMessageHeaderParameter {
+    pub name: String,
+    pub value: String,
 }
 
 pub fn parse_summary(raw: &[u8]) -> ParsedMessageSummary {
@@ -150,6 +157,7 @@ fn format_headers(message: &mail_parser::Message<'_>) -> Vec<ParsedMessageHeader
         .map(|header| ParsedMessageHeader {
             name: header.name.as_str().to_string(),
             value: legacy_header_collection_value(message, header),
+            parameters: legacy_header_collection_parameters(header),
         })
         .filter(|header| !header.name.is_empty() && !header.value.is_empty())
         .collect()
@@ -167,6 +175,14 @@ fn legacy_header_collection_value(
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join(", "),
+        HeaderValue::ContentType(content_type) => {
+            let mut value = legacy_php_trim(content_type.ctype()).to_string();
+            if let Some(subtype) = content_type.subtype() {
+                value.push('/');
+                value.push_str(legacy_php_trim(subtype));
+            }
+            value
+        }
         HeaderValue::Empty => String::new(),
         _ => message
             .raw_message
@@ -175,6 +191,24 @@ fn legacy_header_collection_value(
             .map(|value| legacy_php_trim(&value).to_string())
             .unwrap_or_default(),
     }
+}
+
+fn legacy_header_collection_parameters(header: &Header<'_>) -> Vec<ParsedMessageHeaderParameter> {
+    let HeaderValue::ContentType(content_type) = &header.value else {
+        return Vec::new();
+    };
+    let Some(attributes) = &content_type.attributes else {
+        return Vec::new();
+    };
+
+    attributes
+        .iter()
+        .map(|(name, value)| ParsedMessageHeaderParameter {
+            name: legacy_php_trim(name).trim_matches(['"', '\'']).to_string(),
+            value: legacy_php_trim(value).trim_matches(['"', '\'']).to_string(),
+        })
+        .filter(|parameter| !parameter.name.is_empty())
+        .collect()
 }
 
 fn format_attachments(message: &mail_parser::Message<'_>) -> Vec<ParsedMessageAttachment> {
@@ -604,6 +638,7 @@ UERGREFUQQ==
     #[test]
     fn parses_raw_message_header_collection_metadata() {
         let raw = br#"Subject: Header message
+Content-Type: text/plain; charset=utf-8; format=flowed
 X-Custom: custom value
 Received: from mx.example
  by mail.example
@@ -613,13 +648,20 @@ Body.
 
         let body = parse_body(raw).unwrap();
 
-        assert_eq!(body.headers.len(), 3);
+        assert_eq!(body.headers.len(), 4);
         assert_eq!(body.headers[0].name, "Subject");
         assert_eq!(body.headers[0].value, "Header message");
-        assert_eq!(body.headers[1].name, "X-Custom");
-        assert_eq!(body.headers[1].value, "custom value");
-        assert_eq!(body.headers[2].name, "Received");
-        assert_eq!(body.headers[2].value, "from mx.example\n by mail.example");
+        assert_eq!(body.headers[1].name, "Content-Type");
+        assert_eq!(body.headers[1].value, "text/plain");
+        assert_eq!(body.headers[1].parameters.len(), 2);
+        assert_eq!(body.headers[1].parameters[0].name, "charset");
+        assert_eq!(body.headers[1].parameters[0].value, "utf-8");
+        assert_eq!(body.headers[1].parameters[1].name, "format");
+        assert_eq!(body.headers[1].parameters[1].value, "flowed");
+        assert_eq!(body.headers[2].name, "X-Custom");
+        assert_eq!(body.headers[2].value, "custom value");
+        assert_eq!(body.headers[3].name, "Received");
+        assert_eq!(body.headers[3].value, "from mx.example\n by mail.example");
     }
 
     #[test]

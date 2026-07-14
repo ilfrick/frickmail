@@ -6015,11 +6015,28 @@ fn legacy_parsed_headers_json(headers: Option<&[ParsedMessageHeader]>) -> Value 
         "@Collection": headers
             .iter()
             .map(|header| {
-                json!({
+                let mut value = json!({
                     "@Object": "Object/MimeHeader",
                     "name": header.name,
                     "value": header.value,
-                })
+                });
+                if !header.parameters.is_empty() {
+                    let mut parameters = Map::new();
+                    for parameter in &header.parameters {
+                        parameters.insert(
+                            parameter.name.to_ascii_lowercase(),
+                            json!({
+                                "name": parameter.name,
+                                "value": parameter.value,
+                            }),
+                        );
+                    }
+                    value["parameters"] = json!({
+                        "@Object": "Collection/ParameterCollection",
+                        "@Collection": parameters,
+                    });
+                }
+                value
             })
             .collect::<Vec<_>>(),
     })
@@ -11678,6 +11695,23 @@ UERGREFUQQ==
         assert_eq!(attachment["cId"], "part@example.com");
         assert_eq!(attachment["contentLocation"], "cid:report");
         assert_eq!(attachment["isInline"], true);
+
+        let header = &body["Result"]["headers"]["@Collection"][2];
+        assert_eq!(header["@Object"], "Object/MimeHeader");
+        assert_eq!(header["name"], "Content-Type");
+        assert_eq!(header["value"], "multipart/mixed");
+        assert_eq!(
+            header["parameters"]["@Object"],
+            "Collection/ParameterCollection"
+        );
+        assert_eq!(
+            header["parameters"]["@Collection"]["boundary"]["name"],
+            "boundary"
+        );
+        assert_eq!(
+            header["parameters"]["@Collection"]["boundary"]["value"],
+            "b"
+        );
     }
 
     #[tokio::test]
