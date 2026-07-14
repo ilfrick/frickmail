@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use mail_parser::{
     Address, Encoding, Header, HeaderForm, HeaderValue, MessagePart, MimeHeaders, PartType,
 };
@@ -18,6 +19,7 @@ pub struct ParsedMessageBody {
     pub plain: String,
     pub subject: Option<String>,
     pub encrypted: bool,
+    pub draft_info: Option<ParsedDraftInfo>,
     pub message_id: String,
     pub in_reply_to: String,
     pub references: String,
@@ -59,6 +61,13 @@ pub struct ParsedMessageHeaderParameter {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedDraftInfo {
+    pub info_type: String,
+    pub uid: i64,
+    pub folder: String,
+}
+
 pub fn parse_summary(raw: &[u8]) -> ParsedMessageSummary {
     let Some(message) = mail_parser::MessageParser::default().parse(raw) else {
         return ParsedMessageSummary {
@@ -88,6 +97,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         .unwrap_or_default();
     let subject = message.subject().map(ToOwned::to_owned);
     let encrypted = legacy_message_encrypted(&message);
+    let draft_info = format_draft_info(&message);
     let message_id = format_legacy_header_value(&message, "Message-ID");
     let in_reply_to = format_legacy_header_value(&message, "In-Reply-To");
     let references =
@@ -113,6 +123,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         && plain.is_empty()
         && subject.is_none()
         && !encrypted
+        && draft_info.is_none()
         && message_id.is_empty()
         && in_reply_to.is_empty()
         && references.is_empty()
@@ -136,6 +147,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         plain,
         subject,
         encrypted,
+        draft_info,
         message_id,
         in_reply_to,
         references,
@@ -212,6 +224,70 @@ fn legacy_message_encrypted(message: &mail_parser::Message<'_>) -> bool {
     message.content_type().is_some_and(|content_type| {
         legacy_content_type_value(content_type) == "multipart/encrypted"
     })
+}
+
+fn format_draft_info(message: &mail_parser::Message<'_>) -> Option<ParsedDraftInfo> {
+    let raw = format_legacy_header_value(message, "X-Draft-Info");
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut info_type = String::new();
+    let mut uid = 0;
+    let mut folder = String::new();
+
+    for (name, value) in legacy_parameter_pairs(&raw) {
+        match name.to_ascii_lowercase().as_str() {
+            "type" => info_type = value,
+            "uid" => uid = legacy_php_int(&value),
+            "folder" => folder = legacy_base64_decode(&value),
+            _ => {}
+        }
+    }
+
+    (!info_type.is_empty() && uid != 0 && !folder.is_empty()).then_some(ParsedDraftInfo {
+        info_type,
+        uid,
+        folder,
+    })
+}
+
+fn legacy_parameter_pairs(raw: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    raw.split(';').filter_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        let name = legacy_php_trim(name).trim_matches(['"', '\'']).to_string();
+        let value = legacy_php_trim(value).trim_matches(['"', '\'']).to_string();
+        (!name.is_empty()).then_some((name, value))
+    })
+}
+
+fn legacy_base64_decode(value: &str) -> String {
+    STANDARD
+        .decode(value.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default()
+}
+
+fn legacy_php_int(value: &str) -> i64 {
+    let value = legacy_php_trim(value);
+    let mut end = 0;
+    let mut saw_digit = false;
+    for (index, ch) in value.char_indices() {
+        let allowed_sign = index == 0 && (ch == '-' || ch == '+');
+        if allowed_sign || ch.is_ascii_digit() {
+            if ch.is_ascii_digit() {
+                saw_digit = true;
+            }
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if !saw_digit {
+        return 0;
+    }
+    value[..end].parse::<i64>().unwrap_or_default()
 }
 
 fn legacy_content_type_value(content_type: &mail_parser::ContentType<'_>) -> String {
@@ -697,6 +773,22 @@ Version: 1
             body.headers[1].parameters[0].value,
             "application/pgp-encrypted"
         );
+    }
+
+    #[test]
+    fn parses_raw_message_draft_info() {
+        let raw = br#"Subject: Draft reply
+X-Draft-Info: type=reply; uid=77; folder=SU5CT1g=
+
+Body.
+"#;
+
+        let body = parse_body(raw).unwrap();
+        let draft_info = body.draft_info.unwrap();
+
+        assert_eq!(draft_info.info_type, "reply");
+        assert_eq!(draft_info.uid, 77);
+        assert_eq!(draft_info.folder, "INBOX");
     }
 
     #[test]

@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 ammonia.workspace = true
+base64.workspace = true
 fm-core = { path = "../fm-core" }
 mail-builder.workspace = true
 mail-parser.workspace = true

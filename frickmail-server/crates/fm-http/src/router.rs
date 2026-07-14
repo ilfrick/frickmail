@@ -33,7 +33,7 @@ use fm_imap::{
     MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField,
     RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
-use fm_mime::{parse_body, ParsedMessageAttachment, ParsedMessageHeader};
+use fm_mime::{parse_body, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader};
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
@@ -5907,6 +5907,7 @@ fn legacy_message_json(
     hash: &str,
     subject: &str,
     encrypted: bool,
+    draft_info: Option<&ParsedDraftInfo>,
     html: &str,
     plain: &str,
     message_id: &str,
@@ -5967,6 +5968,9 @@ fn legacy_message_json(
 
     if !references.is_empty() {
         value["references"] = json!(references);
+    }
+    if let Some(draft_info) = draft_info {
+        value["draftInfo"] = json!([draft_info.info_type, draft_info.uid, draft_info.folder]);
     }
     if !html.is_empty() || !plain.is_empty() {
         value["html"] = json!(html);
@@ -6053,6 +6057,7 @@ fn legacy_message_body_response(
     let mut plain = String::new();
     let mut subject = String::new();
     let mut encrypted = false;
+    let mut draft_info = None;
     let mut message_id = String::new();
     let mut in_reply_to = String::new();
     let mut references = String::new();
@@ -6089,6 +6094,9 @@ fn legacy_message_body_response(
                 }
                 if body.encrypted {
                     encrypted = true;
+                }
+                if draft_info.is_none() {
+                    draft_info = body.draft_info.clone();
                 }
                 if in_reply_to.is_empty() {
                     in_reply_to = body.in_reply_to.clone();
@@ -6174,6 +6182,7 @@ fn legacy_message_body_response(
                 &hash,
                 &subject,
                 encrypted,
+                draft_info.as_ref(),
                 &html,
                 &plain,
                 &message_id,
@@ -11681,6 +11690,39 @@ Version: 1
     }
 
     #[tokio::test]
+    async fn native_legacy_message_populates_raw_draft_info() {
+        let key = [56_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1924, 1925, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1925, "folder": "Drafts", "uid": 60}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: br#"Subject: Draft reply
+X-Draft-Info: type=reply; uid=77; folder=SU5CT1g=
+
+Body.
+"#
+                    .to_vec(),
+                    is_complete: true,
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["draftInfo"][0], "reply");
+        assert_eq!(body["Result"]["draftInfo"][1], 77);
+        assert_eq!(body["Result"]["draftInfo"][2], "INBOX");
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_populates_raw_message_attachments() {
         let key = [52_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1930, 1931, &key).await;
@@ -11893,6 +11935,7 @@ UERGREFUQQ==
             "hash",
             "Optional fields",
             false,
+            None,
             "<p>Hello</p>",
             "",
             "",

@@ -951,6 +951,7 @@ name = "fm-mime"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "base64 0.22.1",
  "fm-core",
  "mail-builder",
  "mail-parser",
