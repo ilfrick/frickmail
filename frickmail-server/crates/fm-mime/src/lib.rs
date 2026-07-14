@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use mail_parser::{Address, Encoding, HeaderForm, HeaderValue, MessagePart, MimeHeaders, PartType};
+use mail_parser::{
+    Address, Encoding, Header, HeaderForm, HeaderValue, MessagePart, MimeHeaders, PartType,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub struct ParsedMessageBody {
     pub sender: Vec<String>,
     pub delivered_to: Vec<String>,
     pub attachments: Vec<ParsedMessageAttachment>,
+    pub headers: Vec<ParsedMessageHeader>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +43,12 @@ pub struct ParsedMessageAttachment {
     pub c_id: String,
     pub content_location: String,
     pub is_inline: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedMessageHeader {
+    pub name: String,
+    pub value: String,
 }
 
 pub fn parse_summary(raw: &[u8]) -> ParsedMessageSummary {
@@ -89,6 +98,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
     let sender = format_header_addresses(&message, "Sender");
     let delivered_to = format_header_addresses(&message, "Delivered-To");
     let attachments = format_attachments(&message);
+    let headers = format_headers(&message);
 
     if html.is_empty()
         && plain.is_empty()
@@ -106,6 +116,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         && sender.is_empty()
         && delivered_to.is_empty()
         && attachments.is_empty()
+        && headers.is_empty()
     {
         return None;
     }
@@ -128,7 +139,42 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         sender,
         delivered_to,
         attachments,
+        headers,
     })
+}
+
+fn format_headers(message: &mail_parser::Message<'_>) -> Vec<ParsedMessageHeader> {
+    message
+        .headers()
+        .iter()
+        .map(|header| ParsedMessageHeader {
+            name: header.name.as_str().to_string(),
+            value: legacy_header_collection_value(message, header),
+        })
+        .filter(|header| !header.name.is_empty() && !header.value.is_empty())
+        .collect()
+}
+
+fn legacy_header_collection_value(
+    message: &mail_parser::Message<'_>,
+    header: &Header<'_>,
+) -> String {
+    match &header.value {
+        HeaderValue::Text(value) => legacy_php_trim(value).to_string(),
+        HeaderValue::TextList(values) => values
+            .iter()
+            .map(|value| legacy_php_trim(value))
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        HeaderValue::Empty => String::new(),
+        _ => message
+            .raw_message
+            .get(header.offset_start..header.offset_end)
+            .map(|value| String::from_utf8_lossy(value).replace('\r', ""))
+            .map(|value| legacy_php_trim(&value).to_string())
+            .unwrap_or_default(),
+    }
 }
 
 fn format_attachments(message: &mail_parser::Message<'_>) -> Vec<ParsedMessageAttachment> {
@@ -553,6 +599,27 @@ UERGREFUQQ==
         assert_eq!(attachment.c_id, "part@example.com");
         assert_eq!(attachment.content_location, "cid:report");
         assert!(attachment.is_inline);
+    }
+
+    #[test]
+    fn parses_raw_message_header_collection_metadata() {
+        let raw = br#"Subject: Header message
+X-Custom: custom value
+Received: from mx.example
+ by mail.example
+
+Body.
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert_eq!(body.headers.len(), 3);
+        assert_eq!(body.headers[0].name, "Subject");
+        assert_eq!(body.headers[0].value, "Header message");
+        assert_eq!(body.headers[1].name, "X-Custom");
+        assert_eq!(body.headers[1].value, "custom value");
+        assert_eq!(body.headers[2].name, "Received");
+        assert_eq!(body.headers[2].value, "from mx.example\n by mail.example");
     }
 
     #[test]

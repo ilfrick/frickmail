@@ -33,7 +33,7 @@ use fm_imap::{
     MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField,
     RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
-use fm_mime::{parse_body, ParsedMessageAttachment};
+use fm_mime::{parse_body, ParsedMessageAttachment, ParsedMessageHeader};
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
@@ -5914,6 +5914,7 @@ fn legacy_message_json(
     read_receipt: &str,
     header_timestamp: Option<i64>,
     attachments: Option<&[ParsedMessageAttachment]>,
+    headers: Option<&[ParsedMessageHeader]>,
     from: Option<&[String]>,
     reply_to: Option<&[String]>,
     to: Option<&[String]>,
@@ -5960,7 +5961,7 @@ fn legacy_message_json(
         "id": Value::Null,
         "size": size,
         "preview": legacy_nullable_string(preview),
-        "headers": Value::Null,
+        "headers": legacy_parsed_headers_json(headers),
     });
 
     if !references.is_empty() {
@@ -6004,6 +6005,26 @@ fn legacy_parsed_attachments_json(
     )
 }
 
+fn legacy_parsed_headers_json(headers: Option<&[ParsedMessageHeader]>) -> Value {
+    let Some(headers) = headers else {
+        return Value::Null;
+    };
+
+    json!({
+        "@Object": "Collection/MimeHeaderCollection",
+        "@Collection": headers
+            .iter()
+            .map(|header| {
+                json!({
+                    "@Object": "Object/MimeHeader",
+                    "name": header.name,
+                    "value": header.value,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
 fn legacy_message_body_response(
     action: &str,
     folder: &str,
@@ -6019,6 +6040,7 @@ fn legacy_message_body_response(
     let mut read_receipt = String::new();
     let mut header_timestamp = None;
     let mut attachments = None;
+    let mut headers = None;
     let mut from = None;
     let mut reply_to = None;
     let mut to = None;
@@ -6060,6 +6082,9 @@ fn legacy_message_body_response(
                 }
                 if part.is_complete && attachments.is_none() && !body.attachments.is_empty() {
                     attachments = Some(body.attachments.clone());
+                }
+                if part.is_complete && headers.is_none() && !body.headers.is_empty() {
+                    headers = Some(body.headers.clone());
                 }
                 if from.is_none() {
                     from = Some(body.from.clone());
@@ -6104,6 +6129,7 @@ fn legacy_message_body_response(
         && read_receipt.is_empty()
         && header_timestamp.is_none()
         && attachments.is_none()
+        && headers.is_none()
         && from.is_none()
         && reply_to.is_none()
         && to.is_none()
@@ -6133,6 +6159,7 @@ fn legacy_message_body_response(
                 &read_receipt,
                 header_timestamp,
                 attachments.as_deref(),
+                headers.as_deref(),
                 from.as_deref(),
                 reply_to.as_deref(),
                 to.as_deref(),
@@ -11497,7 +11524,19 @@ mod tests {
             "delivered@example.com"
         );
         assert_eq!(body["Result"]["attachments"], Value::Null);
-        assert_eq!(body["Result"]["headers"], Value::Null);
+        assert_eq!(
+            body["Result"]["headers"]["@Object"],
+            "Collection/MimeHeaderCollection"
+        );
+        let headers = body["Result"]["headers"]["@Collection"].as_array().unwrap();
+        assert_eq!(headers[0]["@Object"], "Object/MimeHeader");
+        assert_eq!(headers[0]["name"], "From");
+        assert_eq!(
+            headers[0]["value"],
+            "\"Sender, Example\" <sender@example.com>"
+        );
+        assert_eq!(headers[13]["name"], "Subject");
+        assert_eq!(headers[13]["value"], "Legacy body");
         assert_eq!(body["Result"]["dateTimestamp"], 1_057_049_557);
         assert_eq!(body["Result"]["dateTimestampSource"], "header");
         assert!(body["Result"].get("date").is_none());
@@ -11682,6 +11721,7 @@ UERGREFUQQ==
         assert_eq!(body["Result"]["subject"], "Attachment preview");
         assert_eq!(body["Result"]["plain"], "Body from capped preview.");
         assert_eq!(body["Result"]["attachments"], Value::Null);
+        assert_eq!(body["Result"]["headers"], Value::Null);
     }
 
     #[tokio::test]
@@ -11778,6 +11818,7 @@ UERGREFUQQ==
             "",
             "<root@example>",
             "receipt@example.com",
+            None,
             None,
             None,
             Some(from.as_slice()),
