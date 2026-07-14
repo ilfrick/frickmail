@@ -17,6 +17,7 @@ pub struct ParsedMessageBody {
     pub html: String,
     pub plain: String,
     pub subject: Option<String>,
+    pub encrypted: bool,
     pub message_id: String,
     pub in_reply_to: String,
     pub references: String,
@@ -86,6 +87,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         .map(|body| body.into_owned())
         .unwrap_or_default();
     let subject = message.subject().map(ToOwned::to_owned);
+    let encrypted = legacy_message_encrypted(&message);
     let message_id = format_legacy_header_value(&message, "Message-ID");
     let in_reply_to = format_legacy_header_value(&message, "In-Reply-To");
     let references =
@@ -110,6 +112,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
     if html.is_empty()
         && plain.is_empty()
         && subject.is_none()
+        && !encrypted
         && message_id.is_empty()
         && in_reply_to.is_empty()
         && references.is_empty()
@@ -132,6 +135,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         html,
         plain,
         subject,
+        encrypted,
         message_id,
         in_reply_to,
         references,
@@ -175,14 +179,7 @@ fn legacy_header_collection_value(
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join(", "),
-        HeaderValue::ContentType(content_type) => {
-            let mut value = legacy_php_trim(content_type.ctype()).to_string();
-            if let Some(subtype) = content_type.subtype() {
-                value.push('/');
-                value.push_str(legacy_php_trim(subtype));
-            }
-            value
-        }
+        HeaderValue::ContentType(content_type) => legacy_content_type_value(content_type),
         HeaderValue::Empty => String::new(),
         _ => message
             .raw_message
@@ -209,6 +206,21 @@ fn legacy_header_collection_parameters(header: &Header<'_>) -> Vec<ParsedMessage
         })
         .filter(|parameter| !parameter.name.is_empty())
         .collect()
+}
+
+fn legacy_message_encrypted(message: &mail_parser::Message<'_>) -> bool {
+    message.content_type().is_some_and(|content_type| {
+        legacy_content_type_value(content_type) == "multipart/encrypted"
+    })
+}
+
+fn legacy_content_type_value(content_type: &mail_parser::ContentType<'_>) -> String {
+    let mut value = legacy_php_trim(content_type.ctype()).to_string();
+    if let Some(subtype) = content_type.subtype() {
+        value.push('/');
+        value.push_str(legacy_php_trim(subtype));
+    }
+    value
 }
 
 fn format_attachments(message: &mail_parser::Message<'_>) -> Vec<ParsedMessageAttachment> {
@@ -662,6 +674,29 @@ Body.
         assert_eq!(body.headers[2].value, "custom value");
         assert_eq!(body.headers[3].name, "Received");
         assert_eq!(body.headers[3].value, "from mx.example\n by mail.example");
+    }
+
+    #[test]
+    fn parses_raw_message_top_level_encrypted_content_type() {
+        let raw = br#"Subject: Encrypted message
+Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="b"
+
+--b
+Content-Type: application/pgp-encrypted
+
+Version: 1
+--b--
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert!(body.encrypted);
+        assert_eq!(body.headers[1].name, "Content-Type");
+        assert_eq!(body.headers[1].value, "multipart/encrypted");
+        assert_eq!(
+            body.headers[1].parameters[0].value,
+            "application/pgp-encrypted"
+        );
     }
 
     #[test]

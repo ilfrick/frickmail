@@ -5906,6 +5906,7 @@ fn legacy_message_json(
     uid: u32,
     hash: &str,
     subject: &str,
+    encrypted: bool,
     html: &str,
     plain: &str,
     message_id: &str,
@@ -5937,7 +5938,7 @@ fn legacy_message_json(
         "uid": uid,
         "hash": hash,
         "subject": subject,
-        "encrypted": false,
+        "encrypted": encrypted,
         "messageId": message_id,
         "spamScore": 0,
         "spamResult": "",
@@ -6051,6 +6052,7 @@ fn legacy_message_body_response(
     let mut html = String::new();
     let mut plain = String::new();
     let mut subject = String::new();
+    let mut encrypted = false;
     let mut message_id = String::new();
     let mut in_reply_to = String::new();
     let mut references = String::new();
@@ -6084,6 +6086,9 @@ fn legacy_message_body_response(
             fm_imap::BodyPartKind::RawMessage => {
                 if message_id.is_empty() {
                     message_id = body.message_id.clone();
+                }
+                if body.encrypted {
+                    encrypted = true;
                 }
                 if in_reply_to.is_empty() {
                     in_reply_to = body.in_reply_to.clone();
@@ -6168,6 +6173,7 @@ fn legacy_message_body_response(
                 uid,
                 &hash,
                 &subject,
+                encrypted,
                 &html,
                 &plain,
                 &message_id,
@@ -11635,6 +11641,46 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_legacy_message_marks_raw_top_level_encrypted_content_type() {
+        let key = [55_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1922, 1923, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1923, "folder": "INBOX", "uid": 59}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: br#"Subject: Encrypted message
+Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="b"
+
+--b
+Content-Type: application/pgp-encrypted
+
+Version: 1
+--b--
+"#
+                    .to_vec(),
+                    is_complete: true,
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["subject"], "Encrypted message");
+        assert_eq!(body["Result"]["encrypted"], true);
+        assert_eq!(
+            body["Result"]["headers"]["@Collection"][1]["value"],
+            "multipart/encrypted"
+        );
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_populates_raw_message_attachments() {
         let key = [52_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1930, 1931, &key).await;
@@ -11846,6 +11892,7 @@ UERGREFUQQ==
             54,
             "hash",
             "Optional fields",
+            false,
             "<p>Hello</p>",
             "",
             "",
