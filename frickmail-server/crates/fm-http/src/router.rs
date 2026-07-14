@@ -11621,6 +11621,49 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_legacy_message_decodes_raw_address_header_values() {
+        let key = [57_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1926, 1927, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1927, "folder": "INBOX", "uid": 61}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: br#"From: "=?UTF-8?Q?Sender,_=C3=84?=" <sender@example.com>, "Plain, Recipient" <plain@example.com>
+To: =?UTF-8?Q?Recipient_=C3=96?= <recipient@example.com>
+Cc: "=?UTF-8?Q?Multi_?= =?UTF-8?Q?Part?=" <multi@example.com>
+
+Body.
+"#
+                    .to_vec(),
+                    is_complete: true,
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(
+            body["Result"]["headers"]["@Collection"][0]["value"],
+            "\"Sender, Ä\" <sender@example.com>, \"Plain, Recipient\" <plain@example.com>"
+        );
+        assert_eq!(
+            body["Result"]["headers"]["@Collection"][1]["value"],
+            "Recipient Ö <recipient@example.com>"
+        );
+        assert_eq!(
+            body["Result"]["headers"]["@Collection"][2]["value"],
+            "\"Multi Part\" <multi@example.com>"
+        );
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_accepts_malformed_date_only_raw_message() {
         let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1920, 1921, &key).await;

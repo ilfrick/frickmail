@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use mail_parser::{
-    Address, Encoding, Header, HeaderForm, HeaderValue, MessagePart, MimeHeaders, PartType,
+    parsers::MessageStream, Address, Encoding, Header, HeaderForm, HeaderValue, MessagePart,
+    MimeHeaders, PartType,
 };
 use serde::{Deserialize, Serialize};
 
@@ -185,6 +186,14 @@ fn legacy_header_collection_value(
 ) -> String {
     match &header.value {
         HeaderValue::Text(value) => legacy_php_trim(value).to_string(),
+        HeaderValue::Address(_) => {
+            let raw = legacy_raw_header_value(message, header);
+            if raw.contains("=?") {
+                legacy_decode_raw_header_value(&raw)
+            } else {
+                raw
+            }
+        }
         HeaderValue::TextList(values) => values
             .iter()
             .map(|value| legacy_php_trim(value))
@@ -193,13 +202,50 @@ fn legacy_header_collection_value(
             .join(", "),
         HeaderValue::ContentType(content_type) => legacy_content_type_value(content_type),
         HeaderValue::Empty => String::new(),
-        _ => message
-            .raw_message
-            .get(header.offset_start..header.offset_end)
-            .map(|value| String::from_utf8_lossy(value).replace('\r', ""))
-            .map(|value| legacy_php_trim(&value).to_string())
-            .unwrap_or_default(),
+        _ => legacy_raw_header_value(message, header),
     }
+}
+
+fn legacy_raw_header_value(message: &mail_parser::Message<'_>, header: &Header<'_>) -> String {
+    message
+        .raw_message
+        .get(header.offset_start..header.offset_end)
+        .map(|value| String::from_utf8_lossy(value).replace('\r', ""))
+        .map(|value| legacy_php_trim(&value).to_string())
+        .unwrap_or_default()
+}
+
+fn legacy_decode_raw_header_value(value: &str) -> String {
+    let value = value.replace(['\r', '\n', '\t'], " ");
+    let mut decoded = String::with_capacity(value.len());
+    let mut index = 0;
+
+    while let Some(relative_start) = value[index..].find("=?") {
+        let start = index + relative_start;
+        decoded.push_str(&value[index..start]);
+
+        let mut stream = MessageStream::new(&value.as_bytes()[start + 1..]);
+        if let Some(token) = stream.decode_rfc2047() {
+            decoded.push_str(&token);
+            index = start + 1 + stream.offset();
+
+            let whitespace_len = value[index..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_whitespace())
+                .take(5)
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if whitespace_len > 0 && value[index + whitespace_len..].starts_with("=?") {
+                index += whitespace_len;
+            }
+        } else {
+            decoded.push('=');
+            index = start + 1;
+        }
+    }
+
+    decoded.push_str(&value[index..]);
+    decoded
 }
 
 fn legacy_header_collection_parameters(header: &Header<'_>) -> Vec<ParsedMessageHeaderParameter> {
@@ -750,6 +796,28 @@ Body.
         assert_eq!(body.headers[2].value, "custom value");
         assert_eq!(body.headers[3].name, "Received");
         assert_eq!(body.headers[3].value, "from mx.example\n by mail.example");
+    }
+
+    #[test]
+    fn parses_raw_message_decoded_address_header_values() {
+        let raw = br#"From: "=?UTF-8?Q?Sender,_=C3=84?=" <sender@example.com>, "Plain, Recipient" <plain@example.com>
+To: =?UTF-8?Q?Recipient_=C3=96?= <recipient@example.com>
+Cc: "=?UTF-8?Q?Multi_?= =?UTF-8?Q?Part?=" <multi@example.com>
+
+Body.
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert_eq!(body.headers[0].name, "From");
+        assert_eq!(
+            body.headers[0].value,
+            "\"Sender, Ä\" <sender@example.com>, \"Plain, Recipient\" <plain@example.com>"
+        );
+        assert_eq!(body.headers[1].name, "To");
+        assert_eq!(body.headers[1].value, "Recipient Ö <recipient@example.com>");
+        assert_eq!(body.headers[2].name, "Cc");
+        assert_eq!(body.headers[2].value, "\"Multi Part\" <multi@example.com>");
     }
 
     #[test]
