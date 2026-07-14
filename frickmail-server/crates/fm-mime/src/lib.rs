@@ -186,20 +186,9 @@ fn legacy_header_collection_value(
 ) -> String {
     match &header.value {
         HeaderValue::Text(value) => legacy_php_trim(value).to_string(),
-        HeaderValue::Address(_) => {
-            let raw = legacy_raw_header_value(message, header);
-            if raw.contains("=?") {
-                legacy_decode_raw_header_value(&raw)
-            } else {
-                raw
-            }
+        HeaderValue::Address(_) | HeaderValue::TextList(_) => {
+            legacy_decode_raw_header_value(&legacy_raw_header_value(message, header))
         }
-        HeaderValue::TextList(values) => values
-            .iter()
-            .map(|value| legacy_php_trim(value))
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>()
-            .join(", "),
         HeaderValue::ContentType(content_type) => legacy_content_type_value(content_type),
         HeaderValue::Empty => String::new(),
         _ => legacy_raw_header_value(message, header),
@@ -774,6 +763,8 @@ UERGREFUQQ==
         let raw = br#"Subject: Header message
 Content-Type: text/plain; charset=utf-8; format=flowed
 X-Custom: custom value
+References: <root@example.com>
+ <parent@example.com>
 Received: from mx.example
  by mail.example
 
@@ -782,7 +773,7 @@ Body.
 
         let body = parse_body(raw).unwrap();
 
-        assert_eq!(body.headers.len(), 4);
+        assert_eq!(body.headers.len(), 5);
         assert_eq!(body.headers[0].name, "Subject");
         assert_eq!(body.headers[0].value, "Header message");
         assert_eq!(body.headers[1].name, "Content-Type");
@@ -794,8 +785,13 @@ Body.
         assert_eq!(body.headers[1].parameters[1].value, "flowed");
         assert_eq!(body.headers[2].name, "X-Custom");
         assert_eq!(body.headers[2].value, "custom value");
-        assert_eq!(body.headers[3].name, "Received");
-        assert_eq!(body.headers[3].value, "from mx.example\n by mail.example");
+        assert_eq!(body.headers[3].name, "References");
+        assert_eq!(
+            body.headers[3].value,
+            "<root@example.com>  <parent@example.com>"
+        );
+        assert_eq!(body.headers[4].name, "Received");
+        assert_eq!(body.headers[4].value, "from mx.example\n by mail.example");
     }
 
     #[test]

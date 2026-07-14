@@ -11567,6 +11567,11 @@ mod tests {
             headers[0]["value"],
             "\"Sender, Example\" <sender@example.com>"
         );
+        assert_eq!(headers[9]["name"], "References");
+        assert_eq!(
+            headers[9]["value"],
+            "<root@example.com>  <parent@example.com>"
+        );
         assert_eq!(headers[13]["name"], "Subject");
         assert_eq!(headers[13]["value"], "Legacy body");
         assert_eq!(body["Result"]["dateTimestamp"], 1_057_049_557);
