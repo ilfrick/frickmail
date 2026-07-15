@@ -528,6 +528,17 @@ impl SqlxUserRepository {
         fetch_mail_account(pool, user_id, account_id).await
     }
 
+    pub async fn update_mail_account_settings(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        patch: &Value,
+    ) -> Result<bool> {
+        update_mail_account_settings_patch(pool, user_id, account_id, patch)
+            .await
+            .map(|rows| rows > 0)
+    }
+
     pub async fn get_mail_account_connection_secret(
         pool: &AnyPool,
         user_id: i64,
@@ -1156,7 +1167,7 @@ async fn update_mail_account_settings_patch(
     user_id: i64,
     account_id: i64,
     patch: &Value,
-) -> Result<()> {
+) -> Result<u64> {
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
     let query = update_mail_account_settings_patch_query(&backend);
@@ -1167,7 +1178,7 @@ async fn update_mail_account_settings_patch(
         .bind(account_id)
         .execute(&mut *conn)
         .await
-        .map(|_| ())
+        .map(|result| result.rows_affected())
         .map_err(db_error)
 }
 
@@ -6861,6 +6872,42 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.public_message(), "Account not found");
+    }
+
+    #[tokio::test]
+    async fn repository_updates_mail_account_settings_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 35, json!({})).await;
+        insert_user(&pool, 36, json!({})).await;
+        insert_mail_account(&pool, 172, 35, "Work", true).await;
+        insert_mail_account(&pool, 173, 36, "OtherUser", true).await;
+
+        let updated = SqlxUserRepository::update_mail_account_settings(
+            &pool,
+            35,
+            172,
+            &json!({"SentFolder": "Sent", "ArchiveFolder": "Archive"}),
+        )
+        .await
+        .unwrap();
+        assert!(updated);
+        assert_eq!(
+            mail_account_settings(&pool, 172).await,
+            json!({"SentFolder": "Sent", "ArchiveFolder": "Archive"})
+        );
+
+        let updated = SqlxUserRepository::update_mail_account_settings(
+            &pool,
+            35,
+            173,
+            &json!({"SentFolder": "WrongUser"}),
+        )
+        .await
+        .unwrap();
+        assert!(!updated);
+        assert_eq!(mail_account_settings(&pool, 173).await, json!({}));
     }
 
     #[tokio::test]

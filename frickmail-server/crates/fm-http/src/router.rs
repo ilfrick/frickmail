@@ -803,6 +803,9 @@ async fn native_compat_response(
         "FolderDelete" => {
             Some(native_legacy_folder_delete(state, original_action, payload, session).await)
         }
+        "SystemFoldersUpdate" => Some(
+            native_legacy_system_folders_update(state, original_action, payload, session).await,
+        ),
         "MessageSetSeen" => Some(
             native_legacy_message_store_flag(
                 state,
@@ -5675,6 +5678,52 @@ where
         .map_err(|_| FrickmailError::Upstream("Folder delete timed out".to_string()));
 
     legacy_message_bool_response(original_action, result)
+}
+
+async fn native_legacy_system_folders_update(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let account_id = match resolve_message_body_account_id(payload, session, original_action).await
+    {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
+
+    let patch = json!({
+        "SentFolder": payload_string(payload, "sent").unwrap_or_default(),
+        "DraftsFolder": payload_string(payload, "drafts").unwrap_or_default(),
+        "JunkFolder": payload_string(payload, "junk").unwrap_or_default(),
+        "TrashFolder": payload_string(payload, "trash").unwrap_or_default(),
+        "ArchiveFolder": payload_string(payload, "archive").unwrap_or_default(),
+    });
+
+    match SqlxUserRepository::update_mail_account_settings(pool, user.user_id, account_id, &patch)
+        .await
+    {
+        Ok(true) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": true
+            }),
+        ),
+        Ok(false) => json_result_error(original_action, "Account not found"),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
 }
 
 async fn native_legacy_message_store_flag(
@@ -14370,6 +14419,47 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(folder, "Child");
         assert_eq!(parent, "Parent");
         assert!(subscribe);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_system_folders_update_uses_selected_account() {
+        let key = [56_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1836, 1837, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1837 },
+            )
+            .await
+            .unwrap();
+
+        let response = super::native_legacy_system_folders_update(
+            &state,
+            "SystemFoldersUpdate",
+            &json!({
+                "sent": "Sent",
+                "drafts": "Drafts",
+                "junk": "Spam",
+                "trash": "Trash",
+                "archive": "Archive"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "SystemFoldersUpdate");
+        assert_eq!(body["Result"], true);
+        assert_eq!(
+            mail_account_settings(state.db_pool().unwrap(), 1837).await,
+            json!({
+                "SentFolder": "Sent",
+                "DraftsFolder": "Drafts",
+                "JunkFolder": "Spam",
+                "TrashFolder": "Trash",
+                "ArchiveFolder": "Archive"
+            })
+        );
     }
 
     #[tokio::test]

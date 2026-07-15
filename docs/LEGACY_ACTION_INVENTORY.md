@@ -115,7 +115,8 @@ part of the full webmail core migration.
 | `FolderClear` | `dev/View/Popup/FolderClear.js`, `dev/View/User/MailBox/MessageList.js` | native | Uses selected Frickmail mail account, marks all selected-folder messages deleted, and expunges like MailSo `FolderClear`. |
 | `FolderDelete` | `dev/Settings/User/Folders.js` | native | Uses selected Frickmail mail account, rejects exact `INBOX` and non-empty folders like MailSo, unsubscribes, and deletes the mailbox. |
 | `FolderCreate` | `dev/View/Popup/FolderCreate.js`, `dev/Settings/User/Folders.js` | native | Uses selected Frickmail mail account, mirrors MailSo parent delimiter resolution, creates and optionally subscribes the mailbox, then returns a legacy `Object/Folder` payload for frontend insertion. |
-| `FolderRename`, `FolderSettings`, `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights`, `SystemFoldersUpdate`, `FolderSetMetadata`, `FolderCheckable` | `dev/View/Popup`, `dev/Settings/User/Folders.js`, `dev/Stores/User/Folder.js` | compat-known | Folder rename, settings, metadata, local checkable state, and ACL routes remain unmigrated. |
+| `SystemFoldersUpdate` | `dev/Stores/User/Folder.js`, `dev/View/Popup/FolderSystem.js` | native | Uses the selected Frickmail mail account and persists legacy system folder names into account-local settings (`SentFolder`, `DraftsFolder`, `JunkFolder`, `TrashFolder`, `ArchiveFolder`). |
+| `FolderRename`, `FolderSettings`, `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights`, `FolderSetMetadata`, `FolderCheckable` | `dev/View/Popup`, `dev/Settings/User/Folders.js`, `dev/Stores/User/Folder.js` | compat-known | Folder rename, settings, metadata, local checkable state, and ACL routes remain unmigrated. |
 | `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | compat-known | Attachment actions remain on the compatibility roadmap. |
 
 ## Other Bundled Plugin JSON Hooks
