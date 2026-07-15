@@ -6058,8 +6058,9 @@ fn legacy_message_json(
     in_reply_to: &str,
     references: &str,
     read_receipt: &str,
-    header_timestamp: Option<i64>,
-    attachments: Option<&[ParsedMessageAttachment]>,
+    date_timestamp: i64,
+    date_timestamp_source: &str,
+    attachments: Value,
     headers: Option<&[ParsedMessageHeader]>,
     from: Option<&[String]>,
     reply_to: Option<&[String]>,
@@ -6073,11 +6074,6 @@ fn legacy_message_json(
     flags: &[String],
     preview: Option<&str>,
 ) -> Value {
-    let date_timestamp_source = if header_timestamp.is_some() {
-        "header"
-    } else {
-        "internal"
-    };
     let mut value = json!({
         "@Object": "Object/Message",
         "folder": folder,
@@ -6089,7 +6085,7 @@ fn legacy_message_json(
         "spamScore": 0,
         "spamResult": "",
         "isSpam": false,
-        "dateTimestamp": header_timestamp.unwrap_or_default(),
+        "dateTimestamp": date_timestamp,
         "dateTimestampSource": date_timestamp_source,
         "from": legacy_optional_email_collection(from),
         "replyTo": legacy_optional_email_collection(reply_to),
@@ -6099,7 +6095,7 @@ fn legacy_message_json(
         "sender": legacy_optional_email_collection(sender),
         "deliveredTo": legacy_optional_email_collection(delivered_to),
         "readReceipt": read_receipt,
-        "attachments": legacy_parsed_attachments_json(folder, uid, attachments),
+        "attachments": attachments,
         "spf": [],
         "dkim": [],
         "dmarc": [],
@@ -6242,8 +6238,11 @@ fn legacy_message_body_response(
     let mut in_reply_to = String::new();
     let mut references = String::new();
     let mut read_receipt = String::new();
-    let mut header_timestamp = None;
+    let mut date_timestamp = 0;
+    let mut date_timestamp_source = "internal";
+    let mut size = 0;
     let mut attachments = None;
+    let mut metadata_attachments = None;
     let mut headers = None;
     let mut from = None;
     let mut reply_to = None;
@@ -6257,6 +6256,45 @@ fn legacy_message_body_response(
         .find_map(|part| (!part.crypto.is_empty()).then_some(part.crypto.clone()))
         .unwrap_or_default();
     let mut encrypted = crypto.pgp_encrypted.is_some() || crypto.smime_encrypted.is_some();
+
+    if let Some(metadata) = parts
+        .iter()
+        .find_map(|part| (!part.metadata.is_empty()).then_some(&part.metadata))
+    {
+        size = metadata.size;
+        if !metadata.attachments.is_empty() {
+            metadata_attachments = Some(metadata.attachments.clone());
+        }
+        if let Some(body) = parse_body(&metadata.header) {
+            subject = body.subject.unwrap_or_default();
+            if body.encrypted {
+                encrypted = true;
+            }
+            draft_info = body.draft_info.clone();
+            message_id = body.message_id.clone();
+            in_reply_to = body.in_reply_to.clone();
+            references = body.references.clone();
+            read_receipt = body.read_receipt.clone();
+            if let Some(timestamp) = body.header_timestamp {
+                date_timestamp = timestamp;
+                date_timestamp_source = "header";
+            } else if let Some(timestamp) = metadata.internal_timestamp {
+                date_timestamp = timestamp;
+            }
+            if !body.headers.is_empty() {
+                headers = Some(body.headers.clone());
+            }
+            from = Some(body.from.clone());
+            reply_to = Some(body.reply_to.clone());
+            to = Some(body.to.clone());
+            cc = Some(body.cc.clone());
+            bcc = Some(body.bcc.clone());
+            sender = Some(body.sender.clone());
+            delivered_to = Some(body.delivered_to.clone());
+        } else if let Some(timestamp) = metadata.internal_timestamp {
+            date_timestamp = timestamp;
+        }
+    }
 
     for part in &parts {
         let Some(body) = parse_body(&part.raw) else {
@@ -6292,8 +6330,11 @@ fn legacy_message_body_response(
                 if read_receipt.is_empty() {
                     read_receipt = body.read_receipt.clone();
                 }
-                if header_timestamp.is_none() {
-                    header_timestamp = body.header_timestamp;
+                if date_timestamp_source != "header" {
+                    if let Some(timestamp) = body.header_timestamp {
+                        date_timestamp = timestamp;
+                        date_timestamp_source = "header";
+                    }
                 }
                 if part.is_complete && attachments.is_none() && !body.attachments.is_empty() {
                     attachments = Some(body.attachments.clone());
@@ -6342,8 +6383,10 @@ fn legacy_message_body_response(
         && in_reply_to.is_empty()
         && references.is_empty()
         && read_receipt.is_empty()
-        && header_timestamp.is_none()
+        && date_timestamp == 0
+        && size == 0
         && attachments.is_none()
+        && metadata_attachments.is_none()
         && headers.is_none()
         && from.is_none()
         && reply_to.is_none()
@@ -6357,6 +6400,14 @@ fn legacy_message_body_response(
     }
 
     let hash = legacy_message_hash(folder, uid);
+    let attachment_json = if let Some(attachments) = attachments.as_deref() {
+        legacy_parsed_attachments_json(folder, uid, Some(attachments))
+    } else {
+        metadata_attachments
+            .as_ref()
+            .map(|attachments| json!(attachments))
+            .unwrap_or(Value::Null)
+    };
     json_value_envelope(
         StatusCode::OK,
         action,
@@ -6374,8 +6425,9 @@ fn legacy_message_body_response(
                 &in_reply_to,
                 &references,
                 &read_receipt,
-                header_timestamp,
-                attachments.as_deref(),
+                date_timestamp,
+                date_timestamp_source,
+                attachment_json,
                 headers.as_deref(),
                 from.as_deref(),
                 reply_to.as_deref(),
@@ -6385,7 +6437,7 @@ fn legacy_message_body_response(
                 sender.as_deref(),
                 delivered_to.as_deref(),
                 &crypto,
-                0,
+                size,
                 flags,
                 None,
             )
@@ -11566,6 +11618,7 @@ mod tests {
                         is_complete: false,
                         flags: Vec::new(),
                         crypto: Default::default(),
+                        metadata: Default::default(),
                     },
                     BodyPreviewPart {
                         kind: BodyPartKind::Plain,
@@ -11573,6 +11626,7 @@ mod tests {
                         is_complete: false,
                         flags: Vec::new(),
                         crypto: Default::default(),
+                        metadata: Default::default(),
                     },
                 ]))
             },
@@ -11644,6 +11698,7 @@ mod tests {
                     is_complete: false,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -11720,6 +11775,7 @@ mod tests {
                     is_complete: true,
                 flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -11805,6 +11861,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -11851,6 +11908,7 @@ Body.
                     is_complete: true,
                 flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -11898,6 +11956,7 @@ Body.
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -11934,6 +11993,7 @@ Body.
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -11975,6 +12035,7 @@ Version: 1
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -12014,6 +12075,7 @@ Version: 1
                         }),
                         ..Default::default()
                     },
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -12049,6 +12111,7 @@ Body.
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -12106,6 +12169,7 @@ UERGREFUQQ==
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -12178,6 +12242,7 @@ UERGREFUQQ==
                     is_complete: false,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -12189,6 +12254,127 @@ UERGREFUQQ==
         assert_eq!(body["Result"]["plain"], "Body from capped preview.");
         assert_eq!(body["Result"]["attachments"], Value::Null);
         assert_eq!(body["Result"]["headers"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_populates_preview_metadata_from_header_fetch() {
+        let key = [59_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1936, 1937, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1937, "folder": "INBOX", "uid": 64}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::Plain,
+                    raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nPreview body.".to_vec(),
+                    is_complete: false,
+                    flags: vec!["\\Seen".to_string()],
+                    crypto: Default::default(),
+                    metadata: fm_imap::LegacyMessageFetchMetadata {
+                        header: b"From: \"Sender, Example\" <sender@example.com>\r\n\
+To: Recipient <recipient@example.com>\r\n\
+Message-ID: <preview@example.com>\r\n\
+In-Reply-To: <parent@example.com>\r\n\
+References: <root@example.com>\r\n <parent@example.com>\r\n\
+Disposition-Notification-To: receipt@example.com\r\n\
+Subject: Preview metadata\r\n\r\n"
+                            .to_vec(),
+                        internal_timestamp: Some(1_700_000_000),
+                        size: 4096,
+                        attachments: vec![fm_imap::LegacyAttachmentSummary {
+                            object: "Object/Attachment".to_string(),
+                            folder: "INBOX".to_string(),
+                            uid: 64,
+                            mime_index: "2".to_string(),
+                            mime_type: "application/pdf".to_string(),
+                            file_name: "report.pdf".to_string(),
+                            estimated_size: 768,
+                            c_id: "<part@example.com>".to_string(),
+                            content_location: "cid:report".to_string(),
+                            is_inline: true,
+                        }],
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "Preview metadata");
+        assert_eq!(result["plain"], "Preview body.");
+        assert_eq!(result["messageId"], "<preview@example.com>");
+        assert_eq!(result["inReplyTo"], "<parent@example.com>");
+        assert_eq!(
+            result["references"],
+            "<root@example.com> <parent@example.com>"
+        );
+        assert_eq!(result["readReceipt"], "receipt@example.com");
+        assert_eq!(result["dateTimestamp"], 1_700_000_000);
+        assert_eq!(result["dateTimestampSource"], "internal");
+        assert_eq!(result["size"], 4096);
+        assert_eq!(result["flags"][0], "\\Seen");
+        assert_eq!(result["from"][0]["name"], "Sender, Example");
+        assert_eq!(result["from"][0]["email"], "sender@example.com");
+        assert_eq!(result["to"][0]["email"], "recipient@example.com");
+        assert_eq!(
+            result["headers"]["@Object"],
+            "Collection/MimeHeaderCollection"
+        );
+        assert_eq!(result["attachments"][0]["@Object"], "Object/Attachment");
+        assert_eq!(result["attachments"][0]["mimeIndex"], "2");
+        assert_eq!(result["attachments"][0]["fileName"], "report.pdf");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_accepts_metadata_only_preview() {
+        let key = [60_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1938, 1939, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1939, "folder": "INBOX", "uid": 65}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: Vec::new(),
+                    is_complete: false,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: fm_imap::LegacyMessageFetchMetadata {
+                        header: b"From: sender@example.com\r\n\
+Subject: Empty body metadata\r\n\r\n"
+                            .to_vec(),
+                        internal_timestamp: Some(1_700_000_123),
+                        size: 123,
+                        attachments: Vec::new(),
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "Empty body metadata");
+        assert_eq!(result["from"][0]["email"], "sender@example.com");
+        assert_eq!(result["dateTimestamp"], 1_700_000_123);
+        assert_eq!(result["dateTimestampSource"], "internal");
+        assert_eq!(result["size"], 123);
+        assert!(result.get("html").is_none());
+        assert!(result.get("plain").is_none());
+        assert_eq!(result["attachments"], Value::Null);
     }
 
     #[tokio::test]
@@ -12210,6 +12396,7 @@ UERGREFUQQ==
                     is_complete: false,
                 flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -12252,6 +12439,7 @@ UERGREFUQQ==
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )
@@ -12293,8 +12481,9 @@ UERGREFUQQ==
             "",
             "<root@example>",
             "receipt@example.com",
-            None,
-            None,
+            0,
+            "internal",
+            Value::Null,
             None,
             Some(from.as_slice()),
             Some(reply_to.as_slice()),
@@ -12394,6 +12583,7 @@ UERGREFUQQ==
                         is_complete: true,
                         flags: Vec::new(),
                         crypto: Default::default(),
+                        metadata: Default::default(),
                     }]))
                 }
             },
@@ -12447,6 +12637,7 @@ UERGREFUQQ==
                         is_complete: true,
                         flags,
                         crypto: Default::default(),
+                        metadata: Default::default(),
                     }]))
                 }
             },
@@ -12496,6 +12687,7 @@ UERGREFUQQ==
                         is_complete: true,
                         flags,
                         crypto: Default::default(),
+                        metadata: Default::default(),
                     }]))
                 }
             },
@@ -12539,6 +12731,7 @@ UERGREFUQQ==
                         is_complete: true,
                         flags,
                         crypto: Default::default(),
+                        metadata: Default::default(),
                     }]))
                 }
             },
@@ -12573,6 +12766,7 @@ UERGREFUQQ==
                         is_complete: true,
                         flags,
                         crypto: Default::default(),
+                        metadata: Default::default(),
                     }]))
                 }
             },
@@ -13690,6 +13884,7 @@ UERGREFUQQ==
                     is_complete: true,
                     flags: Vec::new(),
                     crypto: Default::default(),
+                    metadata: Default::default(),
                 }]))
             },
         )

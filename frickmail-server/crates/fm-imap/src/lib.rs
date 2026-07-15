@@ -136,6 +136,7 @@ pub struct BodyPreviewPart {
     pub is_complete: bool,
     pub flags: Vec<String>,
     pub crypto: LegacyMessageCrypto,
+    pub metadata: LegacyMessageFetchMetadata,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -152,6 +153,23 @@ impl LegacyMessageCrypto {
             && self.pgp_encrypted.is_none()
             && self.smime_signed.is_none()
             && self.smime_encrypted.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyMessageFetchMetadata {
+    pub header: Vec<u8>,
+    pub internal_timestamp: Option<i64>,
+    pub size: u32,
+    pub attachments: Vec<LegacyAttachmentSummary>,
+}
+
+impl LegacyMessageFetchMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.header.is_empty()
+            && self.internal_timestamp.is_none()
+            && self.size == 0
+            && self.attachments.is_empty()
     }
 }
 
@@ -397,6 +415,7 @@ struct BodyPreviewFetchSpec {
     parts: Vec<BodyPartSpec>,
     flags: Vec<String>,
     crypto: LegacyMessageCrypto,
+    metadata: LegacyMessageFetchMetadata,
 }
 
 impl BodyPartSpec {
@@ -418,12 +437,19 @@ pub async fn fetch_message_body_preview(
 
     let mut session = login(config, password).await?;
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
-    let Some(specs) = fetch_body_part_specs(&mut session, uid).await? else {
+    let Some(specs) = fetch_body_part_specs(&mut session, mailbox, uid).await? else {
         logout_quietly(session).await;
         return Ok(None);
     };
-    let parts =
-        fetch_preview_parts(&mut session, uid, &specs.parts, &specs.flags, &specs.crypto).await?;
+    let parts = fetch_preview_parts(
+        &mut session,
+        uid,
+        &specs.parts,
+        &specs.flags,
+        &specs.crypto,
+        &specs.metadata,
+    )
+    .await?;
     logout_quietly(session).await;
     Ok(Some(parts))
 }
@@ -736,7 +762,7 @@ pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<&'static str> {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
     }
 
-    Ok("(UID FLAGS RFC822.SIZE BODYSTRUCTURE)")
+    Ok("(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])")
 }
 
 pub fn uid_fetch_raw_message_query(uid: u32) -> Result<&'static str> {
@@ -2610,6 +2636,7 @@ fn fetch_body_for_uid(attrs: &[AttributeValue<'_>], expected_uid: u32) -> Option
 
 async fn fetch_body_part_specs(
     session: &mut BoxedSession,
+    folder: &str,
     uid: u32,
 ) -> Result<Option<BodyPreviewFetchSpec>> {
     let mut fetches = timeout_imap(
@@ -2624,6 +2651,9 @@ async fn fetch_body_part_specs(
         }
         let flags =
             legacy_unique_flag_strings(fetch.flags().map(|flag| legacy_message_flag_string(&flag)));
+        let header = fetch.header().unwrap_or_default().to_vec();
+        let internal_timestamp = fetch.internal_date().map(|value| value.timestamp());
+        let size = fetch.size.unwrap_or_default();
         let Some(bodystructure) = fetch.bodystructure() else {
             return Ok(Some(BodyPreviewFetchSpec {
                 parts: vec![BodyPartSpec {
@@ -2634,9 +2664,22 @@ async fn fetch_body_part_specs(
                 }],
                 flags,
                 crypto: LegacyMessageCrypto::default(),
+                metadata: LegacyMessageFetchMetadata {
+                    header,
+                    internal_timestamp,
+                    size,
+                    attachments: Vec::new(),
+                },
             }));
         };
         let crypto = legacy_message_crypto_metadata(bodystructure);
+        let attachments = legacy_message_attachments(folder, uid, Some(bodystructure));
+        let metadata = LegacyMessageFetchMetadata {
+            header,
+            internal_timestamp,
+            size,
+            attachments,
+        };
         let specs = body_preview_part_specs(bodystructure);
         if specs.is_empty() {
             return Ok(Some(BodyPreviewFetchSpec {
@@ -2648,12 +2691,14 @@ async fn fetch_body_part_specs(
                 }],
                 flags,
                 crypto,
+                metadata,
             }));
         }
         return Ok(Some(BodyPreviewFetchSpec {
             parts: specs,
             flags,
             crypto,
+            metadata,
         }));
     }
 
@@ -2666,6 +2711,7 @@ async fn fetch_preview_parts(
     specs: &[BodyPartSpec],
     flags: &[String],
     crypto: &LegacyMessageCrypto,
+    metadata: &LegacyMessageFetchMetadata,
 ) -> Result<Vec<BodyPreviewPart>> {
     let query = body_preview_fetch_query(specs);
     let mut fetches = timeout_imap(
@@ -2696,6 +2742,7 @@ async fn fetch_preview_parts(
                             is_complete: false,
                             flags: flags.to_vec(),
                             crypto: crypto.clone(),
+                            metadata: metadata.clone(),
                         });
                     }
                 }
@@ -2707,16 +2754,40 @@ async fn fetch_preview_parts(
                             is_complete: raw_message_preview_is_complete(body, spec.octets),
                             flags: flags.to_vec(),
                             crypto: crypto.clone(),
+                            metadata: metadata.clone(),
                         });
                     }
                 }
             }
         }
 
+        if parts.is_empty() {
+            if let Some(part) = metadata_only_body_preview_part(flags, crypto, metadata) {
+                parts.push(part);
+            }
+        }
+
         return Ok(parts);
     }
 
-    Ok(Vec::new())
+    Ok(metadata_only_body_preview_part(flags, crypto, metadata)
+        .into_iter()
+        .collect())
+}
+
+fn metadata_only_body_preview_part(
+    flags: &[String],
+    crypto: &LegacyMessageCrypto,
+    metadata: &LegacyMessageFetchMetadata,
+) -> Option<BodyPreviewPart> {
+    (!metadata.is_empty()).then(|| BodyPreviewPart {
+        kind: BodyPartKind::RawMessage,
+        raw: Vec::new(),
+        is_complete: false,
+        flags: flags.to_vec(),
+        crypto: crypto.clone(),
+        metadata: metadata.clone(),
+    })
 }
 
 fn raw_message_preview_is_complete(body: &[u8], expected_octets: u32) -> bool {
@@ -3229,7 +3300,7 @@ mod tests {
 
         assert_eq!(
             uid_fetch_bodystructure_query(42).unwrap(),
-            "(UID FLAGS RFC822.SIZE BODYSTRUCTURE)"
+            "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])"
         );
         assert!(uid_fetch_bodystructure_query(0).is_err());
         assert_eq!(
@@ -3262,6 +3333,36 @@ mod tests {
             b"abcd",
             BODY_PREVIEW_PART_LIMIT_BYTES as u32,
         ));
+    }
+
+    #[test]
+    fn metadata_only_body_preview_preserves_header_fetch_result() {
+        let flags = vec!["\\Seen".to_string()];
+        let crypto = LegacyMessageCrypto {
+            pgp_encrypted: Some(LegacyPartId {
+                part_id: "2".to_string(),
+            }),
+            ..Default::default()
+        };
+        let metadata = LegacyMessageFetchMetadata {
+            header: b"Subject: Empty body\r\n\r\n".to_vec(),
+            internal_timestamp: Some(1_700_000_000),
+            size: 1024,
+            attachments: Vec::new(),
+        };
+
+        let part = metadata_only_body_preview_part(&flags, &crypto, &metadata).unwrap();
+
+        assert_eq!(part.kind, BodyPartKind::RawMessage);
+        assert!(part.raw.is_empty());
+        assert!(!part.is_complete);
+        assert_eq!(part.flags, flags);
+        assert_eq!(part.crypto, crypto);
+        assert_eq!(part.metadata, metadata);
+        assert!(
+            metadata_only_body_preview_part(&[], &Default::default(), &Default::default())
+                .is_none()
+        );
     }
 
     #[test]
