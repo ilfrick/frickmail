@@ -113,7 +113,8 @@ part of the full webmail core migration.
 | `FolderAppend` | `dev/Common/Folders.js` | native | Handles legacy multipart `appendFile` uploads when `FRICKMAIL__FRICKMAIL_USER__ALLOW_MESSAGE_APPEND=true`; uses selected Frickmail mail account and appends validated RFC822 data to IMAP without adding flags. |
 | `FolderSubscribe` | `dev/View/Popup/Folder.js`, `dev/Settings/User/Folders.js` | native | Uses selected Frickmail mail account or explicit payload account, preserves PHP-style truthiness for `subscribe`, and maps IMAP subscribe/unsubscribe failures to legacy JSON errors. |
 | `FolderClear` | `dev/View/Popup/FolderClear.js`, `dev/View/User/MailBox/MessageList.js` | native | Uses selected Frickmail mail account, marks all selected-folder messages deleted, and expunges like MailSo `FolderClear`. |
-| `FolderSettings`, `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights`, `SystemFoldersUpdate`, `FolderSetMetadata`, `FolderCheckable` | `dev/View/Popup`, `dev/Settings/User/Folders.js`, `dev/Stores/User/Folder.js` | compat-known | Folder settings, metadata, local checkable state, and ACL routes remain unmigrated. |
+| `FolderDelete` | `dev/Settings/User/Folders.js` | native | Uses selected Frickmail mail account, rejects exact `INBOX` and non-empty folders like MailSo, unsubscribes, and deletes the mailbox. |
+| `FolderCreate`, `FolderRename`, `FolderSettings`, `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights`, `SystemFoldersUpdate`, `FolderSetMetadata`, `FolderCheckable` | `dev/View/Popup`, `dev/Settings/User/Folders.js`, `dev/Stores/User/Folder.js` | compat-known | Folder creation/rename, settings, metadata, local checkable state, and ACL routes remain unmigrated. |
 | `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | compat-known | Attachment actions remain on the compatibility roadmap. |
 
 ## Other Bundled Plugin JSON Hooks

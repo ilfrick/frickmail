@@ -661,6 +661,33 @@ pub async fn clear_mailbox(
     result
 }
 
+pub async fn delete_mailbox(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+
+    let mut session = login(config, password).await?;
+    let status = timeout_imap(
+        "check mailbox before delete",
+        session.status(mailbox, "(MESSAGES)"),
+    )
+    .await?;
+    let result = async {
+        validate_deletable_mailbox(mailbox, status.exists)?;
+        timeout_imap(
+            "unsubscribe mailbox before delete",
+            session.unsubscribe(mailbox),
+        )
+        .await?;
+        timeout_imap("delete mailbox", session.delete(mailbox)).await
+    }
+    .await;
+    logout_quietly(session).await;
+    result
+}
+
 pub async fn store_message_flag(
     config: ImapConnectionConfig,
     password: &str,
@@ -3517,6 +3544,20 @@ fn store_keyword_query(keyword: &str, set: bool) -> String {
     format!("{operation} ({keyword})")
 }
 
+fn validate_deletable_mailbox(mailbox: &str, messages: u32) -> Result<()> {
+    if mailbox == "INBOX" {
+        return Err(FrickmailError::BadRequest(
+            "Cannot delete INBOX".to_string(),
+        ));
+    }
+    if messages > 0 {
+        return Err(FrickmailError::BadRequest(
+            "Cannot delete non-empty folder".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
     while value.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
         value = &value[1..];
@@ -3867,6 +3908,18 @@ mod tests {
             store_keyword_query("$label1", false),
             "-FLAGS.SILENT ($label1)"
         );
+    }
+
+    #[test]
+    fn validate_deletable_mailbox_matches_mailso_guards() {
+        assert!(validate_deletable_mailbox("Archive", 0).is_ok());
+        assert!(validate_deletable_mailbox("inbox", 0).is_ok());
+
+        let inbox = validate_deletable_mailbox("INBOX", 0).unwrap_err();
+        assert_eq!(inbox.public_message(), "Cannot delete INBOX");
+
+        let non_empty = validate_deletable_mailbox("Archive", 1).unwrap_err();
+        assert_eq!(non_empty.public_message(), "Cannot delete non-empty folder");
     }
 
     #[test]
