@@ -27,16 +27,16 @@ use chrono::{Duration as ChronoDuration, Local, Utc};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
-    copy_messages, delete_mailbox, delete_messages, fetch_legacy_folder_information,
-    fetch_legacy_message_list, fetch_mailbox_status, fetch_message_body_preview,
-    fetch_raw_folder_messages, fetch_raw_message, legacy_message_cache_key, legacy_message_hash,
-    legacy_message_list_cache_key, legacy_message_list_params_hash, move_messages,
-    set_mailbox_subscription, store_message_flag, store_message_keyword, store_seen_to_all,
-    validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag,
-    ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation, LegacyMessageList,
-    LegacyMessageListRequest, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
-    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-    RuleExecutionReport,
+    copy_messages, create_mailbox, delete_mailbox, delete_messages,
+    fetch_legacy_folder_information, fetch_legacy_message_list, fetch_mailbox_status,
+    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
+    legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
+    legacy_message_list_params_hash, move_messages, set_mailbox_subscription, store_message_flag,
+    store_message_keyword, store_seen_to_all, validate_eml, BodyPreviewPart, ImapConnectionConfig,
+    ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolder,
+    LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest, MailboxStatus,
+    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
+    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::{
     parse_body, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader,
@@ -791,6 +791,9 @@ async fn native_compat_response(
             native_legacy_folder_information_multiply(state, original_action, payload, session)
                 .await,
         ),
+        "FolderCreate" => {
+            Some(native_legacy_folder_create(state, original_action, payload, session).await)
+        }
         "FolderSubscribe" => {
             Some(native_legacy_folder_subscribe(state, original_action, payload, session).await)
         }
@@ -5460,6 +5463,76 @@ where
     )
 }
 
+async fn native_legacy_folder_create(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_create_with_creator(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, parent, subscribe| async move {
+            create_mailbox(config, &password, &folder, &parent, subscribe).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_create_with_creator<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    creator: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, String, bool) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Option<LegacyFolder>>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let parent = payload_string(payload, "parent").unwrap_or_default();
+    let subscribe = payload.get("subscribe").is_some_and(legacy_php_truthy);
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        creator(config, password, folder, parent, subscribe),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Folder create timed out".to_string()));
+
+    let result = match result {
+        Ok(Ok(Some(folder))) => legacy_folder_json(&folder),
+        Ok(Ok(None)) => Value::Null,
+        Ok(Err(error)) => {
+            return json_result_error(original_action, &error.public_message());
+        }
+        Err(error) => {
+            return json_result_error(original_action, &error.public_message());
+        }
+    };
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": result
+        }),
+    )
+}
+
 async fn native_legacy_folder_subscribe(
     state: &AppState,
     original_action: &str,
@@ -6114,6 +6187,30 @@ fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
                 "flags": message.flags,
             }))
             .collect::<Vec<_>>());
+    }
+    value
+}
+
+fn legacy_folder_json(folder: &LegacyFolder) -> Value {
+    let mut value = json!({
+        "@Object": "Object/Folder",
+        "name": folder.name,
+        "fullName": folder.full_name,
+        "delimiter": folder.delimiter,
+        "attributes": folder.attributes,
+        "metadata": folder.metadata,
+        "uidNext": folder.uid_next,
+        "totalEmails": folder.total_emails,
+        "unreadEmails": folder.unread_emails,
+        "id": folder.id,
+        "size": folder.size,
+        "role": folder.role,
+        "checkable": false,
+    });
+    if let Some(etag) = &folder.etag {
+        if !etag.is_empty() {
+            value["etag"] = json!(etag);
+        }
     }
     value
 }
@@ -8839,10 +8936,11 @@ mod tests {
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
         BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
-        ImapMoveOptions, LegacyAttachmentSummary, LegacyFolderInformation, LegacyMessageFlags,
-        LegacyMessageList, LegacyMessageListRequest, LegacyMessageSummary, LegacyNewMessage,
-        MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp,
-        RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
+        ImapMoveOptions, LegacyAttachmentSummary, LegacyFolder, LegacyFolderInformation,
+        LegacyMessageFlags, LegacyMessageList, LegacyMessageListRequest, LegacyMessageSummary,
+        LegacyNewMessage, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField,
+        RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+        RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
@@ -13931,6 +14029,39 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn legacy_folder_json_matches_mailso_folder_shape() {
+        let value = super::legacy_folder_json(&LegacyFolder {
+            name: "Child".to_string(),
+            full_name: "Parent/Child".to_string(),
+            delimiter: "/".to_string(),
+            attributes: vec!["\\subscribed".to_string()],
+            metadata: HashMap::from([("/shared/vendor/example".to_string(), "1".to_string())]),
+            uid_next: Some(5),
+            total_emails: 0,
+            unread_emails: Some(0),
+            id: None,
+            size: None,
+            role: Some("archive".to_string()),
+            etag: Some("folder-etag".to_string()),
+        });
+
+        assert_eq!(value["@Object"], "Object/Folder");
+        assert_eq!(value["name"], "Child");
+        assert_eq!(value["fullName"], "Parent/Child");
+        assert_eq!(value["delimiter"], "/");
+        assert_eq!(value["attributes"][0], "\\subscribed");
+        assert_eq!(value["metadata"]["/shared/vendor/example"], "1");
+        assert_eq!(value["uidNext"], 5);
+        assert_eq!(value["totalEmails"], 0);
+        assert_eq!(value["unreadEmails"], 0);
+        assert_eq!(value["id"], Value::Null);
+        assert_eq!(value["size"], Value::Null);
+        assert_eq!(value["role"], "archive");
+        assert_eq!(value["checkable"], false);
+        assert_eq!(value["etag"], "folder-etag");
+    }
+
+    #[test]
     fn legacy_message_list_raw_key_request_falls_back_like_legacy_decode() {
         assert_eq!(
             super::legacy_message_list_raw_key_request_from_payload(&json!({
@@ -14181,6 +14312,64 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(folder, "INBOX");
         assert_eq!(prev_uid_next, Some(50));
         assert_eq!(flag_uids, Some(vec![41, 42]));
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_create_uses_selected_account_and_returns_folder() {
+        let key = [55_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1834, 1835, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1835 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_create = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_create_with_creator(
+            &state,
+            "FolderCreate",
+            &json!({"folder": "Child", "parent": "Parent", "subscribe": "1"}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, parent, subscribe| {
+                let captured = Arc::clone(&captured_for_create);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder, parent, subscribe));
+                    Ok(Some(LegacyFolder {
+                        name: "Child".to_string(),
+                        full_name: "Parent/Child".to_string(),
+                        delimiter: "/".to_string(),
+                        attributes: vec!["\\subscribed".to_string()],
+                        metadata: HashMap::new(),
+                        uid_next: Some(1),
+                        total_emails: 0,
+                        unread_emails: Some(0),
+                        id: None,
+                        size: None,
+                        role: None,
+                        etag: None,
+                    }))
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderCreate");
+        assert_eq!(body["Result"]["@Object"], "Object/Folder");
+        assert_eq!(body["Result"]["fullName"], "Parent/Child");
+        assert_eq!(body["Result"]["checkable"], false);
+        let (config, password, folder, parent, subscribe) =
+            captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Child");
+        assert_eq!(parent, "Parent");
+        assert!(subscribe);
     }
 
     #[tokio::test]

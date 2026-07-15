@@ -1,7 +1,13 @@
-use std::{borrow::Cow, collections::HashSet, fmt, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_imap::{
-    types::{Capabilities, Capability, Flag},
+    types::{Capabilities, Capability, Flag, NameAttribute},
     Client, Session,
 };
 use fm_core::{FrickmailError, Result};
@@ -236,6 +242,22 @@ pub struct LegacySmimeSigned {
 pub struct MailboxStatus {
     pub uid_next: Option<u32>,
     pub exists: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyFolder {
+    pub name: String,
+    pub full_name: String,
+    pub delimiter: String,
+    pub attributes: Vec<String>,
+    pub metadata: HashMap<String, String>,
+    pub uid_next: Option<u32>,
+    pub total_emails: u32,
+    pub unread_emails: Option<u32>,
+    pub id: Option<String>,
+    pub size: Option<u64>,
+    pub role: Option<String>,
+    pub etag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -643,6 +665,38 @@ pub async fn set_mailbox_subscription(
     } else {
         timeout_imap("unsubscribe mailbox", session.unsubscribe(mailbox)).await
     };
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn create_mailbox(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    parent: &str,
+    subscribe: bool,
+) -> Result<Option<LegacyFolder>> {
+    let mailbox = mailbox.trim();
+    let parent = parent.trim();
+    validate_mailbox(mailbox)?;
+    if !parent.is_empty() {
+        validate_mailbox(parent)?;
+    }
+
+    let mut session = login(config, password).await?;
+    let result = async {
+        let delimiter = mailbox_hierarchy_delimiter(&mut session, parent).await?;
+        let full_name = create_mailbox_full_name(mailbox, parent, delimiter.as_str());
+        validate_mailbox(&full_name)?;
+
+        timeout_imap("create mailbox", session.create(&full_name)).await?;
+        if subscribe {
+            timeout_imap("subscribe created mailbox", session.subscribe(&full_name)).await?;
+        }
+
+        created_legacy_folder(&mut session, &full_name, subscribe).await
+    }
+    .await;
     logout_quietly(session).await;
     result
 }
@@ -3544,6 +3598,185 @@ fn store_keyword_query(keyword: &str, set: bool) -> String {
     format!("{operation} ({keyword})")
 }
 
+async fn mailbox_hierarchy_delimiter(session: &mut BoxedSession, parent: &str) -> Result<String> {
+    let pattern = quote_mailbox_pattern(parent)?;
+    let folders = timeout_imap(
+        "list mailbox hierarchy delimiter",
+        session.list(Some(""), Some(&pattern)),
+    )
+    .await?;
+    pin_mut!(folders);
+
+    if let Some(folder) =
+        timeout_imap("read mailbox hierarchy delimiter", folders.try_next()).await?
+    {
+        return folder.delimiter().map(str::to_string).ok_or_else(|| {
+            if parent.is_empty() {
+                FrickmailError::Upstream("Cannot get folder delimiter.".to_string())
+            } else {
+                FrickmailError::Upstream(
+                    "Cannot create folder in non-existent parent folder.".to_string(),
+                )
+            }
+        });
+    }
+
+    Err(if parent.is_empty() {
+        FrickmailError::Upstream("Cannot get folder delimiter.".to_string())
+    } else {
+        FrickmailError::Upstream("Cannot create folder in non-existent parent folder.".to_string())
+    })
+}
+
+fn create_mailbox_full_name(mailbox: &str, parent: &str, delimiter: &str) -> String {
+    if parent.is_empty() || delimiter.is_empty() {
+        format!("{parent}{mailbox}")
+    } else {
+        format!("{parent}{delimiter}{mailbox}")
+    }
+}
+
+async fn created_legacy_folder(
+    session: &mut BoxedSession,
+    full_name: &str,
+    subscribed: bool,
+) -> Result<Option<LegacyFolder>> {
+    let listed = {
+        let folders = timeout_imap(
+            "list created mailbox",
+            session.list(Some(full_name), Some("\"\"")),
+        )
+        .await?;
+        pin_mut!(folders);
+        let mut fallback = None;
+
+        while let Some(folder) = timeout_imap("read created mailbox", folders.try_next()).await? {
+            let item = (
+                folder.name().to_string(),
+                folder.delimiter().unwrap_or_default().to_string(),
+                legacy_name_attributes(folder.attributes()),
+            );
+            if folder.name() == full_name {
+                fallback = Some(item);
+                break;
+            }
+            fallback.get_or_insert(item);
+        }
+        fallback
+    };
+
+    let Some((listed_full_name, delimiter, mut attributes)) = listed else {
+        return Ok(None);
+    };
+
+    if subscribed
+        && !attributes
+            .iter()
+            .any(|attribute| attribute == "\\subscribed")
+    {
+        attributes.push("\\subscribed".to_string());
+    }
+
+    let status = timeout_imap(
+        "status created mailbox",
+        session.status(&listed_full_name, "(MESSAGES UIDNEXT UNSEEN)"),
+    )
+    .await?;
+
+    Ok(Some(LegacyFolder {
+        name: legacy_folder_name(&listed_full_name, &delimiter),
+        full_name: listed_full_name,
+        delimiter,
+        role: legacy_folder_role(&attributes),
+        attributes,
+        metadata: HashMap::new(),
+        uid_next: status.uid_next,
+        total_emails: status.exists,
+        unread_emails: status.unseen,
+        id: None,
+        size: None,
+        etag: None,
+    }))
+}
+
+fn quote_mailbox_pattern(value: &str) -> Result<String> {
+    if contains_crlf(value) {
+        return Err(FrickmailError::BadRequest(
+            "mailbox must not contain CR or LF".to_string(),
+        ));
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        if matches!(character, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    Ok(quoted)
+}
+
+fn legacy_name_attributes(attributes: &[NameAttribute<'_>]) -> Vec<String> {
+    attributes
+        .iter()
+        .filter_map(legacy_name_attribute)
+        .collect()
+}
+
+fn legacy_name_attribute(attribute: &NameAttribute<'_>) -> Option<String> {
+    let value = match attribute {
+        NameAttribute::NoInferiors => "\\noinferiors",
+        NameAttribute::NoSelect => "\\noselect",
+        NameAttribute::Marked => "\\marked",
+        NameAttribute::Unmarked => "\\unmarked",
+        NameAttribute::All => "\\all",
+        NameAttribute::Archive => "\\archive",
+        NameAttribute::Drafts => "\\drafts",
+        NameAttribute::Flagged => "\\flagged",
+        NameAttribute::Junk => "\\junk",
+        NameAttribute::Sent => "\\sent",
+        NameAttribute::Trash => "\\trash",
+        NameAttribute::Extension(value) => return Some(value.to_ascii_lowercase()),
+        _ => return None,
+    };
+    Some(value.to_string())
+}
+
+fn legacy_folder_name(full_name: &str, delimiter: &str) -> String {
+    if delimiter.is_empty() {
+        return full_name.to_string();
+    }
+    full_name
+        .rsplit(delimiter)
+        .next()
+        .unwrap_or(full_name)
+        .to_string()
+}
+
+fn legacy_folder_role(attributes: &[String]) -> Option<String> {
+    let role = [
+        ("\\inbox", "inbox"),
+        ("\\all", "all"),
+        ("\\archive", "archive"),
+        ("\\drafts", "drafts"),
+        ("\\flagged", "flagged"),
+        ("\\important", "important"),
+        ("\\junk", "junk"),
+        ("\\sent", "sent"),
+        ("\\trash", "trash"),
+    ]
+    .into_iter()
+    .find_map(|(attribute, role)| {
+        attributes
+            .iter()
+            .any(|value| value == attribute)
+            .then_some(role)
+    });
+
+    role.map(str::to_string)
+}
+
 fn validate_deletable_mailbox(mailbox: &str, messages: u32) -> Result<()> {
     if mailbox == "INBOX" {
         return Err(FrickmailError::BadRequest(
@@ -3920,6 +4153,34 @@ mod tests {
 
         let non_empty = validate_deletable_mailbox("Archive", 1).unwrap_err();
         assert_eq!(non_empty.public_message(), "Cannot delete non-empty folder");
+    }
+
+    #[test]
+    fn create_mailbox_helpers_match_mailso_folder_create_shape() {
+        assert_eq!(
+            create_mailbox_full_name("Child", "Parent", "/"),
+            "Parent/Child"
+        );
+        assert_eq!(create_mailbox_full_name("Root", "", "/"), "Root");
+        assert_eq!(legacy_folder_name("Parent/Child", "/"), "Child");
+        assert_eq!(legacy_folder_name("Flat", ""), "Flat");
+        assert_eq!(
+            quote_mailbox_pattern(r#"A "quoted" \ folder"#).unwrap(),
+            r#""A \"quoted\" \\ folder""#
+        );
+        assert!(quote_mailbox_pattern("Bad\r\nFolder").is_err());
+    }
+
+    #[test]
+    fn legacy_folder_attributes_are_lowercase_and_role_aware() {
+        let attributes = legacy_name_attributes(&[
+            NameAttribute::NoSelect,
+            NameAttribute::Archive,
+            NameAttribute::Extension(Cow::Borrowed("\\Subscribed")),
+        ]);
+
+        assert_eq!(attributes, vec!["\\noselect", "\\archive", "\\subscribed"]);
+        assert_eq!(legacy_folder_role(&attributes), Some("archive".to_string()));
     }
 
     #[test]
