@@ -5980,6 +5980,10 @@ fn legacy_nullable_string(value: Option<&str>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn legacy_optional_scalar_string(value: Option<&str>) -> Value {
+    value.map(|value| json!(value)).unwrap_or(Value::Null)
+}
+
 #[allow(dead_code)]
 fn legacy_message_list_json(list: &fm_imap::LegacyMessageList) -> Value {
     let mut folder = legacy_folder_information_json(&list.folder);
@@ -6033,7 +6037,7 @@ fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value
         "dmarc": [],
         "flags": message.flags,
         "inReplyTo": message.in_reply_to,
-        "id": Value::Null,
+        "id": legacy_optional_scalar_string(message.email_id.as_deref()),
         "size": message.size,
         "preview": legacy_nullable_string(message.preview.as_deref()),
         "headers": [],
@@ -6078,6 +6082,7 @@ fn legacy_message_json(
     crypto: &fm_imap::LegacyMessageCrypto,
     size: u32,
     flags: &[String],
+    email_id: Option<&str>,
     preview: Option<&str>,
 ) -> Value {
     let mut value = json!({
@@ -6107,7 +6112,7 @@ fn legacy_message_json(
         "dmarc": auth_statuses.dmarc,
         "flags": flags,
         "inReplyTo": in_reply_to,
-        "id": Value::Null,
+        "id": legacy_optional_scalar_string(email_id),
         "size": size,
         "preview": legacy_nullable_string(preview),
         "headers": legacy_parsed_headers_json(headers),
@@ -6251,6 +6256,7 @@ fn legacy_message_body_response(
     let mut date_timestamp = 0;
     let mut date_timestamp_source = "internal";
     let mut size = 0;
+    let mut email_id = None;
     let mut attachments = None;
     let mut metadata_attachments = None;
     let mut headers = None;
@@ -6272,6 +6278,7 @@ fn legacy_message_body_response(
         .find_map(|part| (!part.metadata.is_empty()).then_some(&part.metadata))
     {
         size = metadata.size;
+        email_id = metadata.email_id.as_deref();
         if !metadata.attachments.is_empty() {
             metadata_attachments = Some(metadata.attachments.clone());
         }
@@ -6491,6 +6498,7 @@ fn legacy_message_body_response(
                 &crypto,
                 size,
                 flags,
+                email_id,
                 None,
             )
         }),
@@ -12409,6 +12417,7 @@ Subject: Preview metadata\r\n\r\n"
                             .to_vec(),
                         internal_timestamp: Some(1_700_000_000),
                         size: 4096,
+                        email_id: Some("gmail-message-id".to_string()),
                         attachments: vec![fm_imap::LegacyAttachmentSummary {
                             object: "Object/Attachment".to_string(),
                             folder: "INBOX".to_string(),
@@ -12443,6 +12452,7 @@ Subject: Preview metadata\r\n\r\n"
         assert_eq!(result["dateTimestamp"], 1_700_000_000);
         assert_eq!(result["dateTimestampSource"], "internal");
         assert_eq!(result["size"], 4096);
+        assert_eq!(result["id"], "gmail-message-id");
         assert_eq!(result["flags"][0], "\\Seen");
         assert_eq!(result["from"][0]["name"], "Sender, Example");
         assert_eq!(result["from"][0]["email"], "sender@example.com");
@@ -12479,6 +12489,7 @@ Subject: Preview metadata\r\n\r\n"
                         header: Vec::new(),
                         internal_timestamp: Some(1_700_000_456),
                         size: 2048,
+                        email_id: Some("gmail-envelope-id".to_string()),
                         attachments: Vec::new(),
                         envelope: fm_imap::LegacyMessageEnvelope {
                             subject: "Envelope subject".to_string(),
@@ -12506,6 +12517,7 @@ Subject: Preview metadata\r\n\r\n"
         assert_eq!(result["dateTimestamp"], 1_700_000_456);
         assert_eq!(result["dateTimestampSource"], "internal");
         assert_eq!(result["size"], 2048);
+        assert_eq!(result["id"], "gmail-envelope-id");
         assert_eq!(result["from"][0]["name"], "Envelope Sender");
         assert_eq!(result["from"][0]["email"], "sender@example.com");
         assert_eq!(result["sender"][0]["email"], "actual@example.com");
@@ -12545,6 +12557,7 @@ In-Reply-To: <header-parent@example.com>\r\n\r\n"
                             .to_vec(),
                         internal_timestamp: Some(1_700_000_789),
                         size: 2048,
+                        email_id: None,
                         attachments: Vec::new(),
                         envelope: fm_imap::LegacyMessageEnvelope {
                             subject: "Envelope subject".to_string(),
@@ -12919,6 +12932,7 @@ Subject: Empty body metadata\r\n\r\n"
             &Default::default(),
             0,
             &[],
+            Some("gmail-message-id"),
             None,
         );
 
@@ -12927,6 +12941,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(message["html"], "<p>Hello</p>");
         assert_eq!(message["plain"], "");
         assert_eq!(message["preview"], Value::Null);
+        assert_eq!(message["id"], "gmail-message-id");
         assert_eq!(message["from"][0]["name"], "Sender");
         assert_eq!(message["from"][0]["email"], "sender@example.com");
         assert_eq!(message["replyTo"][0]["email"], "reply@example.com");
@@ -13866,7 +13881,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(message["@Object"], "Object/Message");
         assert_eq!(message["folder"], "INBOX");
         assert_eq!(message["uid"], 44);
-        assert_eq!(message["id"], Value::Null);
+        assert_eq!(message["id"], "gmail-message-id");
         assert_eq!(message["subject"], "Staged summary");
         assert_eq!(message["encrypted"], true);
         assert_eq!(message["messageId"], "<message@example.com>");
@@ -13916,6 +13931,8 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(super::legacy_nullable_string(Some("")), Value::Null);
         assert_eq!(super::legacy_nullable_string(Some("0")), Value::Null);
         assert_eq!(super::legacy_nullable_string(Some("Preview")), "Preview");
+        assert_eq!(super::legacy_optional_scalar_string(None), Value::Null);
+        assert_eq!(super::legacy_optional_scalar_string(Some("0")), "0");
     }
 
     #[test]
@@ -17537,6 +17554,7 @@ Subject: Empty body metadata\r\n\r\n"
             folder: "INBOX".to_string(),
             uid: 44,
             hash: "summary-hash".to_string(),
+            email_id: Some("gmail-message-id".to_string()),
             subject: "Staged summary".to_string(),
             encrypted: true,
             message_id: "<message@example.com>".to_string(),

@@ -162,6 +162,7 @@ pub struct LegacyMessageFetchMetadata {
     pub header: Vec<u8>,
     pub internal_timestamp: Option<i64>,
     pub size: u32,
+    pub email_id: Option<String>,
     pub attachments: Vec<LegacyAttachmentSummary>,
     pub envelope: LegacyMessageEnvelope,
 }
@@ -171,6 +172,7 @@ impl LegacyMessageFetchMetadata {
         self.header.is_empty()
             && self.internal_timestamp.is_none()
             && self.size == 0
+            && self.email_id.is_none()
             && self.attachments.is_empty()
             && self.envelope.is_empty()
     }
@@ -285,6 +287,7 @@ pub struct LegacyMessageSummary {
     pub folder: String,
     pub uid: u32,
     pub hash: String,
+    pub email_id: Option<String>,
     pub subject: String,
     pub encrypted: bool,
     pub message_id: String,
@@ -433,6 +436,11 @@ struct ImapRuleCapabilities {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImapFetchMetadataCapabilities {
+    supports_gmail_id: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyPartKind {
     Html,
     Plain,
@@ -474,7 +482,8 @@ pub async fn fetch_message_body_preview(
 
     let mut session = login(config, password).await?;
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
-    let Some(specs) = fetch_body_part_specs(&mut session, mailbox, uid).await? else {
+    let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
+    let Some(specs) = fetch_body_part_specs(&mut session, mailbox, uid, capabilities).await? else {
         logout_quietly(session).await;
         return Ok(None);
     };
@@ -542,7 +551,9 @@ pub async fn fetch_legacy_message_list(
 
     let client_hash = legacy_imap_client_hash(&config);
     let mut session = login(config, password).await?;
-    let result = legacy_message_list_in_session(&mut session, request, &client_hash).await;
+    let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
+    let result =
+        legacy_message_list_in_session(&mut session, request, &client_hash, capabilities).await;
     logout_quietly(session).await;
     result
 }
@@ -795,11 +806,22 @@ pub fn examine_mailbox_command(mailbox: &str) -> Result<Vec<u8>> {
 }
 
 pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<&'static str> {
+    uid_fetch_bodystructure_query_with_gmail_id(uid, false)
+}
+
+pub fn uid_fetch_bodystructure_query_with_gmail_id(
+    uid: u32,
+    include_gmail_id: bool,
+) -> Result<&'static str> {
     if uid == 0 {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
     }
 
-    Ok("(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER])")
+    Ok(if include_gmail_id {
+        "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER] X-GM-MSGID)"
+    } else {
+        "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER])"
+    })
 }
 
 pub fn uid_fetch_raw_message_query(uid: u32) -> Result<&'static str> {
@@ -815,7 +837,15 @@ pub fn sequence_fetch_raw_message_query() -> &'static str {
 }
 
 pub fn legacy_message_list_fetch_query() -> &'static str {
-    "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])"
+    legacy_message_list_fetch_query_with_gmail_id(false)
+}
+
+pub fn legacy_message_list_fetch_query_with_gmail_id(include_gmail_id: bool) -> &'static str {
+    if include_gmail_id {
+        "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER] X-GM-MSGID)"
+    } else {
+        "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])"
+    }
 }
 
 pub fn legacy_message_flags_fetch_query() -> &'static str {
@@ -1267,6 +1297,7 @@ async fn legacy_message_list_in_session(
     session: &mut BoxedSession,
     request: LegacyMessageListRequest,
     client_hash: &str,
+    capabilities: ImapFetchMetadataCapabilities,
 ) -> Result<LegacyMessageList> {
     let fetch_new_messages = legacy_message_list_fetches_new_messages(request.thread_uid);
     let folder = legacy_folder_information_in_session(
@@ -1286,7 +1317,10 @@ async fn legacy_message_list_in_session(
     if let Some(range) = range {
         let mut fetches = timeout_imap(
             "fetch legacy message list",
-            session.fetch(range, legacy_message_list_fetch_query()),
+            session.fetch(
+                range,
+                legacy_message_list_fetch_query_with_gmail_id(capabilities.supports_gmail_id),
+            ),
         )
         .await?;
 
@@ -1297,7 +1331,7 @@ async fn legacy_message_list_in_session(
                 continue;
             };
             let header = fetch.header().unwrap_or_default();
-            let summary = legacy_message_summary_from_fetch(
+            let summary = legacy_message_summary_from_fetch_with_email_id(
                 &request.mailbox,
                 uid,
                 fetch.internal_date().map(|value| value.timestamp()),
@@ -1305,6 +1339,7 @@ async fn legacy_message_list_in_session(
                 fetch.flags(),
                 fetch.bodystructure(),
                 header,
+                fetch.gmail_msg_id().map(u64::to_string),
             );
             if legacy_message_list_keeps_flags(&summary.flags, request.hide_deleted) {
                 messages.push(summary);
@@ -1450,6 +1485,7 @@ async fn fetch_legacy_new_messages(
     Ok(messages)
 }
 
+#[cfg(test)]
 fn legacy_message_summary_from_fetch<'a>(
     folder: &str,
     uid: u32,
@@ -1458,6 +1494,29 @@ fn legacy_message_summary_from_fetch<'a>(
     flags: impl Iterator<Item = Flag<'a>>,
     bodystructure: Option<&BodyStructure<'_>>,
     header: &[u8],
+) -> LegacyMessageSummary {
+    legacy_message_summary_from_fetch_with_email_id(
+        folder,
+        uid,
+        internal_timestamp,
+        size,
+        flags,
+        bodystructure,
+        header,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn legacy_message_summary_from_fetch_with_email_id<'a>(
+    folder: &str,
+    uid: u32,
+    internal_timestamp: Option<i64>,
+    size: u32,
+    flags: impl Iterator<Item = Flag<'a>>,
+    bodystructure: Option<&BodyStructure<'_>>,
+    header: &[u8],
+    email_id: Option<String>,
 ) -> LegacyMessageSummary {
     let subject = legacy_message_subject(&header_value(header, "Subject").unwrap_or_default());
     let message_id = header_value(header, "Message-ID")
@@ -1488,6 +1547,7 @@ fn legacy_message_summary_from_fetch<'a>(
         folder: folder.to_string(),
         uid,
         hash: legacy_message_hash(folder, uid),
+        email_id,
         subject,
         encrypted,
         message_id,
@@ -2765,6 +2825,15 @@ async fn imap_rule_capabilities(session: &mut BoxedSession) -> Result<ImapRuleCa
     })
 }
 
+async fn imap_fetch_metadata_capabilities(
+    session: &mut BoxedSession,
+) -> Result<ImapFetchMetadataCapabilities> {
+    let capabilities = timeout_imap("read IMAP capabilities", session.capabilities()).await?;
+    Ok(ImapFetchMetadataCapabilities {
+        supports_gmail_id: has_capability_ignore_ascii_case(&capabilities, "X-GM-EXT-1"),
+    })
+}
+
 fn fetch_body_for_uid(attrs: &[AttributeValue<'_>], expected_uid: u32) -> Option<Vec<u8>> {
     let uid = attrs.iter().find_map(|attr| match attr {
         AttributeValue::Uid(uid) => Some(*uid),
@@ -2867,10 +2936,14 @@ async fn fetch_body_part_specs(
     session: &mut BoxedSession,
     folder: &str,
     uid: u32,
+    capabilities: ImapFetchMetadataCapabilities,
 ) -> Result<Option<BodyPreviewFetchSpec>> {
     let mut fetches = timeout_imap(
         "fetch message body structure",
-        session.uid_fetch(uid.to_string(), uid_fetch_bodystructure_query(uid)?),
+        session.uid_fetch(
+            uid.to_string(),
+            uid_fetch_bodystructure_query_with_gmail_id(uid, capabilities.supports_gmail_id)?,
+        ),
     )
     .await?;
 
@@ -2883,6 +2956,7 @@ async fn fetch_body_part_specs(
         let header = fetch.header().unwrap_or_default().to_vec();
         let internal_timestamp = fetch.internal_date().map(|value| value.timestamp());
         let size = fetch.size.unwrap_or_default();
+        let email_id = fetch.gmail_msg_id().map(u64::to_string);
         let envelope = fetch
             .envelope()
             .map(legacy_message_envelope_metadata)
@@ -2901,6 +2975,7 @@ async fn fetch_body_part_specs(
                     header,
                     internal_timestamp,
                     size,
+                    email_id,
                     attachments: Vec::new(),
                     envelope,
                 },
@@ -2912,6 +2987,7 @@ async fn fetch_body_part_specs(
             header,
             internal_timestamp,
             size,
+            email_id,
             attachments,
             envelope,
         };
@@ -3537,6 +3613,10 @@ mod tests {
             uid_fetch_bodystructure_query(42).unwrap(),
             "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER])"
         );
+        assert_eq!(
+            uid_fetch_bodystructure_query_with_gmail_id(42, true).unwrap(),
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER] X-GM-MSGID)"
+        );
         assert!(uid_fetch_bodystructure_query(0).is_err());
         assert_eq!(
             uid_fetch_raw_message_query(42).unwrap(),
@@ -3977,6 +4057,22 @@ mod tests {
         assert_eq!(summary.sender, "Sender <sender@example.com>");
         assert_eq!(summary.delivered_to, "delivered@example.com");
         assert_eq!(summary.read_receipt, "Receipt <receipt@example.com>");
+    }
+
+    #[test]
+    fn legacy_message_summary_carries_gmail_message_id_like_mailso_fallback() {
+        let summary = legacy_message_summary_from_fetch_with_email_id(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            b"Subject: Gmail id\r\n\r\n",
+            Some("1278455344230334865".to_string()),
+        );
+
+        assert_eq!(summary.email_id.as_deref(), Some("1278455344230334865"));
     }
 
     #[test]
@@ -5157,6 +5253,10 @@ mod tests {
         assert_eq!(
             legacy_message_list_fetch_query(),
             "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])"
+        );
+        assert_eq!(
+            legacy_message_list_fetch_query_with_gmail_id(true),
+            "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER] X-GM-MSGID)"
         );
         assert_eq!(
             legacy_new_messages_fetch_query(),
