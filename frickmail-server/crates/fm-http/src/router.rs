@@ -30,11 +30,11 @@ use fm_imap::{
     delete_messages, fetch_legacy_folder_information, fetch_legacy_message_list,
     fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
     legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
-    legacy_message_list_params_hash, move_messages, store_message_flag, store_message_keyword,
-    store_seen_to_all, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
-    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation, LegacyMessageList,
-    LegacyMessageListRequest, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
-    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    legacy_message_list_params_hash, move_messages, set_mailbox_subscription, store_message_flag,
+    store_message_keyword, store_seen_to_all, validate_eml, BodyPreviewPart, ImapConnectionConfig,
+    ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation,
+    LegacyMessageList, LegacyMessageListRequest, MailboxStatus, RawFolderFetchLimits, RuleAction,
+    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
     RuleExecutionReport,
 };
 use fm_mime::{
@@ -790,6 +790,9 @@ async fn native_compat_response(
             native_legacy_folder_information_multiply(state, original_action, payload, session)
                 .await,
         ),
+        "FolderSubscribe" => {
+            Some(native_legacy_folder_subscribe(state, original_action, payload, session).await)
+        }
         "MessageSetSeen" => Some(
             native_legacy_message_store_flag(
                 state,
@@ -5448,6 +5451,58 @@ where
             "Result": results
         }),
     )
+}
+
+async fn native_legacy_folder_subscribe(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_subscribe_with_subscriber(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, subscribe| async move {
+            set_mailbox_subscription(config, &password, &folder, subscribe).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_subscribe_with_subscriber<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    subscriber: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, bool) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let subscribe = payload.get("subscribe").is_some_and(legacy_php_truthy);
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        subscriber(config, password, folder, subscribe),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Folder subscription update timed out".to_string()));
+
+    legacy_message_bool_response(original_action, result)
 }
 
 async fn native_legacy_message_store_flag(
@@ -14027,6 +14082,79 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(folder, "INBOX");
         assert_eq!(prev_uid_next, Some(50));
         assert_eq!(flag_uids, Some(vec![41, 42]));
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_subscribe_uses_selected_account() {
+        let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1820, 1821, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1821 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_subscribe = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_subscribe_with_subscriber(
+            &state,
+            "FolderSubscribe",
+            &json!({"folder": "Archive", "subscribe": "1"}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, subscribe| {
+                let captured = Arc::clone(&captured_for_subscribe);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder, subscribe));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderSubscribe");
+        assert_eq!(body["Result"], true);
+        let (config, password, folder, subscribe) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Archive");
+        assert!(subscribe);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_subscribe_unsubscribes_php_falsey_zero() {
+        let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1822, 1823, &key).await;
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_subscribe = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_subscribe_with_subscriber(
+            &state,
+            "FolderSubscribe",
+            &json!({"account_id": 1823, "folder": "Archive", "subscribe": "0"}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, subscribe| {
+                let captured = Arc::clone(&captured_for_subscribe);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder, subscribe));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderSubscribe");
+        assert_eq!(body["Result"], true);
+        let (_config, password, folder, subscribe) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Archive");
+        assert!(!subscribe);
     }
 
     #[tokio::test]

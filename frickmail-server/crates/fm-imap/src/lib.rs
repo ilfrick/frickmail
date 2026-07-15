@@ -629,6 +629,24 @@ async fn append_raw_message_with_flags(
     Ok(())
 }
 
+pub async fn set_mailbox_subscription(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    subscribe: bool,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+
+    let mut session = login(config, password).await?;
+    let result = if subscribe {
+        timeout_imap("subscribe mailbox", session.subscribe(mailbox)).await
+    } else {
+        timeout_imap("unsubscribe mailbox", session.unsubscribe(mailbox)).await
+    };
+    logout_quietly(session).await;
+    result
+}
+
 pub async fn store_message_flag(
     config: ImapConnectionConfig,
     password: &str,
