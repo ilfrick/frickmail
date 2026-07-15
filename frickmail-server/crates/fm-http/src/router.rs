@@ -37,7 +37,9 @@ use fm_imap::{
     RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
     RuleExecutionReport,
 };
-use fm_mime::{parse_body, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader};
+use fm_mime::{
+    parse_body, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader,
+};
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
@@ -6054,6 +6056,7 @@ fn legacy_message_json(
     spam_score: u8,
     spam_result: &str,
     is_spam: bool,
+    auth_statuses: &ParsedAuthStatuses,
     draft_info: Option<&ParsedDraftInfo>,
     html: &str,
     plain: &str,
@@ -6090,7 +6093,7 @@ fn legacy_message_json(
         "isSpam": is_spam,
         "dateTimestamp": date_timestamp,
         "dateTimestampSource": date_timestamp_source,
-        "from": legacy_optional_email_collection(from),
+        "from": legacy_optional_email_collection_with_auth(from, auth_statuses),
         "replyTo": legacy_optional_email_collection(reply_to),
         "to": legacy_optional_email_collection(to),
         "cc": legacy_optional_email_collection(cc),
@@ -6099,9 +6102,9 @@ fn legacy_message_json(
         "deliveredTo": legacy_optional_email_collection(delivered_to),
         "readReceipt": read_receipt,
         "attachments": attachments,
-        "spf": [],
-        "dkim": [],
-        "dmarc": [],
+        "spf": auth_statuses.spf,
+        "dkim": auth_statuses.dkim,
+        "dmarc": auth_statuses.dmarc,
         "flags": flags,
         "inReplyTo": in_reply_to,
         "id": Value::Null,
@@ -6243,6 +6246,8 @@ fn legacy_message_body_response(
     let mut read_receipt = String::new();
     let mut spam = fm_imap::LegacyMessageSpamSummary::default();
     let mut spam_loaded = false;
+    let mut auth_statuses = ParsedAuthStatuses::default();
+    let mut auth_statuses_loaded = false;
     let mut date_timestamp = 0;
     let mut date_timestamp_source = "internal";
     let mut size = 0;
@@ -6274,6 +6279,8 @@ fn legacy_message_body_response(
             subject = body.subject.unwrap_or_default();
             spam = fm_imap::legacy_message_spam_summary(&metadata.header, &subject);
             spam_loaded = true;
+            auth_statuses = body.auth_statuses.clone();
+            auth_statuses_loaded = true;
             if body.encrypted {
                 encrypted = true;
             }
@@ -6370,6 +6377,10 @@ fn legacy_message_body_response(
                 if delivered_to.is_none() {
                     delivered_to = Some(body.delivered_to.clone());
                 }
+                if !auth_statuses_loaded {
+                    auth_statuses = body.auth_statuses.clone();
+                    auth_statuses_loaded = true;
+                }
                 if html.is_empty() && !body.html.is_empty() {
                     html = body.html;
                 }
@@ -6432,6 +6443,7 @@ fn legacy_message_body_response(
                 spam.spam_score,
                 &spam.spam_result,
                 spam.is_spam,
+                &auth_statuses,
                 draft_info.as_ref(),
                 &html,
                 &plain,
@@ -6465,6 +6477,42 @@ fn legacy_optional_email_collection(addresses: Option<&[String]>) -> Value {
     addresses
         .map(|addresses| json!(legacy_email_collection_from_strings(addresses)))
         .unwrap_or(Value::Null)
+}
+
+fn legacy_optional_email_collection_with_auth(
+    addresses: Option<&[String]>,
+    auth_statuses: &ParsedAuthStatuses,
+) -> Value {
+    addresses
+        .map(|addresses| {
+            let mut emails = legacy_email_collection_from_strings(addresses);
+            legacy_apply_dkim_status_to_emails(&mut emails, auth_statuses);
+            json!(emails)
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn legacy_apply_dkim_status_to_emails(emails: &mut [Value], auth_statuses: &ParsedAuthStatuses) {
+    if auth_statuses.dkim.is_empty() {
+        return;
+    }
+    for email in emails {
+        let Some(address) = email
+            .get("email")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        for dkim in &auth_statuses.dkim {
+            if dkim[1].is_empty() {
+                continue;
+            }
+            if address.find(&dkim[1]).is_some_and(|index| index > 0) {
+                email["dkimStatus"] = json!(dkim[0]);
+            }
+        }
+    }
 }
 
 fn legacy_email_collection_from_strings(addresses: &[String]) -> Vec<Value> {
@@ -11925,7 +11973,6 @@ X-Spamd-Result: default: False [7.13 / 9.00]; BAYES_SPAM\r\n\r\n"
         .await;
         let body = read_json(response).await;
         let result = &body["Result"];
-
         assert_eq!(body["Action"], "Message");
         assert_eq!(result["subject"], "*** SPAM *** sale");
         assert_eq!(result["spamScore"], 100);
@@ -12424,6 +12471,97 @@ X-Spam-Status: No, score=3.0 required=5.0 tests=BAYES\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_legacy_message_populates_preview_auth_status_metadata_from_header_fetch() {
+        let key = [65_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1946, 1947, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1947, "folder": "INBOX", "uid": 69}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: Vec::new(),
+                    is_complete: false,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: fm_imap::LegacyMessageFetchMetadata {
+                        header: b"From: Sender <sender@example.com>\r\n\
+Subject: Auth metadata\r\n\
+Authentication-Results: mx.example;\r\n dkim=pass header.d=example.com header.s=s1 header.b=abc;\r\n spf=fail smtp.mailfrom=\"bounce.example.com\";\r\n dmarc=pass header.from=example.com (policy=reject)\r\n\r\n"
+                            .to_vec(),
+                        internal_timestamp: None,
+                        size: 42,
+                        attachments: Vec::new(),
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "Auth metadata");
+        assert_eq!(result["dkim"][0][0], "pass");
+        assert_eq!(result["dkim"][0][1], "example.com");
+        assert_eq!(
+            result["dkim"][0][2],
+            "dkim=pass header.d=example.com header.s=s1 header.b=abc"
+        );
+        assert_eq!(result["from"][0]["email"], "sender@example.com");
+        assert_eq!(result["from"][0]["dkimStatus"], "pass");
+        assert_eq!(result["spf"][0][0], "fail");
+        assert_eq!(result["spf"][0][1], "bounce.example.com");
+        assert_eq!(result["dmarc"][0][0], "pass");
+        assert_eq!(result["dmarc"][0][1], "example.com");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_populates_raw_auth_status_metadata() {
+        let key = [66_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1948, 1949, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1949, "folder": "INBOX", "uid": 70}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"From: Sender <sender@example.com>\r\n\
+Subject: Raw auth metadata\r\n\
+Authentication-Results: mx.example;\r\n dkim=fail header.d=example.com header.s=s1 header.b=abc;\r\n spf=pass smtp.mailfrom=sender.example.com\r\n\r\n\
+Body"
+                        .to_vec(),
+                    is_complete: true,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: Default::default(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "Raw auth metadata");
+        assert_eq!(result["dkim"][0][0], "fail");
+        assert_eq!(result["dkim"][0][1], "example.com");
+        assert_eq!(result["spf"][0][0], "pass");
+        assert_eq!(result["spf"][0][1], "sender.example.com");
+        assert_eq!(result["from"][0]["dkimStatus"], "fail");
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_prefers_metadata_spam_over_raw_body() {
         let key = [64_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1944, 1945, &key).await;
@@ -12612,6 +12750,7 @@ Subject: Empty body metadata\r\n\r\n"
             0,
             "",
             false,
+            &Default::default(),
             None,
             "<p>Hello</p>",
             "",

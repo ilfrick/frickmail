@@ -36,6 +36,7 @@ pub struct ParsedMessageBody {
     pub delivered_to: Vec<String>,
     pub attachments: Vec<ParsedMessageAttachment>,
     pub headers: Vec<ParsedMessageHeader>,
+    pub auth_statuses: ParsedAuthStatuses,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +61,19 @@ pub struct ParsedMessageHeader {
 pub struct ParsedMessageHeaderParameter {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedAuthStatuses {
+    pub dkim: Vec<[String; 3]>,
+    pub dmarc: Vec<[String; 3]>,
+    pub spf: Vec<[String; 3]>,
+}
+
+impl ParsedAuthStatuses {
+    pub fn is_empty(&self) -> bool {
+        self.dkim.is_empty() && self.dmarc.is_empty() && self.spf.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +133,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
     let delivered_to = format_header_addresses(&message, "Delivered-To");
     let attachments = format_attachments(&message);
     let headers = format_headers(&message);
+    let auth_statuses = legacy_auth_statuses(raw);
 
     if html.is_empty()
         && plain.is_empty()
@@ -139,6 +154,7 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         && delivered_to.is_empty()
         && attachments.is_empty()
         && headers.is_empty()
+        && auth_statuses.is_empty()
     {
         return None;
     }
@@ -164,7 +180,168 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
         delivered_to,
         attachments,
         headers,
+        auth_statuses,
     })
+}
+
+fn legacy_auth_statuses(raw: &[u8]) -> ParsedAuthStatuses {
+    let mut result = ParsedAuthStatuses::default();
+    let authentication_results = raw_header_values(raw, "Authentication-Results");
+
+    if !authentication_results.is_empty() {
+        let value = collapse_ascii_whitespace(&authentication_results.join(";"))
+            .replace("-bit key;", "-bit key,");
+        for line in value.split(';') {
+            if let (Some((kind, status)), Some(identity)) =
+                (auth_result_status(line), auth_result_identity(line))
+            {
+                let item = [
+                    status.to_ascii_lowercase(),
+                    identity,
+                    line.trim().to_string(),
+                ];
+                match kind.as_str() {
+                    "dkim" => result.dkim.push(item),
+                    "dmarc" => result.dmarc.push(item),
+                    "spf" => result.spf.push(item),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if result.dkim.is_empty() {
+        for value in raw_header_values(raw, "X-DKIM-Authentication-Results") {
+            let value = collapse_ascii_whitespace(&value);
+            if let (Some(status), Some(signer)) = (
+                quoted_auth_parameter(&value, "status", true),
+                quoted_auth_parameter(&value, "signer", false),
+            ) {
+                result.dkim.push([status, signer.trim().to_string(), value]);
+            }
+        }
+    }
+
+    result
+}
+
+fn raw_header_values(raw: &[u8], name: &str) -> Vec<String> {
+    let raw = String::from_utf8_lossy(raw).replace('\r', "");
+    let mut values = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut current_value = String::new();
+
+    for line in raw.lines() {
+        if line.is_empty() {
+            break;
+        }
+
+        let first = line.chars().next();
+        if matches!(first, Some(' ' | '\t')) && current_name.is_some() {
+            current_value.push('\n');
+            current_value.push_str(line);
+            continue;
+        }
+
+        if let Some(header_name) = current_name.take() {
+            if header_name.eq_ignore_ascii_case(name) {
+                values.push(current_value.trim().to_string());
+            }
+            current_value.clear();
+        }
+
+        let Some((header_name, header_value)) = line.split_once(':') else {
+            continue;
+        };
+        current_name = Some(header_name.trim().to_string());
+        current_value.push_str(header_value);
+    }
+
+    if let Some(header_name) = current_name {
+        if header_name.eq_ignore_ascii_case(name) {
+            values.push(current_value.trim().to_string());
+        }
+    }
+
+    values
+}
+
+fn collapse_ascii_whitespace(value: &str) -> String {
+    let mut collapsed = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            pending_space = true;
+        } else {
+            if pending_space && !collapsed.is_empty() {
+                collapsed.push(' ');
+            }
+            collapsed.push(ch);
+            pending_space = false;
+        }
+    }
+    collapsed
+}
+
+fn auth_result_status(line: &str) -> Option<(String, String)> {
+    let lower = line.to_ascii_lowercase();
+    let mut best: Option<(usize, &str)> = None;
+    for kind in ["dkim", "dmarc", "spf"] {
+        let needle = format!("{kind}=");
+        if let Some(index) = lower.find(&needle) {
+            if best.is_none_or(|(best_index, _)| index < best_index) {
+                best = Some((index, kind));
+            }
+        }
+    }
+
+    let (index, kind) = best?;
+    let start = index + kind.len() + 1;
+    let status: String = line[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    (!status.is_empty()).then(|| (kind.to_string(), status))
+}
+
+fn auth_result_identity(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let mut best: Option<(usize, &'static str)> = None;
+    for key in ["header.d=", "header.i=", "header.from=", "smtp.mailfrom="] {
+        if let Some(index) = lower.find(key) {
+            if best.is_none_or(|(best_index, _)| index < best_index) {
+                best = Some((index, key));
+            }
+        }
+    }
+
+    let (index, key) = best?;
+    let value = &line[index + key.len()..];
+    let value = value.strip_prefix('"').unwrap_or(value);
+    let identity: String = value
+        .chars()
+        .take_while(|ch| !ch.is_whitespace() && *ch != ';' && *ch != '"')
+        .collect();
+    (!identity.is_empty()).then_some(identity)
+}
+
+fn quoted_auth_parameter(value: &str, key: &str, alphanumeric_only: bool) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let needle = key.to_ascii_lowercase();
+    let index = lower.find(&needle)?;
+    let rest = &value[index + needle.len()..];
+    let rest = rest.strip_prefix(char::is_whitespace).unwrap_or(rest);
+    let rest = rest.strip_prefix('=')?;
+    let rest = rest.strip_prefix(char::is_whitespace).unwrap_or(rest);
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let result = &rest[..end];
+    if result.is_empty()
+        || (alphanumeric_only && !result.chars().all(|ch| ch.is_ascii_alphanumeric()))
+    {
+        return None;
+    }
+    Some(result.to_string())
 }
 
 fn format_headers(message: &mail_parser::Message<'_>) -> Vec<ParsedMessageHeader> {
@@ -811,6 +988,123 @@ Body.
         );
         assert_eq!(body.headers[4].name, "Received");
         assert_eq!(body.headers[4].value, "from mx.example\n by mail.example");
+    }
+
+    #[test]
+    fn parses_authentication_results_like_mailso() {
+        let raw = br#"Authentication-Results: mx.example;
+ dkim=pass header.d=example.com header.s=s1 header.b=abc;
+ spf=fail (sender ip) smtp.mailfrom="bounce.example.com";
+ dmarc=pass header.from=example.com (policy=reject)
+Authentication-Results: mx2.example; spf=pass smtp.mailfrom=sender.example.com
+
+Body.
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert_eq!(
+            body.auth_statuses.dkim,
+            vec![[
+                "pass".to_string(),
+                "example.com".to_string(),
+                "dkim=pass header.d=example.com header.s=s1 header.b=abc".to_string(),
+            ]]
+        );
+        assert_eq!(
+            body.auth_statuses.spf,
+            vec![
+                [
+                    "fail".to_string(),
+                    "bounce.example.com".to_string(),
+                    "spf=fail (sender ip) smtp.mailfrom=\"bounce.example.com\"".to_string(),
+                ],
+                [
+                    "pass".to_string(),
+                    "sender.example.com".to_string(),
+                    "spf=pass smtp.mailfrom=sender.example.com".to_string(),
+                ],
+            ]
+        );
+        assert_eq!(
+            body.auth_statuses.dmarc,
+            vec![[
+                "pass".to_string(),
+                "example.com".to_string(),
+                "dmarc=pass header.from=example.com (policy=reject)".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn parses_x_dkim_authentication_results_only_when_primary_dkim_absent() {
+        let raw = br#"X-DKIM-Authentication-Results: signer="fallback.example" status="pass"
+
+Body.
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert_eq!(
+            body.auth_statuses.dkim,
+            vec![[
+                "pass".to_string(),
+                "fallback.example".to_string(),
+                "signer=\"fallback.example\" status=\"pass\"".to_string(),
+            ]]
+        );
+
+        let primary = br#"Authentication-Results: mx.example; dkim=fail header.d=primary.example
+X-DKIM-Authentication-Results: signer="fallback.example" status="pass"
+
+Body.
+"#;
+        let body = parse_body(primary).unwrap();
+
+        assert_eq!(
+            body.auth_statuses.dkim,
+            vec![[
+                "fail".to_string(),
+                "primary.example".to_string(),
+                "dkim=fail header.d=primary.example".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn parses_x_dkim_fallback_when_primary_auth_has_no_dkim() {
+        let raw = br#"Authentication-Results: mx.example; spf=pass smtp.mailfrom=sender.example.com; dmarc=pass header.from=example.com
+X-DKIM-Authentication-Results: signer="fallback.example" status="pass"
+
+Body.
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert_eq!(
+            body.auth_statuses.spf,
+            vec![[
+                "pass".to_string(),
+                "sender.example.com".to_string(),
+                "spf=pass smtp.mailfrom=sender.example.com".to_string(),
+            ]]
+        );
+        assert_eq!(
+            body.auth_statuses.dmarc,
+            vec![[
+                "pass".to_string(),
+                "example.com".to_string(),
+                "dmarc=pass header.from=example.com".to_string(),
+            ]]
+        );
+        assert_eq!(
+            body.auth_statuses.dkim,
+            vec![[
+                "pass".to_string(),
+                "fallback.example".to_string(),
+                "signer=\"fallback.example\" status=\"pass\"".to_string(),
+            ]]
+        );
     }
 
     #[test]
