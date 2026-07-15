@@ -6068,6 +6068,7 @@ fn legacy_message_json(
     bcc: Option<&[String]>,
     sender: Option<&[String]>,
     delivered_to: Option<&[String]>,
+    crypto: &fm_imap::LegacyMessageCrypto,
     size: u32,
     flags: &[String],
     preview: Option<&str>,
@@ -6116,12 +6117,44 @@ fn legacy_message_json(
     if let Some(draft_info) = draft_info {
         value["draftInfo"] = json!([draft_info.info_type, draft_info.uid, draft_info.folder]);
     }
+    legacy_apply_message_crypto_json(&mut value, crypto);
     if !html.is_empty() || !plain.is_empty() {
         value["html"] = json!(html);
         value["plain"] = json!(plain);
     }
 
     value
+}
+
+fn legacy_apply_message_crypto_json(value: &mut Value, crypto: &fm_imap::LegacyMessageCrypto) {
+    if let Some(pgp_signed) = &crypto.pgp_signed {
+        value["pgpSigned"] = json!({
+            "partId": pgp_signed.part_id,
+            "sigPartId": pgp_signed.sig_part_id,
+            "micAlg": pgp_signed.mic_alg,
+        });
+    }
+    if let Some(pgp_encrypted) = &crypto.pgp_encrypted {
+        value["pgpEncrypted"] = json!({
+            "partId": pgp_encrypted.part_id,
+        });
+    }
+    if let Some(smime_signed) = &crypto.smime_signed {
+        let mut signed = json!({
+            "partId": smime_signed.part_id,
+            "micAlg": smime_signed.mic_alg,
+            "detached": smime_signed.detached,
+        });
+        if let Some(sig_part_id) = &smime_signed.sig_part_id {
+            signed["sigPartId"] = json!(sig_part_id);
+        }
+        value["smimeSigned"] = signed;
+    }
+    if let Some(smime_encrypted) = &crypto.smime_encrypted {
+        value["smimeEncrypted"] = json!({
+            "partId": smime_encrypted.part_id,
+        });
+    }
 }
 
 fn legacy_parsed_attachments_json(
@@ -6204,7 +6237,6 @@ fn legacy_message_body_response(
     let mut html = String::new();
     let mut plain = String::new();
     let mut subject = String::new();
-    let mut encrypted = false;
     let mut draft_info = None;
     let mut message_id = String::new();
     let mut in_reply_to = String::new();
@@ -6220,6 +6252,11 @@ fn legacy_message_body_response(
     let mut bcc = None;
     let mut sender = None;
     let mut delivered_to = None;
+    let crypto = parts
+        .iter()
+        .find_map(|part| (!part.crypto.is_empty()).then_some(part.crypto.clone()))
+        .unwrap_or_default();
+    let mut encrypted = crypto.pgp_encrypted.is_some() || crypto.smime_encrypted.is_some();
 
     for part in &parts {
         let Some(body) = parse_body(&part.raw) else {
@@ -6347,6 +6384,7 @@ fn legacy_message_body_response(
                 bcc.as_deref(),
                 sender.as_deref(),
                 delivered_to.as_deref(),
+                &crypto,
                 0,
                 flags,
                 None,
@@ -11527,12 +11565,14 @@ mod tests {
                         .to_vec(),
                         is_complete: false,
                         flags: Vec::new(),
+                        crypto: Default::default(),
                     },
                     BodyPreviewPart {
                         kind: BodyPartKind::Plain,
                         raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nPlain body.".to_vec(),
                         is_complete: false,
                         flags: Vec::new(),
+                        crypto: Default::default(),
                     },
                 ]))
             },
@@ -11603,6 +11643,7 @@ mod tests {
                     raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nSelected body.".to_vec(),
                     is_complete: false,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -11678,6 +11719,7 @@ mod tests {
                     raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nDisposition-Notification-To: receipt@example.com\r\nX-Confirm-Reading-To: fallback@example.com\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
                     is_complete: true,
                 flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -11762,6 +11804,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                         .to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -11807,6 +11850,7 @@ Body.
                     .to_vec(),
                     is_complete: true,
                 flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -11853,6 +11897,7 @@ Body.
                     .to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -11888,6 +11933,7 @@ Body.
                     raw: b"Date: definitely not a date\r\n\r\n".to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -11928,6 +11974,7 @@ Version: 1
                     .to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -11941,6 +11988,41 @@ Version: 1
             body["Result"]["headers"]["@Collection"][1]["value"],
             "multipart/encrypted"
         );
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_marks_bodystructure_crypto_encrypted() {
+        let key = [58_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1934, 1935, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1935, "folder": "INBOX", "uid": 63}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::Plain,
+                    raw: b"Content-Type: text/plain; charset=utf-8\r\nSubject: Bodystructure encrypted\r\n\r\nBody".to_vec(),
+                    is_complete: false,
+                    flags: Vec::new(),
+                    crypto: fm_imap::LegacyMessageCrypto {
+                        pgp_encrypted: Some(fm_imap::LegacyPartId {
+                            part_id: "2".to_string(),
+                        }),
+                        ..Default::default()
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["encrypted"], true);
+        assert_eq!(body["Result"]["pgpEncrypted"]["partId"], "2");
     }
 
     #[tokio::test]
@@ -11966,6 +12048,7 @@ Body.
                     .to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -12022,6 +12105,7 @@ UERGREFUQQ==
                     .to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -12093,6 +12177,7 @@ UERGREFUQQ==
                     .to_vec(),
                     is_complete: false,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -12124,6 +12209,7 @@ UERGREFUQQ==
                     raw: b"Content-Type: text/plain; charset=utf-8\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\n\r\nPart-only body".to_vec(),
                     is_complete: false,
                 flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -12165,6 +12251,7 @@ UERGREFUQQ==
                     raw: b"Subject: Metadata only\r\n\r\n".to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )
@@ -12216,6 +12303,7 @@ UERGREFUQQ==
             Some(bcc.as_slice()),
             Some(sender.as_slice()),
             Some(delivered_to.as_slice()),
+            &Default::default(),
             0,
             &[],
             None,
@@ -12245,6 +12333,42 @@ UERGREFUQQ==
         assert!(message.get("threadUnseen").is_none());
     }
 
+    #[test]
+    fn legacy_apply_message_crypto_json_matches_mailso_keys() {
+        let mut value = json!({});
+        let crypto = fm_imap::LegacyMessageCrypto {
+            pgp_signed: Some(fm_imap::LegacyPgpSigned {
+                part_id: "1".to_string(),
+                sig_part_id: "2".to_string(),
+                mic_alg: "pgp-sha256".to_string(),
+            }),
+            pgp_encrypted: Some(fm_imap::LegacyPartId {
+                part_id: "2".to_string(),
+            }),
+            smime_signed: Some(fm_imap::LegacySmimeSigned {
+                part_id: "TEXT".to_string(),
+                sig_part_id: Some("2".to_string()),
+                mic_alg: "sha-256".to_string(),
+                detached: true,
+            }),
+            smime_encrypted: Some(fm_imap::LegacyPartId {
+                part_id: "1".to_string(),
+            }),
+        };
+
+        super::legacy_apply_message_crypto_json(&mut value, &crypto);
+
+        assert_eq!(value["pgpSigned"]["partId"], "1");
+        assert_eq!(value["pgpSigned"]["sigPartId"], "2");
+        assert_eq!(value["pgpSigned"]["micAlg"], "pgp-sha256");
+        assert_eq!(value["pgpEncrypted"]["partId"], "2");
+        assert_eq!(value["smimeSigned"]["partId"], "TEXT");
+        assert_eq!(value["smimeSigned"]["sigPartId"], "2");
+        assert_eq!(value["smimeSigned"]["micAlg"], "sha-256");
+        assert_eq!(value["smimeSigned"]["detached"], true);
+        assert_eq!(value["smimeEncrypted"]["partId"], "1");
+    }
+
     #[tokio::test]
     async fn native_legacy_message_decodes_legacy_raw_key_get_shape() {
         let key = [49_u8; fm_user::CREDENTIAL_KEY_BYTES];
@@ -12269,6 +12393,7 @@ UERGREFUQQ==
                         raw: b"Subject: RawKey body\r\n\r\nHello from raw key".to_vec(),
                         is_complete: true,
                         flags: Vec::new(),
+                        crypto: Default::default(),
                     }]))
                 }
             },
@@ -12321,6 +12446,7 @@ UERGREFUQQ==
                         raw: b"Subject: Cacheable\r\n\r\nBody".to_vec(),
                         is_complete: true,
                         flags,
+                        crypto: Default::default(),
                     }]))
                 }
             },
@@ -12369,6 +12495,7 @@ UERGREFUQQ==
                         raw: b"Subject: Cacheable POST\r\n\r\nBody".to_vec(),
                         is_complete: true,
                         flags,
+                        crypto: Default::default(),
                     }]))
                 }
             },
@@ -12411,6 +12538,7 @@ UERGREFUQQ==
                         raw: b"Subject: Cacheable\r\n\r\nBody".to_vec(),
                         is_complete: true,
                         flags,
+                        crypto: Default::default(),
                     }]))
                 }
             },
@@ -12444,6 +12572,7 @@ UERGREFUQQ==
                         raw: b"Subject: Cacheable\r\n\r\nBody".to_vec(),
                         is_complete: true,
                         flags,
+                        crypto: Default::default(),
                     }]))
                 }
             },
@@ -13560,6 +13689,7 @@ UERGREFUQQ==
                     raw: b"\0".to_vec(),
                     is_complete: true,
                     flags: Vec::new(),
+                    crypto: Default::default(),
                 }]))
             },
         )

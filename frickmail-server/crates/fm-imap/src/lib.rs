@@ -135,6 +135,44 @@ pub struct BodyPreviewPart {
     pub raw: Vec<u8>,
     pub is_complete: bool,
     pub flags: Vec<String>,
+    pub crypto: LegacyMessageCrypto,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyMessageCrypto {
+    pub pgp_signed: Option<LegacyPgpSigned>,
+    pub pgp_encrypted: Option<LegacyPartId>,
+    pub smime_signed: Option<LegacySmimeSigned>,
+    pub smime_encrypted: Option<LegacyPartId>,
+}
+
+impl LegacyMessageCrypto {
+    pub fn is_empty(&self) -> bool {
+        self.pgp_signed.is_none()
+            && self.pgp_encrypted.is_none()
+            && self.smime_signed.is_none()
+            && self.smime_encrypted.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyPartId {
+    pub part_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyPgpSigned {
+    pub part_id: String,
+    pub sig_part_id: String,
+    pub mic_alg: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacySmimeSigned {
+    pub part_id: String,
+    pub sig_part_id: Option<String>,
+    pub mic_alg: String,
+    pub detached: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +396,7 @@ struct BodyPartSpec {
 struct BodyPreviewFetchSpec {
     parts: Vec<BodyPartSpec>,
     flags: Vec<String>,
+    crypto: LegacyMessageCrypto,
 }
 
 impl BodyPartSpec {
@@ -383,7 +422,8 @@ pub async fn fetch_message_body_preview(
         logout_quietly(session).await;
         return Ok(None);
     };
-    let parts = fetch_preview_parts(&mut session, uid, &specs.parts, &specs.flags).await?;
+    let parts =
+        fetch_preview_parts(&mut session, uid, &specs.parts, &specs.flags, &specs.crypto).await?;
     logout_quietly(session).await;
     Ok(Some(parts))
 }
@@ -1669,6 +1709,79 @@ fn legacy_body_has_encrypted_part(body: &BodyStructure<'_>) -> bool {
         }
 }
 
+fn legacy_message_crypto_metadata(body: &BodyStructure<'_>) -> LegacyMessageCrypto {
+    let mut crypto = LegacyMessageCrypto::default();
+
+    legacy_walk_body_parts(body, "", &mut |part, part_id, parent_id| {
+        if let BodyStructure::Multipart { .. } = part {
+            if legacy_body_is_pgp_encrypted(part) {
+                crypto.pgp_encrypted = Some(LegacyPartId {
+                    part_id: legacy_body_child_part_id(parent_id, 1),
+                });
+            }
+        }
+
+        if legacy_body_is_smime_encrypted(part) {
+            crypto.smime_encrypted = Some(LegacyPartId {
+                part_id: part_id.to_string(),
+            });
+        } else if legacy_body_is_opaque_smime_signed(part) {
+            crypto.smime_signed = Some(LegacySmimeSigned {
+                part_id: part_id.to_string(),
+                sig_part_id: None,
+                mic_alg: legacy_body_root_mic_alg(part, parent_id),
+                detached: false,
+            });
+        }
+    });
+
+    let mut saw_multipart_signed = false;
+    legacy_walk_body_parts(body, "", &mut |part, part_id, parent_id| {
+        if saw_multipart_signed || !legacy_body_is_multipart_signed(part) {
+            return;
+        }
+        saw_multipart_signed = true;
+
+        if let BodyStructure::Multipart { bodies, .. } = part {
+            if legacy_body_is_pgp_signed(part) {
+                crypto.pgp_signed = Some(LegacyPgpSigned {
+                    part_id: legacy_body_child_part_id(parent_id, 0),
+                    sig_part_id: legacy_body_child_part_id(parent_id, 1),
+                    mic_alg: legacy_body_root_mic_alg(part, parent_id),
+                });
+            } else if legacy_body_is_detached_smime_signed(part, bodies) {
+                crypto.smime_signed = Some(LegacySmimeSigned {
+                    part_id: part_id.to_string(),
+                    sig_part_id: Some(legacy_body_child_part_id(parent_id, 1)),
+                    mic_alg: legacy_body_root_mic_alg(part, parent_id),
+                    detached: true,
+                });
+            }
+        }
+    });
+
+    crypto
+}
+
+fn legacy_walk_body_parts<F>(body: &BodyStructure<'_>, part_id: &str, visit: &mut F)
+where
+    F: FnMut(&BodyStructure<'_>, &str, &str),
+{
+    let current_part_id = legacy_body_part_id(body, part_id);
+    visit(body, &current_part_id, part_id);
+
+    if let BodyStructure::Multipart { bodies, .. } = body {
+        for (index, child) in bodies.iter().enumerate() {
+            let child_part_id = legacy_body_child_part_id(part_id, index);
+            legacy_walk_body_parts(child, &child_part_id, visit);
+        }
+    }
+}
+
+fn legacy_body_child_part_id(parent_part_id: &str, index: usize) -> String {
+    format!("{}{}", legacy_child_part_prefix(parent_part_id), index + 1)
+}
+
 fn legacy_body_part_is_attachment(body: &BodyStructure<'_>) -> bool {
     let common = match body {
         BodyStructure::Basic { common, .. }
@@ -2091,6 +2204,21 @@ fn legacy_body_is_pgp_encrypted(body: &BodyStructure<'_>) -> bool {
         && legacy_body_type_eq(&bodies[1], "application", "octet-stream")
 }
 
+fn legacy_body_is_pgp_signed(body: &BodyStructure<'_>) -> bool {
+    let BodyStructure::Multipart { common, bodies, .. } = body else {
+        return false;
+    };
+
+    legacy_body_content_type_eq(common, "multipart", "signed")
+        && legacy_body_param_eq(common, "protocol", "application/pgp-signature")
+        && bodies.len() == 2
+        && legacy_body_type_eq(&bodies[1], "application", "pgp-signature")
+}
+
+fn legacy_body_is_multipart_signed(body: &BodyStructure<'_>) -> bool {
+    legacy_body_content_type_eq(legacy_body_common(body), "multipart", "signed")
+}
+
 fn legacy_body_type_eq(body: &BodyStructure<'_>, ty: &str, subtype: &str) -> bool {
     let common = match body {
         BodyStructure::Basic { common, .. }
@@ -2119,6 +2247,68 @@ fn legacy_body_is_smime_encrypted(body: &BodyStructure<'_>) -> bool {
                     )
             })
         })
+}
+
+fn legacy_body_is_detached_smime_signed(
+    body: &BodyStructure<'_>,
+    bodies: &[BodyStructure<'_>],
+) -> bool {
+    let common = legacy_body_common(body);
+
+    legacy_body_content_type_eq(common, "multipart", "signed")
+        && legacy_body_param_is_pkcs7_signature(common, "protocol")
+        && bodies.len() == 2
+        && legacy_body_is_pkcs7_signature(&bodies[1])
+}
+
+fn legacy_body_is_opaque_smime_signed(body: &BodyStructure<'_>) -> bool {
+    let common = match body {
+        BodyStructure::Basic { common, .. } => common,
+        _ => return false,
+    };
+
+    legacy_body_is_pkcs7_mime(common)
+        && common.ty.params.as_ref().is_some_and(|params| {
+            params.iter().any(|(param_name, param_value)| {
+                param_name.eq_ignore_ascii_case("smime-type")
+                    && legacy_php_trim(param_value).eq_ignore_ascii_case("signed-data")
+            })
+        })
+}
+
+fn legacy_body_is_pkcs7_signature(body: &BodyStructure<'_>) -> bool {
+    let common = legacy_body_common(body);
+    legacy_body_content_type_eq(common, "application", "pkcs7-signature")
+        || legacy_body_content_type_eq(common, "application", "x-pkcs7-signature")
+}
+
+fn legacy_body_is_pkcs7_mime(common: &imap_proto::BodyContentCommon<'_>) -> bool {
+    legacy_body_content_type_eq(common, "application", "pkcs7-mime")
+        || legacy_body_content_type_eq(common, "application", "x-pkcs7-mime")
+}
+
+fn legacy_body_param_is_pkcs7_signature(
+    common: &imap_proto::BodyContentCommon<'_>,
+    name: &str,
+) -> bool {
+    common.ty.params.as_ref().is_some_and(|params| {
+        params.iter().any(|(param_name, param_value)| {
+            param_name.eq_ignore_ascii_case(name)
+                && matches!(
+                    legacy_php_trim(param_value).to_ascii_lowercase().as_str(),
+                    "application/pkcs7-signature" | "application/x-pkcs7-signature"
+                )
+        })
+    })
+}
+
+fn legacy_body_root_mic_alg(body: &BodyStructure<'_>, parent_id: &str) -> String {
+    if !parent_id.is_empty() {
+        return String::new();
+    }
+
+    legacy_decode_body_attr_parameter(legacy_body_common(body).ty.params.as_deref(), "micalg")
+        .unwrap_or_default()
 }
 
 fn legacy_body_content_type_eq(
@@ -2443,8 +2633,10 @@ async fn fetch_body_part_specs(
                     octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
                 }],
                 flags,
+                crypto: LegacyMessageCrypto::default(),
             }));
         };
+        let crypto = legacy_message_crypto_metadata(bodystructure);
         let specs = body_preview_part_specs(bodystructure);
         if specs.is_empty() {
             return Ok(Some(BodyPreviewFetchSpec {
@@ -2455,11 +2647,13 @@ async fn fetch_body_part_specs(
                     octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
                 }],
                 flags,
+                crypto,
             }));
         }
         return Ok(Some(BodyPreviewFetchSpec {
             parts: specs,
             flags,
+            crypto,
         }));
     }
 
@@ -2471,6 +2665,7 @@ async fn fetch_preview_parts(
     uid: u32,
     specs: &[BodyPartSpec],
     flags: &[String],
+    crypto: &LegacyMessageCrypto,
 ) -> Result<Vec<BodyPreviewPart>> {
     let query = body_preview_fetch_query(specs);
     let mut fetches = timeout_imap(
@@ -2500,6 +2695,7 @@ async fn fetch_preview_parts(
                             raw: join_mime_part(mime, body),
                             is_complete: false,
                             flags: flags.to_vec(),
+                            crypto: crypto.clone(),
                         });
                     }
                 }
@@ -2510,6 +2706,7 @@ async fn fetch_preview_parts(
                             raw: body.to_vec(),
                             is_complete: raw_message_preview_is_complete(body, spec.octets),
                             flags: flags.to_vec(),
+                            crypto: crypto.clone(),
                         });
                     }
                 }
@@ -4024,6 +4221,148 @@ mod tests {
     }
 
     #[test]
+    fn legacy_message_crypto_marks_pgp_encrypted_bodystructure() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common_with_params(
+                "multipart",
+                "encrypted",
+                None,
+                Some(vec![("protocol", " application/pgp-encrypted ")]),
+            ),
+            bodies: vec![
+                BodyStructure::Basic {
+                    common: test_body_common("application", "pgp-encrypted", None),
+                    other: test_body_single_part(11),
+                    extension: None,
+                },
+                BodyStructure::Basic {
+                    common: test_body_common("application", "octet-stream", None),
+                    other: test_body_single_part(1024),
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let crypto = legacy_message_crypto_metadata(&body);
+
+        assert_eq!(crypto.pgp_encrypted.unwrap().part_id, "2");
+        assert!(crypto.pgp_signed.is_none());
+    }
+
+    #[test]
+    fn legacy_message_crypto_marks_pgp_signed_bodystructure() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common_with_params(
+                "multipart",
+                "signed",
+                None,
+                Some(vec![
+                    ("protocol", "application/pgp-signature"),
+                    ("micalg", "pgp-sha256"),
+                ]),
+            ),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", None),
+                    other: test_body_single_part(128),
+                    lines: 1,
+                    extension: None,
+                },
+                BodyStructure::Basic {
+                    common: test_body_common("application", "pgp-signature", None),
+                    other: test_body_single_part(256),
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let crypto = legacy_message_crypto_metadata(&body);
+        let signed = crypto.pgp_signed.unwrap();
+
+        assert_eq!(signed.part_id, "1");
+        assert_eq!(signed.sig_part_id, "2");
+        assert_eq!(signed.mic_alg, "pgp-sha256");
+    }
+
+    #[test]
+    fn legacy_message_crypto_blanks_nested_signed_micalg_like_mailso() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: vec![BodyStructure::Multipart {
+                common: test_body_common_with_params(
+                    "multipart",
+                    "signed",
+                    None,
+                    Some(vec![
+                        ("protocol", "application/pgp-signature"),
+                        ("micalg", "pgp-sha256"),
+                    ]),
+                ),
+                bodies: vec![
+                    BodyStructure::Text {
+                        common: test_body_common("text", "plain", None),
+                        other: test_body_single_part(128),
+                        lines: 1,
+                        extension: None,
+                    },
+                    BodyStructure::Basic {
+                        common: test_body_common("application", "pgp-signature", None),
+                        other: test_body_single_part(256),
+                        extension: None,
+                    },
+                ],
+                extension: None,
+            }],
+            extension: None,
+        };
+
+        let signed = legacy_message_crypto_metadata(&body).pgp_signed.unwrap();
+
+        assert_eq!(signed.part_id, "1.1");
+        assert_eq!(signed.sig_part_id, "1.2");
+        assert_eq!(signed.mic_alg, "");
+    }
+
+    #[test]
+    fn legacy_message_crypto_does_not_promote_embedded_message_crypto() {
+        let embedded = BodyStructure::Multipart {
+            common: test_body_common_with_params(
+                "multipart",
+                "encrypted",
+                None,
+                Some(vec![("protocol", "application/pgp-encrypted")]),
+            ),
+            bodies: vec![
+                BodyStructure::Basic {
+                    common: test_body_common("application", "pgp-encrypted", None),
+                    other: test_body_single_part(11),
+                    extension: None,
+                },
+                BodyStructure::Basic {
+                    common: test_body_common("application", "octet-stream", None),
+                    other: test_body_single_part(1024),
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+        let body = BodyStructure::Message {
+            common: test_body_common("message", "rfc822", Some("attachment")),
+            other: test_body_single_part(2048),
+            envelope: test_envelope(),
+            body: Box::new(embedded),
+            lines: 42,
+            extension: None,
+        };
+
+        let crypto = legacy_message_crypto_metadata(&body);
+
+        assert!(crypto.is_empty());
+    }
+
+    #[test]
     fn legacy_message_summary_marks_smime_encrypted_bodystructure() {
         let body = BodyStructure::Basic {
             common: test_body_common_with_params(
@@ -4047,6 +4386,74 @@ mod tests {
         );
 
         assert!(summary.encrypted);
+    }
+
+    #[test]
+    fn legacy_message_crypto_marks_smime_bodystructure() {
+        let encrypted = BodyStructure::Basic {
+            common: test_body_common_with_params(
+                "application",
+                "x-pkcs7-mime",
+                None,
+                Some(vec![("smime-type", " AuthEnveloped-Data ")]),
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+        let opaque_signed = BodyStructure::Basic {
+            common: test_body_common_with_params(
+                "application",
+                "pkcs7-mime",
+                None,
+                Some(vec![("smime-type", " signed-data ")]),
+            ),
+            other: test_body_single_part(1024),
+            extension: None,
+        };
+        let detached_signed = BodyStructure::Multipart {
+            common: test_body_common_with_params(
+                "multipart",
+                "signed",
+                None,
+                Some(vec![
+                    ("protocol", "application/x-pkcs7-signature"),
+                    ("micalg", "sha-256"),
+                ]),
+            ),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", None),
+                    other: test_body_single_part(128),
+                    lines: 1,
+                    extension: None,
+                },
+                BodyStructure::Basic {
+                    common: test_body_common("application", "pkcs7-signature", None),
+                    other: test_body_single_part(256),
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let smime_encrypted = legacy_message_crypto_metadata(&encrypted)
+            .smime_encrypted
+            .unwrap();
+        let opaque = legacy_message_crypto_metadata(&opaque_signed)
+            .smime_signed
+            .unwrap();
+        let detached = legacy_message_crypto_metadata(&detached_signed)
+            .smime_signed
+            .unwrap();
+
+        assert_eq!(smime_encrypted.part_id, "1");
+        assert_eq!(opaque.part_id, "1");
+        assert_eq!(opaque.sig_part_id, None);
+        assert_eq!(opaque.detached, false);
+        assert_eq!(detached.part_id, "TEXT");
+        assert_eq!(detached.sig_part_id.as_deref(), Some("2"));
+        assert_eq!(detached.mic_alg, "sha-256");
+        assert_eq!(detached.detached, true);
     }
 
     #[test]
@@ -4166,6 +4573,21 @@ mod tests {
             description: None,
             transfer_encoding,
             octets,
+        }
+    }
+
+    fn test_envelope() -> imap_proto::Envelope<'static> {
+        imap_proto::Envelope {
+            date: None,
+            subject: None,
+            from: None,
+            sender: None,
+            reply_to: None,
+            to: None,
+            cc: None,
+            bcc: None,
+            in_reply_to: None,
+            message_id: None,
         }
     }
 
