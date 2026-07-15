@@ -1528,11 +1528,115 @@ fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64
 }
 
 fn legacy_read_receipt(header: &[u8]) -> String {
-    header_value(header, "Disposition-Notification-To")
-        .filter(|value| !legacy_php_trim(value).is_empty())
-        .or_else(|| header_value(header, "X-Confirm-Reading-To"))
+    let primary = header_value(header, "Disposition-Notification-To")
         .map(|value| legacy_php_trim(&value).to_string())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let selected = if primary.is_empty() {
+        header_value(header, "X-Confirm-Reading-To")
+            .map(|value| legacy_php_trim(&value).to_string())
+            .unwrap_or_default()
+    } else {
+        primary
+    };
+
+    if legacy_read_receipt_value_matches_mailso(&selected) {
+        selected
+    } else {
+        String::new()
+    }
+}
+
+fn legacy_read_receipt_value_matches_mailso(value: &str) -> bool {
+    let value = legacy_php_trim(value);
+    !value.is_empty()
+        && legacy_has_non_comment_email_content(value)
+        && !legacy_read_receipt_is_empty_angle_address(value)
+        && !legacy_read_receipt_is_invalid_quoted_display(value)
+}
+
+fn legacy_read_receipt_is_empty_angle_address(value: &str) -> bool {
+    let content = legacy_non_comment_email_content(value);
+    let content = legacy_php_trim(&content);
+    content
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .is_some_and(|value| legacy_php_trim(value).is_empty())
+}
+
+fn legacy_read_receipt_is_invalid_quoted_display(value: &str) -> bool {
+    let content = legacy_non_comment_email_content(value);
+    let content = legacy_php_trim(&content);
+    if content
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .is_some()
+    {
+        return true;
+    }
+
+    content
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .is_some_and(|value| legacy_php_trim(value).is_empty())
+}
+
+fn legacy_has_non_comment_email_content(value: &str) -> bool {
+    !legacy_non_comment_email_content(value).is_empty()
+}
+
+fn legacy_non_comment_email_content(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut comment = String::new();
+    let mut in_comment = false;
+    let mut in_quote = false;
+    let mut in_address = false;
+    let mut escaped = false;
+
+    for ch in value.chars() {
+        if escaped {
+            if in_comment {
+                comment.push(ch);
+            } else {
+                output.push(ch);
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            if in_comment {
+                comment.push(ch);
+            } else {
+                output.push(ch);
+            }
+            escaped = true;
+            continue;
+        }
+        if in_comment {
+            comment.push(ch);
+            if ch == ')' {
+                comment.clear();
+                in_comment = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' if !in_address => in_quote = !in_quote,
+            '<' if !in_quote => in_address = true,
+            '>' if in_address => in_address = false,
+            '(' if !in_quote && !in_address => {
+                comment.push(ch);
+                in_comment = true;
+                continue;
+            }
+            _ => {}
+        }
+        output.push(ch);
+    }
+    if in_comment {
+        output.push_str(&comment);
+    }
+
+    output.trim().to_string()
 }
 
 fn legacy_strip_spaces(value: &str) -> String {
@@ -3924,6 +4028,94 @@ mod tests {
         );
 
         assert_eq!(summary.read_receipt, "Manual Receipt");
+
+        let single_quoted =
+            b"Subject: Receipt\r\nDisposition-Notification-To: 'Manual Receipt'\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            single_quoted,
+        );
+
+        assert_eq!(summary.read_receipt, "'Manual Receipt'");
+    }
+
+    #[test]
+    fn legacy_message_summary_drops_invalid_read_receipts_like_mailso() {
+        let empty_address = b"Subject: Receipt\r\nDisposition-Notification-To: <>\r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            empty_address,
+        );
+
+        assert!(summary.read_receipt.is_empty());
+
+        let whitespace_address = b"Subject: Receipt\r\nDisposition-Notification-To: < >\r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            whitespace_address,
+        );
+
+        assert!(summary.read_receipt.is_empty());
+
+        let quoted_display = b"Subject: Receipt\r\nDisposition-Notification-To: \"Manual Receipt\"\r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            quoted_display,
+        );
+
+        assert!(summary.read_receipt.is_empty());
+
+        let empty_single_quotes = b"Subject: Receipt\r\nDisposition-Notification-To: ''\r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            empty_single_quotes,
+        );
+
+        assert!(summary.read_receipt.is_empty());
+
+        let comment_only = b"Subject: Receipt\r\nDisposition-Notification-To: (comment)\r\nX-Confirm-Reading-To: fallback@example.com\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            comment_only,
+        );
+
+        assert!(summary.read_receipt.is_empty());
     }
 
     #[test]
