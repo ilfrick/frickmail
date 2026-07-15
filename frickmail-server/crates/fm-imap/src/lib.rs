@@ -173,6 +173,13 @@ impl LegacyMessageFetchMetadata {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyMessageSpamSummary {
+    pub spam_score: u8,
+    pub spam_result: String,
+    pub is_spam: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyPartId {
     pub part_id: String,
@@ -1441,7 +1448,7 @@ fn legacy_message_summary_from_fetch<'a>(
         &header_value(header, "Content-Type").unwrap_or_default(),
         bodystructure,
     );
-    let spam = legacy_message_spam_metadata(header, &subject);
+    let spam = legacy_message_spam_summary(header, &subject);
     let (date_timestamp, date_timestamp_source) =
         legacy_message_timestamp(&date, internal_timestamp);
     let flags = legacy_unique_flag_strings(flags.map(|flag| legacy_message_flag_string(&flag)));
@@ -1454,8 +1461,8 @@ fn legacy_message_summary_from_fetch<'a>(
         subject,
         encrypted,
         message_id,
-        spam_score: legacy_serialized_spam_score(&spam),
-        spam_result: spam.result,
+        spam_score: spam.spam_score,
+        spam_result: spam.spam_result,
         is_spam: spam.is_spam,
         in_reply_to,
         references,
@@ -1515,6 +1522,15 @@ struct LegacySpamMetadata {
     score: u8,
     result: String,
     is_spam: bool,
+}
+
+pub fn legacy_message_spam_summary(header: &[u8], subject: &str) -> LegacyMessageSpamSummary {
+    let metadata = legacy_message_spam_metadata(header, subject);
+    LegacyMessageSpamSummary {
+        spam_score: legacy_serialized_spam_score(&metadata),
+        spam_result: metadata.result,
+        is_spam: metadata.is_spam,
+    }
 }
 
 fn legacy_message_spam_metadata(header: &[u8], subject: &str) -> LegacySpamMetadata {

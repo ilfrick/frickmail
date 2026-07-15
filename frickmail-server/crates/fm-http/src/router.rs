@@ -6051,6 +6051,9 @@ fn legacy_message_json(
     hash: &str,
     subject: &str,
     encrypted: bool,
+    spam_score: u8,
+    spam_result: &str,
+    is_spam: bool,
     draft_info: Option<&ParsedDraftInfo>,
     html: &str,
     plain: &str,
@@ -6082,9 +6085,9 @@ fn legacy_message_json(
         "subject": subject,
         "encrypted": encrypted,
         "messageId": message_id,
-        "spamScore": 0,
-        "spamResult": "",
-        "isSpam": false,
+        "spamScore": spam_score,
+        "spamResult": spam_result,
+        "isSpam": is_spam,
         "dateTimestamp": date_timestamp,
         "dateTimestampSource": date_timestamp_source,
         "from": legacy_optional_email_collection(from),
@@ -6238,6 +6241,8 @@ fn legacy_message_body_response(
     let mut in_reply_to = String::new();
     let mut references = String::new();
     let mut read_receipt = String::new();
+    let mut spam = fm_imap::LegacyMessageSpamSummary::default();
+    let mut spam_loaded = false;
     let mut date_timestamp = 0;
     let mut date_timestamp_source = "internal";
     let mut size = 0;
@@ -6267,6 +6272,8 @@ fn legacy_message_body_response(
         }
         if let Some(body) = parse_body(&metadata.header) {
             subject = body.subject.unwrap_or_default();
+            spam = fm_imap::legacy_message_spam_summary(&metadata.header, &subject);
+            spam_loaded = true;
             if body.encrypted {
                 encrypted = true;
             }
@@ -6374,6 +6381,10 @@ fn legacy_message_body_response(
         if subject.is_empty() {
             subject = body.subject.unwrap_or_default();
         }
+        if !spam_loaded && matches!(part.kind, fm_imap::BodyPartKind::RawMessage) {
+            spam = fm_imap::legacy_message_spam_summary(&part.raw, &subject);
+            spam_loaded = true;
+        }
     }
 
     if html.is_empty()
@@ -6418,6 +6429,9 @@ fn legacy_message_body_response(
                 &hash,
                 &subject,
                 encrypted,
+                spam.spam_score,
+                &spam.spam_result,
+                spam.is_spam,
                 draft_info.as_ref(),
                 &html,
                 &plain,
@@ -11884,6 +11898,42 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_legacy_message_populates_raw_spam_metadata() {
+        let key = [62_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1940, 1941, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1941, "folder": "INBOX", "uid": 66}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"Subject: *** SPAM *** sale\r\n\
+X-Spamd-Result: default: False [7.13 / 9.00]; BAYES_SPAM\r\n\r\n"
+                        .to_vec(),
+                    is_complete: true,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: Default::default(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "*** SPAM *** sale");
+        assert_eq!(result["spamScore"], 100);
+        assert_eq!(result["spamResult"], "7.13 / 9.00");
+        assert_eq!(result["isSpam"], true);
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_decodes_raw_address_header_values() {
         let key = [57_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1926, 1927, &key).await;
@@ -12333,6 +12383,91 @@ Subject: Preview metadata\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_legacy_message_populates_preview_spam_metadata_from_header_fetch() {
+        let key = [63_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1942, 1943, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1943, "folder": "INBOX", "uid": 67}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::Plain,
+                    raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nPreview body.".to_vec(),
+                    is_complete: false,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: fm_imap::LegacyMessageFetchMetadata {
+                        header: b"Subject: SpamAssassin\r\n\
+X-Spam-Status: No, score=3.0 required=5.0 tests=BAYES\r\n\r\n"
+                            .to_vec(),
+                        internal_timestamp: None,
+                        size: 42,
+                        attachments: Vec::new(),
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "SpamAssassin");
+        assert_eq!(result["spamScore"], 60);
+        assert_eq!(result["spamResult"], "3.0 / 5.0");
+        assert_eq!(result["isSpam"], false);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_prefers_metadata_spam_over_raw_body() {
+        let key = [64_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1944, 1945, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1945, "folder": "INBOX", "uid": 68}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"Subject: Raw spam\r\n\
+X-Spam-Status: Yes, score=5.0 required=5.0 tests=BAYES\r\n\r\n\
+Body"
+                        .to_vec(),
+                    is_complete: true,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: fm_imap::LegacyMessageFetchMetadata {
+                        header: b"Subject: Metadata ham\r\n\
+X-Spam-Status: No, score=1.0 required=5.0 tests=BAYES\r\n\r\n"
+                            .to_vec(),
+                        internal_timestamp: None,
+                        size: 42,
+                        attachments: Vec::new(),
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "Metadata ham");
+        assert_eq!(result["spamScore"], 20);
+        assert_eq!(result["spamResult"], "1.0 / 5.0");
+        assert_eq!(result["isSpam"], false);
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_accepts_metadata_only_preview() {
         let key = [60_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1938, 1939, &key).await;
@@ -12473,6 +12608,9 @@ Subject: Empty body metadata\r\n\r\n"
             54,
             "hash",
             "Optional fields",
+            false,
+            0,
+            "",
             false,
             None,
             "<p>Hello</p>",
