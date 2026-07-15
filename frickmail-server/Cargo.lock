@@ -914,6 +914,7 @@ dependencies = [
  "fm-smtp",
  "fm-user",
  "hmac",
+ "md-5",
  "openssl",
  "p256",
  "reqwest",

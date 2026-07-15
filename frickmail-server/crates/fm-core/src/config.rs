@@ -26,6 +26,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub mail: MailDefaults,
     #[serde(default)]
+    pub cache: FrickmailCacheConfig,
+    #[serde(default)]
     pub frickmail_user: FrickmailUserConfig,
     #[serde(default)]
     pub transactional_smtp: TransactionalSmtpConfig,
@@ -52,6 +54,14 @@ pub struct MailDefaults {
     pub smtp_port: u16,
     #[serde(default = "default_fetch_new_messages")]
     pub fetch_new_messages: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FrickmailCacheConfig {
+    #[serde(default = "default_cache_index")]
+    pub index: String,
+    #[serde(default = "default_cache_http_expires")]
+    pub http_expires: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,6 +131,15 @@ impl Default for MailDefaults {
     }
 }
 
+impl Default for FrickmailCacheConfig {
+    fn default() -> Self {
+        Self {
+            index: default_cache_index(),
+            http_expires: default_cache_http_expires(),
+        }
+    }
+}
+
 impl FrickmailConfig {
     pub fn from_env() -> Result<Self> {
         let cfg = config::Config::builder()
@@ -173,6 +192,12 @@ impl FrickmailConfig {
             return Err(FrickmailError::InvalidConfig {
                 field: "frickmail_user.export_folder_max_bytes",
                 message: "must be greater than zero".to_string(),
+            });
+        }
+        if self.cache.http_expires < 0 {
+            return Err(FrickmailError::InvalidConfig {
+                field: "cache.http_expires",
+                message: "must be greater than or equal to zero".to_string(),
             });
         }
 
@@ -296,6 +321,14 @@ fn default_smtp_port() -> u16 {
 
 fn default_fetch_new_messages() -> bool {
     true
+}
+
+fn default_cache_index() -> String {
+    "v1".to_string()
+}
+
+fn default_cache_http_expires() -> i64 {
+    3600
 }
 
 fn default_transactional_smtp_port() -> u16 {

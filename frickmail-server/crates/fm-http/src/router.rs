@@ -6,11 +6,14 @@ use std::{
 };
 
 use axum::{
-    body::{to_bytes, Bytes},
+    body::{to_bytes, Body, Bytes},
     extract::{OriginalUri, Request as AxumRequest, State},
     http::{
-        header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE, USER_AGENT},
-        HeaderMap, Method, StatusCode, Uri,
+        header::{
+            ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, EXPIRES, IF_MATCH,
+            IF_NONE_MATCH, SET_COOKIE, USER_AGENT,
+        },
+        HeaderMap, HeaderValue, Method, StatusCode, Uri,
     },
     response::{IntoResponse, Response},
     routing::get,
@@ -20,7 +23,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine as _,
 };
-use chrono::Local;
+use chrono::{Duration as ChronoDuration, Local, Utc};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, copy_messages,
@@ -44,6 +47,7 @@ use fm_user::{
     NewSmimeCert, NewSmimeP12, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailAccount,
     UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES,
 };
+use md5::{Digest, Md5};
 use p256::{
     ecdsa::{signature::Signer, Signature, SigningKey},
     pkcs8::DecodePrivateKey,
@@ -78,6 +82,7 @@ const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const SMIME_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
 const SMIME_VERIFY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const SMIME_VERIFY_MAX_BASE64_CHARS: usize = SMIME_VERIFY_MAX_BYTES.div_ceil(3) * 4;
+const LEGACY_SNAPPYMAIL_APP_VERSION: &str = env!("FRICKMAIL_WEBMAIL_VERSION");
 const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com";
 const MICROSOFT_GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access";
 const MICROSOFT_ACCOUNT_SWITCH_SCOPES: &str = "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read";
@@ -370,9 +375,15 @@ async fn json_api_request(
     }
 
     if is_compat_hook(&action) {
-        if let Some(response) =
-            native_compat_response(&state, &action, &request.action, &request.payload, &session)
-                .await
+        if let Some(response) = native_compat_response(
+            &state,
+            &action,
+            &request.action,
+            &request.payload,
+            &session,
+            &headers,
+        )
+        .await
         {
             return response;
         }
@@ -523,6 +534,7 @@ async fn native_compat_response(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    _headers: &HeaderMap,
 ) -> Option<Response> {
     match action {
         "FrickmailMe" => Some(native_frickmail_me(state, original_action, session).await),
@@ -4849,12 +4861,14 @@ async fn native_legacy_message_list(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    headers: &HeaderMap,
 ) -> Response {
     native_legacy_message_list_with_fetcher(
         state,
         original_action,
         payload,
         session,
+        headers,
         MESSAGE_LIST_DEADLINE,
         |config, password, request| async move {
             fetch_legacy_message_list(config, &password, request).await
@@ -4869,6 +4883,7 @@ async fn native_legacy_message_list_with_fetcher<F, Fut>(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    headers: &HeaderMap,
     fetch_deadline: Duration,
     fetcher: F,
 ) -> Response
@@ -4927,16 +4942,34 @@ where
 
     match result {
         Ok(Ok(list)) => {
-            let _raw_cache_state = raw_cache_hash.as_deref().and_then(|cache_hash| {
+            let raw_cache_state = raw_cache_hash.as_deref().and_then(|cache_hash| {
                 legacy_message_list_raw_cache_state(cache_hash, &request, &list.folder.etag)
             });
-            json_value_envelope(
+            if let Some(response) = raw_cache_state.as_ref().and_then(|cache_state| {
+                legacy_message_list_cache_validation_response(
+                    headers,
+                    &state.config().cache,
+                    cache_state,
+                )
+            }) {
+                return response;
+            }
+
+            let mut response = json_value_envelope(
                 StatusCode::OK,
                 original_action,
                 json!({
                     "Result": legacy_message_list_json(&list)
                 }),
-            )
+            );
+            if let Some(cache_state) = raw_cache_state {
+                legacy_apply_message_list_cache_headers(
+                    response.headers_mut(),
+                    &state.config().cache,
+                    &cache_state.current_cache_key,
+                );
+            }
+            response
         }
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
@@ -5112,6 +5145,79 @@ fn legacy_message_list_cache_hash_account(request_cache_hash: &str) -> Option<St
         .map(|(_, account_hash)| account_hash)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn legacy_message_list_cache_validation_response(
+    headers: &HeaderMap,
+    cache_config: &fm_core::FrickmailCacheConfig,
+    cache_state: &LegacyMessageListRawCacheState,
+) -> Option<Response> {
+    if !cache_state.verify_existing_cache {
+        return None;
+    }
+
+    let etag = legacy_http_cache_etag(&cache_state.current_cache_key, cache_config);
+    if legacy_header_contains(headers.get(IF_NONE_MATCH), &etag) {
+        return Some(legacy_empty_response(StatusCode::NOT_MODIFIED));
+    }
+    if headers
+        .get(IF_MATCH)
+        .is_some_and(|value| !legacy_header_value_contains(value, &etag))
+    {
+        return Some(legacy_empty_response(StatusCode::PRECONDITION_FAILED));
+    }
+
+    None
+}
+
+fn legacy_apply_message_list_cache_headers(
+    headers: &mut HeaderMap,
+    cache_config: &fm_core::FrickmailCacheConfig,
+    cache_key: &str,
+) {
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache, must-revalidate, max-age=0"),
+    );
+
+    let etag = format!("\"{}\"", legacy_http_cache_etag(cache_key, cache_config));
+    if let Ok(etag) = HeaderValue::from_str(&etag) {
+        headers.insert(ETAG, etag);
+    }
+
+    if cache_config.http_expires > 0 {
+        let expires = (Utc::now() + ChronoDuration::seconds(cache_config.http_expires))
+            .format("%a, %-d %b %Y %H:%M:%S UTC")
+            .to_string();
+        if let Ok(expires) = HeaderValue::from_str(&expires) {
+            headers.insert(EXPIRES, expires);
+        }
+    }
+}
+
+fn legacy_http_cache_etag(cache_key: &str, cache_config: &fm_core::FrickmailCacheConfig) -> String {
+    let mut digest = Md5::new();
+    digest.update(cache_key.as_bytes());
+    digest.update(cache_config.index.as_bytes());
+    digest.update(LEGACY_SNAPPYMAIL_APP_VERSION.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn legacy_header_contains(value: Option<&HeaderValue>, needle: &str) -> bool {
+    value.is_some_and(|value| legacy_header_value_contains(value, needle))
+}
+
+fn legacy_header_value_contains(value: &HeaderValue, needle: &str) -> bool {
+    value
+        .to_str()
+        .is_ok_and(|header| !needle.is_empty() && header.contains(needle))
+}
+
+fn legacy_empty_response(status: StatusCode) -> Response {
+    Response::builder()
+        .status(status)
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn legacy_message_list_hide_deleted_setting(
@@ -8335,7 +8441,10 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         extract::{Request as AxumRequest, State},
-        http::{HeaderMap, Method, Request, StatusCode, Uri},
+        http::{
+            header::{CACHE_CONTROL, ETAG, EXPIRES, IF_MATCH, IF_NONE_MATCH},
+            HeaderMap, Method, Request, StatusCode, Uri,
+        },
         response::IntoResponse,
         routing::any,
         Json, Router,
@@ -12141,6 +12250,7 @@ UERGREFUQQ==
                 "threadAlgorithm": "REFERENCES"
             }),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             move |config, password, request| {
                 let captured = Arc::clone(&captured_for_fetch);
@@ -12207,6 +12317,7 @@ UERGREFUQQ==
                 "folder": "INBOX"
             }),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             move |_config, _password, request| {
                 let captured = Arc::clone(&captured_for_fetch);
@@ -12234,6 +12345,151 @@ UERGREFUQQ==
         assert_eq!(body["Result"]["@Object"], "Collection/MessageCollection");
         assert_eq!(body["Result"]["totalThreads"], Value::Null);
         assert!(!captured.lock().unwrap().clone().unwrap().hide_deleted);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_applies_raw_key_cache_headers() {
+        let key = [54_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1934, 1935, &key).await;
+        let (raw_key, expected_etag) = legacy_message_list_raw_key_and_etag();
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({
+                "account_id": 1935,
+                "RawKey": raw_key
+            }),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, request| async move {
+                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            },
+        )
+        .await;
+        let expected_header = format!("\"{expected_etag}\"");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-cache, must-revalidate, max-age=0")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(ETAG)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_header.as_str())
+        );
+        assert!(response.headers().contains_key(EXPIRES));
+
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"]["folder"]["etag"], "etag");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_raw_key_cache_uses_configured_index() {
+        let key = [57_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let mut config = test_config(None);
+        config.cache.index = "v2".to_string();
+        let (raw_key, expected_etag) =
+            legacy_message_list_raw_key_and_etag_with_config(&config.cache);
+        let (_, default_etag) = legacy_message_list_raw_key_and_etag();
+        let (state, session) = message_body_test_state_with_config(1940, 1941, &key, config).await;
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({
+                "account_id": 1941,
+                "RawKey": raw_key
+            }),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, request| async move {
+                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            },
+        )
+        .await;
+        let expected_header = format!("\"{expected_etag}\"");
+
+        assert_ne!(expected_etag, default_etag);
+        assert_eq!(
+            response
+                .headers()
+                .get(ETAG)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_header.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_raw_key_cache_returns_not_modified() {
+        let key = [55_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1936, 1937, &key).await;
+        let (raw_key, expected_etag) = legacy_message_list_raw_key_and_etag();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            IF_NONE_MATCH,
+            format!("W/\"{expected_etag}\"").parse().unwrap(),
+        );
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({
+                "account_id": 1937,
+                "RawKey": raw_key
+            }),
+            &session,
+            &headers,
+            Duration::from_secs(1),
+            |_config, _password, request| async move {
+                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            },
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_raw_key_cache_rejects_if_match_mismatch() {
+        let key = [56_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1938, 1939, &key).await;
+        let (raw_key, _expected_etag) = legacy_message_list_raw_key_and_etag();
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_MATCH, "\"different\"".parse().unwrap());
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({
+                "account_id": 1939,
+                "RawKey": raw_key
+            }),
+            &session,
+            &headers,
+            Duration::from_secs(1),
+            |_config, _password, request| async move {
+                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            },
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert!(body.is_empty());
     }
 
     #[test]
@@ -12346,7 +12602,7 @@ UERGREFUQQ==
         });
         let raw_key = URL_SAFE_NO_PAD.encode(raw_payload.to_string());
         let decoded = super::legacy_message_list_raw_key_request_from_payload(&json!({
-            "RawKey": raw_key
+            "RawKey": raw_key.clone()
         }))
         .unwrap()
         .unwrap();
@@ -15174,6 +15430,7 @@ UERGREFUQQ==
             open_signup: false,
             oidc: Default::default(),
             mail: Default::default(),
+            cache: Default::default(),
             frickmail_user: Default::default(),
             transactional_smtp: Default::default(),
         }
@@ -16339,6 +16596,65 @@ UERGREFUQQ==
                 is_inline: true,
             }],
             preview: Some("Preview text".to_string()),
+        }
+    }
+
+    fn legacy_message_list_raw_key_and_etag() -> (String, String) {
+        legacy_message_list_raw_key_and_etag_with_config(&Default::default())
+    }
+
+    fn legacy_message_list_raw_key_and_etag_with_config(
+        cache_config: &fm_core::FrickmailCacheConfig,
+    ) -> (String, String) {
+        let raw_payload = json!({
+            "folder": "INBOX",
+            "offset": "15",
+            "limit": "25",
+            "search": "from:bob",
+            "sort": "REVERSE DATE",
+            "uidNext": "123",
+            "useThreads": 1,
+            "threadUid": "77",
+            "threadAlgorithm": "REFERENCES",
+            "hash": "previous-etag-account",
+            "accountHash": "account"
+        });
+        let raw_key = URL_SAFE_NO_PAD.encode(raw_payload.to_string());
+        let decoded = super::legacy_message_list_raw_key_request_from_payload(&json!({
+            "RawKey": raw_key
+        }))
+        .unwrap()
+        .unwrap();
+        let mut request = decoded.request.clone();
+        request.hide_deleted = true;
+        let cache_state =
+            super::legacy_message_list_raw_cache_state(&decoded.cache_hash, &request, "etag")
+                .unwrap();
+
+        (
+            raw_key,
+            super::legacy_http_cache_etag(&cache_state.current_cache_key, cache_config),
+        )
+    }
+
+    fn legacy_test_message_list_for_request(
+        request: &LegacyMessageListRequest,
+        etag: &str,
+    ) -> LegacyMessageList {
+        let mut folder = legacy_test_folder_information();
+        folder.etag = etag.to_string();
+
+        LegacyMessageList {
+            folder,
+            total_emails: 12,
+            total_threads: Some(6),
+            offset: request.offset,
+            limit: request.limit,
+            search: request.search.clone(),
+            sort: request.sort.clone(),
+            limited: false,
+            thread_uid: request.thread_uid,
+            messages: vec![legacy_test_message_summary()],
         }
     }
 
