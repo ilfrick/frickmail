@@ -29,12 +29,13 @@ use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, copy_messages,
     delete_messages, fetch_legacy_folder_information, fetch_legacy_message_list,
     fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
-    legacy_message_hash, legacy_message_list_cache_key, legacy_message_list_params_hash,
-    move_messages, store_message_flag, store_message_keyword, store_seen_to_all, validate_eml,
-    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
-    ImapMoveOptions, LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest,
-    MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField,
-    RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+    legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
+    legacy_message_list_params_hash, move_messages, store_message_flag, store_message_keyword,
+    store_seen_to_all, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
+    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolderInformation, LegacyMessageList,
+    LegacyMessageListRequest, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
+    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    RuleExecutionReport,
 };
 use fm_mime::{parse_body, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader};
 use fm_plugin_compat::{
@@ -534,7 +535,7 @@ async fn native_compat_response(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
-    _headers: &HeaderMap,
+    headers: &HeaderMap,
 ) -> Option<Response> {
     match action {
         "FrickmailMe" => Some(native_frickmail_me(state, original_action, session).await),
@@ -778,7 +779,7 @@ async fn native_compat_response(
             .await
         }
         "Message" if legacy_message_payload_is_native_candidate(payload) => {
-            Some(native_legacy_message(state, original_action, payload, session).await)
+            Some(native_legacy_message(state, original_action, payload, session, headers).await)
         }
         "FolderInformation" => {
             Some(native_legacy_folder_information(state, original_action, payload, session).await)
@@ -4733,12 +4734,14 @@ async fn native_legacy_message(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    headers: &HeaderMap,
 ) -> Response {
     native_legacy_message_with_fetcher(
         state,
         original_action,
         payload,
         session,
+        headers,
         MESSAGE_BODY_FETCH_DEADLINE,
         |config, password, folder, uid| async move {
             fetch_message_body_preview(config, &password, &folder, uid).await
@@ -4752,6 +4755,7 @@ async fn native_legacy_message_with_fetcher<F, Fut>(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    headers: &HeaderMap,
     fetch_deadline: Duration,
     fetcher: F,
 ) -> Response
@@ -4768,6 +4772,7 @@ where
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, message),
     };
+    let client_hash = config.login.clone();
 
     let result = tokio::time::timeout(
         fetch_deadline,
@@ -4782,12 +4787,37 @@ where
     .map_err(|_| FrickmailError::Upstream("Message fetch timed out".to_string()));
 
     match result {
-        Ok(Ok(Some(parts))) => legacy_message_body_response(
-            original_action,
-            &message_request.folder,
-            message_request.uid,
-            parts,
-        ),
+        Ok(Ok(Some(parts))) => {
+            let flags = parts
+                .first()
+                .map(|part| part.flags.as_slice())
+                .unwrap_or(&[]);
+            let cache_key = legacy_message_cache_key(
+                &message_request.folder,
+                message_request.uid,
+                flags,
+                &client_hash,
+            );
+
+            if let Some(response) =
+                legacy_http_cache_validation_response(headers, &state.config().cache, &cache_key)
+            {
+                return response;
+            }
+
+            let mut response = legacy_message_body_response(
+                original_action,
+                &message_request.folder,
+                message_request.uid,
+                parts,
+            );
+            legacy_apply_http_cache_headers(
+                response.headers_mut(),
+                &state.config().cache,
+                &cache_key,
+            );
+            response
+        }
         Ok(Ok(None)) => json_result_error(original_action, "Message not found"),
         Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
     }
@@ -4963,7 +4993,7 @@ where
                 }),
             );
             if let Some(cache_state) = raw_cache_state {
-                legacy_apply_message_list_cache_headers(
+                legacy_apply_http_cache_headers(
                     response.headers_mut(),
                     &state.config().cache,
                     &cache_state.current_cache_key,
@@ -5156,7 +5186,15 @@ fn legacy_message_list_cache_validation_response(
         return None;
     }
 
-    let etag = legacy_http_cache_etag(&cache_state.current_cache_key, cache_config);
+    legacy_http_cache_validation_response(headers, cache_config, &cache_state.current_cache_key)
+}
+
+fn legacy_http_cache_validation_response(
+    headers: &HeaderMap,
+    cache_config: &fm_core::FrickmailCacheConfig,
+    cache_key: &str,
+) -> Option<Response> {
+    let etag = legacy_http_cache_etag(cache_key, cache_config);
     if legacy_header_contains(headers.get(IF_NONE_MATCH), &etag) {
         return Some(legacy_empty_response(StatusCode::NOT_MODIFIED));
     }
@@ -5170,7 +5208,7 @@ fn legacy_message_list_cache_validation_response(
     None
 }
 
-fn legacy_apply_message_list_cache_headers(
+fn legacy_apply_http_cache_headers(
     headers: &mut HeaderMap,
     cache_config: &fm_core::FrickmailCacheConfig,
     cache_key: &str,
@@ -6159,6 +6197,10 @@ fn legacy_message_body_response(
     uid: u32,
     parts: Vec<BodyPreviewPart>,
 ) -> Response {
+    let flags = parts
+        .first()
+        .map(|part| part.flags.as_slice())
+        .unwrap_or(&[]);
     let mut html = String::new();
     let mut plain = String::new();
     let mut subject = String::new();
@@ -6179,7 +6221,7 @@ fn legacy_message_body_response(
     let mut sender = None;
     let mut delivered_to = None;
 
-    for part in parts {
+    for part in &parts {
         let Some(body) = parse_body(&part.raw) else {
             continue;
         };
@@ -6306,7 +6348,7 @@ fn legacy_message_body_response(
                 sender.as_deref(),
                 delivered_to.as_deref(),
                 0,
-                &[],
+                flags,
                 None,
             )
         }),
@@ -8443,7 +8485,7 @@ mod tests {
         extract::{Request as AxumRequest, State},
         http::{
             header::{CACHE_CONTROL, ETAG, EXPIRES, IF_MATCH, IF_NONE_MATCH},
-            HeaderMap, Method, Request, StatusCode, Uri,
+            HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
         },
         response::IntoResponse,
         routing::any,
@@ -11484,11 +11526,13 @@ mod tests {
                         .as_bytes()
                         .to_vec(),
                         is_complete: false,
+                        flags: Vec::new(),
                     },
                     BodyPreviewPart {
                         kind: BodyPartKind::Plain,
                         raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nPlain body.".to_vec(),
                         is_complete: false,
+                        flags: Vec::new(),
                     },
                 ]))
             },
@@ -11558,6 +11602,7 @@ mod tests {
                     kind: BodyPartKind::Plain,
                     raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nSelected body.".to_vec(),
                     is_complete: false,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -11623,6 +11668,7 @@ mod tests {
             "Message",
             &json!({"account_id": 1813, "folder": "INBOX", "uid": 51}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, folder, uid| async move {
                 assert_eq!(folder, "INBOX");
@@ -11631,6 +11677,7 @@ mod tests {
                     kind: BodyPartKind::RawMessage,
                     raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nDisposition-Notification-To: receipt@example.com\r\nX-Confirm-Reading-To: fallback@example.com\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
                     is_complete: true,
+                flags: Vec::new(),
                 }]))
             },
         )
@@ -11702,6 +11749,7 @@ mod tests {
             "Message",
             &json!({"account_id": 1919, "folder": "INBOX", "uid": 55}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
@@ -11713,6 +11761,7 @@ References: <root@example.com>\r\n <parent@example.com>\r\n\
 X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
                         .to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -11744,6 +11793,7 @@ X-Confirm-Reading-To: fallback@example.com\r\n\r\n"
             "Message",
             &json!({"account_id": 1927, "folder": "INBOX", "uid": 61}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
@@ -11756,6 +11806,7 @@ Body.
 "#
                     .to_vec(),
                     is_complete: true,
+                flags: Vec::new(),
                 }]))
             },
         )
@@ -11787,6 +11838,7 @@ Body.
             "Message",
             &json!({"account_id": 1929, "folder": "INBOX", "uid": 62}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
@@ -11800,6 +11852,7 @@ Body.
 "#
                     .to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -11827,12 +11880,14 @@ Body.
             "Message",
             &json!({"account_id": 1921, "folder": "INBOX", "uid": 56}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
                     raw: b"Date: definitely not a date\r\n\r\n".to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -11856,6 +11911,7 @@ Body.
             "Message",
             &json!({"account_id": 1923, "folder": "INBOX", "uid": 59}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
@@ -11871,6 +11927,7 @@ Version: 1
 "#
                     .to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -11896,6 +11953,7 @@ Version: 1
             "Message",
             &json!({"account_id": 1925, "folder": "Drafts", "uid": 60}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
@@ -11907,6 +11965,7 @@ Body.
 "#
                     .to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -11929,6 +11988,7 @@ Body.
             "Message",
             &json!({"account_id": 1931, "folder": "INBOX", "uid": 57}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
@@ -11961,6 +12021,7 @@ UERGREFUQQ==
 "#
                     .to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -12009,6 +12070,7 @@ UERGREFUQQ==
             "Message",
             &json!({"account_id": 1933, "folder": "INBOX", "uid": 58}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
@@ -12030,6 +12092,7 @@ UERGREFUQQ==
 "#
                     .to_vec(),
                     is_complete: false,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -12053,12 +12116,14 @@ UERGREFUQQ==
             "Message",
             &json!({"account_id": 1819, "folder": "INBOX", "uid": 53}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::Plain,
                     raw: b"Content-Type: text/plain; charset=utf-8\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\n\r\nPart-only body".to_vec(),
                     is_complete: false,
+                flags: Vec::new(),
                 }]))
             },
         )
@@ -12092,12 +12157,14 @@ UERGREFUQQ==
             "Message",
             &json!({"account_id": 1815, "folder": "INBOX", "uid": 52}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
                     raw: b"Subject: Metadata only\r\n\r\n".to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -12191,6 +12258,7 @@ UERGREFUQQ==
             "Message",
             &json!({"account_id": 1817, "RawKey": raw_key}),
             &session,
+            &HeaderMap::new(),
             Duration::from_secs(1),
             move |_config, _password, folder, uid| {
                 let captured = Arc::clone(&captured_for_fetch);
@@ -12200,6 +12268,7 @@ UERGREFUQQ==
                         kind: BodyPartKind::RawMessage,
                         raw: b"Subject: RawKey body\r\n\r\nHello from raw key".to_vec(),
                         is_complete: true,
+                        flags: Vec::new(),
                     }]))
                 }
             },
@@ -12225,6 +12294,163 @@ UERGREFUQQ==
         assert_eq!(parsed.uid, 53);
         assert!(!parsed.use_threads);
         assert_eq!(parsed.account_hash, "account-2");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_raw_key_cache_applies_headers_and_flags() {
+        let key = [62_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1934, 1935, &key).await;
+        let flags = vec!["\\seen".to_string(), "$label1".to_string()];
+        let raw_key = URL_SAFE_NO_PAD.encode(json!(["INBOX", 52, 0, "account"]).to_string());
+        let expected_etag =
+            legacy_message_raw_key_cache_etag(&state.config().cache, flags.as_slice());
+        let expected_header = format!("\"{expected_etag}\"");
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1935, "RawKey": raw_key}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            {
+                let flags = flags.clone();
+                move |_config, _password, _folder, _uid| async move {
+                    Ok(Some(vec![BodyPreviewPart {
+                        kind: BodyPartKind::RawMessage,
+                        raw: b"Subject: Cacheable\r\n\r\nBody".to_vec(),
+                        is_complete: true,
+                        flags,
+                    }]))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("private, no-cache, must-revalidate, max-age=0")
+        );
+        assert_eq!(
+            response.headers().get(ETAG).and_then(|v| v.to_str().ok()),
+            Some(expected_header.as_str())
+        );
+        assert!(response.headers().get(EXPIRES).is_some());
+
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["flags"][0], "\\seen");
+        assert_eq!(body["Result"]["flags"][1], "$label1");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_post_cache_applies_headers() {
+        let key = [65_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1940, 1941, &key).await;
+        let flags = vec!["\\seen".to_string()];
+        let expected_etag = legacy_message_cache_etag(&state.config().cache, 52, flags.as_slice());
+        let expected_header = format!("\"{expected_etag}\"");
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1941, "folder": "INBOX", "uid": 52}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            {
+                let flags = flags.clone();
+                move |_config, _password, _folder, _uid| async move {
+                    Ok(Some(vec![BodyPreviewPart {
+                        kind: BodyPartKind::RawMessage,
+                        raw: b"Subject: Cacheable POST\r\n\r\nBody".to_vec(),
+                        is_complete: true,
+                        flags,
+                    }]))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(ETAG).and_then(|v| v.to_str().ok()),
+            Some(expected_header.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_raw_key_cache_returns_not_modified() {
+        let key = [63_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1936, 1937, &key).await;
+        let flags = vec!["\\seen".to_string()];
+        let raw_key = URL_SAFE_NO_PAD.encode(json!(["INBOX", 52, 0, "account"]).to_string());
+        let expected_etag =
+            legacy_message_raw_key_cache_etag(&state.config().cache, flags.as_slice());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            IF_NONE_MATCH,
+            HeaderValue::from_str(&format!("\"{expected_etag}\"")).unwrap(),
+        );
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1937, "RawKey": raw_key}),
+            &session,
+            &headers,
+            Duration::from_secs(1),
+            {
+                let flags = flags.clone();
+                move |_config, _password, _folder, _uid| async move {
+                    Ok(Some(vec![BodyPreviewPart {
+                        kind: BodyPartKind::RawMessage,
+                        raw: b"Subject: Cacheable\r\n\r\nBody".to_vec(),
+                        is_complete: true,
+                        flags,
+                    }]))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_raw_key_cache_rejects_if_match_mismatch() {
+        let key = [64_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1938, 1939, &key).await;
+        let flags = vec!["\\answered".to_string()];
+        let raw_key = URL_SAFE_NO_PAD.encode(json!(["INBOX", 52, 0, "account"]).to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_MATCH, HeaderValue::from_static("\"stale\""));
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1939, "RawKey": raw_key}),
+            &session,
+            &headers,
+            Duration::from_secs(1),
+            {
+                let flags = flags.clone();
+                move |_config, _password, _folder, _uid| async move {
+                    Ok(Some(vec![BodyPreviewPart {
+                        kind: BodyPartKind::RawMessage,
+                        raw: b"Subject: Cacheable\r\n\r\nBody".to_vec(),
+                        is_complete: true,
+                        flags,
+                    }]))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
     }
 
     #[tokio::test]
@@ -13333,6 +13559,7 @@ UERGREFUQQ==
                     kind: BodyPartKind::RawMessage,
                     raw: b"\0".to_vec(),
                     is_complete: true,
+                    flags: Vec::new(),
                 }]))
             },
         )
@@ -16601,6 +16828,22 @@ UERGREFUQQ==
 
     fn legacy_message_list_raw_key_and_etag() -> (String, String) {
         legacy_message_list_raw_key_and_etag_with_config(&Default::default())
+    }
+
+    fn legacy_message_raw_key_cache_etag(
+        cache_config: &fm_core::FrickmailCacheConfig,
+        flags: &[String],
+    ) -> String {
+        legacy_message_cache_etag(cache_config, 52, flags)
+    }
+
+    fn legacy_message_cache_etag(
+        cache_config: &fm_core::FrickmailCacheConfig,
+        uid: u32,
+        flags: &[String],
+    ) -> String {
+        let cache_key = fm_imap::legacy_message_cache_key("INBOX", uid, flags, "work@example.com");
+        super::legacy_http_cache_etag(&cache_key, cache_config)
     }
 
     fn legacy_message_list_raw_key_and_etag_with_config(

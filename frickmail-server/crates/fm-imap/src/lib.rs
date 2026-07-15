@@ -134,6 +134,7 @@ pub struct BodyPreviewPart {
     pub kind: BodyPartKind,
     pub raw: Vec<u8>,
     pub is_complete: bool,
+    pub flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +354,12 @@ struct BodyPartSpec {
     octets: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BodyPreviewFetchSpec {
+    parts: Vec<BodyPartSpec>,
+    flags: Vec<String>,
+}
+
 impl BodyPartSpec {
     fn path_vec(self) -> Option<Vec<u32>> {
         self.path.map(|path| path[..self.depth].to_vec())
@@ -376,7 +383,7 @@ pub async fn fetch_message_body_preview(
         logout_quietly(session).await;
         return Ok(None);
     };
-    let parts = fetch_preview_parts(&mut session, uid, &specs).await?;
+    let parts = fetch_preview_parts(&mut session, uid, &specs.parts, &specs.flags).await?;
     logout_quietly(session).await;
     Ok(Some(parts))
 }
@@ -689,7 +696,7 @@ pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<&'static str> {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
     }
 
-    Ok("(UID RFC822.SIZE BODYSTRUCTURE)")
+    Ok("(UID FLAGS RFC822.SIZE BODYSTRUCTURE)")
 }
 
 pub fn uid_fetch_raw_message_query(uid: u32) -> Result<&'static str> {
@@ -854,6 +861,19 @@ pub fn legacy_new_uid_range(prev_uid_next: Option<u32>, uid_next: Option<u32>) -
 
 pub fn legacy_message_hash(folder: &str, uid: u32) -> String {
     md5_hex(format!("{folder}{uid}"))
+}
+
+pub fn legacy_message_cache_key(
+    folder: &str,
+    uid: u32,
+    flags: &[String],
+    client_hash: &str,
+) -> String {
+    md5_hex(format!(
+        "MessageHash/{folder}/{uid}/{}/{}",
+        flags.join(","),
+        client_hash
+    ))
 }
 
 pub fn legacy_message_list_params_hash(
@@ -2401,7 +2421,7 @@ fn fetch_body_for_uid(attrs: &[AttributeValue<'_>], expected_uid: u32) -> Option
 async fn fetch_body_part_specs(
     session: &mut BoxedSession,
     uid: u32,
-) -> Result<Option<Vec<BodyPartSpec>>> {
+) -> Result<Option<BodyPreviewFetchSpec>> {
     let mut fetches = timeout_imap(
         "fetch message body structure",
         session.uid_fetch(uid.to_string(), uid_fetch_bodystructure_query(uid)?),
@@ -2412,24 +2432,35 @@ async fn fetch_body_part_specs(
         if fetch.uid != Some(uid) {
             continue;
         }
+        let flags =
+            legacy_unique_flag_strings(fetch.flags().map(|flag| legacy_message_flag_string(&flag)));
         let Some(bodystructure) = fetch.bodystructure() else {
-            return Ok(Some(vec![BodyPartSpec {
-                path: None,
-                depth: 0,
-                kind: BodyPartKind::RawMessage,
-                octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
-            }]));
+            return Ok(Some(BodyPreviewFetchSpec {
+                parts: vec![BodyPartSpec {
+                    path: None,
+                    depth: 0,
+                    kind: BodyPartKind::RawMessage,
+                    octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
+                }],
+                flags,
+            }));
         };
         let specs = body_preview_part_specs(bodystructure);
         if specs.is_empty() {
-            return Ok(Some(vec![BodyPartSpec {
-                path: None,
-                depth: 0,
-                kind: BodyPartKind::RawMessage,
-                octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
-            }]));
+            return Ok(Some(BodyPreviewFetchSpec {
+                parts: vec![BodyPartSpec {
+                    path: None,
+                    depth: 0,
+                    kind: BodyPartKind::RawMessage,
+                    octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
+                }],
+                flags,
+            }));
         }
-        return Ok(Some(specs));
+        return Ok(Some(BodyPreviewFetchSpec {
+            parts: specs,
+            flags,
+        }));
     }
 
     Ok(None)
@@ -2439,6 +2470,7 @@ async fn fetch_preview_parts(
     session: &mut BoxedSession,
     uid: u32,
     specs: &[BodyPartSpec],
+    flags: &[String],
 ) -> Result<Vec<BodyPreviewPart>> {
     let query = body_preview_fetch_query(specs);
     let mut fetches = timeout_imap(
@@ -2467,6 +2499,7 @@ async fn fetch_preview_parts(
                             kind: spec.kind,
                             raw: join_mime_part(mime, body),
                             is_complete: false,
+                            flags: flags.to_vec(),
                         });
                     }
                 }
@@ -2476,6 +2509,7 @@ async fn fetch_preview_parts(
                             kind: BodyPartKind::RawMessage,
                             raw: body.to_vec(),
                             is_complete: raw_message_preview_is_complete(body, spec.octets),
+                            flags: flags.to_vec(),
                         });
                     }
                 }
@@ -2998,7 +3032,7 @@ mod tests {
 
         assert_eq!(
             uid_fetch_bodystructure_query(42).unwrap(),
-            "(UID RFC822.SIZE BODYSTRUCTURE)"
+            "(UID FLAGS RFC822.SIZE BODYSTRUCTURE)"
         );
         assert!(uid_fetch_bodystructure_query(0).is_err());
         assert_eq!(
@@ -4164,6 +4198,15 @@ mod tests {
         assert_eq!(
             legacy_message_hash("INBOX", 44),
             "2a7cf377296d50a49291639593793425"
+        );
+        assert_eq!(
+            legacy_message_cache_key(
+                "INBOX",
+                44,
+                &["\\seen".to_string(), "$label1".to_string()],
+                "alice"
+            ),
+            "b405b4bd83194401eb79e798ed2423c6"
         );
         let request = LegacyMessageListRequest {
             mailbox: "INBOX".to_string(),
