@@ -6305,6 +6305,32 @@ fn legacy_message_body_response(
             bcc = Some(body.bcc.clone());
             sender = Some(body.sender.clone());
             delivered_to = Some(body.delivered_to.clone());
+        } else if !metadata.envelope.is_empty() {
+            let envelope = &metadata.envelope;
+            subject = envelope.subject.clone();
+            message_id = envelope.message_id.clone();
+            in_reply_to = envelope.in_reply_to.clone();
+            if let Some(timestamp) = metadata.internal_timestamp {
+                date_timestamp = timestamp;
+            }
+            if !envelope.from.is_empty() {
+                from = Some(envelope.from.clone());
+            }
+            if !envelope.reply_to.is_empty() {
+                reply_to = Some(envelope.reply_to.clone());
+            }
+            if !envelope.to.is_empty() {
+                to = Some(envelope.to.clone());
+            }
+            if !envelope.cc.is_empty() {
+                cc = Some(envelope.cc.clone());
+            }
+            if !envelope.bcc.is_empty() {
+                bcc = Some(envelope.bcc.clone());
+            }
+            if !envelope.sender.is_empty() {
+                sender = Some(envelope.sender.clone());
+            }
         } else if let Some(timestamp) = metadata.internal_timestamp {
             date_timestamp = timestamp;
         }
@@ -12395,6 +12421,7 @@ Subject: Preview metadata\r\n\r\n"
                             content_location: "cid:report".to_string(),
                             is_inline: true,
                         }],
+                        ..Default::default()
                     },
                 }]))
             },
@@ -12430,6 +12457,122 @@ Subject: Preview metadata\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_legacy_message_uses_envelope_when_headers_are_unavailable() {
+        let key = [67_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1950, 1951, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1951, "folder": "INBOX", "uid": 71}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: Vec::new(),
+                    is_complete: false,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: fm_imap::LegacyMessageFetchMetadata {
+                        header: Vec::new(),
+                        internal_timestamp: Some(1_700_000_456),
+                        size: 2048,
+                        attachments: Vec::new(),
+                        envelope: fm_imap::LegacyMessageEnvelope {
+                            subject: "Envelope subject".to_string(),
+                            message_id: "<envelope@example.com>".to_string(),
+                            in_reply_to: "<parent@example.com>".to_string(),
+                            from: vec!["Envelope Sender <sender@example.com>".to_string()],
+                            sender: vec!["Actual Sender <actual@example.com>".to_string()],
+                            reply_to: vec!["reply@example.com".to_string()],
+                            to: vec!["Recipient <recipient@example.com>".to_string()],
+                            cc: vec!["cc@example.com".to_string()],
+                            bcc: vec!["hidden@example.com".to_string()],
+                        },
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "Envelope subject");
+        assert_eq!(result["messageId"], "<envelope@example.com>");
+        assert_eq!(result["inReplyTo"], "<parent@example.com>");
+        assert_eq!(result["dateTimestamp"], 1_700_000_456);
+        assert_eq!(result["dateTimestampSource"], "internal");
+        assert_eq!(result["size"], 2048);
+        assert_eq!(result["from"][0]["name"], "Envelope Sender");
+        assert_eq!(result["from"][0]["email"], "sender@example.com");
+        assert_eq!(result["sender"][0]["email"], "actual@example.com");
+        assert_eq!(result["replyTo"][0]["email"], "reply@example.com");
+        assert_eq!(result["to"][0]["email"], "recipient@example.com");
+        assert_eq!(result["cc"][0]["email"], "cc@example.com");
+        assert_eq!(result["bcc"][0]["email"], "hidden@example.com");
+        assert_eq!(result["headers"], Value::Null);
+        assert!(result.get("html").is_none());
+        assert!(result.get("plain").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_prefers_headers_over_envelope_metadata() {
+        let key = [68_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1952, 1953, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1953, "folder": "INBOX", "uid": 72}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: Vec::new(),
+                    is_complete: false,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: fm_imap::LegacyMessageFetchMetadata {
+                        header: b"From: Header Sender <header@example.com>\r\n\
+Subject: Header subject\r\n\
+Message-ID: <header@example.com>\r\n\
+In-Reply-To: <header-parent@example.com>\r\n\r\n"
+                            .to_vec(),
+                        internal_timestamp: Some(1_700_000_789),
+                        size: 2048,
+                        attachments: Vec::new(),
+                        envelope: fm_imap::LegacyMessageEnvelope {
+                            subject: "Envelope subject".to_string(),
+                            message_id: "<envelope@example.com>".to_string(),
+                            in_reply_to: "<envelope-parent@example.com>".to_string(),
+                            from: vec!["Envelope Sender <sender@example.com>".to_string()],
+                            ..Default::default()
+                        },
+                    },
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        let result = &body["Result"];
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(result["subject"], "Header subject");
+        assert_eq!(result["messageId"], "<header@example.com>");
+        assert_eq!(result["inReplyTo"], "<header-parent@example.com>");
+        assert_eq!(result["from"][0]["email"], "header@example.com");
+        assert_eq!(
+            result["headers"]["@Object"],
+            "Collection/MimeHeaderCollection"
+        );
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_populates_preview_spam_metadata_from_header_fetch() {
         let key = [63_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1942, 1943, &key).await;
@@ -12455,6 +12598,7 @@ X-Spam-Status: No, score=3.0 required=5.0 tests=BAYES\r\n\r\n"
                         internal_timestamp: None,
                         size: 42,
                         attachments: Vec::new(),
+                        ..Default::default()
                     },
                 }]))
             },
@@ -12497,6 +12641,7 @@ Authentication-Results: mx.example;\r\n dkim=pass header.d=example.com header.s=
                         internal_timestamp: None,
                         size: 42,
                         attachments: Vec::new(),
+                        ..Default::default()
                     },
                 }]))
             },
@@ -12590,6 +12735,7 @@ X-Spam-Status: No, score=1.0 required=5.0 tests=BAYES\r\n\r\n"
                         internal_timestamp: None,
                         size: 42,
                         attachments: Vec::new(),
+                        ..Default::default()
                     },
                 }]))
             },
@@ -12631,6 +12777,7 @@ Subject: Empty body metadata\r\n\r\n"
                         internal_timestamp: Some(1_700_000_123),
                         size: 123,
                         attachments: Vec::new(),
+                        ..Default::default()
                     },
                 }]))
             },

@@ -10,6 +10,7 @@ use imap_proto::{
     builders::command::{Command, CommandBuilder},
     AttributeValue, BodyStructure, MessageSection, Response, SectionPath, Status,
 };
+use mail_parser::parsers::MessageStream;
 use md5::{Digest, Md5};
 use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
@@ -162,6 +163,7 @@ pub struct LegacyMessageFetchMetadata {
     pub internal_timestamp: Option<i64>,
     pub size: u32,
     pub attachments: Vec<LegacyAttachmentSummary>,
+    pub envelope: LegacyMessageEnvelope,
 }
 
 impl LegacyMessageFetchMetadata {
@@ -170,6 +172,34 @@ impl LegacyMessageFetchMetadata {
             && self.internal_timestamp.is_none()
             && self.size == 0
             && self.attachments.is_empty()
+            && self.envelope.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyMessageEnvelope {
+    pub subject: String,
+    pub message_id: String,
+    pub in_reply_to: String,
+    pub from: Vec<String>,
+    pub sender: Vec<String>,
+    pub reply_to: Vec<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+}
+
+impl LegacyMessageEnvelope {
+    pub fn is_empty(&self) -> bool {
+        self.subject.is_empty()
+            && self.message_id.is_empty()
+            && self.in_reply_to.is_empty()
+            && self.from.is_empty()
+            && self.sender.is_empty()
+            && self.reply_to.is_empty()
+            && self.to.is_empty()
+            && self.cc.is_empty()
+            && self.bcc.is_empty()
     }
 }
 
@@ -769,7 +799,7 @@ pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<&'static str> {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
     }
 
-    Ok("(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])")
+    Ok("(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER])")
 }
 
 pub fn uid_fetch_raw_message_query(uid: u32) -> Result<&'static str> {
@@ -2650,6 +2680,85 @@ fn fetch_body_for_uid(attrs: &[AttributeValue<'_>], expected_uid: u32) -> Option
     })
 }
 
+fn legacy_message_envelope_metadata(envelope: &imap_proto::Envelope<'_>) -> LegacyMessageEnvelope {
+    LegacyMessageEnvelope {
+        subject: legacy_decode_envelope_header(envelope.subject.as_ref()),
+        message_id: legacy_envelope_string(envelope.message_id.as_ref()),
+        in_reply_to: legacy_envelope_string(envelope.in_reply_to.as_ref()),
+        from: legacy_envelope_addresses(envelope.from.as_ref()),
+        sender: legacy_envelope_addresses(envelope.sender.as_ref()),
+        reply_to: legacy_envelope_addresses(envelope.reply_to.as_ref()),
+        to: legacy_envelope_addresses(envelope.to.as_ref()),
+        cc: legacy_envelope_addresses(envelope.cc.as_ref()),
+        bcc: legacy_envelope_addresses(envelope.bcc.as_ref()),
+    }
+}
+
+fn legacy_envelope_addresses(addresses: Option<&Vec<imap_proto::Address<'_>>>) -> Vec<String> {
+    addresses
+        .into_iter()
+        .flatten()
+        .filter_map(legacy_envelope_address)
+        .collect()
+}
+
+fn legacy_envelope_address(address: &imap_proto::Address<'_>) -> Option<String> {
+    let mailbox = legacy_envelope_string(address.mailbox.as_ref());
+    let host = legacy_envelope_string(address.host.as_ref());
+    if mailbox.is_empty() || host.is_empty() {
+        return None;
+    }
+
+    let email = format!("{mailbox}@{host}");
+    let name = legacy_decode_envelope_header(address.name.as_ref());
+    if name.is_empty() {
+        Some(email)
+    } else {
+        Some(format!("{name} <{email}>"))
+    }
+}
+
+fn legacy_envelope_string(value: Option<&Cow<'_, [u8]>>) -> String {
+    value
+        .map(|value| String::from_utf8_lossy(value.as_ref()).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn legacy_decode_envelope_header(value: Option<&Cow<'_, [u8]>>) -> String {
+    legacy_decode_rfc2047_header_value(&legacy_envelope_string(value))
+}
+
+fn legacy_decode_rfc2047_header_value(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut index = 0;
+
+    while let Some(relative_start) = value[index..].find("=?") {
+        let start = index + relative_start;
+        decoded.push_str(&value[index..start]);
+
+        let mut stream = MessageStream::new(&value.as_bytes()[start + 1..]);
+        if let Some(token) = stream.decode_rfc2047() {
+            decoded.push_str(&token);
+            index = start + 1 + stream.offset();
+
+            let whitespace_len = value[index..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_whitespace())
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if value[index + whitespace_len..].starts_with("=?") {
+                index += whitespace_len;
+            }
+        } else {
+            decoded.push_str("=?");
+            index = start + 2;
+        }
+    }
+
+    decoded.push_str(&value[index..]);
+    decoded.trim().to_string()
+}
+
 async fn fetch_body_part_specs(
     session: &mut BoxedSession,
     folder: &str,
@@ -2670,6 +2779,10 @@ async fn fetch_body_part_specs(
         let header = fetch.header().unwrap_or_default().to_vec();
         let internal_timestamp = fetch.internal_date().map(|value| value.timestamp());
         let size = fetch.size.unwrap_or_default();
+        let envelope = fetch
+            .envelope()
+            .map(legacy_message_envelope_metadata)
+            .unwrap_or_default();
         let Some(bodystructure) = fetch.bodystructure() else {
             return Ok(Some(BodyPreviewFetchSpec {
                 parts: vec![BodyPartSpec {
@@ -2685,6 +2798,7 @@ async fn fetch_body_part_specs(
                     internal_timestamp,
                     size,
                     attachments: Vec::new(),
+                    envelope,
                 },
             }));
         };
@@ -2695,6 +2809,7 @@ async fn fetch_body_part_specs(
             internal_timestamp,
             size,
             attachments,
+            envelope,
         };
         let specs = body_preview_part_specs(bodystructure);
         if specs.is_empty() {
@@ -3316,7 +3431,7 @@ mod tests {
 
         assert_eq!(
             uid_fetch_bodystructure_query(42).unwrap(),
-            "(UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER])"
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER])"
         );
         assert!(uid_fetch_bodystructure_query(0).is_err());
         assert_eq!(
@@ -3365,6 +3480,7 @@ mod tests {
             internal_timestamp: Some(1_700_000_000),
             size: 1024,
             attachments: Vec::new(),
+            ..Default::default()
         };
 
         let part = metadata_only_body_preview_part(&flags, &crypto, &metadata).unwrap();
@@ -3379,6 +3495,63 @@ mod tests {
             metadata_only_body_preview_part(&[], &Default::default(), &Default::default())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn legacy_message_envelope_metadata_formats_mailso_fallback_fields() {
+        let envelope = imap_proto::Envelope {
+            date: Some(Cow::Borrowed(b"Tue, 1 Jul 2003 10:52:37 CEST")),
+            subject: Some(Cow::Borrowed(
+                b"=?UTF-8?Q?Envelope_=C3=84?= =?UTF-8?Q?subject?=",
+            )),
+            from: Some(vec![test_envelope_address(
+                Some("=?UTF-8?Q?Envelope_=C3=84_Sender?="),
+                Some("sender"),
+                Some("example.com"),
+            )]),
+            sender: Some(vec![test_envelope_address(
+                Some("Actual Sender"),
+                Some("actual"),
+                Some("example.com"),
+            )]),
+            reply_to: Some(vec![test_envelope_address(
+                None,
+                Some("reply"),
+                Some("example.com"),
+            )]),
+            to: Some(vec![test_envelope_address(
+                Some("Recipient"),
+                Some("recipient"),
+                Some("example.com"),
+            )]),
+            cc: Some(vec![test_envelope_address(
+                None,
+                Some("cc"),
+                Some("example.com"),
+            )]),
+            bcc: Some(vec![test_envelope_address(
+                None,
+                Some("hidden"),
+                Some("example.com"),
+            )]),
+            in_reply_to: Some(Cow::Borrowed(b"<parent@example.com>")),
+            message_id: Some(Cow::Borrowed(b"<message@example.com>")),
+        };
+
+        let metadata = legacy_message_envelope_metadata(&envelope);
+
+        assert_eq!(metadata.subject, "Envelope Äsubject");
+        assert_eq!(metadata.message_id, "<message@example.com>");
+        assert_eq!(metadata.in_reply_to, "<parent@example.com>");
+        assert_eq!(
+            metadata.from,
+            vec!["Envelope Ä Sender <sender@example.com>"]
+        );
+        assert_eq!(metadata.sender, vec!["Actual Sender <actual@example.com>"]);
+        assert_eq!(metadata.reply_to, vec!["reply@example.com"]);
+        assert_eq!(metadata.to, vec!["Recipient <recipient@example.com>"]);
+        assert_eq!(metadata.cc, vec!["cc@example.com"]);
+        assert_eq!(metadata.bcc, vec!["hidden@example.com"]);
     }
 
     #[test]
@@ -4705,6 +4878,19 @@ mod tests {
             bcc: None,
             in_reply_to: None,
             message_id: None,
+        }
+    }
+
+    fn test_envelope_address(
+        name: Option<&'static str>,
+        mailbox: Option<&'static str>,
+        host: Option<&'static str>,
+    ) -> imap_proto::Address<'static> {
+        imap_proto::Address {
+            name: name.map(|value| Cow::Borrowed(value.as_bytes())),
+            adl: None,
+            mailbox: mailbox.map(|value| Cow::Borrowed(value.as_bytes())),
+            host: host.map(|value| Cow::Borrowed(value.as_bytes())),
         }
     }
 
