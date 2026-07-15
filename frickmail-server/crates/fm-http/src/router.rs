@@ -26,8 +26,8 @@ use base64::{
 use chrono::{Duration as ChronoDuration, Local, Utc};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
-    append_raw_message, append_raw_message_without_flags, apply_imap_rules, copy_messages,
-    delete_messages, fetch_legacy_folder_information, fetch_legacy_message_list,
+    append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
+    copy_messages, delete_messages, fetch_legacy_folder_information, fetch_legacy_message_list,
     fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
     legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
     legacy_message_list_params_hash, move_messages, set_mailbox_subscription, store_message_flag,
@@ -792,6 +792,9 @@ async fn native_compat_response(
         ),
         "FolderSubscribe" => {
             Some(native_legacy_folder_subscribe(state, original_action, payload, session).await)
+        }
+        "FolderClear" => {
+            Some(native_legacy_folder_clear(state, original_action, payload, session).await)
         }
         "MessageSetSeen" => Some(
             native_legacy_message_store_flag(
@@ -5501,6 +5504,52 @@ where
     )
     .await
     .map_err(|_| FrickmailError::Upstream("Folder subscription update timed out".to_string()));
+
+    legacy_message_bool_response(original_action, result)
+}
+
+async fn native_legacy_folder_clear(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_clear_with_clearer(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder| async move { clear_mailbox(config, &password, &folder).await },
+    )
+    .await
+}
+
+async fn native_legacy_folder_clear_with_clearer<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    clearer: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+
+    let result = tokio::time::timeout(mutation_deadline, clearer(config, password, folder))
+        .await
+        .map_err(|_| FrickmailError::Upstream("Folder clear timed out".to_string()));
 
     legacy_message_bool_response(original_action, result)
 }
@@ -14155,6 +14204,46 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(password, "imap-secret");
         assert_eq!(folder, "Archive");
         assert!(!subscribe);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_clear_uses_selected_account() {
+        let key = [52_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1824, 1825, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1825 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_clear = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_clear_with_clearer(
+            &state,
+            "FolderClear",
+            &json!({"folder": "Archive"}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder| {
+                let captured = Arc::clone(&captured_for_clear);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderClear");
+        assert_eq!(body["Result"], true);
+        let (config, password, folder) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Archive");
     }
 
     #[tokio::test]

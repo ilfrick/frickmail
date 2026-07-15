@@ -647,6 +647,20 @@ pub async fn set_mailbox_subscription(
     result
 }
 
+pub async fn clear_mailbox(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+
+    let mut session = login(config, password).await?;
+    let selected = timeout_imap("select mailbox", session.select(mailbox)).await?;
+    let result = clear_mailbox_in_session(&mut session, selected.exists).await;
+    logout_quietly(session).await;
+    result
+}
+
 pub async fn store_message_flag(
     config: ImapConnectionConfig,
     password: &str,
@@ -2751,6 +2765,29 @@ async fn delete_rule_messages(
             .is_some()
         {}
     }
+
+    Ok(())
+}
+
+async fn clear_mailbox_in_session(session: &mut BoxedSession, exists: u32) -> Result<()> {
+    if exists == 0 {
+        return Ok(());
+    }
+
+    drain_sequence_store(
+        session,
+        "1:*",
+        "+FLAGS.SILENT (\\Deleted)",
+        "mark folder messages deleted",
+    )
+    .await?;
+
+    let expunged = timeout_imap("expunge cleared folder messages", session.expunge()).await?;
+    pin_mut!(expunged);
+    while timeout_imap("read clear folder expunge response", expunged.try_next())
+        .await?
+        .is_some()
+    {}
 
     Ok(())
 }
