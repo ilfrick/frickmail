@@ -517,6 +517,7 @@ struct ImapRuleCapabilities {
 struct ImapFetchMetadataCapabilities {
     supports_gmail_id: bool,
     uses_utf8_search: bool,
+    supports_within: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1451,11 +1452,50 @@ fn legacy_message_list_search_fields(search: &str) -> Vec<(String, String)> {
         .split_once(':')
         .is_some_and(|(name, _)| legacy_message_list_search_name(name).is_some());
     if !starts_with_prefixed_field {
-        let fields = serde_urlencoded::from_str::<Vec<(String, String)>>(search)
-            .unwrap_or_default()
+        enum QueryValue {
+            Scalar(String),
+            Array(Vec<String>),
+        }
+
+        let mut params = Vec::<(String, QueryValue)>::new();
+        for (raw_name, value) in
+            serde_urlencoded::from_str::<Vec<(String, String)>>(search).unwrap_or_default()
+        {
+            let (name, is_array) = raw_name
+                .strip_suffix("[]")
+                .map(|name| (name, true))
+                .unwrap_or((raw_name.as_str(), false));
+            if let Some((_, current)) = params
+                .iter_mut()
+                .find(|(current_name, _)| current_name == name)
+            {
+                if is_array {
+                    match current {
+                        QueryValue::Array(values) => values.push(value),
+                        QueryValue::Scalar(_) => *current = QueryValue::Array(vec![value]),
+                    }
+                } else {
+                    *current = QueryValue::Scalar(value);
+                }
+            } else {
+                params.push((
+                    name.to_string(),
+                    if is_array {
+                        QueryValue::Array(vec![value])
+                    } else {
+                        QueryValue::Scalar(value)
+                    },
+                ));
+            }
+        }
+
+        let fields = params
             .into_iter()
             .flat_map(|(name, value)| {
-                let name = name.trim_end_matches("[]");
+                let value = match value {
+                    QueryValue::Scalar(value) => value,
+                    QueryValue::Array(values) => values.join(","),
+                };
                 if name.eq_ignore_ascii_case("IS") {
                     return value
                         .split(',')
@@ -1667,6 +1707,59 @@ fn legacy_message_list_friendly_size(value: &str) -> Result<u32> {
     })
 }
 
+fn legacy_message_list_positive_seconds(value: &str) -> Result<Option<u32>> {
+    let value = legacy_php_trim(value);
+    let bytes = value.as_bytes();
+    let mut cursor = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let mut digits = 0;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+        cursor += 1;
+        digits += 1;
+    }
+    if bytes.get(cursor) == Some(&b'.') {
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return Ok(None);
+    }
+    if matches!(bytes.get(cursor), Some(b'e' | b'E')) {
+        let exponent = cursor;
+        cursor += 1;
+        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
+            cursor += 1;
+        }
+        let exponent_digits = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor == exponent_digits {
+            cursor = exponent;
+        }
+    }
+    let seconds = value[..cursor].parse::<f64>().map_err(|_| {
+        FrickmailError::BadRequest("message-list search interval is too large".to_string())
+    })?;
+    if !seconds.is_finite() {
+        return Err(FrickmailError::BadRequest(
+            "message-list search interval is too large".to_string(),
+        ));
+    }
+    let seconds = seconds.trunc();
+    if seconds <= 0.0 {
+        return Ok(None);
+    }
+    if seconds > f64::from(u32::MAX) {
+        return Err(FrickmailError::BadRequest(
+            "message-list search interval exceeds the IMAP4rev1 numeric limit".to_string(),
+        ));
+    }
+    Ok(Some(seconds as u32))
+}
+
 fn legacy_message_list_header_criterion(value: &str) -> Result<String> {
     let Some((field, search)) = value.split_once(' ') else {
         return Err(FrickmailError::BadRequest(
@@ -1693,6 +1786,20 @@ pub fn legacy_message_list_search_criteria_with_fast_simple_search(
     search: &str,
     hide_deleted: bool,
     fast_simple_search: bool,
+) -> Result<String> {
+    legacy_message_list_search_criteria_with_capabilities(
+        search,
+        hide_deleted,
+        fast_simple_search,
+        false,
+    )
+}
+
+fn legacy_message_list_search_criteria_with_capabilities(
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+    supports_within: bool,
 ) -> Result<String> {
     let search = legacy_php_trim(search);
     let fields = legacy_message_list_search_fields(search);
@@ -1780,6 +1887,13 @@ pub fn legacy_message_list_search_criteria_with_fast_simple_search(
                     "{name} {}",
                     legacy_message_list_friendly_size(value)?
                 )),
+                "OLDER" | "YOUNGER" => {
+                    if supports_within {
+                        if let Some(seconds) = legacy_message_list_positive_seconds(value)? {
+                            criteria.push(format!("{name} {seconds}"));
+                        }
+                    }
+                }
                 "SINCE" => {
                     if let Some(date) = legacy_message_list_search_date(value) {
                         since_filter = Some(
@@ -1836,7 +1950,7 @@ pub fn legacy_message_list_search_criteria_with_fast_simple_search(
                 "UNREAD" => criteria.push("UNSEEN".to_string()),
                 "FLAGGED" | "UNFLAGGED" | "SEEN" | "UNSEEN" | "ANSWERED" | "UNANSWERED"
                 | "DELETED" | "UNDELETED" => criteria.push(name.clone()),
-                "FROM" | "TO" => {}
+                "FROM" | "TO" | "IN" => {}
                 unsupported => {
                     return Err(FrickmailError::BadRequest(format!(
                         "message-list search filter '{unsupported}' is not migrated yet"
@@ -1877,11 +1991,13 @@ fn legacy_message_list_search_wire(
     hide_deleted: bool,
     fast_simple_search: bool,
     utf8_mode: bool,
+    supports_within: bool,
 ) -> Result<LegacyMessageListSearchWire> {
-    let criteria = legacy_message_list_search_criteria_with_fast_simple_search(
+    let criteria = legacy_message_list_search_criteria_with_capabilities(
         search,
         hide_deleted,
         fast_simple_search,
+        supports_within,
     )?;
     let needs_utf8_charset = !utf8_mode && !criteria.is_ascii();
     if !needs_utf8_charset {
@@ -1956,9 +2072,11 @@ async fn legacy_message_list_visible_uids(
     search: &str,
     hide_deleted: bool,
     utf8_mode: bool,
+    supports_within: bool,
 ) -> Result<Vec<u32>> {
     let operation = "search legacy message list";
-    let wire = legacy_message_list_search_wire(search, hide_deleted, true, utf8_mode)?;
+    let wire =
+        legacy_message_list_search_wire(search, hide_deleted, true, utf8_mode, supports_within)?;
     timeout_result(
         operation,
         timeout(COMMAND_TIMEOUT, async {
@@ -2484,6 +2602,7 @@ async fn legacy_message_list_in_session(
             &request.search,
             request.hide_deleted,
             capabilities.uses_utf8_search,
+            capabilities.supports_within,
         )
         .await?;
         let total = u32::try_from(matching_uids.len()).unwrap_or(u32::MAX);
@@ -4036,6 +4155,7 @@ async fn imap_fetch_metadata_capabilities(
     Ok(ImapFetchMetadataCapabilities {
         supports_gmail_id: has_capability_ignore_ascii_case(&capabilities, "X-GM-EXT-1"),
         uses_utf8_search: capabilities.iter().any(is_legacy_utf8_capability),
+        supports_within: has_capability_ignore_ascii_case(&capabilities, "WITHIN"),
     })
 }
 
@@ -7231,6 +7351,23 @@ mod tests {
         expected_criteria: &'static str,
         response: &'static str,
     ) -> Result<Vec<u32>> {
+        run_scripted_visible_uid_search_with_capabilities(
+            search_value,
+            hide_deleted,
+            false,
+            expected_criteria,
+            response,
+        )
+        .await
+    }
+
+    async fn run_scripted_visible_uid_search_with_capabilities(
+        search_value: &'static str,
+        hide_deleted: bool,
+        supports_within: bool,
+        expected_criteria: &'static str,
+        response: &'static str,
+    ) -> Result<Vec<u32>> {
         use tokio::io::AsyncWriteExt as _;
 
         let (client_stream, mut server_stream) = tokio::io::duplex(512);
@@ -7253,8 +7390,14 @@ mod tests {
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let result =
-            legacy_message_list_visible_uids(&mut session, search_value, hide_deleted, true).await;
+        let result = legacy_message_list_visible_uids(
+            &mut session,
+            search_value,
+            hide_deleted,
+            true,
+            supports_within,
+        )
+        .await;
         server.await.unwrap();
         result
     }
@@ -7286,6 +7429,22 @@ mod tests {
             .await
             .unwrap(),
             vec![9, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_list_uid_search_sends_within_capability_criteria() {
+        assert_eq!(
+            run_scripted_visible_uid_search_with_capabilities(
+                "older=3600",
+                true,
+                true,
+                "OLDER 3600 UNDELETED",
+                "* SEARCH 11\r\nA0002 OK searched\r\n",
+            )
+            .await
+            .unwrap(),
+            vec![11]
         );
     }
 
@@ -7335,7 +7494,8 @@ mod tests {
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
         let result =
-            legacy_message_list_visible_uids(&mut session, "subject:café", true, utf8_mode).await;
+            legacy_message_list_visible_uids(&mut session, "subject:café", true, utf8_mode, false)
+                .await;
         server.await.unwrap();
         result
     }
@@ -7519,16 +7679,66 @@ mod tests {
     }
 
     #[test]
+    fn message_list_search_criteria_gates_within_intervals() {
+        assert_eq!(
+            legacy_message_list_search_criteria_with_capabilities(
+                "older=3600seconds&younger=7200",
+                true,
+                true,
+                true,
+            )
+            .unwrap(),
+            "OLDER 3600 YOUNGER 7200 UNDELETED"
+        );
+        for (search, expected) in [
+            ("older=1e3", "OLDER 1000 UNDELETED"),
+            ("older=1.5e3", "OLDER 1500 UNDELETED"),
+            ("older=.5e3", "OLDER 500 UNDELETED"),
+            ("older%5B%5D=3600&older%5B%5D=7200", "OLDER 3600 UNDELETED"),
+        ] {
+            assert_eq!(
+                legacy_message_list_search_criteria_with_capabilities(search, true, true, true,)
+                    .unwrap(),
+                expected
+            );
+        }
+        for search in ["older=0", "older=-1", "older=none", "older=1e-3"] {
+            assert_eq!(
+                legacy_message_list_search_criteria_with_capabilities(search, true, true, true,)
+                    .unwrap(),
+                "UNDELETED"
+            );
+        }
+        assert_eq!(
+            legacy_message_list_search_criteria_with_capabilities(
+                "older=3600",
+                false,
+                true,
+                false,
+            )
+            .unwrap(),
+            "ALL"
+        );
+        assert!(legacy_message_list_search_criteria_with_capabilities(
+            "older=4294967296",
+            true,
+            true,
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn message_list_search_wire_frames_non_ascii_for_legacy_imap() {
         assert_eq!(
-            legacy_message_list_search_wire("subject:café", true, true, true).unwrap(),
+            legacy_message_list_search_wire("subject:café", true, true, true, false).unwrap(),
             LegacyMessageListSearchWire {
                 chunks: vec!["SUBJECT \"café\" UNDELETED".to_string()],
                 needs_utf8_charset: false,
             }
         );
         assert_eq!(
-            legacy_message_list_search_wire("subject:café", true, true, false).unwrap(),
+            legacy_message_list_search_wire("subject:café", true, true, false, false).unwrap(),
             LegacyMessageListSearchWire {
                 chunks: vec!["SUBJECT {5}".to_string(), "café UNDELETED".to_string(),],
                 needs_utf8_charset: true,
