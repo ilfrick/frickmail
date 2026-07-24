@@ -1406,6 +1406,63 @@ pub fn legacy_message_list_fetches_new_messages(thread_uid: u32) -> bool {
     thread_uid == 0
 }
 
+fn legacy_message_list_visibility_search(hide_deleted: bool) -> &'static str {
+    if hide_deleted {
+        "UNDELETED"
+    } else {
+        "ALL"
+    }
+}
+
+async fn legacy_message_list_visible_uids(
+    session: &mut BoxedSession,
+    hide_deleted: bool,
+) -> Result<Vec<u32>> {
+    let operation = "search legacy message list";
+    let command = format!(
+        "UID SEARCH {}",
+        legacy_message_list_visibility_search(hide_deleted)
+    );
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(&command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut uids = Vec::new();
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                if let Response::MailboxData(MailboxDatum::Search(found)) = response.parsed() {
+                    uids.extend(found.iter().copied());
+                }
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(uids);
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+fn legacy_message_list_page_uids(uids: &[u32], offset: u32, limit: u32) -> Vec<u32> {
+    uids.iter()
+        .copied()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect()
+}
+
 pub fn legacy_new_messages_mailbox_matches(mailbox: &str) -> bool {
     mailbox == "INBOX"
 }
@@ -1833,16 +1890,24 @@ async fn legacy_message_list_in_session(
         client_hash,
     )
     .await?;
-    let total = folder.total_emails.unwrap_or_default();
+    let folder_total = folder.total_emails.unwrap_or_default();
     let limit = legacy_message_list_limit(request.limit);
-    let range = message_list_sequence_range(total, request.offset, limit);
-    let mut messages = Vec::new();
+    let (mut matching_uids, total) = if folder_total == 0 || request.offset > folder_total {
+        (Vec::new(), folder_total)
+    } else {
+        let matching_uids = legacy_message_list_visible_uids(session, request.hide_deleted).await?;
+        let total = u32::try_from(matching_uids.len()).unwrap_or(u32::MAX);
+        (matching_uids, total)
+    };
+    matching_uids.sort_unstable_by(|left, right| right.cmp(left));
+    let page_uids = legacy_message_list_page_uids(&matching_uids, request.offset, limit);
+    let mut messages_by_uid = HashMap::new();
 
-    if let Some(range) = range {
+    if let Some(uid_set) = legacy_uid_sequence_set(&page_uids) {
         let mut fetches = timeout_imap(
             "fetch legacy message list",
-            session.fetch(
-                range,
+            session.uid_fetch(
+                uid_set,
                 legacy_message_list_fetch_query_with_gmail_id(capabilities.supports_gmail_id),
             ),
         )
@@ -1865,12 +1930,13 @@ async fn legacy_message_list_in_session(
                 header,
                 fetch.gmail_msg_id().map(u64::to_string),
             );
-            if legacy_message_list_keeps_flags(&summary.flags, request.hide_deleted) {
-                messages.push(summary);
-            }
+            messages_by_uid.insert(uid, summary);
         }
-        messages.sort_by_key(|message| std::cmp::Reverse(message.uid));
     }
+    let messages = page_uids
+        .iter()
+        .filter_map(|uid| messages_by_uid.remove(uid))
+        .collect();
 
     Ok(LegacyMessageList {
         folder,
@@ -6528,6 +6594,91 @@ mod tests {
         assert_eq!(message_list_sequence_range(5, 4, 20), Some("1".to_string()));
         assert_eq!(message_list_sequence_range(5, 5, 20), None);
         assert_eq!(message_list_sequence_range(5, 0, 0), None);
+    }
+
+    #[test]
+    fn message_list_visibility_search_filters_deleted_before_paging() {
+        assert_eq!(legacy_message_list_visibility_search(true), "UNDELETED");
+        assert_eq!(legacy_message_list_visibility_search(false), "ALL");
+    }
+
+    async fn read_scripted_imap_command(stream: &mut tokio::io::DuplexStream) -> String {
+        use tokio::io::AsyncWriteExt as _;
+
+        let mut command = Vec::new();
+        let mut buffer = [0_u8; 128];
+        loop {
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert!(count > 0, "IMAP client closed before sending command");
+            command.extend_from_slice(&buffer[..count]);
+            if command.ends_with(b"\r\n") {
+                return String::from_utf8(command).unwrap();
+            }
+            stream.flush().await.unwrap();
+        }
+    }
+
+    async fn run_scripted_visible_uid_search(response: &'static str) -> Result<Vec<u32>> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let search = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(search, "A0002 UID SEARCH UNDELETED\r\n");
+            server_stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let result = legacy_message_list_visible_uids(&mut session, true).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn message_list_uid_search_collects_ids_and_validates_success_completion() {
+        assert_eq!(
+            run_scripted_visible_uid_search("* SEARCH 105 74 99\r\nA0002 OK searched\r\n")
+                .await
+                .unwrap(),
+            vec![105, 74, 99]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_list_uid_search_rejects_no_bad_and_bye_responses() {
+        for response in [
+            "A0002 NO search rejected\r\n",
+            "A0002 BAD invalid search\r\n",
+            "* BYE server shutting down\r\n",
+        ] {
+            let error = run_scripted_visible_uid_search(response).await.unwrap_err();
+            assert!(error
+                .public_message()
+                .contains("search legacy message list"));
+            assert!(error.public_message().contains("failed"));
+        }
+    }
+
+    #[test]
+    fn message_list_uid_pages_preserve_selected_order_and_bounds() {
+        let uids = [105, 99, 74, 51, 12];
+        assert_eq!(legacy_message_list_page_uids(&uids, 0, 2), vec![105, 99]);
+        assert_eq!(legacy_message_list_page_uids(&uids, 2, 2), vec![74, 51]);
+        assert_eq!(legacy_message_list_page_uids(&uids, 4, 10), vec![12]);
+        assert!(legacy_message_list_page_uids(&uids, 5, 10).is_empty());
+        assert!(legacy_message_list_page_uids(&uids, 0, 0).is_empty());
     }
 
     #[test]
