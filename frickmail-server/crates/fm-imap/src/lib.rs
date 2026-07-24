@@ -515,6 +515,7 @@ struct ImapRuleCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ImapFetchMetadataCapabilities {
     supports_gmail_id: bool,
+    uses_utf8_search: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1406,31 +1407,472 @@ pub fn legacy_message_list_fetches_new_messages(thread_uid: u32) -> bool {
     thread_uid == 0
 }
 
-fn legacy_message_list_visibility_search(hide_deleted: bool) -> &'static str {
-    if hide_deleted {
-        "UNDELETED"
-    } else {
-        "ALL"
+const LEGACY_MESSAGE_LIST_SEARCH_NAMES: &[&str] = &[
+    "IN",
+    "EMAIL",
+    "MAIL",
+    "FROM",
+    "TO",
+    "SUBJECT",
+    "HAS",
+    "IS",
+    "DATE",
+    "SINCE",
+    "BEFORE",
+    "TEXT",
+    "BODY",
+    "SIZE",
+    "LARGER",
+    "BIGGER",
+    "SMALLER",
+    "MAXSIZE",
+    "MINSIZE",
+    "KEYWORD",
+    "OLDER_THAN",
+    "NEWER_THAN",
+    "ON",
+    "SENTON",
+    "SENTSINCE",
+    "SENTBEFORE",
+    "HEADER",
+];
+
+fn legacy_message_list_search_name(name: &str) -> Option<&'static str> {
+    let name = name.trim_end_matches("[]");
+    LEGACY_MESSAGE_LIST_SEARCH_NAMES
+        .iter()
+        .copied()
+        .find(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+fn legacy_message_list_search_fields(search: &str) -> Vec<(String, String)> {
+    let starts_with_prefixed_field = search
+        .split_once(':')
+        .is_some_and(|(name, _)| legacy_message_list_search_name(name).is_some());
+    if !starts_with_prefixed_field {
+        let fields = serde_urlencoded::from_str::<Vec<(String, String)>>(search)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(name, value)| {
+                let name = name.trim_end_matches("[]");
+                if name.eq_ignore_ascii_case("IS") {
+                    return value
+                        .split(',')
+                        .map(|flag| (flag.trim().to_ascii_uppercase(), String::new()))
+                        .collect::<Vec<_>>();
+                }
+                let uppercase = name.to_ascii_uppercase();
+                let name = match uppercase.as_str() {
+                    "MAIL" => "EMAIL",
+                    "TEXT" => "BODY",
+                    "SIZE" | "BIGGER" | "MINSIZE" => "LARGER",
+                    "MAXSIZE" => "SMALLER",
+                    name => name,
+                };
+                if matches!(
+                    name,
+                    "BODY"
+                        | "EMAIL"
+                        | "FROM"
+                        | "TO"
+                        | "SUBJECT"
+                        | "KEYWORD"
+                        | "IN"
+                        | "SMALLER"
+                        | "LARGER"
+                        | "SINCE"
+                        | "ON"
+                        | "SENTON"
+                        | "SENTSINCE"
+                        | "SENTBEFORE"
+                        | "BEFORE"
+                        | "OLDER"
+                        | "YOUNGER"
+                        | "HEADER"
+                        | "ATTACHMENT"
+                        | "FLAGGED"
+                        | "UNFLAGGED"
+                        | "SEEN"
+                        | "UNSEEN"
+                        | "ANSWERED"
+                        | "UNANSWERED"
+                        | "DELETED"
+                        | "UNDELETED"
+                ) {
+                    vec![(name.to_string(), value)]
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<_>>();
+        return legacy_message_list_unique_search_fields(fields);
     }
+
+    let bytes = search.as_bytes();
+    let mut fields = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        let name_start = cursor;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b':')
+        {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b':') {
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| !byte.is_ascii_whitespace())
+            {
+                cursor += 1;
+            }
+            continue;
+        }
+        let name = &search[name_start..cursor];
+        cursor += 1;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+
+        let mut value = Vec::new();
+        if let Some(quote @ (b'"' | b'\'')) = bytes.get(cursor).copied() {
+            cursor += 1;
+            while let Some(byte) = bytes.get(cursor).copied() {
+                cursor += 1;
+                if byte == quote {
+                    break;
+                }
+                if byte == b'\\' {
+                    if let Some(escaped) = bytes.get(cursor).copied() {
+                        value.push(escaped);
+                        cursor += 1;
+                    }
+                } else {
+                    value.push(byte);
+                }
+            }
+        } else {
+            while let Some(byte) = bytes.get(cursor).copied() {
+                if byte.is_ascii_whitespace() {
+                    break;
+                }
+                value.push(byte);
+                cursor += 1;
+            }
+        }
+
+        if let Some(name) = legacy_message_list_search_name(name) {
+            let value = String::from_utf8_lossy(&value).into_owned();
+            if name == "HAS"
+                && matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "file" | "files" | "attachment" | "attachments"
+                )
+            {
+                fields.push(("ATTACHMENT".to_string(), String::new()));
+            } else if name == "IS" {
+                fields.extend(
+                    value
+                        .split(',')
+                        .map(|flag| (flag.trim().to_ascii_uppercase(), String::new())),
+                );
+            } else {
+                let normalized = match name {
+                    "MAIL" => "EMAIL",
+                    "TEXT" => "BODY",
+                    "SIZE" | "BIGGER" | "MINSIZE" => "LARGER",
+                    "MAXSIZE" => "SMALLER",
+                    _ => name,
+                };
+                fields.push((normalized.to_string(), value));
+            }
+        }
+    }
+    legacy_message_list_unique_search_fields(fields)
+}
+
+fn legacy_message_list_unique_search_fields(
+    fields: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut unique = Vec::<(String, String)>::new();
+    for (name, value) in fields {
+        if let Some((_, current)) = unique.iter_mut().find(|(current, _)| current == &name) {
+            *current = value;
+        } else {
+            unique.push((name, value));
+        }
+    }
+    unique
+}
+
+pub fn legacy_message_list_search_criteria(search: &str, hide_deleted: bool) -> Result<String> {
+    legacy_message_list_search_criteria_with_fast_simple_search(search, hide_deleted, true)
+}
+
+pub fn legacy_message_list_search_criteria_with_fast_simple_search(
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+) -> Result<String> {
+    let search = legacy_php_trim(search);
+    let fields = legacy_message_list_search_fields(search);
+    let has_parsed_fields = fields.iter().any(|(name, value)| {
+        matches!(
+            name.as_str(),
+            "ATTACHMENT"
+                | "FLAGGED"
+                | "UNFLAGGED"
+                | "SEEN"
+                | "UNSEEN"
+                | "ANSWERED"
+                | "UNANSWERED"
+                | "DELETED"
+                | "UNDELETED"
+                | "READ"
+                | "UNREAD"
+        ) || !value.trim().is_empty()
+    });
+    let mut criteria = Vec::new();
+
+    if !search.is_empty() && !has_parsed_fields {
+        let value = imap_quote_message_list_search_value(search)?;
+        criteria.push(if fast_simple_search {
+            format!("OR OR OR FROM {value} TO {value} CC {value} SUBJECT {value}")
+        } else {
+            format!("TEXT {value}")
+        });
+    } else {
+        let email = fields
+            .iter()
+            .rev()
+            .find(|(name, value)| name == "EMAIL" && !value.trim().is_empty())
+            .map(|(_, value)| value.as_str());
+        if let Some(email) = email {
+            let value = imap_quote_message_list_search_value(email)?;
+            criteria.push(format!("OR OR FROM {value} TO {value} CC {value}"));
+        }
+
+        for (name, value) in &fields {
+            if value.trim().is_empty()
+                && !matches!(
+                    name.as_str(),
+                    "ATTACHMENT"
+                        | "FLAGGED"
+                        | "UNFLAGGED"
+                        | "SEEN"
+                        | "UNSEEN"
+                        | "ANSWERED"
+                        | "UNANSWERED"
+                        | "DELETED"
+                        | "UNDELETED"
+                        | "READ"
+                        | "UNREAD"
+                )
+            {
+                continue;
+            }
+            match name.as_str() {
+                "EMAIL" => {}
+                "FROM" if email.is_none() => criteria.push(format!(
+                    "FROM {}",
+                    imap_quote_message_list_search_value(value)?
+                )),
+                "TO" if email.is_none() => {
+                    let value = imap_quote_message_list_search_value(value)?;
+                    criteria.push(format!("OR TO {value} CC {value}"));
+                }
+                "SUBJECT" | "BODY" => criteria.push(format!(
+                    "{name} {}",
+                    imap_quote_message_list_search_value(value)?
+                )),
+                "ATTACHMENT" => criteria.push(
+                    "OR OR OR HEADER Content-Type \"application/\" \
+                     HEADER Content-Type \"multipart/m\" \
+                     HEADER Content-Type \"multipart/signed\" \
+                     HEADER Content-Type \"multipart/report\""
+                        .to_string(),
+                ),
+                "READ" => criteria.push("SEEN".to_string()),
+                "UNREAD" => criteria.push("UNSEEN".to_string()),
+                "FLAGGED" | "UNFLAGGED" | "SEEN" | "UNSEEN" | "ANSWERED" | "UNANSWERED"
+                | "DELETED" | "UNDELETED" => criteria.push(name.clone()),
+                "FROM" | "TO" => {}
+                unsupported => {
+                    return Err(FrickmailError::BadRequest(format!(
+                        "message-list search filter '{unsupported}' is not migrated yet"
+                    )));
+                }
+            }
+        }
+    }
+
+    if hide_deleted
+        && !criteria
+            .iter()
+            .any(|criterion| criterion == "DELETED" || criterion == "UNDELETED")
+    {
+        criteria.push("UNDELETED".to_string());
+    }
+    Ok(if criteria.is_empty() {
+        "ALL".to_string()
+    } else {
+        criteria.join(" ")
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LegacyMessageListSearchWire {
+    chunks: Vec<String>,
+    needs_utf8_charset: bool,
+}
+
+fn legacy_message_list_search_wire(
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+    utf8_mode: bool,
+) -> Result<LegacyMessageListSearchWire> {
+    let criteria = legacy_message_list_search_criteria_with_fast_simple_search(
+        search,
+        hide_deleted,
+        fast_simple_search,
+    )?;
+    let needs_utf8_charset = !utf8_mode && !criteria.is_ascii();
+    if !needs_utf8_charset {
+        return Ok(LegacyMessageListSearchWire {
+            chunks: vec![criteria],
+            needs_utf8_charset,
+        });
+    }
+
+    let bytes = criteria.as_bytes();
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'"' {
+            let ch = criteria[cursor..].chars().next().ok_or_else(|| {
+                FrickmailError::Upstream("invalid message-list search criteria".to_string())
+            })?;
+            chunk.push(ch);
+            cursor += ch.len_utf8();
+            continue;
+        }
+
+        let quoted_start = cursor;
+        cursor += 1;
+        let mut value = String::new();
+        let mut closed = false;
+        while cursor < bytes.len() {
+            let ch = criteria[cursor..].chars().next().ok_or_else(|| {
+                FrickmailError::Upstream("invalid message-list search criteria".to_string())
+            })?;
+            cursor += ch.len_utf8();
+            if ch == '"' {
+                closed = true;
+                break;
+            }
+            if ch == '\\' {
+                let escaped = criteria[cursor..].chars().next().ok_or_else(|| {
+                    FrickmailError::Upstream(
+                        "invalid escaped message-list search criteria".to_string(),
+                    )
+                })?;
+                value.push(escaped);
+                cursor += escaped.len_utf8();
+            } else {
+                value.push(ch);
+            }
+        }
+        if !closed {
+            return Err(FrickmailError::Upstream(
+                "unterminated message-list search criteria".to_string(),
+            ));
+        }
+        if value.is_ascii() {
+            chunk.push_str(&criteria[quoted_start..cursor]);
+            continue;
+        }
+
+        chunk.push_str(&format!("{{{}}}", value.len()));
+        chunks.push(chunk);
+        chunk = value;
+    }
+    chunks.push(chunk);
+    Ok(LegacyMessageListSearchWire {
+        chunks,
+        needs_utf8_charset,
+    })
 }
 
 async fn legacy_message_list_visible_uids(
     session: &mut BoxedSession,
+    search: &str,
     hide_deleted: bool,
+    utf8_mode: bool,
 ) -> Result<Vec<u32>> {
     let operation = "search legacy message list";
-    let command = format!(
-        "UID SEARCH {}",
-        legacy_message_list_visibility_search(hide_deleted)
-    );
+    let wire = legacy_message_list_search_wire(search, hide_deleted, true, utf8_mode)?;
     timeout_result(
         operation,
         timeout(COMMAND_TIMEOUT, async {
+            let mut chunks = wire.chunks.into_iter();
+            let first = chunks.next().ok_or_else(|| {
+                FrickmailError::Upstream("empty message-list search command".to_string())
+            })?;
+            let charset = if wire.needs_utf8_charset {
+                " CHARSET UTF-8"
+            } else {
+                ""
+            };
+            let command = format!("UID SEARCH{charset} {first}");
             let request_id = session
                 .run_command(&command)
                 .await
                 .map_err(|error| imap_error(operation, error))?;
             let mut uids = Vec::new();
+
+            for chunk in chunks {
+                loop {
+                    let response = session
+                        .read_response()
+                        .await
+                        .map_err(|error| {
+                            FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                        })?
+                        .ok_or_else(|| {
+                            FrickmailError::Upstream(format!(
+                                "{operation} failed: IMAP connection closed"
+                            ))
+                        })?;
+                    if let Response::MailboxData(MailboxDatum::Search(found)) = response.parsed() {
+                        uids.extend(found.iter().copied());
+                    }
+                    if matches!(response.parsed(), Response::Continue { .. }) {
+                        break;
+                    }
+                    if imap_command_completion(response.parsed(), &request_id, operation)?.is_some()
+                    {
+                        return Err(FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP server completed before literal continuation"
+                        )));
+                    }
+                }
+                session
+                    .run_command_untagged(&chunk)
+                    .await
+                    .map_err(|error| imap_error(operation, error))?;
+            }
+
             loop {
                 let response = session
                     .read_response()
@@ -1445,6 +1887,11 @@ async fn legacy_message_list_visible_uids(
                     })?;
                 if let Response::MailboxData(MailboxDatum::Search(found)) = response.parsed() {
                     uids.extend(found.iter().copied());
+                }
+                if matches!(response.parsed(), Response::Continue { .. }) {
+                    return Err(FrickmailError::Upstream(format!(
+                        "{operation} failed: unexpected IMAP continuation"
+                    )));
                 }
                 if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
                     return Ok(uids);
@@ -1895,7 +2342,13 @@ async fn legacy_message_list_in_session(
     let (mut matching_uids, total) = if folder_total == 0 || request.offset > folder_total {
         (Vec::new(), folder_total)
     } else {
-        let matching_uids = legacy_message_list_visible_uids(session, request.hide_deleted).await?;
+        let matching_uids = legacy_message_list_visible_uids(
+            session,
+            &request.search,
+            request.hide_deleted,
+            capabilities.uses_utf8_search,
+        )
+        .await?;
         let total = u32::try_from(matching_uids.len()).unwrap_or(u32::MAX);
         (matching_uids, total)
     };
@@ -3445,6 +3898,7 @@ async fn imap_fetch_metadata_capabilities(
     let capabilities = timeout_imap("read IMAP capabilities", session.capabilities()).await?;
     Ok(ImapFetchMetadataCapabilities {
         supports_gmail_id: has_capability_ignore_ascii_case(&capabilities, "X-GM-EXT-1"),
+        uses_utf8_search: capabilities.iter().any(is_legacy_utf8_capability),
     })
 }
 
@@ -5682,6 +6136,16 @@ fn imap_quote_search_value(value: &str) -> Result<String> {
     Ok(format!("\"{escaped}\""))
 }
 
+fn imap_quote_message_list_search_value(value: &str) -> Result<String> {
+    if contains_crlf(value) || value.contains('\0') {
+        return Err(FrickmailError::BadRequest(
+            "message-list search value must not contain CR, LF, or NUL".to_string(),
+        ));
+    }
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("\"{escaped}\""))
+}
+
 fn imap_rule_any_or(criteria: &[String]) -> String {
     match criteria {
         [] => String::new(),
@@ -6597,9 +7061,15 @@ mod tests {
     }
 
     #[test]
-    fn message_list_visibility_search_filters_deleted_before_paging() {
-        assert_eq!(legacy_message_list_visibility_search(true), "UNDELETED");
-        assert_eq!(legacy_message_list_visibility_search(false), "ALL");
+    fn message_list_search_criteria_filters_deleted_before_paging() {
+        assert_eq!(
+            legacy_message_list_search_criteria("", true).unwrap(),
+            "UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("", false).unwrap(),
+            "ALL"
+        );
     }
 
     async fn read_scripted_imap_command(stream: &mut tokio::io::DuplexStream) -> String {
@@ -6618,7 +7088,12 @@ mod tests {
         }
     }
 
-    async fn run_scripted_visible_uid_search(response: &'static str) -> Result<Vec<u32>> {
+    async fn run_scripted_visible_uid_search(
+        search_value: &'static str,
+        hide_deleted: bool,
+        expected_criteria: &'static str,
+        response: &'static str,
+    ) -> Result<Vec<u32>> {
         use tokio::io::AsyncWriteExt as _;
 
         let (client_stream, mut server_stream) = tokio::io::duplex(512);
@@ -6631,7 +7106,7 @@ mod tests {
                 .unwrap();
 
             let search = read_scripted_imap_command(&mut server_stream).await;
-            assert_eq!(search, "A0002 UID SEARCH UNDELETED\r\n");
+            assert_eq!(search, format!("A0002 UID SEARCH {expected_criteria}\r\n"));
             server_stream.write_all(response.as_bytes()).await.unwrap();
         });
 
@@ -6641,7 +7116,8 @@ mod tests {
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let result = legacy_message_list_visible_uids(&mut session, true).await;
+        let result =
+            legacy_message_list_visible_uids(&mut session, search_value, hide_deleted, true).await;
         server.await.unwrap();
         result
     }
@@ -6649,11 +7125,107 @@ mod tests {
     #[tokio::test]
     async fn message_list_uid_search_collects_ids_and_validates_success_completion() {
         assert_eq!(
-            run_scripted_visible_uid_search("* SEARCH 105 74 99\r\nA0002 OK searched\r\n")
-                .await
-                .unwrap(),
+            run_scripted_visible_uid_search(
+                "",
+                true,
+                "UNDELETED",
+                "* SEARCH 105 74 99\r\nA0002 OK searched\r\n",
+            )
+            .await
+            .unwrap(),
             vec![105, 74, 99]
         );
+    }
+
+    #[tokio::test]
+    async fn message_list_uid_search_sends_compiled_search_criteria() {
+        assert_eq!(
+            run_scripted_visible_uid_search(
+                "from:alice is:unseen",
+                true,
+                "FROM \"alice\" UNSEEN UNDELETED",
+                "* SEARCH 9 3\r\nA0002 OK searched\r\n",
+            )
+            .await
+            .unwrap(),
+            vec![9, 3]
+        );
+    }
+
+    async fn run_scripted_unicode_uid_search(
+        utf8_mode: bool,
+        continuation_response: &'static str,
+    ) -> Result<Vec<u32>> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let search = read_scripted_imap_command(&mut server_stream).await;
+            if utf8_mode {
+                assert_eq!(search, "A0002 UID SEARCH SUBJECT \"café\" UNDELETED\r\n");
+                server_stream
+                    .write_all(b"* SEARCH 8\r\nA0002 OK searched\r\n")
+                    .await
+                    .unwrap();
+            } else {
+                assert_eq!(search, "A0002 UID SEARCH CHARSET UTF-8 SUBJECT {5}\r\n");
+                server_stream
+                    .write_all(continuation_response.as_bytes())
+                    .await
+                    .unwrap();
+                if continuation_response.starts_with('+') {
+                    let literal = read_scripted_imap_command(&mut server_stream).await;
+                    assert_eq!(literal, "café UNDELETED\r\n");
+                    server_stream
+                        .write_all(b"* SEARCH 8\r\nA0002 OK searched\r\n")
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let result =
+            legacy_message_list_visible_uids(&mut session, "subject:café", true, utf8_mode).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn message_list_unicode_search_uses_negotiated_utf8_or_classic_literal() {
+        assert_eq!(
+            run_scripted_unicode_uid_search(true, "").await.unwrap(),
+            vec![8]
+        );
+        assert_eq!(
+            run_scripted_unicode_uid_search(false, "+ continue\r\n")
+                .await
+                .unwrap(),
+            vec![8]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_list_unicode_search_rejects_failure_before_literal_continuation() {
+        let error = run_scripted_unicode_uid_search(false, "A0002 NO charset rejected\r\n")
+            .await
+            .unwrap_err();
+        assert!(error
+            .public_message()
+            .contains("search legacy message list"));
+        assert!(error.public_message().contains("failed"));
     }
 
     #[tokio::test]
@@ -6663,12 +7235,104 @@ mod tests {
             "A0002 BAD invalid search\r\n",
             "* BYE server shutting down\r\n",
         ] {
-            let error = run_scripted_visible_uid_search(response).await.unwrap_err();
+            let error = run_scripted_visible_uid_search("", true, "UNDELETED", response)
+                .await
+                .unwrap_err();
             assert!(error
                 .public_message()
                 .contains("search legacy message list"));
             assert!(error.public_message().contains("failed"));
         }
+    }
+
+    #[test]
+    fn message_list_search_criteria_compiles_text_address_and_state_filters() {
+        assert_eq!(
+            legacy_message_list_search_criteria("hello \"world\"", true).unwrap(),
+            "OR OR OR FROM \"hello \\\"world\\\"\" TO \"hello \\\"world\\\"\" \
+             CC \"hello \\\"world\\\"\" SUBJECT \"hello \\\"world\\\"\" UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_with_fast_simple_search(
+                "hello \"world\"",
+                true,
+                false,
+            )
+            .unwrap(),
+            "TEXT \"hello \\\"world\\\"\" UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria(
+                "from:\"Alice Example\" to:bob@example.test subject:report is:unseen,flagged",
+                true,
+            )
+            .unwrap(),
+            "FROM \"Alice Example\" OR TO \"bob@example.test\" CC \"bob@example.test\" \
+             SUBJECT \"report\" UNSEEN FLAGGED UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria(
+                "mail=alice%40example.test&is%5B%5D=read&is%5B%5D=answered",
+                false,
+            )
+            .unwrap(),
+            "OR OR FROM \"alice@example.test\" TO \"alice@example.test\" \
+             CC \"alice@example.test\" SEEN ANSWERED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("has:attachment", true).unwrap(),
+            "OR OR OR HEADER Content-Type \"application/\" HEADER Content-Type \"multipart/m\" \
+             HEADER Content-Type \"multipart/signed\" HEADER Content-Type \"multipart/report\" \
+             UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("unknown=value", true).unwrap(),
+            "OR OR OR FROM \"unknown=value\" TO \"unknown=value\" CC \"unknown=value\" \
+             SUBJECT \"unknown=value\" UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("subject:first subject:second", true).unwrap(),
+            "SUBJECT \"second\" UNDELETED"
+        );
+    }
+
+    #[test]
+    fn message_list_search_wire_frames_non_ascii_for_legacy_imap() {
+        assert_eq!(
+            legacy_message_list_search_wire("subject:café", true, true, true).unwrap(),
+            LegacyMessageListSearchWire {
+                chunks: vec!["SUBJECT \"café\" UNDELETED".to_string()],
+                needs_utf8_charset: false,
+            }
+        );
+        assert_eq!(
+            legacy_message_list_search_wire("subject:café", true, true, false).unwrap(),
+            LegacyMessageListSearchWire {
+                chunks: vec!["SUBJECT {5}".to_string(), "café UNDELETED".to_string(),],
+                needs_utf8_charset: true,
+            }
+        );
+    }
+
+    #[test]
+    fn message_list_search_criteria_honors_explicit_deleted_state() {
+        assert_eq!(
+            legacy_message_list_search_criteria("is:deleted", true).unwrap(),
+            "DELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("is:undeleted", true).unwrap(),
+            "UNDELETED"
+        );
+    }
+
+    #[test]
+    fn message_list_search_criteria_rejects_injection_and_unmigrated_filters() {
+        for search in ["from:\"a\r\nBAD\"", "subject:a\0b"] {
+            assert!(legacy_message_list_search_criteria(search, true).is_err());
+        }
+        let error = legacy_message_list_search_criteria("date:2026-07-24", true).unwrap_err();
+        assert!(error.public_message().contains("not migrated yet"));
     }
 
     #[test]

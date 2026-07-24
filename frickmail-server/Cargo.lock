@@ -943,6 +943,7 @@ dependencies = [
  "md-5",
  "rustls-pki-types",
  "serde",
+ "serde_urlencoded",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
