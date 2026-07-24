@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use async_imap::{
@@ -11,7 +11,7 @@ use async_imap::{
     Client, Session,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chrono::NaiveDate;
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
 use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
@@ -1760,6 +1760,219 @@ fn legacy_message_list_positive_seconds(value: &str) -> Result<Option<u32>> {
     Ok(Some(seconds as u32))
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LegacyMessageListInterval {
+    years: u64,
+    months: u64,
+    days: u64,
+    hours: u64,
+    minutes: u64,
+    seconds: u64,
+}
+
+fn legacy_message_list_interval_error() -> FrickmailError {
+    FrickmailError::BadRequest("invalid message-list relative date interval".to_string())
+}
+
+fn legacy_message_list_interval_section(value: &str, designators: &[u8]) -> Result<Vec<(u64, u8)>> {
+    let bytes = value.as_bytes();
+    let mut cursor = 0;
+    let mut last_designator = None;
+    let mut parts = Vec::new();
+    while cursor < bytes.len() {
+        let number_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor == number_start {
+            return Err(legacy_message_list_interval_error());
+        }
+        let number = value[number_start..cursor]
+            .parse::<u64>()
+            .map_err(|_| legacy_message_list_interval_error())?;
+        let designator = *bytes
+            .get(cursor)
+            .ok_or_else(legacy_message_list_interval_error)?;
+        cursor += 1;
+        let position = designators
+            .iter()
+            .position(|candidate| *candidate == designator)
+            .ok_or_else(legacy_message_list_interval_error)?;
+        if last_designator.is_some_and(|last| position <= last) {
+            return Err(legacy_message_list_interval_error());
+        }
+        last_designator = Some(position);
+        parts.push((number, designator));
+    }
+    Ok(parts)
+}
+
+fn legacy_message_list_interval(value: &str) -> Result<LegacyMessageListInterval> {
+    if value.len() == 19
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+        && value.as_bytes().get(10) == Some(&b'T')
+        && value.as_bytes().get(13) == Some(&b':')
+        && value.as_bytes().get(16) == Some(&b':')
+    {
+        let numeric = [0..4, 5..7, 8..10, 11..13, 14..16, 17..19]
+            .into_iter()
+            .map(|range| {
+                let part = &value[range];
+                if !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(legacy_message_list_interval_error());
+                }
+                part.parse::<u64>()
+                    .map_err(|_| legacy_message_list_interval_error())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if numeric[1] > 12
+            || numeric[2] > 31
+            || numeric[3] > 24
+            || numeric[4] > 59
+            || numeric[5] > 59
+        {
+            return Err(legacy_message_list_interval_error());
+        }
+        return Ok(LegacyMessageListInterval {
+            years: numeric[0],
+            months: numeric[1],
+            days: numeric[2],
+            hours: numeric[3],
+            minutes: numeric[4],
+            seconds: numeric[5],
+        });
+    }
+
+    let (date, time) = match value.split_once('T') {
+        Some((date, time)) if !time.is_empty() && !time.contains('T') => (date, Some(time)),
+        Some(_) => return Err(legacy_message_list_interval_error()),
+        None => (value, None),
+    };
+    if date.is_empty() && time.is_none() {
+        return Err(legacy_message_list_interval_error());
+    }
+
+    let mut interval = LegacyMessageListInterval::default();
+    let mut populated = false;
+    if !date.is_empty() {
+        for (number, designator) in legacy_message_list_interval_section(date, b"YMWD")? {
+            populated = true;
+            match designator {
+                b'Y' => interval.years = number,
+                b'M' => interval.months = number,
+                b'W' => {
+                    interval.days = interval
+                        .days
+                        .checked_add(
+                            number
+                                .checked_mul(7)
+                                .ok_or_else(legacy_message_list_interval_error)?,
+                        )
+                        .ok_or_else(legacy_message_list_interval_error)?;
+                }
+                b'D' => {
+                    interval.days = interval
+                        .days
+                        .checked_add(number)
+                        .ok_or_else(legacy_message_list_interval_error)?;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    if let Some(time) = time {
+        for (number, designator) in legacy_message_list_interval_section(time, b"HMS")? {
+            populated = true;
+            match designator {
+                b'H' => interval.hours = number,
+                b'M' => interval.minutes = number,
+                b'S' => interval.seconds = number,
+                _ => unreachable!(),
+            }
+        }
+    }
+    if !populated {
+        return Err(legacy_message_list_interval_error());
+    }
+    Ok(interval)
+}
+
+fn legacy_message_list_subtract_interval(
+    now: &DateTime<Utc>,
+    value: &str,
+) -> Result<DateTime<Utc>> {
+    let interval = legacy_message_list_interval(value)?;
+    let source_month = i64::from(now.year())
+        .checked_mul(12)
+        .and_then(|year| year.checked_add(i64::from(now.month0())))
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let interval_months = i64::try_from(interval.years)
+        .map_err(|_| legacy_message_list_interval_error())?
+        .checked_mul(12)
+        .and_then(|years| {
+            i64::try_from(interval.months)
+                .ok()
+                .and_then(|months| years.checked_add(months))
+        })
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let target_month = source_month
+        .checked_sub(interval_months)
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let target_year = i32::try_from(target_month.div_euclid(12))
+        .map_err(|_| legacy_message_list_interval_error())?;
+    let target_month = u32::try_from(target_month.rem_euclid(12) + 1)
+        .map_err(|_| legacy_message_list_interval_error())?;
+    let base = NaiveDate::from_ymd_opt(target_year, target_month, 1)
+        .ok_or_else(legacy_message_list_interval_error)?
+        .and_time(now.time())
+        .checked_add_signed(ChronoDuration::days(i64::from(now.day() - 1)))
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let days = i64::try_from(interval.days)
+        .ok()
+        .and_then(ChronoDuration::try_days)
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let hours = i64::try_from(interval.hours)
+        .ok()
+        .and_then(ChronoDuration::try_hours)
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let minutes = i64::try_from(interval.minutes)
+        .ok()
+        .and_then(ChronoDuration::try_minutes)
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let seconds = i64::try_from(interval.seconds)
+        .ok()
+        .and_then(ChronoDuration::try_seconds)
+        .ok_or_else(legacy_message_list_interval_error)?;
+    let relative = base
+        .checked_sub_signed(days)
+        .and_then(|date| date.checked_sub_signed(hours))
+        .and_then(|date| date.checked_sub_signed(minutes))
+        .and_then(|date| date.checked_sub_signed(seconds))
+        .ok_or_else(legacy_message_list_interval_error)?;
+    if !(1..=9999).contains(&relative.year()) {
+        return Err(legacy_message_list_interval_error());
+    }
+    Ok(DateTime::from_naive_utc_and_offset(relative, Utc))
+}
+
+fn legacy_message_list_relative_seconds(
+    now: &DateTime<Utc>,
+    relative: &DateTime<Utc>,
+) -> Result<u32> {
+    let seconds = now.signed_duration_since(relative).num_seconds();
+    if seconds <= 0 {
+        return Err(FrickmailError::BadRequest(
+            "message-list relative date interval must be positive".to_string(),
+        ));
+    }
+    u32::try_from(seconds).map_err(|_| {
+        FrickmailError::BadRequest(
+            "message-list relative date interval exceeds the IMAP4rev1 numeric limit".to_string(),
+        )
+    })
+}
+
 fn legacy_message_list_header_criterion(value: &str) -> Result<String> {
     let Some((field, search)) = value.split_once(' ') else {
         return Err(FrickmailError::BadRequest(
@@ -1800,6 +2013,22 @@ fn legacy_message_list_search_criteria_with_capabilities(
     hide_deleted: bool,
     fast_simple_search: bool,
     supports_within: bool,
+) -> Result<String> {
+    legacy_message_list_search_criteria_at(
+        search,
+        hide_deleted,
+        fast_simple_search,
+        supports_within,
+        DateTime::<Utc>::from(SystemTime::now()),
+    )
+}
+
+fn legacy_message_list_search_criteria_at(
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+    supports_within: bool,
+    now: DateTime<Utc>,
 ) -> Result<String> {
     let search = legacy_php_trim(search);
     let fields = legacy_message_list_search_fields(search);
@@ -1892,6 +2121,30 @@ fn legacy_message_list_search_criteria_with_capabilities(
                         if let Some(seconds) = legacy_message_list_positive_seconds(value)? {
                             criteria.push(format!("{name} {seconds}"));
                         }
+                    }
+                }
+                "OLDER_THAN" | "NEWER_THAN" => {
+                    let relative = legacy_message_list_subtract_interval(&now, value)?;
+                    if supports_within {
+                        let seconds = legacy_message_list_relative_seconds(&now, &relative)?;
+                        let criterion = if name == "OLDER_THAN" {
+                            "OLDER"
+                        } else {
+                            "YOUNGER"
+                        };
+                        criteria.push(format!("{criterion} {seconds}"));
+                    } else if name == "OLDER_THAN" {
+                        criteria.push(format!(
+                            "BEFORE {}",
+                            legacy_message_list_search_date_wire(relative.date_naive())
+                        ));
+                    } else {
+                        let date = relative.date_naive();
+                        since_filter = Some(
+                            since_filter
+                                .map(|current| current.max(date))
+                                .unwrap_or(date),
+                        );
                     }
                 }
                 "SINCE" => {
@@ -7729,6 +7982,139 @@ mod tests {
     }
 
     #[test]
+    fn message_list_search_criteria_compiles_calendar_relative_filters() {
+        let now = DateTime::from_naive_utc_and_offset(
+            NaiveDate::from_ymd_opt(2026, 3, 31)
+                .unwrap()
+                .and_hms_opt(12, 34, 56)
+                .unwrap(),
+            Utc,
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_at(
+                "older_than:1M newer_than:2D",
+                true,
+                true,
+                false,
+                now,
+            )
+            .unwrap(),
+            "BEFORE 3-Mar-2026 SINCE 29-Mar-2026 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_at(
+                "older_than:1M newer_than:2D",
+                true,
+                true,
+                true,
+                now,
+            )
+            .unwrap(),
+            "OLDER 2419200 YOUNGER 172800 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_at(
+                "older_than:1Y2M3W4DT5H6M7S",
+                true,
+                true,
+                true,
+                now,
+            )
+            .unwrap(),
+            "OLDER 38811967 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_at(
+                "newer_than:0001-02-03T04:05:06",
+                true,
+                true,
+                true,
+                now,
+            )
+            .unwrap(),
+            "YOUNGER 36907506 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_at(
+                "older_than:T4294967296S",
+                true,
+                true,
+                false,
+                now,
+            )
+            .unwrap(),
+            "BEFORE 22-Feb-1890 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_interval("0001-12-31T24:59:59").unwrap(),
+            LegacyMessageListInterval {
+                years: 1,
+                months: 12,
+                days: 31,
+                hours: 24,
+                minutes: 59,
+                seconds: 59,
+            }
+        );
+    }
+
+    #[test]
+    fn message_list_search_criteria_rejects_invalid_calendar_relative_filters() {
+        let now = DateTime::from_naive_utc_and_offset(
+            NaiveDate::from_ymd_opt(2026, 3, 31)
+                .unwrap()
+                .and_hms_opt(12, 34, 56)
+                .unwrap(),
+            Utc,
+        );
+        for search in [
+            "older_than:bad",
+            "older_than:P1D",
+            "older_than:1DT",
+            "older_than:1D2Y",
+            "older_than:1D2D",
+            "older_than:0001-02-03T04:05",
+            "older_than:0001-13-00T00:00:00",
+            "older_than:0001-00-32T00:00:00",
+            "older_than:0001-00-00T25:00:00",
+            "older_than:0001-00-00T00:60:00",
+            "older_than:0001-00-00T00:00:60",
+        ] {
+            assert!(
+                legacy_message_list_search_criteria_at(search, true, true, false, now).is_err(),
+                "{search} must not produce invalid or broadened IMAP criteria"
+            );
+        }
+        assert!(
+            legacy_message_list_search_criteria_at("older_than:0D", true, true, true, now,)
+                .is_err()
+        );
+        assert!(
+            legacy_message_list_search_criteria_at("older_than:200Y", true, true, true, now,)
+                .is_err()
+        );
+        assert!(legacy_message_list_search_criteria_at(
+            "older_than:T4294967296S",
+            true,
+            true,
+            true,
+            now,
+        )
+        .is_err());
+        assert_eq!(
+            legacy_message_list_search_criteria_at(
+                "older_than=1D",
+                true,
+                true,
+                false,
+                now,
+            )
+            .unwrap(),
+            "OR OR OR FROM \"older_than=1D\" TO \"older_than=1D\" CC \"older_than=1D\" SUBJECT \"older_than=1D\" UNDELETED"
+        );
+    }
+
+    #[test]
     fn message_list_search_wire_frames_non_ascii_for_legacy_imap() {
         assert_eq!(
             legacy_message_list_search_wire("subject:café", true, true, true, false).unwrap(),
@@ -7765,8 +8151,6 @@ mod tests {
         }
         let error = legacy_message_list_search_criteria("header:Subject", true).unwrap_err();
         assert!(error.public_message().contains("field name and value"));
-        let error = legacy_message_list_search_criteria("older_than:P1D", true).unwrap_err();
-        assert!(error.public_message().contains("not migrated yet"));
     }
 
     #[test]
