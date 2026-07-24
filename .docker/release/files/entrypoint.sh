@@ -69,7 +69,7 @@ if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_defaul
 fi
 
 # Frickmail: provision Postgres schema for users + mail accounts (idempotent)
-FRICKMAIL_DB_HOST="${FRICKMAIL_DB_HOST:-db}"
+FRICKMAIL_DB_HOST="${FRICKMAIL_DB_HOST-db}"
 FRICKMAIL_DB_PORT="${FRICKMAIL_DB_PORT:-5432}"
 FRICKMAIL_DB_NAME="${FRICKMAIL_DB_NAME:-frickmail}"
 FRICKMAIL_DB_USER="${FRICKMAIL_DB_USER:-frickmail}"
