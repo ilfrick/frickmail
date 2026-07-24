@@ -6841,7 +6841,7 @@ async fn legacy_imap_connection_context(
 
 fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
     let mut value = json!({
-        "id": Value::Null,
+        "id": info.id,
         "name": info.name,
         "uidNext": info.uid_next,
         "uidValidity": info.uid_validity,
@@ -14736,6 +14736,7 @@ Subject: Empty body metadata\r\n\r\n"
     #[test]
     fn legacy_folder_information_json_omits_php_optional_fields() {
         let value = super::legacy_folder_information_json(&LegacyFolderInformation {
+            id: None,
             name: "Archive".to_string(),
             uid_next: Some(9),
             uid_validity: Some(4),
@@ -14767,6 +14768,7 @@ Subject: Empty body metadata\r\n\r\n"
 
         let counts_with_unknown_unread =
             super::legacy_folder_information_json(&LegacyFolderInformation {
+                id: Some("Zm9sZGVyLWlk".to_string()),
                 name: "Archive".to_string(),
                 uid_next: Some(9),
                 uid_validity: Some(4),
@@ -14782,6 +14784,7 @@ Subject: Empty body metadata\r\n\r\n"
             });
 
         assert_eq!(counts_with_unknown_unread["totalEmails"], 7);
+        assert_eq!(counts_with_unknown_unread["id"], "Zm9sZGVyLWlk");
         assert_eq!(counts_with_unknown_unread["unreadEmails"], Value::Null);
         assert_eq!(counts_with_unknown_unread["appendLimit"], 10_485_760);
         assert_eq!(counts_with_unknown_unread["size"], 123_456);
@@ -15151,6 +15154,7 @@ Subject: Empty body metadata\r\n\r\n"
                     *captured.lock().unwrap() =
                         Some((config, password, folder, prev_uid_next, flag_uids));
                     Ok(LegacyFolderInformation {
+                        id: None,
                         name: "INBOX".to_string(),
                         uid_next: Some(52),
                         uid_validity: Some(10),
@@ -19442,6 +19446,7 @@ Subject: Empty body metadata\r\n\r\n"
 
     fn legacy_test_folder_information() -> LegacyFolderInformation {
         LegacyFolderInformation {
+            id: None,
             name: "INBOX".to_string(),
             uid_next: Some(52),
             uid_validity: Some(10),

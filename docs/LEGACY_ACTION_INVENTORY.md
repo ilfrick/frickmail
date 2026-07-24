@@ -109,8 +109,8 @@ part of the full webmail core migration.
 | `MessageSetSeenToAll` | `dev/View/User/MailBox/MessageList.js` | native | Uses selected Frickmail mail account; marks `1:*` by sequence for whole-folder updates and uses UID STORE when `threadUids` is supplied. |
 | `MessageSetKeyword` | `dev/Model/Message.js` | native | Uses selected Frickmail mail account; stores safe ASCII IMAP keyword atoms, honors folder `PERMANENTFLAGS`, and no-ops unsafe or unsupported keywords like legacy PHP's skip-unsupported path. |
 | `Folders` | `dev/Model/FolderCollection.js` | native | Uses the selected Frickmail mail account and returns the legacy folder collection shape with LIST/LSUB subscription discovery, LIST-STATUS-compatible folder counts and ETags, best-effort METADATA roles, RFC 2342 namespaces (including other-user/shared roots), storage quota bytes, filtered capabilities, and account-local checkable decoration. |
-| `FolderInformation` | `dev/Common/Folders.js` | partial-native | Native for selected-account POST requests; returns legacy folder status shape with counts, UIDNEXT, UIDVALIDITY, permanent flags, PHP-compatible optional count/modseq/etag/permanent-flag/append-size fields, PHP-compatible folder ETag, `messagesFlags` for `flagsUids`, and INBOX `newMessages` summaries when `uidNext` changes. `appendLimit`/`size` adapter emission is staged; live extraction remains pending an IMAP source. Server-specific CONDSTORE/HIGHESTMODSEQ parity still needs broader IMAP validation. |
-| `FolderInformationMultiply` | `dev/Common/Folders.js` | partial-native | Native for selected-account POST refreshes; fetches each requested folder status and skips per-folder failures like legacy PHP. Full cache interaction parity remains compatibility work. |
+| `FolderInformation` | `dev/Common/Folders.js` | native | Uses the selected account and returns the legacy folder status shape with capability-gated `HIGHESTMODSEQ`, `APPENDLIMIT`, `STATUS=SIZE`, and base64 `MAILBOXID`, plus counts, UIDNEXT, UIDVALIDITY, permanent flags, PHP-compatible folder ETag, `messagesFlags` for `flagsUids`, and INBOX `newMessages` summaries when `uidNext` changes. |
+| `FolderInformationMultiply` | `dev/Common/Folders.js` | native | Uses the selected account, fetches each requested folder's extended STATUS data, and skips per-folder failures like legacy PHP. |
 | `FolderAppend` | `dev/Common/Folders.js` | native | Handles legacy multipart `appendFile` uploads when `FRICKMAIL__FRICKMAIL_USER__ALLOW_MESSAGE_APPEND=true`; uses selected Frickmail mail account and appends validated RFC822 data to IMAP without adding flags. |
 | `FolderSubscribe` | `dev/View/Popup/Folder.js`, `dev/Settings/User/Folders.js` | native | Uses selected Frickmail mail account or explicit payload account, preserves PHP-style truthiness for `subscribe`, and maps IMAP subscribe/unsubscribe failures to legacy JSON errors. |
 | `FolderClear` | `dev/View/Popup/FolderClear.js`, `dev/View/User/MailBox/MessageList.js` | native | Uses selected Frickmail mail account, marks all selected-folder messages deleted, and expunges like MailSo `FolderClear`. |
@@ -181,6 +181,6 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Complete `MessageList`, `Message`, and folder status parity: RawKey GET cache
-   paths, search/threaded lists, precise legacy sort semantics, previews,
+1. Complete `MessageList` and `Message` parity: RawKey GET cache paths,
+   search/threaded lists, precise legacy sort semantics, previews,
    attachment/header details, and detailed new-message notification payloads.

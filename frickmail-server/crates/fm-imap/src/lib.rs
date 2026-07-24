@@ -316,6 +316,7 @@ pub enum LegacyNamespaceValue {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LegacyFolderInformation {
+    pub id: Option<String>,
     pub name: String,
     pub uid_next: Option<u32>,
     pub uid_validity: Option<u32>,
@@ -1788,15 +1789,16 @@ async fn legacy_folder_information_in_session(
     fetch_new_messages: bool,
     client_hash: &str,
 ) -> Result<LegacyFolderInformation> {
-    let status = timeout_imap(
-        "status mailbox",
-        session.status(mailbox, "(MESSAGES UIDNEXT UIDVALIDITY UNSEEN)"),
-    )
-    .await?;
+    let capabilities =
+        timeout_imap("read folder-status capabilities", session.capabilities()).await?;
+    let utf8_mode = enable_legacy_utf8(session, &capabilities).await?;
+    let wire_mailbox = imap_mailbox_from_utf8(mailbox, utf8_mode);
+    let options = LegacyFolderStatusOptions::from_capabilities(&capabilities);
+    let status = legacy_extended_folder_status(session, &wire_mailbox, &options).await?;
     let selected = if flag_uids.is_some() {
-        timeout_imap("select mailbox", session.select(mailbox)).await?
+        timeout_imap("select mailbox", session.select(&wire_mailbox)).await?
     } else {
-        timeout_imap("examine mailbox", session.examine(mailbox)).await?
+        timeout_imap("examine mailbox", session.examine(&wire_mailbox)).await?
     };
     let mut info = legacy_folder_information_from_mailboxes(
         mailbox,
@@ -1886,15 +1888,15 @@ async fn legacy_message_list_in_session(
 
 fn legacy_folder_information_from_mailboxes(
     mailbox: &str,
-    status: &async_imap::types::Mailbox,
+    status: &ListedLegacyFolderStatus,
     examined: &async_imap::types::Mailbox,
     prev_uid_next: Option<u32>,
     client_hash: &str,
 ) -> LegacyFolderInformation {
     let uid_next = status.uid_next.or(examined.uid_next);
     let uid_validity = status.uid_validity.or(examined.uid_validity);
-    let total_emails = Some(status.exists);
-    let unread_emails = status.unseen.or(examined.unseen);
+    let total_emails = status.total_emails.or(Some(examined.exists));
+    let unread_emails = status.unread_emails;
     let highest_modseq = status.highest_modseq.or(examined.highest_modseq);
     let permanent_flags = examined
         .permanent_flags
@@ -1903,7 +1905,7 @@ fn legacy_folder_information_from_mailboxes(
         .collect::<Vec<_>>();
     let etag = legacy_folder_etag(
         mailbox,
-        status.exists,
+        total_emails.unwrap_or_default(),
         uid_next,
         uid_validity,
         unread_emails,
@@ -1913,14 +1915,15 @@ fn legacy_folder_information_from_mailboxes(
     let _new_uid_range = legacy_new_uid_range(prev_uid_next, uid_next);
 
     LegacyFolderInformation {
+        id: status.mailbox_id.clone(),
         name: mailbox.to_string(),
         uid_next,
         uid_validity,
         total_emails,
         unread_emails,
         highest_modseq,
-        append_limit: None,
-        size: None,
+        append_limit: status.append_limit,
+        size: status.size,
         permanent_flags,
         etag,
         messages_flags: None,
@@ -4515,6 +4518,26 @@ struct LegacyFolderListOptions {
     utf8_mode: bool,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LegacyFolderStatusOptions {
+    highest_modseq: bool,
+    append_limit: bool,
+    size: bool,
+    mailbox_id: bool,
+}
+
+impl LegacyFolderStatusOptions {
+    fn from_capabilities(capabilities: &Capabilities) -> Self {
+        Self {
+            highest_modseq: has_capability_ignore_ascii_case(capabilities, "CONDSTORE")
+                || has_capability_ignore_ascii_case(capabilities, "QRESYNC"),
+            append_limit: has_capability_ignore_ascii_case(capabilities, "APPENDLIMIT"),
+            size: has_capability_ignore_ascii_case(capabilities, "STATUS=SIZE"),
+            mailbox_id: has_capability_ignore_ascii_case(capabilities, "OBJECTID"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ListedLegacyFolderStatus {
     total_emails: Option<u32>,
@@ -4522,8 +4545,75 @@ struct ListedLegacyFolderStatus {
     uid_validity: Option<u32>,
     unread_emails: Option<u32>,
     highest_modseq: Option<u64>,
+    append_limit: Option<u64>,
     size: Option<u64>,
     mailbox_id: Option<String>,
+}
+
+async fn legacy_extended_folder_status(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    options: &LegacyFolderStatusOptions,
+) -> Result<ListedLegacyFolderStatus> {
+    let operation = "read extended mailbox status";
+    let command = legacy_folder_status_command(mailbox, options)?;
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(&command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut collected = ListedLegacyFolderStatus::default();
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                if let Response::MailboxData(MailboxDatum::Status {
+                    mailbox: response_mailbox,
+                    status,
+                }) = response.parsed()
+                {
+                    if response_mailbox == mailbox {
+                        collect_legacy_status_attributes(status, &mut collected);
+                    }
+                }
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(collected);
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+fn legacy_folder_status_command(
+    mailbox: &str,
+    options: &LegacyFolderStatusOptions,
+) -> Result<String> {
+    let mailbox = quote_imap_string("mailbox", mailbox)?;
+    let mut items = vec!["MESSAGES", "UNSEEN", "UIDNEXT", "UIDVALIDITY"];
+    if options.highest_modseq {
+        items.push("HIGHESTMODSEQ");
+    }
+    if options.append_limit {
+        items.push("APPENDLIMIT");
+    }
+    if options.size {
+        items.push("SIZE");
+    }
+    if options.mailbox_id {
+        items.push("MAILBOXID");
+    }
+    Ok(format!("STATUS {mailbox} ({})", items.join(" ")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4766,24 +4856,33 @@ fn collect_legacy_list_response(
         Response::MailboxData(MailboxDatum::Status { mailbox, status }) => {
             let mailbox = imap_mailbox_to_utf8(mailbox, utf8_mode);
             let entry = collected.statuses.entry(mailbox).or_default();
-            for attribute in status {
-                match attribute {
-                    StatusAttribute::AppendLimit(_) => {}
-                    StatusAttribute::HighestModSeq(value) => entry.highest_modseq = Some(*value),
-                    StatusAttribute::MailboxId(value) => {
-                        entry.mailbox_id = Some(STANDARD.encode(value.as_bytes()))
-                    }
-                    StatusAttribute::Messages(value) => entry.total_emails = Some(*value),
-                    StatusAttribute::Recent(_) => {}
-                    StatusAttribute::Size(value) => entry.size = Some(*value),
-                    StatusAttribute::UidNext(value) => entry.uid_next = Some(*value),
-                    StatusAttribute::UidValidity(value) => entry.uid_validity = Some(*value),
-                    StatusAttribute::Unseen(value) => entry.unread_emails = Some(*value),
-                    _ => {}
-                }
-            }
+            collect_legacy_status_attributes(status, entry);
         }
         _ => {}
+    }
+}
+
+fn collect_legacy_status_attributes(
+    attributes: &[StatusAttribute],
+    status: &mut ListedLegacyFolderStatus,
+) {
+    for attribute in attributes {
+        match attribute {
+            StatusAttribute::AppendLimit(value) => {
+                status.append_limit = Some(value.unwrap_or_default())
+            }
+            StatusAttribute::HighestModSeq(value) => status.highest_modseq = Some(*value),
+            StatusAttribute::MailboxId(value) => {
+                status.mailbox_id = Some(STANDARD.encode(value.as_bytes()))
+            }
+            StatusAttribute::Messages(value) => status.total_emails = Some(*value),
+            StatusAttribute::Recent(_) => {}
+            StatusAttribute::Size(value) => status.size = Some(*value),
+            StatusAttribute::UidNext(value) => status.uid_next = Some(*value),
+            StatusAttribute::UidValidity(value) => status.uid_validity = Some(*value),
+            StatusAttribute::Unseen(value) => status.unread_emails = Some(*value),
+            _ => {}
+        }
     }
 }
 
@@ -4966,8 +5065,7 @@ async fn enable_legacy_utf8(
     session: &mut BoxedSession,
     capabilities: &Capabilities,
 ) -> Result<bool> {
-    let utf8_mode = has_capability_ignore_ascii_case(capabilities, "UTF8=ACCEPT")
-        || has_capability_ignore_ascii_case(capabilities, "UTF8=ONLY");
+    let utf8_mode = capabilities.iter().any(is_legacy_utf8_capability);
     if utf8_mode {
         timeout_imap(
             "enable IMAP UTF-8",
@@ -4976,6 +5074,15 @@ async fn enable_legacy_utf8(
         .await?;
     }
     Ok(utf8_mode)
+}
+
+fn is_legacy_utf8_capability(capability: &Capability) -> bool {
+    matches!(
+        capability,
+        Capability::Atom(atom)
+            if atom.eq_ignore_ascii_case("UTF8=ACCEPT")
+                || atom.eq_ignore_ascii_case("UTF8=ONLY")
+    )
 }
 
 async fn mailbox_metadata_supported(session: &mut BoxedSession) -> Result<bool> {
@@ -5353,11 +5460,58 @@ fn modified_utf7_to_utf8(value: &str) -> String {
     decoded
 }
 
+fn modified_utf7_from_utf8(value: &str) -> String {
+    fn flush_utf16(encoded: &mut String, utf16: &mut Vec<u16>) {
+        if utf16.is_empty() {
+            return;
+        }
+
+        let bytes = utf16
+            .iter()
+            .flat_map(|unit| unit.to_be_bytes())
+            .collect::<Vec<_>>();
+        let mut base64 = STANDARD.encode(bytes);
+        while base64.ends_with('=') {
+            base64.pop();
+        }
+        encoded.push('&');
+        encoded.push_str(&base64.replace('/', ","));
+        encoded.push('-');
+        utf16.clear();
+    }
+
+    let mut encoded = String::with_capacity(value.len());
+    let mut utf16 = Vec::new();
+    for character in value.chars() {
+        if (' '..='~').contains(&character) {
+            flush_utf16(&mut encoded, &mut utf16);
+            if character == '&' {
+                encoded.push_str("&-");
+            } else {
+                encoded.push(character);
+            }
+        } else {
+            let mut units = [0_u16; 2];
+            utf16.extend_from_slice(character.encode_utf16(&mut units));
+        }
+    }
+    flush_utf16(&mut encoded, &mut utf16);
+    encoded
+}
+
 fn imap_mailbox_to_utf8(value: &str, utf8_mode: bool) -> String {
     if utf8_mode {
         value.to_string()
     } else {
         modified_utf7_to_utf8(value)
+    }
+}
+
+fn imap_mailbox_from_utf8(value: &str, utf8_mode: bool) -> String {
+    if utf8_mode {
+        value.to_string()
+    } else {
+        modified_utf7_from_utf8(value)
     }
 }
 
@@ -6131,11 +6285,47 @@ mod tests {
     }
 
     #[test]
+    fn modified_utf7_encoder_matches_imap_mailbox_wire_format() {
+        for (decoded, encoded) in [
+            ("Inbox", "Inbox"),
+            ("R&D", "R&-D"),
+            ("Envoyé", "Envoy&AOk-"),
+            ("日本語", "&ZeVnLIqe-"),
+            ("Emoji 😀", "Emoji &2D3eAA-"),
+        ] {
+            assert_eq!(modified_utf7_from_utf8(decoded), encoded);
+            assert_eq!(modified_utf7_to_utf8(encoded), decoded);
+        }
+    }
+
+    #[test]
     fn mailbox_decoder_preserves_utf8_mode_names_that_resemble_modified_utf7() {
         assert_eq!(imap_mailbox_to_utf8("R&-D", false), "R&D");
         assert_eq!(imap_mailbox_to_utf8("R&-D", true), "R&-D");
         assert_eq!(imap_mailbox_to_utf8("Envoy&AOk-", false), "Envoyé");
         assert_eq!(imap_mailbox_to_utf8("Envoy&AOk-", true), "Envoy&AOk-");
+    }
+
+    #[test]
+    fn mailbox_wire_encoding_tracks_negotiated_utf8_mode() {
+        assert_eq!(imap_mailbox_from_utf8("R&D", false), "R&-D");
+        assert_eq!(imap_mailbox_from_utf8("R&D", true), "R&D");
+        assert_eq!(imap_mailbox_from_utf8("Envoyé", false), "Envoy&AOk-");
+        assert_eq!(imap_mailbox_from_utf8("Envoyé", true), "Envoyé");
+    }
+
+    #[test]
+    fn utf8_negotiation_recognizes_accept_and_only_capabilities() {
+        assert!(is_legacy_utf8_capability(&Capability::Atom(
+            "utf8=accept".to_string()
+        )));
+        assert!(is_legacy_utf8_capability(&Capability::Atom(
+            "UTF8=ONLY".to_string()
+        )));
+        assert!(!is_legacy_utf8_capability(&Capability::Atom(
+            "ENABLE".to_string()
+        )));
+        assert!(!is_legacy_utf8_capability(&Capability::Imap4rev1));
     }
 
     #[test]
@@ -6211,6 +6401,89 @@ mod tests {
                 .and_then(|status| status.total_emails),
             Some(1)
         );
+    }
+
+    #[test]
+    fn extended_folder_status_command_is_capability_gated_and_safely_quoted() {
+        let command = legacy_folder_status_command(
+            "Work \"shared\"",
+            &LegacyFolderStatusOptions {
+                highest_modseq: true,
+                append_limit: true,
+                size: true,
+                mailbox_id: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            "STATUS \"Work \\\"shared\\\"\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ APPENDLIMIT SIZE MAILBOXID)"
+        );
+
+        assert_eq!(
+            legacy_folder_status_command("INBOX", &LegacyFolderStatusOptions::default()).unwrap(),
+            "STATUS \"INBOX\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"
+        );
+        assert!(legacy_folder_status_command(
+            "INBOX\r\nA1 LOGOUT",
+            &LegacyFolderStatusOptions::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn extended_folder_status_collects_optional_values_and_nil_append_limit() {
+        let (_, response) = Response::from_bytes(
+            concat!(
+                "* STATUS \"Archive\" (MESSAGES 3 UNSEEN 1 UIDNEXT 4 UIDVALIDITY 5 ",
+                "HIGHESTMODSEQ 7 APPENDLIMIT NIL SIZE 2048 MAILBOXID (folder-id))\r\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let Response::MailboxData(MailboxDatum::Status { status, .. }) = response else {
+            panic!("expected STATUS response");
+        };
+        let mut collected = ListedLegacyFolderStatus::default();
+        collect_legacy_status_attributes(&status, &mut collected);
+
+        assert_eq!(collected.total_emails, Some(3));
+        assert_eq!(collected.unread_emails, Some(1));
+        assert_eq!(collected.uid_next, Some(4));
+        assert_eq!(collected.uid_validity, Some(5));
+        assert_eq!(collected.highest_modseq, Some(7));
+        assert_eq!(collected.append_limit, Some(0));
+        assert_eq!(collected.size, Some(2048));
+        assert_eq!(collected.mailbox_id.as_deref(), Some("Zm9sZGVyLWlk"));
+    }
+
+    #[test]
+    fn folder_information_prefers_status_counts_and_emits_extended_values() {
+        let status = ListedLegacyFolderStatus {
+            total_emails: Some(3),
+            uid_next: Some(4),
+            uid_validity: Some(5),
+            unread_emails: Some(1),
+            highest_modseq: Some(7),
+            append_limit: Some(10_485_760),
+            size: Some(2048),
+            mailbox_id: Some("Zm9sZGVyLWlk".to_string()),
+        };
+        let examined = async_imap::types::Mailbox {
+            exists: 99,
+            unseen: Some(42),
+            ..Default::default()
+        };
+
+        let info =
+            legacy_folder_information_from_mailboxes("Archive", &status, &examined, None, "client");
+
+        assert_eq!(info.id.as_deref(), Some("Zm9sZGVyLWlk"));
+        assert_eq!(info.total_emails, Some(3));
+        assert_eq!(info.unread_emails, Some(1));
+        assert_eq!(info.highest_modseq, Some(7));
+        assert_eq!(info.append_limit, Some(10_485_760));
+        assert_eq!(info.size, Some(2048));
     }
 
     #[test]
