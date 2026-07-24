@@ -10,18 +10,23 @@ use async_imap::{
     types::{Capabilities, Capability, Flag, NameAttribute},
     Client, Session,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
     builders::command::{Command, CommandBuilder},
-    AclRight, AttributeValue, BodyStructure, MessageSection, RequestId, Response, SectionPath,
-    Status,
+    AclRight, AttributeValue, BodyStructure, MailboxDatum, MessageSection, RequestId, Response,
+    SectionPath, Status, StatusAttribute,
 };
 use mail_parser::parsers::MessageStream;
 use md5::{Digest, Md5};
 use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
-use tokio::{net::TcpStream, time::timeout};
+use tokio::io::AsyncReadExt;
+use tokio::{
+    net::TcpStream,
+    time::{timeout, Instant},
+};
 use tokio_rustls::{
     rustls::{ClientConfig, RootCertStore},
     TlsConnector,
@@ -31,6 +36,7 @@ const DEFAULT_TLS_PORT: u16 = 993;
 const DEFAULT_PLAIN_PORT: u16 = 143;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const FOLDER_METADATA_FALLBACK_BUDGET: Duration = Duration::from_secs(30);
 pub const BODY_PREVIEW_PART_LIMIT_BYTES: usize = 256 * 1024;
 
 trait ImapIo:
@@ -266,12 +272,46 @@ pub struct LegacyFolder {
     pub attributes: Vec<String>,
     pub metadata: HashMap<String, String>,
     pub uid_next: Option<u32>,
-    pub total_emails: u32,
+    pub total_emails: Option<u32>,
     pub unread_emails: Option<u32>,
     pub id: Option<String>,
     pub size: Option<u64>,
     pub role: Option<String>,
     pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyFolderCollection {
+    pub folders: Vec<LegacyFolder>,
+    pub quota_usage: Option<u64>,
+    pub quota_limit: Option<u64>,
+    pub namespace: String,
+    pub namespaces: Option<LegacyNamespaces>,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyNamespaces {
+    pub personal: Vec<LegacyNamespaceEntry>,
+    pub users: Vec<LegacyNamespaceEntry>,
+    pub shared: Vec<LegacyNamespaceEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyNamespaceEntry {
+    pub prefix: String,
+    #[serde(skip)]
+    pub wire_prefix: String,
+    pub delimiter: Option<String>,
+    pub extension: Vec<LegacyNamespaceValue>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum LegacyNamespaceValue {
+    Null,
+    String(String),
+    List(Vec<LegacyNamespaceValue>),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -551,6 +591,136 @@ pub async fn fetch_mailbox_status(
         uid_next: mailbox.uid_next,
         exists: mailbox.exists,
     })
+}
+
+pub async fn fetch_legacy_folders(
+    config: ImapConnectionConfig,
+    password: &str,
+    discover_subscriptions: bool,
+) -> Result<LegacyFolderCollection> {
+    let namespaces = fetch_legacy_namespaces(config.clone(), password)
+        .await
+        .unwrap_or(None);
+    let client_hash = legacy_imap_client_hash(&config);
+    let mut session = login(config, password).await?;
+    let result = async {
+        let capabilities =
+            timeout_imap("read folder-list capabilities", session.capabilities()).await?;
+        let utf8_mode = enable_legacy_utf8(&mut session, &capabilities).await?;
+        let capability_names = legacy_visible_capabilities(&capabilities);
+        let list_extended = has_capability_ignore_ascii_case(&capabilities, "LIST-EXTENDED");
+        let list_status = has_capability_ignore_ascii_case(&capabilities, "LIST-STATUS");
+        let options = LegacyFolderListOptions {
+            discover_subscriptions,
+            list_extended,
+            list_status,
+            special_use: has_capability_ignore_ascii_case(&capabilities, "SPECIAL-USE"),
+            highest_modseq: has_capability_ignore_ascii_case(&capabilities, "CONDSTORE")
+                || has_capability_ignore_ascii_case(&capabilities, "QRESYNC"),
+            append_limit: has_capability_ignore_ascii_case(&capabilities, "APPENDLIMIT"),
+            size: has_capability_ignore_ascii_case(&capabilities, "STATUS=SIZE"),
+            mailbox_id: has_capability_ignore_ascii_case(&capabilities, "OBJECTID"),
+            utf8_mode,
+        };
+
+        let mut references = vec![String::new()];
+        if let Some(namespaces) = namespaces.as_ref() {
+            if let Some(namespace) = namespaces.users.first() {
+                references.push(namespace.wire_prefix.clone());
+            }
+            if let Some(namespace) = namespaces.shared.first() {
+                references.push(namespace.wire_prefix.clone());
+            }
+        }
+        references.dedup();
+
+        let mut listed_folders = Vec::new();
+        let mut seen = HashSet::new();
+        for (index, reference) in references.iter().enumerate() {
+            let listed = legacy_folders_for_reference(&mut session, reference, &options).await;
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(error) if index > 0 => {
+                    let _ = error;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            for folder in listed {
+                if seen.insert(folder.full_name.clone()) {
+                    listed_folders.push(folder);
+                }
+            }
+        }
+
+        let metadata_supported = has_capability_ignore_ascii_case(&capabilities, "METADATA");
+        let mut session_usable = true;
+        let mut all_metadata = if metadata_supported {
+            match legacy_all_metadata(&mut session, utf8_mode).await {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    session_usable = false;
+                    HashMap::new()
+                }
+            }
+        } else {
+            HashMap::new()
+        };
+        if metadata_supported && session_usable && all_metadata.is_empty() {
+            let fallback_deadline = Instant::now() + FOLDER_METADATA_FALLBACK_BUDGET;
+            for folder in listed_folders.iter().filter(|folder| folder.selectable()) {
+                let remaining = fallback_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match legacy_folder_metadata_with_timeout(
+                    &mut session,
+                    &folder.wire_name,
+                    remaining.min(COMMAND_TIMEOUT),
+                )
+                .await
+                {
+                    Ok(Some(metadata)) => {
+                        all_metadata.insert(folder.full_name.clone(), metadata);
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        session_usable = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let folders = listed_folders
+            .into_iter()
+            .map(|folder| {
+                let metadata = all_metadata.remove(&folder.full_name).unwrap_or_default();
+                folder.into_legacy_folder(metadata, &client_hash)
+            })
+            .collect();
+        let (quota_usage, quota_limit) = if session_usable {
+            legacy_storage_quota(&mut session, &capabilities).await
+        } else {
+            (None, None)
+        };
+        let namespace = namespaces
+            .as_ref()
+            .map(LegacyNamespaces::personal_prefix)
+            .unwrap_or_default();
+
+        Ok(LegacyFolderCollection {
+            folders,
+            quota_usage,
+            quota_limit,
+            namespace,
+            namespaces,
+            capabilities: capability_names,
+        })
+    }
+    .await;
+    logout_quietly(session).await;
+    result
 }
 
 pub async fn fetch_legacy_folder_information(
@@ -3911,6 +4081,903 @@ fn renamed_mailbox_name(mailbox: &str, old_name: &str, new_name: &str, delimiter
     mailbox.to_string()
 }
 
+impl LegacyNamespaces {
+    fn apply_wire_encoding(&mut self, utf8_mode: bool) {
+        for namespace in self
+            .personal
+            .iter_mut()
+            .chain(self.users.iter_mut())
+            .chain(self.shared.iter_mut())
+        {
+            namespace.prefix = imap_mailbox_to_utf8(&namespace.wire_prefix, utf8_mode);
+        }
+    }
+
+    fn personal_prefix(&self) -> String {
+        let Some(namespace) = self.personal.first() else {
+            return String::new();
+        };
+        let mut prefix = namespace.prefix.clone();
+        let Some(delimiter) = namespace.delimiter.as_deref() else {
+            return prefix;
+        };
+        let inbox_prefix = format!("INBOX{delimiter}");
+        if prefix
+            .get(..inbox_prefix.len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(&inbox_prefix))
+        {
+            prefix.replace_range(..inbox_prefix.len(), &inbox_prefix);
+        }
+        prefix
+    }
+}
+
+async fn fetch_legacy_namespaces(
+    config: ImapConnectionConfig,
+    password: &str,
+) -> Result<Option<LegacyNamespaces>> {
+    let mut session = login(config, password).await?;
+    let capabilities =
+        timeout_imap("read IMAP namespace capability", session.capabilities()).await?;
+    let utf8_mode = enable_legacy_utf8(&mut session, &capabilities).await?;
+    if !has_capability_ignore_ascii_case(&capabilities, "NAMESPACE") {
+        logout_quietly(session).await;
+        return Ok(None);
+    }
+
+    let request_id =
+        timeout_imap("request IMAP namespaces", session.run_command("NAMESPACE")).await?;
+    let result = timeout(
+        COMMAND_TIMEOUT,
+        read_namespace_response(session.as_mut(), &request_id),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("read IMAP namespaces timed out".to_string()))?;
+    drop(session);
+    result.map(|mut namespaces| {
+        namespaces.apply_wire_encoding(utf8_mode);
+        Some(namespaces)
+    })
+}
+
+async fn read_namespace_response(
+    stream: &mut BoxedImapIo,
+    request_id: &RequestId,
+) -> Result<LegacyNamespaces> {
+    const MAX_NAMESPACE_RESPONSE_BYTES: usize = 256 * 1024;
+
+    let tag = std::str::from_utf8(request_id.as_bytes())
+        .map_err(|_| FrickmailError::Upstream("invalid IMAP namespace tag".to_string()))?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 4096];
+
+    loop {
+        let count = stream.read(&mut chunk).await.map_err(|error| {
+            FrickmailError::Upstream(format!("read IMAP namespaces failed: {error}"))
+        })?;
+        if count == 0 {
+            return Err(FrickmailError::Upstream(
+                "read IMAP namespaces failed: IMAP connection closed".to_string(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.len() > MAX_NAMESPACE_RESPONSE_BYTES {
+            return Err(FrickmailError::Upstream(
+                "read IMAP namespaces failed: response too large".to_string(),
+            ));
+        }
+
+        let mut parsed = None;
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            let remaining = &bytes[cursor..];
+            if let Some(payload) = strip_imap_prefix(remaining, b"* NAMESPACE ") {
+                let Ok((namespaces, consumed)) =
+                    parse_namespace_response_payload_with_consumed(payload)
+                else {
+                    break;
+                };
+                let suffix = &payload[consumed..];
+                let whitespace = suffix
+                    .iter()
+                    .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                    .count();
+                let suffix = &suffix[whitespace..];
+                if suffix.len() < 2 {
+                    break;
+                }
+                if !suffix.starts_with(b"\r\n") {
+                    return Err(FrickmailError::Upstream(
+                        "read IMAP namespaces failed: invalid trailing NAMESPACE data".to_string(),
+                    ));
+                }
+                parsed = Some(namespaces);
+                cursor += "* NAMESPACE ".len() + consumed + whitespace + 2;
+                continue;
+            }
+
+            let Ok((remaining, response)) = Response::from_bytes(remaining) else {
+                break;
+            };
+            cursor = bytes.len().saturating_sub(remaining.len());
+            match response {
+                Response::Done {
+                    tag: response_tag,
+                    status: Status::Ok,
+                    ..
+                } if response_tag.0 == tag => {
+                    return parsed.ok_or_else(|| {
+                        FrickmailError::Upstream(
+                            "read IMAP namespaces failed: response missing NAMESPACE data"
+                                .to_string(),
+                        )
+                    });
+                }
+                Response::Done {
+                    tag: response_tag,
+                    status,
+                    information,
+                    ..
+                } if response_tag.0 == tag => {
+                    return Err(imap_acl_status_error(
+                        "read IMAP namespaces",
+                        &status,
+                        information.as_deref(),
+                    ));
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    information,
+                    ..
+                } => {
+                    return Err(imap_acl_status_error(
+                        "read IMAP namespaces",
+                        &Status::Bye,
+                        information.as_deref(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn strip_imap_prefix<'a>(frame: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    frame
+        .get(..prefix.len())
+        .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
+        .then(|| &frame[prefix.len()..])
+}
+
+#[cfg(test)]
+fn parse_namespace_response_line(line: &str) -> Result<LegacyNamespaces> {
+    let payload = line
+        .get("* NAMESPACE ".len()..)
+        .ok_or_else(|| FrickmailError::Upstream("invalid IMAP NAMESPACE response".to_string()))?;
+    parse_namespace_response_payload(payload.as_bytes(), true)
+}
+
+#[cfg(test)]
+fn parse_namespace_response_payload(
+    payload: &[u8],
+    require_finished: bool,
+) -> Result<LegacyNamespaces> {
+    let (namespaces, consumed) = parse_namespace_response_payload_with_consumed(payload)?;
+    let mut parser = NamespaceParser {
+        input: payload,
+        cursor: consumed,
+    };
+    parser.skip_spaces();
+    if require_finished && !parser.is_finished() {
+        return Err(FrickmailError::Upstream(
+            "invalid trailing IMAP NAMESPACE data".to_string(),
+        ));
+    }
+    Ok(namespaces)
+}
+
+fn parse_namespace_response_payload_with_consumed(
+    payload: &[u8],
+) -> Result<(LegacyNamespaces, usize)> {
+    let mut parser = NamespaceParser::new(payload);
+    let personal = namespace_entries(parser.parse_value()?)?;
+    let users = namespace_entries(parser.parse_value()?)?;
+    let shared = namespace_entries(parser.parse_value()?)?;
+    Ok((
+        LegacyNamespaces {
+            personal,
+            users,
+            shared,
+        },
+        parser.cursor,
+    ))
+}
+
+fn namespace_entries(value: LegacyNamespaceValue) -> Result<Vec<LegacyNamespaceEntry>> {
+    let LegacyNamespaceValue::List(entries) = value else {
+        return match value {
+            LegacyNamespaceValue::Null => Ok(Vec::new()),
+            _ => Err(FrickmailError::Upstream(
+                "invalid IMAP NAMESPACE group".to_string(),
+            )),
+        };
+    };
+
+    entries
+        .into_iter()
+        .map(|entry| {
+            let LegacyNamespaceValue::List(mut values) = entry else {
+                return Err(FrickmailError::Upstream(
+                    "invalid IMAP NAMESPACE entry".to_string(),
+                ));
+            };
+            if values.len() < 2 {
+                return Err(FrickmailError::Upstream(
+                    "invalid IMAP NAMESPACE entry".to_string(),
+                ));
+            }
+            let wire_prefix = match values.remove(0) {
+                LegacyNamespaceValue::String(value) => value,
+                _ => {
+                    return Err(FrickmailError::Upstream(
+                        "invalid IMAP NAMESPACE prefix".to_string(),
+                    ))
+                }
+            };
+            let delimiter = match values.remove(0) {
+                LegacyNamespaceValue::String(value) => Some(value),
+                LegacyNamespaceValue::Null => None,
+                _ => {
+                    return Err(FrickmailError::Upstream(
+                        "invalid IMAP NAMESPACE delimiter".to_string(),
+                    ))
+                }
+            };
+            Ok(LegacyNamespaceEntry {
+                prefix: wire_prefix.clone(),
+                wire_prefix,
+                delimiter,
+                extension: values,
+            })
+        })
+        .collect()
+}
+
+struct NamespaceParser<'a> {
+    input: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> NamespaceParser<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, cursor: 0 }
+    }
+
+    fn parse_value(&mut self) -> Result<LegacyNamespaceValue> {
+        self.skip_spaces();
+        match self.input.get(self.cursor).copied() {
+            Some(b'(') => self.parse_list(),
+            Some(b'"') => self.parse_quoted().map(LegacyNamespaceValue::String),
+            Some(b'{') => self.parse_literal().map(LegacyNamespaceValue::String),
+            Some(_) => {
+                let atom = self.parse_atom()?;
+                if atom.eq_ignore_ascii_case("NIL") {
+                    Ok(LegacyNamespaceValue::Null)
+                } else {
+                    Ok(LegacyNamespaceValue::String(atom))
+                }
+            }
+            None => Err(FrickmailError::Upstream(
+                "truncated IMAP NAMESPACE response".to_string(),
+            )),
+        }
+    }
+
+    fn parse_list(&mut self) -> Result<LegacyNamespaceValue> {
+        self.cursor += 1;
+        let mut values = Vec::new();
+        loop {
+            self.skip_spaces();
+            match self.input.get(self.cursor).copied() {
+                Some(b')') => {
+                    self.cursor += 1;
+                    return Ok(LegacyNamespaceValue::List(values));
+                }
+                Some(_) => values.push(self.parse_value()?),
+                None => {
+                    return Err(FrickmailError::Upstream(
+                        "unterminated IMAP NAMESPACE list".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn parse_quoted(&mut self) -> Result<String> {
+        self.cursor += 1;
+        let mut value = Vec::new();
+        loop {
+            match self.input.get(self.cursor).copied() {
+                Some(b'"') => {
+                    self.cursor += 1;
+                    return String::from_utf8(value).map_err(|_| {
+                        FrickmailError::Upstream(
+                            "invalid UTF-8 in IMAP NAMESPACE string".to_string(),
+                        )
+                    });
+                }
+                Some(b'\\') => {
+                    self.cursor += 1;
+                    let escaped = self.input.get(self.cursor).copied().ok_or_else(|| {
+                        FrickmailError::Upstream("truncated IMAP NAMESPACE escape".to_string())
+                    })?;
+                    value.push(escaped);
+                    self.cursor += 1;
+                }
+                Some(byte) => {
+                    value.push(byte);
+                    self.cursor += 1;
+                }
+                None => {
+                    return Err(FrickmailError::Upstream(
+                        "unterminated IMAP NAMESPACE string".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn parse_atom(&mut self) -> Result<String> {
+        let start = self.cursor;
+        while self
+            .input
+            .get(self.cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'(' | b')'))
+        {
+            self.cursor += 1;
+        }
+        if start == self.cursor {
+            return Err(FrickmailError::Upstream(
+                "invalid IMAP NAMESPACE atom".to_string(),
+            ));
+        }
+        std::str::from_utf8(&self.input[start..self.cursor])
+            .map(str::to_string)
+            .map_err(|_| {
+                FrickmailError::Upstream("invalid UTF-8 in IMAP NAMESPACE atom".to_string())
+            })
+    }
+
+    fn parse_literal(&mut self) -> Result<String> {
+        self.cursor += 1;
+        let length_start = self.cursor;
+        while self
+            .input
+            .get(self.cursor)
+            .is_some_and(|byte| byte.is_ascii_digit())
+        {
+            self.cursor += 1;
+        }
+        let length_end = self.cursor;
+        if self.input.get(self.cursor) == Some(&b'+') {
+            self.cursor += 1;
+        }
+        if self.input.get(self.cursor..self.cursor + 3) != Some(b"}\r\n") {
+            return Err(FrickmailError::Upstream(
+                "invalid IMAP NAMESPACE literal".to_string(),
+            ));
+        }
+        let length = std::str::from_utf8(&self.input[length_start..length_end])
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| {
+                FrickmailError::Upstream("invalid IMAP NAMESPACE literal length".to_string())
+            })?;
+        self.cursor += 3;
+        let end = self.cursor.checked_add(length).ok_or_else(|| {
+            FrickmailError::Upstream("IMAP NAMESPACE literal length overflow".to_string())
+        })?;
+        let value = self.input.get(self.cursor..end).ok_or_else(|| {
+            FrickmailError::Upstream("truncated IMAP NAMESPACE literal".to_string())
+        })?;
+        self.cursor = end;
+        String::from_utf8(value.to_vec()).map_err(|_| {
+            FrickmailError::Upstream("invalid UTF-8 in IMAP NAMESPACE literal".to_string())
+        })
+    }
+
+    fn skip_spaces(&mut self) {
+        while self
+            .input
+            .get(self.cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            self.cursor += 1;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_finished(&self) -> bool {
+        self.cursor == self.input.len()
+    }
+}
+
+#[derive(Debug)]
+struct LegacyFolderListOptions {
+    discover_subscriptions: bool,
+    list_extended: bool,
+    list_status: bool,
+    special_use: bool,
+    highest_modseq: bool,
+    append_limit: bool,
+    size: bool,
+    mailbox_id: bool,
+    utf8_mode: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ListedLegacyFolderStatus {
+    total_emails: Option<u32>,
+    uid_next: Option<u32>,
+    uid_validity: Option<u32>,
+    unread_emails: Option<u32>,
+    highest_modseq: Option<u64>,
+    size: Option<u64>,
+    mailbox_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListedLegacyFolder {
+    wire_name: String,
+    full_name: String,
+    delimiter: String,
+    attributes: Vec<String>,
+    status: Option<ListedLegacyFolderStatus>,
+}
+
+impl ListedLegacyFolder {
+    fn selectable(&self) -> bool {
+        !self
+            .attributes
+            .iter()
+            .any(|value| matches!(value.as_str(), "\\noselect" | "\\nonexistent"))
+    }
+
+    fn into_legacy_folder(
+        self,
+        metadata: HashMap<String, String>,
+        client_hash: &str,
+    ) -> LegacyFolder {
+        let role = legacy_folder_role_with_metadata(&self.full_name, &self.attributes, &metadata);
+        let etag = self.status.as_ref().and_then(|status| {
+            status.total_emails.map(|total| {
+                legacy_folder_etag(
+                    &self.full_name,
+                    total,
+                    status.uid_next,
+                    status.uid_validity,
+                    status.unread_emails,
+                    status.highest_modseq,
+                    client_hash,
+                )
+            })
+        });
+        LegacyFolder {
+            name: legacy_folder_name(&self.full_name, &self.delimiter),
+            full_name: self.full_name,
+            delimiter: self.delimiter,
+            attributes: self.attributes,
+            metadata,
+            uid_next: self.status.as_ref().and_then(|status| status.uid_next),
+            total_emails: self.status.as_ref().and_then(|status| status.total_emails),
+            unread_emails: self.status.as_ref().and_then(|status| status.unread_emails),
+            id: self
+                .status
+                .as_ref()
+                .and_then(|status| status.mailbox_id.clone()),
+            size: self.status.as_ref().and_then(|status| status.size),
+            role,
+            etag,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct LegacyListCommandResponses {
+    folders: Vec<ListedLegacyFolder>,
+    statuses: HashMap<String, ListedLegacyFolderStatus>,
+}
+
+async fn legacy_folders_for_reference(
+    session: &mut BoxedSession,
+    reference: &str,
+    options: &LegacyFolderListOptions,
+) -> Result<Vec<ListedLegacyFolder>> {
+    let command = legacy_list_command(reference, false, options)?;
+    let mut listed =
+        run_legacy_list_command(session, &command, "list mailboxes", options.utf8_mode).await?;
+
+    if reference.is_empty()
+        && !listed.iter().any(|folder| {
+            folder.full_name.eq_ignore_ascii_case("INBOX")
+                || folder.attributes.iter().any(|value| value == "\\inbox")
+        })
+    {
+        let delimiter = listed
+            .iter()
+            .find_map(|folder| (!folder.delimiter.is_empty()).then(|| folder.delimiter.clone()))
+            .unwrap_or_default();
+        listed.push(ListedLegacyFolder {
+            wire_name: "INBOX".to_string(),
+            full_name: "INBOX".to_string(),
+            delimiter,
+            attributes: Vec::new(),
+            status: None,
+        });
+    }
+
+    if !options.list_extended && options.discover_subscriptions {
+        let subscribed = match legacy_list_command(reference, true, options) {
+            Ok(command) => {
+                run_legacy_list_command(
+                    session,
+                    &command,
+                    "list mailbox subscriptions",
+                    options.utf8_mode,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        match subscribed {
+            Ok(subscribed) => {
+                let subscribed = subscribed
+                    .into_iter()
+                    .map(|folder| folder.full_name)
+                    .collect::<HashSet<_>>();
+                for folder in &mut listed {
+                    if subscribed.contains(&folder.full_name)
+                        && !folder
+                            .attributes
+                            .iter()
+                            .any(|attribute| attribute == "\\subscribed")
+                    {
+                        folder.attributes.push("\\subscribed".to_string());
+                    }
+                }
+            }
+            Err(_) => {
+                for folder in &mut listed {
+                    if !folder
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute == "\\subscribed")
+                    {
+                        folder.attributes.push("\\subscribed".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(listed)
+}
+
+fn legacy_list_command(
+    reference: &str,
+    subscribed_only: bool,
+    options: &LegacyFolderListOptions,
+) -> Result<String> {
+    let reference = quote_imap_string("namespace reference", reference)?;
+    let pattern = quote_mailbox_pattern("*")?;
+    if subscribed_only {
+        return Ok(format!("LSUB {reference} {pattern}"));
+    }
+    if !options.list_extended {
+        return Ok(format!("LIST {reference} {pattern}"));
+    }
+
+    let mut return_items = vec!["SUBSCRIBED".to_string()];
+    if options.special_use {
+        return_items.push("SPECIAL-USE".to_string());
+    }
+    if options.list_status {
+        let mut status_items = vec!["MESSAGES", "UNSEEN", "UIDNEXT", "UIDVALIDITY"];
+        if options.highest_modseq {
+            status_items.push("HIGHESTMODSEQ");
+        }
+        if options.append_limit {
+            status_items.push("APPENDLIMIT");
+        }
+        if options.size {
+            status_items.push("SIZE");
+        }
+        if options.mailbox_id {
+            status_items.push("MAILBOXID");
+        }
+        return_items.push(format!("STATUS ({})", status_items.join(" ")));
+    }
+    Ok(format!(
+        "LIST {reference} {pattern} RETURN ({})",
+        return_items.join(" ")
+    ))
+}
+
+async fn run_legacy_list_command(
+    session: &mut BoxedSession,
+    command: &str,
+    operation: &'static str,
+    utf8_mode: bool,
+) -> Result<Vec<ListedLegacyFolder>> {
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut collected = LegacyListCommandResponses::default();
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                collect_legacy_list_response(response.parsed(), &mut collected, utf8_mode);
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    for folder in &mut collected.folders {
+                        folder.status = collected.statuses.remove(&folder.full_name);
+                    }
+                    return Ok(collected.folders);
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+fn collect_legacy_list_response(
+    response: &Response<'_>,
+    collected: &mut LegacyListCommandResponses,
+    utf8_mode: bool,
+) {
+    match response {
+        Response::MailboxData(MailboxDatum::List {
+            name_attributes,
+            delimiter,
+            name,
+        }) => {
+            let wire_name = name.to_string();
+            let full_name = imap_mailbox_to_utf8(&wire_name, utf8_mode);
+            collected.folders.push(ListedLegacyFolder {
+                wire_name,
+                full_name,
+                delimiter: delimiter.as_deref().unwrap_or_default().to_string(),
+                attributes: legacy_name_attributes(name_attributes),
+                status: None,
+            });
+        }
+        Response::MailboxData(MailboxDatum::Status { mailbox, status }) => {
+            let mailbox = imap_mailbox_to_utf8(mailbox, utf8_mode);
+            let entry = collected.statuses.entry(mailbox).or_default();
+            for attribute in status {
+                match attribute {
+                    StatusAttribute::AppendLimit(_) => {}
+                    StatusAttribute::HighestModSeq(value) => entry.highest_modseq = Some(*value),
+                    StatusAttribute::MailboxId(value) => {
+                        entry.mailbox_id = Some(STANDARD.encode(value.as_bytes()))
+                    }
+                    StatusAttribute::Messages(value) => entry.total_emails = Some(*value),
+                    StatusAttribute::Recent(_) => {}
+                    StatusAttribute::Size(value) => entry.size = Some(*value),
+                    StatusAttribute::UidNext(value) => entry.uid_next = Some(*value),
+                    StatusAttribute::UidValidity(value) => entry.uid_validity = Some(*value),
+                    StatusAttribute::Unseen(value) => entry.unread_emails = Some(*value),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn legacy_all_metadata(
+    session: &mut BoxedSession,
+    utf8_mode: bool,
+) -> Result<HashMap<String, HashMap<String, String>>> {
+    let operation = "read all mailbox metadata";
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(r#"GETMETADATA (DEPTH infinity) "*" ("/shared" "/private")"#)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut all = HashMap::<String, HashMap<String, String>>::new();
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                if let Response::MailboxData(MailboxDatum::MetadataSolicited { mailbox, values }) =
+                    response.parsed()
+                {
+                    let metadata = all
+                        .entry(imap_mailbox_to_utf8(mailbox, utf8_mode))
+                        .or_default();
+                    metadata.extend(values.iter().filter_map(|entry| {
+                        entry
+                            .value
+                            .as_ref()
+                            .map(|value| (entry.entry.clone(), value.clone()))
+                    }));
+                }
+                match response.parsed() {
+                    Response::Done {
+                        tag,
+                        status: Status::Ok,
+                        ..
+                    } if tag == &request_id => return Ok(all),
+                    Response::Done { tag, .. } if tag == &request_id => {
+                        return Ok(HashMap::new());
+                    }
+                    Response::Data {
+                        status: Status::Bye,
+                        information,
+                        ..
+                    } => {
+                        return Err(imap_acl_status_error(
+                            operation,
+                            &Status::Bye,
+                            information.as_deref(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+async fn legacy_folder_metadata_with_timeout(
+    session: &mut BoxedSession,
+    wire_name: &str,
+    command_timeout: Duration,
+) -> Result<Option<HashMap<String, String>>> {
+    let entries = match timeout(
+        command_timeout,
+        session.get_metadata(wire_name, "(DEPTH infinity)", "(\"/shared\" \"/private\")"),
+    )
+    .await
+    {
+        Err(_) => {
+            return Err(FrickmailError::Upstream(
+                "read listed mailbox metadata timed out".to_string(),
+            ));
+        }
+        Ok(Err(async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_))) => {
+            return Ok(None);
+        }
+        Ok(Err(error)) => return Err(imap_error("read listed mailbox metadata", error)),
+        Ok(Ok(entries)) => entries,
+    };
+    Ok(Some(
+        entries
+            .into_iter()
+            .filter_map(|entry| entry.value.map(|value| (entry.entry, value)))
+            .collect(),
+    ))
+}
+
+async fn legacy_storage_quota(
+    session: &mut BoxedSession,
+    capabilities: &Capabilities,
+) -> (Option<u64>, Option<u64>) {
+    if !has_capability_ignore_ascii_case(capabilities, "QUOTA") {
+        return (None, None);
+    }
+    legacy_storage_quota_result(session)
+        .await
+        .unwrap_or((None, None))
+}
+
+async fn legacy_storage_quota_result(
+    session: &mut BoxedSession,
+) -> Result<(Option<u64>, Option<u64>)> {
+    let operation = "read mailbox quota";
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(r#"GETQUOTAROOT "INBOX""#)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut storage = None;
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                if let Response::Quota(quota) = response.parsed() {
+                    if let Some(resource) = quota
+                        .resources
+                        .iter()
+                        .find(|resource| resource.name == imap_proto::QuotaResourceName::Storage)
+                    {
+                        storage = Some((resource.usage, resource.limit));
+                    }
+                }
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(match storage {
+                        Some((usage, limit)) => (
+                            Some(usage.saturating_mul(1024)),
+                            Some(limit.saturating_mul(1024)),
+                        ),
+                        None => (Some(0), Some(0)),
+                    });
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+fn legacy_visible_capabilities(capabilities: &Capabilities) -> Vec<String> {
+    let mut visible = capabilities
+        .iter()
+        .map(|capability| match capability {
+            Capability::Imap4rev1 => "IMAP4rev1".to_string(),
+            Capability::Auth(mechanism) => format!("AUTH={mechanism}"),
+            Capability::Atom(atom) => atom.clone(),
+        })
+        .filter(|capability| {
+            let capability = capability.to_ascii_uppercase();
+            !["IMAP", "AUTH", "LOGIN", "SASL"]
+                .iter()
+                .any(|prefix| capability.starts_with(prefix))
+        })
+        .collect::<Vec<_>>();
+    visible.sort_unstable();
+    visible
+}
+
+async fn enable_legacy_utf8(
+    session: &mut BoxedSession,
+    capabilities: &Capabilities,
+) -> Result<bool> {
+    let utf8_mode = has_capability_ignore_ascii_case(capabilities, "UTF8=ACCEPT")
+        || has_capability_ignore_ascii_case(capabilities, "UTF8=ONLY");
+    if utf8_mode {
+        timeout_imap(
+            "enable IMAP UTF-8",
+            session.run_command_and_check_ok("ENABLE UTF8=ACCEPT"),
+        )
+        .await?;
+    }
+    Ok(utf8_mode)
+}
+
 async fn mailbox_metadata_supported(session: &mut BoxedSession) -> Result<bool> {
     let capabilities =
         timeout_imap("read IMAP metadata capability", session.capabilities()).await?;
@@ -3995,6 +5062,40 @@ fn collect_acl_data_response(
 }
 
 fn acl_command_completion(
+    response: &Response<'_>,
+    request_id: &RequestId,
+    operation: &str,
+) -> Result<Option<()>> {
+    match response {
+        Response::Done {
+            tag,
+            status: Status::Ok,
+            ..
+        } if tag == request_id => Ok(Some(())),
+        Response::Done {
+            tag,
+            status,
+            information,
+            ..
+        } if tag == request_id => Err(imap_acl_status_error(
+            operation,
+            status,
+            information.as_deref(),
+        )),
+        Response::Data {
+            status: Status::Bye,
+            information,
+            ..
+        } => Err(imap_acl_status_error(
+            operation,
+            &Status::Bye,
+            information.as_deref(),
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn imap_command_completion(
     response: &Response<'_>,
     request_id: &RequestId,
     operation: &str,
@@ -4153,7 +5254,7 @@ async fn created_legacy_folder(
         attributes,
         metadata: HashMap::new(),
         uid_next: status.uid_next,
-        total_emails: status.exists,
+        total_emails: Some(status.exists),
         unread_emails: status.unseen,
         id: None,
         size: None,
@@ -4209,6 +5310,57 @@ fn legacy_name_attribute(attribute: &NameAttribute<'_>) -> Option<String> {
     Some(value.to_string())
 }
 
+fn modified_utf7_to_utf8(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find('&') {
+        let start = cursor + relative_start;
+        decoded.push_str(&value[cursor..start]);
+        let Some(relative_end) = value[start + 1..].find('-') else {
+            decoded.push_str(&value[start..]);
+            return decoded;
+        };
+        let end = start + 1 + relative_end;
+        let encoded = &value[start + 1..end];
+        if encoded.is_empty() {
+            decoded.push('&');
+            cursor = end + 1;
+            continue;
+        }
+
+        let mut standard = encoded.replace(',', "/");
+        while !standard.len().is_multiple_of(4) {
+            standard.push('=');
+        }
+        let converted = STANDARD.decode(standard).ok().and_then(|bytes| {
+            if bytes.len() % 2 != 0 {
+                return None;
+            }
+            let utf16 = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            String::from_utf16(&utf16).ok()
+        });
+        if let Some(converted) = converted {
+            decoded.push_str(&converted);
+        } else {
+            decoded.push_str(&value[start..=end]);
+        }
+        cursor = end + 1;
+    }
+    decoded.push_str(&value[cursor..]);
+    decoded
+}
+
+fn imap_mailbox_to_utf8(value: &str, utf8_mode: bool) -> String {
+    if utf8_mode {
+        value.to_string()
+    } else {
+        modified_utf7_to_utf8(value)
+    }
+}
+
 fn legacy_folder_name(full_name: &str, delimiter: &str) -> String {
     if delimiter.is_empty() {
         return full_name.to_string();
@@ -4241,6 +5393,24 @@ fn legacy_folder_role(attributes: &[String]) -> Option<String> {
     });
 
     role.map(str::to_string)
+}
+
+fn legacy_folder_role_with_metadata(
+    full_name: &str,
+    attributes: &[String],
+    metadata: &HashMap<String, String>,
+) -> Option<String> {
+    metadata
+        .get("/private/specialuse")
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_start_matches('\\').to_string())
+        .or_else(|| legacy_folder_role(attributes))
+        .or_else(|| {
+            full_name
+                .eq_ignore_ascii_case("INBOX")
+                .then(|| "inbox".to_string())
+        })
 }
 
 fn validate_deletable_mailbox(mailbox: &str, messages: u32) -> Result<()> {
@@ -4793,6 +5963,279 @@ mod tests {
 
         assert_eq!(attributes, vec!["\\noselect", "\\archive", "\\subscribed"]);
         assert_eq!(legacy_folder_role(&attributes), Some("archive".to_string()));
+    }
+
+    #[test]
+    fn namespace_response_parser_preserves_groups_extensions_and_nil() {
+        let namespaces = parse_namespace_response_line(
+            r#"* NAMESPACE (("INbox/" "/" "X-PARAM" ("one" "two"))) (("Other Users/" "/")) NIL"#,
+        )
+        .unwrap();
+
+        assert_eq!(namespaces.personal_prefix(), "INBOX/");
+        assert_eq!(namespaces.personal[0].prefix, "INbox/");
+        assert_eq!(namespaces.personal[0].delimiter.as_deref(), Some("/"));
+        assert_eq!(
+            namespaces.personal[0].extension,
+            vec![
+                LegacyNamespaceValue::String("X-PARAM".to_string()),
+                LegacyNamespaceValue::List(vec![
+                    LegacyNamespaceValue::String("one".to_string()),
+                    LegacyNamespaceValue::String("two".to_string()),
+                ]),
+            ]
+        );
+        assert_eq!(namespaces.users[0].prefix, "Other Users/");
+        assert!(namespaces.shared.is_empty());
+    }
+
+    #[test]
+    fn namespace_response_parser_handles_quoted_escapes_and_rejects_trailing_data() {
+        let namespaces =
+            parse_namespace_response_line(r#"* NAMESPACE (("Shared\\\"" NIL)) NIL NIL"#).unwrap();
+        assert_eq!(namespaces.personal[0].prefix, "Shared\\\"");
+        assert_eq!(namespaces.personal[0].delimiter, None);
+
+        assert!(
+            parse_namespace_response_line(r#"* NAMESPACE (("" "/")) NIL NIL unexpected"#).is_err()
+        );
+        assert!(parse_namespace_response_line("* NAMESPACE ((\"\" \"/\") NIL NIL").is_err());
+    }
+
+    #[test]
+    fn namespace_response_parser_accepts_synchronizing_and_non_synchronizing_literals() {
+        let namespaces = parse_namespace_response_payload(
+            b"(({5}\r\nINBOX {1+}\r\n/)) NIL ((\"Shared/\" \"/\"))\r\n",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(namespaces.personal[0].prefix, "INBOX");
+        assert_eq!(namespaces.personal[0].delimiter.as_deref(), Some("/"));
+        assert_eq!(namespaces.shared[0].prefix, "Shared/");
+    }
+
+    #[tokio::test]
+    async fn namespace_response_reader_waits_for_matching_tag_across_partial_reads() {
+        use tokio::io::AsyncWriteExt;
+
+        let (client, mut server) = tokio::io::duplex(256);
+        let writer = tokio::spawn(async move {
+            server.write_all(b"* OK advisory\r\n* NAMES").await.unwrap();
+            server
+                .write_all(b"PACE ((\"\" \"/\")) NIL NIL\r\nA2 OK unrelated\r\n")
+                .await
+                .unwrap();
+            server.write_all(b"A1 OK completed\r\n").await.unwrap();
+        });
+        let mut stream: BoxedImapIo = Box::new(client);
+
+        let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
+            .await
+            .unwrap();
+        writer.await.unwrap();
+        assert_eq!(namespaces.personal[0].prefix, "");
+        assert_eq!(namespaces.personal[0].delimiter.as_deref(), Some("/"));
+    }
+
+    #[tokio::test]
+    async fn namespace_response_reader_ignores_tag_looking_lines_inside_literals() {
+        use tokio::io::AsyncWriteExt;
+
+        let response = concat!(
+            "* NAMESPACE ((\"\" \"/\" \"X\" {12}\r\n",
+            "A1 OK fake\r\n",
+            ")) NIL NIL\r\n",
+            "A1 OK completed\r\n",
+        );
+        let (client, mut server) = tokio::io::duplex(256);
+        let writer = tokio::spawn(async move {
+            server.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut stream: BoxedImapIo = Box::new(client);
+
+        let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
+            .await
+            .unwrap();
+        writer.await.unwrap();
+        assert_eq!(
+            namespaces.personal[0].extension,
+            vec![
+                LegacyNamespaceValue::String("X".to_string()),
+                LegacyNamespaceValue::String("A1 OK fake\r\n".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn namespace_response_reader_ignores_namespace_prefix_inside_preceding_literal() {
+        use tokio::io::AsyncWriteExt;
+
+        let fake_namespace = b"header\r\n* NAMESPACE NIL NIL NIL";
+        let mut response =
+            format!("* 1 FETCH (BODY[] {{{}}}\r\n", fake_namespace.len()).into_bytes();
+        response.extend_from_slice(fake_namespace);
+        response.extend_from_slice(
+            concat!(
+                ")\r\n",
+                "* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n",
+                "A1 OK completed\r\n",
+            )
+            .as_bytes(),
+        );
+        let (client, mut server) = tokio::io::duplex(512);
+        let writer = tokio::spawn(async move {
+            server.write_all(&response).await.unwrap();
+        });
+        let mut stream: BoxedImapIo = Box::new(client);
+
+        let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
+            .await
+            .unwrap();
+        writer.await.unwrap();
+        assert_eq!(namespaces.personal[0].wire_prefix, "");
+        assert_eq!(namespaces.personal[0].delimiter.as_deref(), Some("/"));
+    }
+
+    #[tokio::test]
+    async fn namespace_response_reader_does_not_treat_status_text_braces_as_literal() {
+        use tokio::io::AsyncWriteExt;
+
+        let response = concat!(
+            "* OK advisory {12}\r\n",
+            "* NAMESPACE ((\"INBOX/\" \"/\")) NIL NIL\r\n",
+            "A1 OK completed\r\n",
+        );
+        let (client, mut server) = tokio::io::duplex(256);
+        let writer = tokio::spawn(async move {
+            server.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut stream: BoxedImapIo = Box::new(client);
+
+        let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
+            .await
+            .unwrap();
+        writer.await.unwrap();
+        assert_eq!(namespaces.personal[0].wire_prefix, "INBOX/");
+        assert_eq!(namespaces.personal[0].delimiter.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn modified_utf7_decoder_matches_mailso_folder_name_conversion() {
+        assert_eq!(modified_utf7_to_utf8("Inbox"), "Inbox");
+        assert_eq!(modified_utf7_to_utf8("R&D"), "R&D");
+        assert_eq!(modified_utf7_to_utf8("R&-D"), "R&D");
+        assert_eq!(modified_utf7_to_utf8("Envoy&AOk-"), "Envoyé");
+        assert_eq!(modified_utf7_to_utf8("&ZeVnLIqe-"), "日本語");
+        assert_eq!(modified_utf7_to_utf8("Broken&A-"), "Broken&A-");
+    }
+
+    #[test]
+    fn mailbox_decoder_preserves_utf8_mode_names_that_resemble_modified_utf7() {
+        assert_eq!(imap_mailbox_to_utf8("R&-D", false), "R&D");
+        assert_eq!(imap_mailbox_to_utf8("R&-D", true), "R&-D");
+        assert_eq!(imap_mailbox_to_utf8("Envoy&AOk-", false), "Envoyé");
+        assert_eq!(imap_mailbox_to_utf8("Envoy&AOk-", true), "Envoy&AOk-");
+    }
+
+    #[test]
+    fn extended_list_command_requests_legacy_status_and_special_use_data() {
+        let command = legacy_list_command(
+            "",
+            false,
+            &LegacyFolderListOptions {
+                discover_subscriptions: true,
+                list_extended: true,
+                list_status: true,
+                special_use: true,
+                highest_modseq: true,
+                append_limit: true,
+                size: true,
+                mailbox_id: true,
+                utf8_mode: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            "LIST \"\" \"*\" RETURN (SUBSCRIBED SPECIAL-USE STATUS (MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ APPENDLIMIT SIZE MAILBOXID))"
+        );
+    }
+
+    #[test]
+    fn extended_list_responses_decode_names_status_and_optional_fields() {
+        let mut input = concat!(
+            "* LIST (\\Subscribed \\Archive) \"/\" \"Envoy&AOk-\"\r\n",
+            "* STATUS \"Envoy&AOk-\" (MESSAGES 3 UNSEEN 1 UIDNEXT 4 UIDVALIDITY 5 ",
+            "HIGHESTMODSEQ 7 APPENDLIMIT 100 SIZE 2048 MAILBOXID (folder-id))\r\n",
+        )
+        .as_bytes();
+        let mut collected = LegacyListCommandResponses::default();
+        while !input.is_empty() {
+            let (remaining, response) = Response::from_bytes(input).unwrap();
+            collect_legacy_list_response(&response, &mut collected, false);
+            input = remaining;
+        }
+        for folder in &mut collected.folders {
+            folder.status = collected.statuses.remove(&folder.full_name);
+        }
+
+        let folder = collected
+            .folders
+            .pop()
+            .unwrap()
+            .into_legacy_folder(HashMap::new(), "client-hash");
+        assert_eq!(folder.full_name, "Envoyé");
+        assert_eq!(folder.attributes, vec!["\\subscribed", "\\archive"]);
+        assert_eq!(folder.total_emails, Some(3));
+        assert_eq!(folder.unread_emails, Some(1));
+        assert_eq!(folder.uid_next, Some(4));
+        assert_eq!(folder.size, Some(2048));
+        assert_eq!(folder.id.as_deref(), Some("Zm9sZGVyLWlk"));
+        assert_eq!(folder.role.as_deref(), Some("archive"));
+        assert!(folder.etag.is_some());
+    }
+
+    #[test]
+    fn extended_list_status_accepts_append_limit_nil() {
+        let (_, response) =
+            Response::from_bytes(b"* STATUS \"INBOX\" (MESSAGES 1 APPENDLIMIT NIL)\r\n").unwrap();
+        let mut collected = LegacyListCommandResponses::default();
+        collect_legacy_list_response(&response, &mut collected, false);
+
+        assert_eq!(
+            collected
+                .statuses
+                .get("INBOX")
+                .and_then(|status| status.total_emails),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn generic_imap_completion_rejects_matching_list_and_quota_failures() {
+        let request_id = RequestId("A1".to_string());
+        let (_, list_no) = Response::from_bytes(b"A1 NO list rejected\r\n").unwrap();
+        assert!(imap_command_completion(&list_no, &request_id, "list mailboxes").is_err());
+        let (_, quota_bad) = Response::from_bytes(b"A1 BAD quota unsupported\r\n").unwrap();
+        assert!(imap_command_completion(&quota_bad, &request_id, "read quota").is_err());
+    }
+
+    #[test]
+    fn folder_metadata_special_use_takes_role_precedence() {
+        assert_eq!(
+            legacy_folder_role_with_metadata(
+                "Archive",
+                &["\\archive".to_string()],
+                &HashMap::from([("/private/specialuse".to_string(), "\\Sent".to_string())]),
+            ),
+            Some("sent".to_string())
+        );
+        assert_eq!(
+            legacy_folder_role_with_metadata("inbox", &[], &HashMap::new()),
+            Some("inbox".to_string())
+        );
     }
 
     #[test]

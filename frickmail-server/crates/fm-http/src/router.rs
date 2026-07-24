@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     net::{IpAddr, SocketAddr},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -28,16 +28,17 @@ use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, Hea
 use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
     copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
-    fetch_legacy_folder_information, fetch_legacy_message_list, fetch_mailbox_acl,
-    fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
-    legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
-    legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_acl,
-    set_mailbox_metadata, set_mailbox_subscription, store_message_flag, store_message_keyword,
-    store_seen_to_all, update_mailbox_settings, validate_eml, BodyPreviewPart,
-    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
-    LegacyFolder, LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest,
-    MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction,
-    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    fetch_legacy_folder_information, fetch_legacy_folders, fetch_legacy_message_list,
+    fetch_mailbox_acl, fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages,
+    fetch_raw_message, legacy_message_cache_key, legacy_message_hash,
+    legacy_message_list_cache_key, legacy_message_list_params_hash, move_messages, rename_mailbox,
+    set_mailbox_acl, set_mailbox_metadata, set_mailbox_subscription, store_message_flag,
+    store_message_keyword, store_seen_to_all, update_mailbox_settings, validate_eml,
+    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
+    ImapMoveOptions, LegacyFolder, LegacyFolderCollection, LegacyFolderInformation,
+    LegacyMessageList, LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry,
+    MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
+    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
     RuleExecutionReport,
 };
 use fm_mime::{
@@ -786,6 +787,7 @@ async fn native_compat_response(
         "Message" if legacy_message_payload_is_native_candidate(payload) => {
             Some(native_legacy_message(state, original_action, payload, session, headers).await)
         }
+        "Folders" => Some(native_legacy_folders(state, original_action, payload, session).await),
         "FolderInformation" => {
             Some(native_legacy_folder_information(state, original_action, payload, session).await)
         }
@@ -5341,6 +5343,103 @@ fn legacy_php_truthy(value: &Value) -> bool {
     }
 }
 
+async fn native_legacy_folders(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folders_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        |config, password, discover_subscriptions| async move {
+            fetch_legacy_folders(config, &password, discover_subscriptions).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folders_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, bool) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<LegacyFolderCollection>>,
+{
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let account_id = match resolve_message_body_account_id(payload, session, original_action).await
+    {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+    let settings =
+        match SqlxUserRepository::get_mail_account_settings(pool, user.user_id, account_id).await {
+            Ok(Some(settings)) => settings,
+            Ok(None) => return json_result_error(original_action, "Account not found"),
+            Err(error) => return json_result_error(original_action, &error.public_message()),
+        };
+    let discover_subscriptions = settings
+        .get("HideUnsubscribed")
+        .or_else(|| settings.get("hideUnsubscribed"))
+        .is_some_and(legacy_php_truthy);
+    let checkable = legacy_checkable_folders(&settings);
+    let (config, password) = match imap_action_connection_for_selected_or_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+
+    match fetcher(config, password, discover_subscriptions).await {
+        Ok(collection) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": legacy_folder_collection_json(&collection, &checkable)
+            }),
+        ),
+        Err(error) => json_result_error(original_action, &error.public_message()),
+    }
+}
+
+fn legacy_checkable_folders(settings: &Value) -> HashSet<String> {
+    let Some(setting) = settings
+        .get("CheckableFolder")
+        .or_else(|| settings.get("checkableFolder"))
+    else {
+        return HashSet::new();
+    };
+    let values = match setting {
+        Value::String(encoded) => serde_json::from_str::<Vec<String>>(encoded).unwrap_or_default(),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    values.into_iter().collect()
+}
+
 async fn native_legacy_folder_information(
     state: &AppState,
     original_action: &str,
@@ -6780,6 +6879,10 @@ fn legacy_folder_information_json(info: &LegacyFolderInformation) -> Value {
 }
 
 fn legacy_folder_json(folder: &LegacyFolder) -> Value {
+    legacy_folder_json_with_checkable(folder, false)
+}
+
+fn legacy_folder_json_with_checkable(folder: &LegacyFolder, checkable: bool) -> Value {
     let mut value = json!({
         "@Object": "Object/Folder",
         "name": folder.name,
@@ -6793,7 +6896,7 @@ fn legacy_folder_json(folder: &LegacyFolder) -> Value {
         "id": folder.id,
         "size": folder.size,
         "role": folder.role,
-        "checkable": false,
+        "checkable": checkable,
     });
     if let Some(etag) = &folder.etag {
         if !etag.is_empty() {
@@ -6801,6 +6904,41 @@ fn legacy_folder_json(folder: &LegacyFolder) -> Value {
         }
     }
     value
+}
+
+fn legacy_folder_collection_json(
+    collection: &LegacyFolderCollection,
+    checkable: &HashSet<String>,
+) -> Value {
+    json!({
+        "@Object": "Collection/FolderCollection",
+        "@Collection": collection
+            .folders
+            .iter()
+            .map(|folder| legacy_folder_json_with_checkable(
+                folder,
+                checkable.contains(&folder.full_name),
+            ))
+            .collect::<Vec<_>>(),
+        "quotaUsage": collection.quota_usage,
+        "quotaLimit": collection.quota_limit,
+        "namespace": collection.namespace,
+        "namespaces": collection
+            .namespaces
+            .as_ref()
+            .map(legacy_namespaces_json)
+            .unwrap_or(Value::Null),
+        "capabilities": collection.capabilities,
+    })
+}
+
+fn legacy_namespaces_json(namespaces: &LegacyNamespaces) -> Value {
+    json!({
+        "@Object": "Object/Namespaces",
+        "personal": namespaces.personal,
+        "users": namespaces.users,
+        "shared": namespaces.shared,
+    })
 }
 
 fn legacy_new_message_json(message: &fm_imap::LegacyNewMessage) -> Value {
@@ -9500,7 +9638,7 @@ fn message_body_parts_response(action: &str, parts: Vec<BodyPreviewPart>) -> Res
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -9524,17 +9662,17 @@ mod tests {
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
         BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
-        ImapMoveOptions, LegacyAttachmentSummary, LegacyFolder, LegacyFolderInformation,
-        LegacyMessageFlags, LegacyMessageList, LegacyMessageListRequest, LegacyMessageSummary,
-        LegacyNewMessage, MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits,
-        RuleAction, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-        RuleExecutionReport, RuleExecutionResult,
+        ImapMoveOptions, LegacyAttachmentSummary, LegacyFolder, LegacyFolderCollection,
+        LegacyFolderInformation, LegacyMessageFlags, LegacyMessageList, LegacyMessageListRequest,
+        LegacyMessageSummary, LegacyNamespaces, LegacyNewMessage, MailboxAclEntry, MailboxMetadata,
+        MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp,
+        RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
         USER_SESSION_KEY,
     };
-    use fm_user::PushSubscription;
+    use fm_user::{PushSubscription, CREDENTIAL_KEY_BYTES};
     use hmac::{Hmac, Mac};
     use openssl::{
         asn1::Asn1Time,
@@ -12463,6 +12601,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_dispatches_folders_to_native_auth_path() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=Folders"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Folders");
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[tokio::test]
     async fn json_api_dispatches_folder_acl_actions_to_native_auth_path() {
         for action in ["FolderACL", "FolderSetACL", "FolderDeleteACL"] {
             let response = app()
@@ -14647,7 +14805,7 @@ Subject: Empty body metadata\r\n\r\n"
             attributes: vec!["\\subscribed".to_string()],
             metadata: HashMap::from([("/shared/vendor/example".to_string(), "1".to_string())]),
             uid_next: Some(5),
-            total_emails: 0,
+            total_emails: Some(0),
             unread_emails: Some(0),
             id: None,
             size: None,
@@ -14669,6 +14827,125 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(value["role"], "archive");
         assert_eq!(value["checkable"], false);
         assert_eq!(value["etag"], "folder-etag");
+    }
+
+    #[test]
+    fn legacy_folder_collection_json_matches_mailso_collection_shape() {
+        let collection = LegacyFolderCollection {
+            folders: vec![LegacyFolder {
+                name: "INBOX".to_string(),
+                full_name: "INBOX".to_string(),
+                delimiter: "/".to_string(),
+                attributes: vec!["\\inbox".to_string(), "\\subscribed".to_string()],
+                metadata: HashMap::new(),
+                uid_next: Some(8),
+                total_emails: Some(7),
+                unread_emails: Some(2),
+                id: None,
+                size: None,
+                role: Some("inbox".to_string()),
+                etag: Some("inbox-etag".to_string()),
+            }],
+            quota_usage: Some(1024),
+            quota_limit: Some(4096),
+            namespace: String::new(),
+            namespaces: Some(LegacyNamespaces {
+                personal: vec![fm_imap::LegacyNamespaceEntry {
+                    prefix: String::new(),
+                    wire_prefix: String::new(),
+                    delimiter: Some("/".to_string()),
+                    extension: Vec::new(),
+                }],
+                users: Vec::new(),
+                shared: Vec::new(),
+            }),
+            capabilities: vec!["IDLE".to_string(), "QUOTA".to_string()],
+        };
+
+        let value = super::legacy_folder_collection_json(
+            &collection,
+            &HashSet::from(["INBOX".to_string()]),
+        );
+        assert_eq!(value["@Object"], "Collection/FolderCollection");
+        assert_eq!(value["@Collection"][0]["fullName"], "INBOX");
+        assert_eq!(value["@Collection"][0]["checkable"], true);
+        assert_eq!(value["quotaUsage"], 1024);
+        assert_eq!(value["quotaLimit"], 4096);
+        assert_eq!(value["namespace"], "");
+        assert_eq!(value["namespaces"]["@Object"], "Object/Namespaces");
+        assert_eq!(value["namespaces"]["personal"][0]["delimiter"], "/");
+        assert_eq!(value["capabilities"], json!(["IDLE", "QUOTA"]));
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folders_uses_selected_account_settings_and_decorates_checkable() {
+        let key = vec![29_u8; CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1852, 1853, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1853 },
+            )
+            .await
+            .unwrap();
+        assert!(SqlxUserRepository::update_mail_account_settings(
+            state.db_pool().unwrap(),
+            1852,
+            1853,
+            &json!({
+                "HideUnsubscribed": "1",
+                "CheckableFolder": "[\"Archive\"]",
+            }),
+        )
+        .await
+        .unwrap());
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_fetch = Arc::clone(&captured);
+
+        let response = super::native_legacy_folders_with_fetcher(
+            &state,
+            "Folders",
+            &json!({}),
+            &session,
+            move |config, password, discover_subscriptions| {
+                let captured = Arc::clone(&captured_for_fetch);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, discover_subscriptions));
+                    Ok(LegacyFolderCollection {
+                        folders: vec![LegacyFolder {
+                            name: "Archive".to_string(),
+                            full_name: "Archive".to_string(),
+                            delimiter: "/".to_string(),
+                            attributes: vec!["\\archive".to_string()],
+                            metadata: HashMap::new(),
+                            uid_next: Some(2),
+                            total_emails: Some(1),
+                            unread_emails: Some(0),
+                            id: None,
+                            size: None,
+                            role: Some("archive".to_string()),
+                            etag: None,
+                        }],
+                        quota_usage: None,
+                        quota_limit: None,
+                        namespace: String::new(),
+                        namespaces: None,
+                        capabilities: vec!["IDLE".to_string()],
+                    })
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Folders");
+        assert_eq!(body["Result"]["@Object"], "Collection/FolderCollection");
+        assert_eq!(body["Result"]["@Collection"][0]["checkable"], true);
+        assert_eq!(body["Result"]["namespaces"], Value::Null);
+        let (config, password, discover_subscriptions) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert!(discover_subscriptions);
     }
 
     #[test]
@@ -14955,7 +15232,7 @@ Subject: Empty body metadata\r\n\r\n"
                         attributes: vec!["\\subscribed".to_string()],
                         metadata: HashMap::new(),
                         uid_next: Some(1),
-                        total_emails: 0,
+                        total_emails: Some(0),
                         unread_emails: Some(0),
                         id: None,
                         size: None,

@@ -12,7 +12,11 @@ members = [
     "crates/fm-smtp",
     "crates/fm-user",
 ]
+exclude = ["vendor/imap-proto"]
 resolver = "2"
+
+[patch.crates-io]
+imap-proto = { path = "vendor/imap-proto" }
 
 [workspace.package]
 edition = "2021"

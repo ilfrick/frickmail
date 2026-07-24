@@ -528,6 +528,14 @@ impl SqlxUserRepository {
         fetch_mail_account(pool, user_id, account_id).await
     }
 
+    pub async fn get_mail_account_settings(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+    ) -> Result<Option<Value>> {
+        fetch_mail_account_settings(pool, user_id, account_id).await
+    }
+
     pub async fn update_mail_account_settings(
         pool: &AnyPool,
         user_id: i64,
@@ -1371,6 +1379,32 @@ async fn fetch_mail_account(
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
     fetch_mail_account_on_conn(&mut conn, &backend, user_id, account_id).await
+}
+
+async fn fetch_mail_account_settings(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+) -> Result<Option<Value>> {
+    if account_id <= 0 {
+        return Err(FrickmailError::BadRequest(
+            "Account id required".to_string(),
+        ));
+    }
+
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let row = sqlx::query(mail_account_settings_query(&backend))
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_error)?;
+    row.map(|row| {
+        let settings_json: String = row.try_get("settings_json").map_err(db_error)?;
+        serde_json::from_str(&settings_json).map_err(json_error)
+    })
+    .transpose()
 }
 
 async fn fetch_mail_account_on_conn(
@@ -3935,6 +3969,20 @@ fn mail_account_query(backend: &str) -> &'static str {
             "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, login, \
                 CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
              FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
+fn mail_account_settings_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT CAST(settings AS TEXT) AS settings_json FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2"
+        }
+        "MySQL" => {
+            "SELECT CAST(settings AS CHAR) AS settings_json FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
+        }
+        _ => {
+            "SELECT CAST(settings AS TEXT) AS settings_json FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
         }
     }
 }
