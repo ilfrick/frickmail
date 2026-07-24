@@ -11,6 +11,7 @@ use async_imap::{
     Client, Session,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::NaiveDate;
 use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
@@ -1469,9 +1470,15 @@ fn legacy_message_list_search_fields(search: &str) -> Vec<(String, String)> {
                     "MAXSIZE" => "SMALLER",
                     name => name,
                 };
+                let value = if name == "DATE" {
+                    format!("{}/", value.trim_end_matches('/'))
+                } else {
+                    value
+                };
                 if matches!(
                     name,
-                    "BODY"
+                    "DATE"
+                        | "BODY"
                         | "EMAIL"
                         | "FROM"
                         | "TO"
@@ -1593,6 +1600,11 @@ fn legacy_message_list_search_fields(search: &str) -> Vec<(String, String)> {
                     "MAXSIZE" => "SMALLER",
                     _ => name,
                 };
+                let value = if normalized == "DATE" {
+                    value.replace('.', "-")
+                } else {
+                    value
+                };
                 fields.push((normalized.to_string(), value));
             }
         }
@@ -1612,6 +1624,65 @@ fn legacy_message_list_unique_search_fields(
         }
     }
     unique
+}
+
+fn legacy_message_list_search_date(value: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
+}
+
+fn legacy_message_list_search_date_wire(value: NaiveDate) -> String {
+    value.format("%-d-%b-%Y").to_string()
+}
+
+fn legacy_message_list_friendly_size(value: &str) -> Result<u32> {
+    let normalized = value
+        .chars()
+        .flat_map(char::to_uppercase)
+        .filter(|character| character.is_ascii_digit() || matches!(character, 'K' | 'M'))
+        .collect::<String>();
+    let digits = normalized
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    let number = if digits.is_empty() {
+        0
+    } else {
+        digits.parse::<u64>().map_err(|_| {
+            FrickmailError::BadRequest("message-list search size is too large".to_string())
+        })?
+    };
+    let bytes = match normalized.chars().last() {
+        Some('M') => number.checked_mul(1024 * 1024).ok_or_else(|| {
+            FrickmailError::BadRequest("message-list search size is too large".to_string())
+        })?,
+        Some('K') => number.checked_mul(1024).ok_or_else(|| {
+            FrickmailError::BadRequest("message-list search size is too large".to_string())
+        })?,
+        _ => number,
+    };
+    u32::try_from(bytes).map_err(|_| {
+        FrickmailError::BadRequest(
+            "message-list search size exceeds the IMAP4rev1 numeric limit".to_string(),
+        )
+    })
+}
+
+fn legacy_message_list_header_criterion(value: &str) -> Result<String> {
+    let Some((field, search)) = value.split_once(' ') else {
+        return Err(FrickmailError::BadRequest(
+            "message-list HEADER search requires a field name and value".to_string(),
+        ));
+    };
+    if field.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "message-list HEADER search requires a field name and value".to_string(),
+        ));
+    }
+    Ok(format!(
+        "HEADER {} {}",
+        imap_quote_message_list_search_value(field)?,
+        imap_quote_message_list_search_value(search)?
+    ))
 }
 
 pub fn legacy_message_list_search_criteria(search: &str, hide_deleted: bool) -> Result<String> {
@@ -1642,6 +1713,7 @@ pub fn legacy_message_list_search_criteria_with_fast_simple_search(
         ) || !value.trim().is_empty()
     });
     let mut criteria = Vec::new();
+    let mut since_filter = None::<NaiveDate>;
 
     if !search.is_empty() && !has_parsed_fields {
         let value = imap_quote_message_list_search_value(search)?;
@@ -1694,6 +1766,65 @@ pub fn legacy_message_list_search_criteria_with_fast_simple_search(
                     "{name} {}",
                     imap_quote_message_list_search_value(value)?
                 )),
+                "KEYWORD" => {
+                    let keyword = modified_utf7_from_utf8(value);
+                    if !keyword_can_be_stored(&keyword) {
+                        return Err(FrickmailError::BadRequest(
+                            "message-list KEYWORD search requires a valid IMAP atom".to_string(),
+                        ));
+                    }
+                    criteria.push(format!("KEYWORD {keyword}"));
+                }
+                "HEADER" => criteria.push(legacy_message_list_header_criterion(value)?),
+                "LARGER" | "SMALLER" => criteria.push(format!(
+                    "{name} {}",
+                    legacy_message_list_friendly_size(value)?
+                )),
+                "SINCE" => {
+                    if let Some(date) = legacy_message_list_search_date(value) {
+                        since_filter = Some(
+                            since_filter
+                                .map(|current| current.max(date))
+                                .unwrap_or(date),
+                        );
+                    }
+                }
+                "ON" | "SENTON" | "SENTSINCE" | "SENTBEFORE" | "BEFORE" => {
+                    if let Some(date) = legacy_message_list_search_date(value) {
+                        criteria.push(format!(
+                            "{name} {}",
+                            legacy_message_list_search_date_wire(date)
+                        ));
+                    }
+                }
+                "DATE" => {
+                    let segments = value.split('/').collect::<Vec<_>>();
+                    let (from, before) = match segments.as_slice() {
+                        [from, through] => (
+                            legacy_message_list_search_date(from),
+                            legacy_message_list_search_date(through)
+                                .and_then(|date| date.succ_opt()),
+                        ),
+                        [only] if !only.is_empty() => {
+                            let from = legacy_message_list_search_date(only);
+                            (from, from.and_then(|date| date.succ_opt()))
+                        }
+                        _ => (None, None),
+                    };
+                    if let Some(from) = from {
+                        since_filter = Some(
+                            since_filter
+                                .map(|current| current.max(from))
+                                .unwrap_or(from),
+                        );
+                    }
+                    if let Some(before) = before {
+                        criteria.push(format!(
+                            "BEFORE {}",
+                            legacy_message_list_search_date_wire(before)
+                        ));
+                    }
+                }
                 "ATTACHMENT" => criteria.push(
                     "OR OR OR HEADER Content-Type \"application/\" \
                      HEADER Content-Type \"multipart/m\" \
@@ -1715,6 +1846,12 @@ pub fn legacy_message_list_search_criteria_with_fast_simple_search(
         }
     }
 
+    if let Some(since) = since_filter {
+        criteria.push(format!(
+            "SINCE {}",
+            legacy_message_list_search_date_wire(since)
+        ));
+    }
     if hide_deleted
         && !criteria
             .iter()
@@ -7297,6 +7434,91 @@ mod tests {
     }
 
     #[test]
+    fn message_list_search_criteria_compiles_header_keyword_and_size_filters() {
+        assert_eq!(
+            legacy_message_list_search_criteria(
+                "header:\"X-Spam-Status Yes, score=5\" keyword:Français larger:\"2 MB\" \
+                 maxsize:512K",
+                true,
+            )
+            .unwrap(),
+            "HEADER \"X-Spam-Status\" \"Yes, score=5\" KEYWORD Fran&AOc-ais \
+             LARGER 2097152 SMALLER 524288 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria(
+                "header=List-Id+news.example&keyword=%E6%97%A5%E6%9C%AC%E8%AA%9E&size=3K",
+                false,
+            )
+            .unwrap(),
+            "HEADER \"List-Id\" \"news.example\" KEYWORD &ZeVnLIqe- LARGER 3072"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("larger:nonsense smaller:10bytes", false).unwrap(),
+            "LARGER 0 SMALLER 10"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("header=Subject+", false).unwrap(),
+            "HEADER \"Subject\" \"\""
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("header:\"Subject   exact spacing\"", false)
+                .unwrap(),
+            "HEADER \"Subject\" \"  exact spacing\""
+        );
+        for search in [
+            "keyword:\"bad label\"",
+            "keyword:bad*label",
+            "larger:18446744073709551616",
+            "larger:4294967296",
+            "larger:4194304K",
+        ] {
+            assert!(
+                legacy_message_list_search_criteria(search, false).is_err(),
+                "{search} must not produce invalid or broadened IMAP criteria"
+            );
+        }
+    }
+
+    #[test]
+    fn message_list_search_criteria_compiles_absolute_date_filters() {
+        assert_eq!(
+            legacy_message_list_search_criteria(
+                "on:2026-07-24 senton:2026-07-23 sentsince:2026-07-01 \
+                 sentbefore:2026-08-01 before:2026-09-01 since:2026-06-01",
+                true,
+            )
+            .unwrap(),
+            "ON 24-Jul-2026 SENTON 23-Jul-2026 SENTSINCE 1-Jul-2026 \
+             SENTBEFORE 1-Aug-2026 BEFORE 1-Sep-2026 SINCE 1-Jun-2026 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("date:2026.07.24", true).unwrap(),
+            "BEFORE 25-Jul-2026 SINCE 24-Jul-2026 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria(
+                "date:2026-07-01/2026-07-24 since:2026-07-10",
+                false,
+            )
+            .unwrap(),
+            "BEFORE 25-Jul-2026 SINCE 10-Jul-2026"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("date=2026-07-24", true).unwrap(),
+            "SINCE 24-Jul-2026 UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("date=2026-07-01%2F2026-07-24", true,).unwrap(),
+            "UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria("on:not-a-date", true).unwrap(),
+            "UNDELETED"
+        );
+    }
+
+    #[test]
     fn message_list_search_wire_frames_non_ascii_for_legacy_imap() {
         assert_eq!(
             legacy_message_list_search_wire("subject:café", true, true, true).unwrap(),
@@ -7327,11 +7549,13 @@ mod tests {
     }
 
     #[test]
-    fn message_list_search_criteria_rejects_injection_and_unmigrated_filters() {
+    fn message_list_search_criteria_rejects_injection_and_malformed_header_filters() {
         for search in ["from:\"a\r\nBAD\"", "subject:a\0b"] {
             assert!(legacy_message_list_search_criteria(search, true).is_err());
         }
-        let error = legacy_message_list_search_criteria("date:2026-07-24", true).unwrap_err();
+        let error = legacy_message_list_search_criteria("header:Subject", true).unwrap_err();
+        assert!(error.public_message().contains("field name and value"));
+        let error = legacy_message_list_search_criteria("older_than:P1D", true).unwrap_err();
         assert!(error.public_message().contains("not migrated yet"));
     }
 
