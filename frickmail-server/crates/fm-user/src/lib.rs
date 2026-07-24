@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use sqlx::{AnyPool, Row};
+use sqlx::{AnyPool, Connection, Row};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
@@ -537,6 +537,45 @@ impl SqlxUserRepository {
         update_mail_account_settings_patch(pool, user_id, account_id, patch)
             .await
             .map(|rows| rows > 0)
+    }
+
+    pub async fn set_mail_account_checkable_folder(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder: &str,
+        checkable: bool,
+    ) -> Result<bool> {
+        mutate_mail_account_checkable_folders(pool, user_id, account_id, |checkable_folders| {
+            if checkable {
+                checkable_folders.push(folder.to_string());
+            } else if let Some(index) = checkable_folders.iter().position(|item| item == folder) {
+                checkable_folders.remove(index);
+            }
+            deduplicate_strings(checkable_folders);
+        })
+        .await
+    }
+
+    pub async fn rename_mail_account_checkable_folders(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        old_name: &str,
+        new_name: &str,
+        delimiter: &str,
+        checkable: bool,
+    ) -> Result<bool> {
+        mutate_mail_account_checkable_folders(pool, user_id, account_id, |checkable_folders| {
+            rename_checkable_folder_subtree(
+                checkable_folders,
+                old_name,
+                new_name,
+                delimiter,
+                checkable,
+            );
+        })
+        .await
     }
 
     pub async fn get_mail_account_connection_secret(
@@ -1180,6 +1219,112 @@ async fn update_mail_account_settings_patch(
         .await
         .map(|result| result.rows_affected())
         .map_err(db_error)
+}
+
+async fn mutate_mail_account_checkable_folders<F>(
+    pool: &AnyPool,
+    user_id: i64,
+    account_id: i64,
+    mutate: F,
+) -> Result<bool>
+where
+    F: FnOnce(&mut Vec<String>),
+{
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let mut transaction = conn
+        .begin_with(begin_account_primary_transaction_query(&backend))
+        .await
+        .map_err(db_error)?;
+
+    sqlx::query(lock_user_account_mutations_query(&backend))
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(db_error)?;
+    let row = sqlx::query(mail_account_settings_for_update_query(&backend))
+        .bind(user_id)
+        .bind(account_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(db_error)?;
+    let Some(row) = row else {
+        transaction.commit().await.map_err(db_error)?;
+        return Ok(false);
+    };
+
+    let settings_json: String = row.try_get("settings_json").map_err(db_error)?;
+    let mut settings: Value = serde_json::from_str(&settings_json).map_err(json_error)?;
+    let settings_object = settings.as_object_mut().ok_or_else(|| {
+        FrickmailError::Upstream(
+            "frickmail mail account settings JSON is not an object".to_string(),
+        )
+    })?;
+    let mut checkable_folders =
+        checkable_folders_from_setting(settings_object.get("CheckableFolder"));
+    mutate(&mut checkable_folders);
+    settings_object.insert(
+        "CheckableFolder".to_string(),
+        Value::String(serde_json::to_string(&checkable_folders).map_err(json_error)?),
+    );
+
+    sqlx::query(replace_mail_account_settings_query(&backend))
+        .bind(serde_json::to_string(&settings).map_err(json_error)?)
+        .bind(user_id)
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(db_error)?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(true)
+}
+
+fn checkable_folders_from_setting(setting: Option<&Value>) -> Vec<String> {
+    match setting {
+        Some(Value::String(encoded)) => {
+            serde_json::from_str::<Vec<String>>(encoded).unwrap_or_default()
+        }
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn deduplicate_strings(values: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+}
+
+fn rename_checkable_folder_subtree(
+    checkable_folders: &mut Vec<String>,
+    old_name: &str,
+    new_name: &str,
+    delimiter: &str,
+    checkable: bool,
+) {
+    let old_prefix = (!delimiter.is_empty()).then(|| format!("{old_name}{delimiter}"));
+    let mut renamed = Vec::with_capacity(checkable_folders.len() + usize::from(checkable));
+    for folder in checkable_folders.drain(..) {
+        if folder == old_name {
+            continue;
+        }
+        if let Some(suffix) = old_prefix
+            .as_deref()
+            .and_then(|prefix| folder.strip_prefix(prefix))
+        {
+            renamed.push(format!("{new_name}{delimiter}{suffix}"));
+        } else {
+            renamed.push(folder);
+        }
+    }
+    if checkable {
+        renamed.push(new_name.to_string());
+    }
+    deduplicate_strings(&mut renamed);
+    *checkable_folders = renamed;
 }
 
 async fn fetch_optional_user_by<T>(
@@ -4716,6 +4861,34 @@ fn update_mail_account_settings_patch_query(backend: &str) -> &'static str {
     }
 }
 
+fn mail_account_settings_for_update_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT CAST(settings AS TEXT) AS settings_json FROM frickmail_mail_accounts WHERE user_id = $1 AND id = $2 FOR UPDATE"
+        }
+        "MySQL" => {
+            "SELECT CAST(settings AS CHAR) AS settings_json FROM frickmail_mail_accounts WHERE user_id = ? AND id = ? FOR UPDATE"
+        }
+        _ => {
+            "SELECT CAST(settings AS TEXT) AS settings_json FROM frickmail_mail_accounts WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
+fn replace_mail_account_settings_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts SET settings = $1::jsonb, updated_at = NOW() WHERE user_id = $2 AND id = $3"
+        }
+        "MySQL" => {
+            "UPDATE frickmail_mail_accounts SET settings = CAST(? AS JSON), updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts SET settings = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
 fn row_to_mail_account(row: sqlx::any::AnyRow) -> Result<MailAccount> {
     Ok(MailAccount {
         id: row.try_get("id").map_err(db_error)?,
@@ -6908,6 +7081,122 @@ mod tests {
         .unwrap();
         assert!(!updated);
         assert_eq!(mail_account_settings(&pool, 173).await, json!({}));
+    }
+
+    #[tokio::test]
+    async fn repository_updates_checkable_folders_atomically_and_preserves_settings() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 37, json!({})).await;
+        insert_mail_account(&pool, 174, 37, "Work", true).await;
+        sqlx::query("UPDATE frickmail_mail_accounts SET settings = ? WHERE user_id = ? AND id = ?")
+            .bind(
+                json!({
+                    "SentFolder": "Sent",
+                    "CheckableFolder": "[\"INBOX\"]"
+                })
+                .to_string(),
+            )
+            .bind(37_i64)
+            .bind(174_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            assert!(SqlxUserRepository::set_mail_account_checkable_folder(
+                &pool, 37, 174, "Archive", true,
+            )
+            .await
+            .unwrap());
+        }
+        let settings = mail_account_settings(&pool, 174).await;
+        assert_eq!(settings["SentFolder"], "Sent");
+        assert_eq!(settings["CheckableFolder"], "[\"INBOX\",\"Archive\"]");
+
+        assert!(SqlxUserRepository::set_mail_account_checkable_folder(
+            &pool, 37, 174, "Archive", false,
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            mail_account_settings(&pool, 174).await["CheckableFolder"],
+            "[\"INBOX\"]"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_renames_checkable_folder_subtree_with_user_scope() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 38, json!({})).await;
+        insert_user(&pool, 39, json!({})).await;
+        insert_mail_account(&pool, 175, 38, "Work", true).await;
+        insert_mail_account(&pool, 176, 39, "Other", true).await;
+        sqlx::query("UPDATE frickmail_mail_accounts SET settings = ? WHERE user_id = ? AND id = ?")
+            .bind(
+                json!({
+                    "CheckableFolder": [
+                        "Projects",
+                        "Projects/Active",
+                        "Projects/Active",
+                        "Projects-old"
+                    ],
+                    "TrashFolder": "Trash"
+                })
+                .to_string(),
+            )
+            .bind(38_i64)
+            .bind(175_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(SqlxUserRepository::rename_mail_account_checkable_folders(
+            &pool, 38, 175, "Projects", "Work", "/", true,
+        )
+        .await
+        .unwrap());
+        let settings = mail_account_settings(&pool, 175).await;
+        assert_eq!(settings["TrashFolder"], "Trash");
+        assert_eq!(
+            settings["CheckableFolder"],
+            "[\"Work/Active\",\"Projects-old\",\"Work\"]"
+        );
+
+        assert!(!SqlxUserRepository::rename_mail_account_checkable_folders(
+            &pool, 38, 176, "Projects", "Work", "/", true,
+        )
+        .await
+        .unwrap());
+        assert_eq!(mail_account_settings(&pool, 176).await, json!({}));
+    }
+
+    #[test]
+    fn checkable_folder_helpers_normalize_legacy_values_and_respect_boundaries() {
+        assert_eq!(
+            super::checkable_folders_from_setting(Some(&json!("[\"INBOX\",\"Archive\"]"))),
+            vec!["INBOX", "Archive"]
+        );
+        assert_eq!(
+            super::checkable_folders_from_setting(Some(&json!(["INBOX", 7, "Archive"]))),
+            vec!["INBOX", "Archive"]
+        );
+        assert!(super::checkable_folders_from_setting(Some(&json!("broken"))).is_empty());
+
+        let mut folders = vec![
+            "Old".to_string(),
+            "Old/Child".to_string(),
+            "Oldish".to_string(),
+        ];
+        super::rename_checkable_folder_subtree(&mut folders, "Old", "New", "/", false);
+        assert_eq!(folders, vec!["New/Child", "Oldish"]);
+
+        let mut flat = vec!["Old".to_string(), "Oldish".to_string()];
+        super::rename_checkable_folder_subtree(&mut flat, "Old", "New", "", true);
+        assert_eq!(flat, vec!["Oldish", "New"]);
     }
 
     #[tokio::test]

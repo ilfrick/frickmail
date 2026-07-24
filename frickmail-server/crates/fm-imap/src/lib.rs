@@ -80,6 +80,12 @@ pub struct ImapConnectionConfig {
     pub login: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxMetadata {
+    pub key: String,
+    pub value: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawFolderFetchLimits {
     pub max_messages: usize,
@@ -695,6 +701,63 @@ pub async fn create_mailbox(
         }
 
         created_legacy_folder(&mut session, &full_name, subscribe).await
+    }
+    .await;
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn rename_mailbox(
+    config: ImapConnectionConfig,
+    password: &str,
+    old_name: &str,
+    new_name: &str,
+    subscribe: bool,
+    metadata: Option<MailboxMetadata>,
+) -> Result<String> {
+    validate_mailbox(old_name)?;
+    validate_mailbox(new_name)?;
+
+    let mut session = login(config, password).await?;
+    let result = async {
+        let delimiter = mailbox_hierarchy_delimiter(&mut session, old_name).await?;
+        let subscribed =
+            subscribed_mailbox_subtree(&mut session, old_name, delimiter.as_str()).await?;
+
+        timeout_imap("rename mailbox", session.rename(old_name, new_name)).await?;
+        for old_subscription in subscribed {
+            let new_subscription =
+                renamed_mailbox_name(&old_subscription, old_name, new_name, delimiter.as_str());
+            timeout_imap(
+                "unsubscribe renamed mailbox",
+                session.unsubscribe(&old_subscription),
+            )
+            .await?;
+            timeout_imap(
+                "subscribe renamed mailbox",
+                session.subscribe(&new_subscription),
+            )
+            .await?;
+        }
+
+        let subscription_result = if subscribe {
+            timeout_imap("subscribe renamed mailbox", session.subscribe(new_name)).await
+        } else {
+            timeout_imap("unsubscribe renamed mailbox", session.unsubscribe(new_name)).await
+        };
+        let _ = subscription_result;
+
+        if let Some(metadata) = metadata.as_ref() {
+            if let Some(command) = best_effort_metadata_command(new_name, metadata) {
+                let _ = timeout_imap(
+                    "set renamed mailbox metadata",
+                    session.run_command_and_check_ok(&command),
+                )
+                .await;
+            }
+        }
+
+        Ok(delimiter)
     }
     .await;
     logout_quietly(session).await;
@@ -3628,6 +3691,78 @@ async fn mailbox_hierarchy_delimiter(session: &mut BoxedSession, parent: &str) -
     })
 }
 
+async fn subscribed_mailbox_subtree(
+    session: &mut BoxedSession,
+    old_name: &str,
+    delimiter: &str,
+) -> Result<Vec<String>> {
+    let folders = timeout_imap(
+        "list renamed mailbox subscriptions",
+        session.lsub(Some(old_name), Some("*")),
+    )
+    .await?;
+    pin_mut!(folders);
+
+    let mut subscribed = Vec::new();
+    while let Some(folder) =
+        timeout_imap("read renamed mailbox subscriptions", folders.try_next()).await?
+    {
+        if mailbox_is_in_subtree(folder.name(), old_name, delimiter) {
+            subscribed.push(folder.name().to_string());
+        }
+    }
+    Ok(subscribed)
+}
+
+fn mailbox_is_in_subtree(mailbox: &str, root: &str, delimiter: &str) -> bool {
+    mailbox == root
+        || (!delimiter.is_empty()
+            && mailbox
+                .strip_prefix(root)
+                .is_some_and(|suffix| suffix.starts_with(delimiter)))
+}
+
+fn renamed_mailbox_name(mailbox: &str, old_name: &str, new_name: &str, delimiter: &str) -> String {
+    if mailbox == old_name {
+        return new_name.to_string();
+    }
+    if mailbox_is_in_subtree(mailbox, old_name, delimiter) {
+        return format!(
+            "{new_name}{}",
+            mailbox.strip_prefix(old_name).unwrap_or_default()
+        );
+    }
+    mailbox.to_string()
+}
+
+fn validate_metadata(metadata: &MailboxMetadata) -> Result<()> {
+    required_field("metadata key", metadata.key.clone())?;
+    if let Some(value) = metadata.value.as_deref() {
+        if contains_crlf(value) {
+            return Err(FrickmailError::BadRequest(
+                "metadata value must not contain CR or LF".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn set_metadata_command(mailbox: &str, metadata: &MailboxMetadata) -> Result<String> {
+    validate_mailbox(mailbox)?;
+    validate_metadata(metadata)?;
+    let mailbox = quote_mailbox_pattern(mailbox)?;
+    let key = quote_mailbox_pattern(metadata.key.trim())?;
+    let value = match metadata.value.as_deref() {
+        Some(value) => quote_mailbox_pattern(value)?,
+        None => "NIL".to_string(),
+    };
+    Ok(format!("SETMETADATA {mailbox} ({key} {value})"))
+}
+
+fn best_effort_metadata_command(mailbox: &str, metadata: &MailboxMetadata) -> Option<String> {
+    set_metadata_command(mailbox, metadata).ok()
+}
+
 fn create_mailbox_full_name(mailbox: &str, parent: &str, delimiter: &str) -> String {
     if parent.is_empty() || delimiter.is_empty() {
         format!("{parent}{mailbox}")
@@ -4169,6 +4304,74 @@ mod tests {
             r#""A \"quoted\" \\ folder""#
         );
         assert!(quote_mailbox_pattern("Bad\r\nFolder").is_err());
+    }
+
+    #[test]
+    fn rename_mailbox_helpers_preserve_hierarchy_boundaries() {
+        assert!(mailbox_is_in_subtree("Projects", "Projects", "/"));
+        assert!(mailbox_is_in_subtree("Projects/Active", "Projects", "/"));
+        assert!(!mailbox_is_in_subtree("Projects-old", "Projects", "/"));
+        assert!(!mailbox_is_in_subtree("ProjectsChild", "Projects", ""));
+        assert_eq!(
+            renamed_mailbox_name("Projects/Active", "Projects", "Work", "/"),
+            "Work/Active"
+        );
+        assert_eq!(
+            renamed_mailbox_name("Projects-old", "Projects", "Work", "/"),
+            "Projects-old"
+        );
+    }
+
+    #[test]
+    fn metadata_command_quotes_values_and_rejects_injection() {
+        assert_eq!(
+            set_metadata_command(
+                r#"Work "shared""#,
+                &MailboxMetadata {
+                    key: "/private/vendor/kolab/folder-type".to_string(),
+                    value: Some(r#"event "default""#.to_string()),
+                },
+            )
+            .unwrap(),
+            r#"SETMETADATA "Work \"shared\"" ("/private/vendor/kolab/folder-type" "event \"default\"")"#
+        );
+        assert_eq!(
+            set_metadata_command(
+                "Work",
+                &MailboxMetadata {
+                    key: "/private/vendor/kolab/folder-type".to_string(),
+                    value: None,
+                },
+            )
+            .unwrap(),
+            r#"SETMETADATA "Work" ("/private/vendor/kolab/folder-type" NIL)"#
+        );
+        assert!(set_metadata_command(
+            "Work",
+            &MailboxMetadata {
+                key: "/private/vendor/kolab/folder-type\r\nNOOP".to_string(),
+                value: None,
+            },
+        )
+        .is_err());
+        assert!(set_metadata_command(
+            "Work",
+            &MailboxMetadata {
+                key: "/private/vendor/kolab/folder-type".to_string(),
+                value: Some("event\r\nNOOP".to_string()),
+            },
+        )
+        .is_err());
+        assert_eq!(
+            best_effort_metadata_command(
+                "Work",
+                &MailboxMetadata {
+                    key: "/private/vendor/kolab/folder-type\r\nNOOP".to_string(),
+                    value: Some("event".to_string()),
+                },
+            ),
+            None
+        );
     }
 
     #[test]

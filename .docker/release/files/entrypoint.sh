@@ -50,7 +50,7 @@ fi
 SNAPPYMAIL_PLUGINS_DIR=/var/lib/snappymail/_data_/_default_/plugins
 if [ -d /snappymail/plugins-bundled ] && [ -d /var/lib/snappymail/_data_/_default_ ]; then
     mkdir -p "$SNAPPYMAIL_PLUGINS_DIR"
-    for plugin in login-oauth2 login-gmail login-o365 login-oidc contacts-sync calendar frickmail-user frickmail-theme; do
+    for plugin in login-oauth2 login-gmail login-o365 login-oidc contacts-sync calendar frickmail-user frickmail-theme cache-redis; do
         if [ -d "/snappymail/plugins-bundled/$plugin" ]; then
             echo "[INFO] Syncing Frickmail plugin: $plugin"
             rm -rf "$SNAPPYMAIL_PLUGINS_DIR/$plugin"
