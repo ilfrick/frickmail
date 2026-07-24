@@ -54,6 +54,10 @@ pub struct MailDefaults {
     pub smtp_port: u16,
     #[serde(default = "default_fetch_new_messages")]
     pub fetch_new_messages: bool,
+    #[serde(default = "default_message_list_fast_simple_search")]
+    pub message_list_fast_simple_search: bool,
+    #[serde(default)]
+    pub message_list_permanent_filter: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +131,8 @@ impl Default for MailDefaults {
             smtp_host: default_smtp_host(),
             smtp_port: default_smtp_port(),
             fetch_new_messages: default_fetch_new_messages(),
+            message_list_fast_simple_search: default_message_list_fast_simple_search(),
+            message_list_permanent_filter: String::new(),
         }
     }
 }
@@ -320,6 +326,10 @@ fn default_smtp_port() -> u16 {
 }
 
 fn default_fetch_new_messages() -> bool {
+    true
+}
+
+fn default_message_list_fast_simple_search() -> bool {
     true
 }
 

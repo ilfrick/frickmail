@@ -423,6 +423,8 @@ pub struct LegacyMessageListRequest {
     pub sort: String,
     pub prev_uid_next: Option<u32>,
     pub hide_deleted: bool,
+    pub fast_simple_search: bool,
+    pub permanent_filter: String,
     pub use_threads: bool,
     pub thread_uid: u32,
     pub thread_algorithm: String,
@@ -2014,20 +2016,56 @@ fn legacy_message_list_search_criteria_with_capabilities(
     fast_simple_search: bool,
     supports_within: bool,
 ) -> Result<String> {
-    legacy_message_list_search_criteria_at(
+    legacy_message_list_search_criteria_with_settings(
         search,
         hide_deleted,
         fast_simple_search,
         supports_within,
+        "",
+    )
+}
+
+fn legacy_message_list_search_criteria_with_settings(
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+    supports_within: bool,
+    permanent_filter: &str,
+) -> Result<String> {
+    legacy_message_list_search_criteria_at_with_settings(
+        search,
+        hide_deleted,
+        fast_simple_search,
+        supports_within,
+        permanent_filter,
         DateTime::<Utc>::from(SystemTime::now()),
     )
 }
 
+#[cfg(test)]
 fn legacy_message_list_search_criteria_at(
     search: &str,
     hide_deleted: bool,
     fast_simple_search: bool,
     supports_within: bool,
+    now: DateTime<Utc>,
+) -> Result<String> {
+    legacy_message_list_search_criteria_at_with_settings(
+        search,
+        hide_deleted,
+        fast_simple_search,
+        supports_within,
+        "",
+        now,
+    )
+}
+
+fn legacy_message_list_search_criteria_at_with_settings(
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+    supports_within: bool,
+    permanent_filter: &str,
     now: DateTime<Utc>,
 ) -> Result<String> {
     let search = legacy_php_trim(search);
@@ -2226,6 +2264,17 @@ fn legacy_message_list_search_criteria_at(
     {
         criteria.push("UNDELETED".to_string());
     }
+    if legacy_php_truthy(permanent_filter) {
+        if permanent_filter
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+        {
+            return Err(FrickmailError::BadRequest(
+                "message-list permanent filter contains invalid command bytes".to_string(),
+            ));
+        }
+        criteria.push(permanent_filter.to_string());
+    }
     Ok(if criteria.is_empty() {
         "ALL".to_string()
     } else {
@@ -2239,6 +2288,7 @@ struct LegacyMessageListSearchWire {
     needs_utf8_charset: bool,
 }
 
+#[cfg(test)]
 fn legacy_message_list_search_wire(
     search: &str,
     hide_deleted: bool,
@@ -2246,11 +2296,30 @@ fn legacy_message_list_search_wire(
     utf8_mode: bool,
     supports_within: bool,
 ) -> Result<LegacyMessageListSearchWire> {
-    let criteria = legacy_message_list_search_criteria_with_capabilities(
+    legacy_message_list_search_wire_with_settings(
+        search,
+        hide_deleted,
+        fast_simple_search,
+        "",
+        utf8_mode,
+        supports_within,
+    )
+}
+
+fn legacy_message_list_search_wire_with_settings(
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+    permanent_filter: &str,
+    utf8_mode: bool,
+    supports_within: bool,
+) -> Result<LegacyMessageListSearchWire> {
+    let criteria = legacy_message_list_search_criteria_with_settings(
         search,
         hide_deleted,
         fast_simple_search,
         supports_within,
+        permanent_filter,
     )?;
     let needs_utf8_charset = !utf8_mode && !criteria.is_ascii();
     if !needs_utf8_charset {
@@ -2320,6 +2389,7 @@ fn legacy_message_list_search_wire(
     })
 }
 
+#[cfg(test)]
 async fn legacy_message_list_visible_uids(
     session: &mut BoxedSession,
     search: &str,
@@ -2327,9 +2397,36 @@ async fn legacy_message_list_visible_uids(
     utf8_mode: bool,
     supports_within: bool,
 ) -> Result<Vec<u32>> {
+    legacy_message_list_visible_uids_with_settings(
+        session,
+        search,
+        hide_deleted,
+        true,
+        "",
+        utf8_mode,
+        supports_within,
+    )
+    .await
+}
+
+async fn legacy_message_list_visible_uids_with_settings(
+    session: &mut BoxedSession,
+    search: &str,
+    hide_deleted: bool,
+    fast_simple_search: bool,
+    permanent_filter: &str,
+    utf8_mode: bool,
+    supports_within: bool,
+) -> Result<Vec<u32>> {
     let operation = "search legacy message list";
-    let wire =
-        legacy_message_list_search_wire(search, hide_deleted, true, utf8_mode, supports_within)?;
+    let wire = legacy_message_list_search_wire_with_settings(
+        search,
+        hide_deleted,
+        fast_simple_search,
+        permanent_filter,
+        utf8_mode,
+        supports_within,
+    )?;
     timeout_result(
         operation,
         timeout(COMMAND_TIMEOUT, async {
@@ -2850,10 +2947,12 @@ async fn legacy_message_list_in_session(
     let (mut matching_uids, total) = if folder_total == 0 || request.offset > folder_total {
         (Vec::new(), folder_total)
     } else {
-        let matching_uids = legacy_message_list_visible_uids(
+        let matching_uids = legacy_message_list_visible_uids_with_settings(
             session,
             &request.search,
             request.hide_deleted,
+            request.fast_simple_search,
+            &request.permanent_filter,
             capabilities.uses_utf8_search,
             capabilities.supports_within,
         )
@@ -7621,6 +7720,27 @@ mod tests {
         expected_criteria: &'static str,
         response: &'static str,
     ) -> Result<Vec<u32>> {
+        run_scripted_visible_uid_search_with_settings(
+            search_value,
+            hide_deleted,
+            true,
+            "",
+            supports_within,
+            expected_criteria,
+            response,
+        )
+        .await
+    }
+
+    async fn run_scripted_visible_uid_search_with_settings(
+        search_value: &'static str,
+        hide_deleted: bool,
+        fast_simple_search: bool,
+        permanent_filter: &'static str,
+        supports_within: bool,
+        expected_criteria: &'static str,
+        response: &'static str,
+    ) -> Result<Vec<u32>> {
         use tokio::io::AsyncWriteExt as _;
 
         let (client_stream, mut server_stream) = tokio::io::duplex(512);
@@ -7643,10 +7763,12 @@ mod tests {
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let result = legacy_message_list_visible_uids(
+        let result = legacy_message_list_visible_uids_with_settings(
             &mut session,
             search_value,
             hide_deleted,
+            fast_simple_search,
+            permanent_filter,
             true,
             supports_within,
         )
@@ -7698,6 +7820,24 @@ mod tests {
             .await
             .unwrap(),
             vec![11]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_list_uid_search_uses_configured_search_settings() {
+        assert_eq!(
+            run_scripted_visible_uid_search_with_settings(
+                "needle",
+                true,
+                false,
+                "NOT FLAGGED",
+                false,
+                "TEXT \"needle\" UNDELETED NOT FLAGGED",
+                "* SEARCH 13\r\nA0002 OK searched\r\n",
+            )
+            .await
+            .unwrap(),
+            vec![13]
         );
     }
 
@@ -7979,6 +8119,66 @@ mod tests {
             true,
         )
         .is_err());
+    }
+
+    #[test]
+    fn message_list_search_criteria_applies_configured_search_settings() {
+        assert_eq!(
+            legacy_message_list_search_criteria_with_settings(
+                "needle",
+                true,
+                false,
+                false,
+                "NOT FLAGGED",
+            )
+            .unwrap(),
+            "TEXT \"needle\" UNDELETED NOT FLAGGED"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_with_settings(
+                "is:deleted",
+                true,
+                true,
+                false,
+                "UNSEEN",
+            )
+            .unwrap(),
+            "DELETED UNSEEN"
+        );
+        assert_eq!(
+            legacy_message_list_search_criteria_with_settings("", false, true, false, "0",)
+                .unwrap(),
+            "ALL"
+        );
+        for filter in ["UNSEEN\r\nDELETED", "UNSEEN\0DELETED"] {
+            assert!(
+                legacy_message_list_search_criteria_with_settings("", true, true, false, filter,)
+                    .is_err(),
+                "{filter:?} must not cross the IMAP command boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn message_list_search_wire_frames_non_ascii_permanent_filter() {
+        assert_eq!(
+            legacy_message_list_search_wire_with_settings(
+                "",
+                true,
+                true,
+                r#"HEADER "X-Tag" "café""#,
+                false,
+                false,
+            )
+            .unwrap(),
+            LegacyMessageListSearchWire {
+                chunks: vec![
+                    r#"UNDELETED HEADER "X-Tag" {5}"#.to_string(),
+                    "café".to_string(),
+                ],
+                needs_utf8_charset: true,
+            }
+        );
     }
 
     #[test]
@@ -9559,6 +9759,8 @@ mod tests {
             sort: "REVERSE DATE".to_string(),
             prev_uid_next: Some(123),
             hide_deleted: true,
+            fast_simple_search: true,
+            permanent_filter: String::new(),
             use_threads: true,
             thread_uid: 77,
             thread_algorithm: "REFERENCES".to_string(),

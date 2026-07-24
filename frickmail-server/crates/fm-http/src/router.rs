@@ -5008,6 +5008,13 @@ where
             Err(message) => return json_result_error(original_action, message),
         };
     request.hide_deleted = hide_deleted;
+    request.fast_simple_search = state.config().mail.message_list_fast_simple_search;
+    request.permanent_filter = state
+        .config()
+        .mail
+        .message_list_permanent_filter
+        .trim()
+        .to_string();
 
     let result = tokio::time::timeout(fetch_deadline, fetcher(config, password, request.clone()))
         .await
@@ -5089,6 +5096,8 @@ fn legacy_message_list_request_from_payload_with_limit_default(
         sort: payload_string(payload, "sort").unwrap_or_default(),
         prev_uid_next,
         hide_deleted: true,
+        fast_simple_search: true,
+        permanent_filter: String::new(),
         use_threads,
         thread_uid,
         thread_algorithm,
@@ -14238,7 +14247,10 @@ Subject: Empty body metadata\r\n\r\n"
     #[tokio::test]
     async fn native_legacy_message_list_builds_request_and_returns_collection_shape() {
         let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
-        let (state, session) = message_body_test_state(1820, 1821, &key).await;
+        let mut config = test_config(None);
+        config.mail.message_list_fast_simple_search = false;
+        config.mail.message_list_permanent_filter = "  NOT FLAGGED  ".to_string();
+        let (state, session) = message_body_test_state_with_config(1820, 1821, &key, config).await;
         let captured = Arc::new(Mutex::new(None));
         let captured_for_fetch = Arc::clone(&captured);
 
@@ -14303,6 +14315,8 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(request.sort, "REVERSE DATE");
         assert_eq!(request.prev_uid_next, Some(52));
         assert!(request.hide_deleted);
+        assert!(!request.fast_simple_search);
+        assert_eq!(request.permanent_filter, "NOT FLAGGED");
         assert!(request.use_threads);
         assert_eq!(request.thread_uid, 77);
         assert_eq!(request.thread_algorithm, "REFERENCES");
@@ -14519,6 +14533,8 @@ Subject: Empty body metadata\r\n\r\n"
                 sort: String::new(),
                 prev_uid_next: Some(0),
                 hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: String::new(),
                 use_threads: false,
                 thread_uid: 0,
                 thread_algorithm: String::new(),
@@ -14661,6 +14677,8 @@ Subject: Empty body metadata\r\n\r\n"
             sort: "REVERSE DATE".to_string(),
             prev_uid_next: Some(123),
             hide_deleted: true,
+            fast_simple_search: true,
+            permanent_filter: String::new(),
             use_threads: true,
             thread_uid: 77,
             thread_algorithm: "REFERENCES".to_string(),
