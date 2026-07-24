@@ -675,6 +675,66 @@ pub async fn set_mailbox_subscription(
     result
 }
 
+pub async fn set_mailbox_metadata(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    metadata: MailboxMetadata,
+) -> Result<()> {
+    let mut session = login(config, password).await?;
+    let result = async {
+        if mailbox_metadata_supported(&mut session).await? {
+            let command = set_metadata_command(mailbox, &metadata)?;
+            timeout_imap(
+                "set mailbox metadata",
+                session.run_command_and_check_ok(&command),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    .await;
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn update_mailbox_settings(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    subscribe: bool,
+    metadata: Option<MailboxMetadata>,
+) -> Result<()> {
+    let mut session = login(config, password).await?;
+
+    if validate_mailbox(mailbox).is_ok() {
+        let subscription_result = if subscribe {
+            timeout_imap("subscribe mailbox", session.subscribe(mailbox)).await
+        } else {
+            timeout_imap("unsubscribe mailbox", session.unsubscribe(mailbox)).await
+        };
+        let _ = subscription_result;
+    }
+
+    if let Some(metadata) = metadata.as_ref() {
+        if let Some(command) = best_effort_metadata_command(mailbox, metadata) {
+            if mailbox_metadata_supported(&mut session)
+                .await
+                .unwrap_or(false)
+            {
+                let _ = timeout_imap(
+                    "set mailbox metadata",
+                    session.run_command_and_check_ok(&command),
+                )
+                .await;
+            }
+        }
+    }
+
+    logout_quietly(session).await;
+    Ok(())
+}
+
 pub async fn create_mailbox(
     config: ImapConnectionConfig,
     password: &str,
@@ -749,11 +809,16 @@ pub async fn rename_mailbox(
 
         if let Some(metadata) = metadata.as_ref() {
             if let Some(command) = best_effort_metadata_command(new_name, metadata) {
-                let _ = timeout_imap(
-                    "set renamed mailbox metadata",
-                    session.run_command_and_check_ok(&command),
-                )
-                .await;
+                if mailbox_metadata_supported(&mut session)
+                    .await
+                    .unwrap_or(false)
+                {
+                    let _ = timeout_imap(
+                        "set renamed mailbox metadata",
+                        session.run_command_and_check_ok(&command),
+                    )
+                    .await;
+                }
             }
         }
 
@@ -3733,6 +3798,12 @@ fn renamed_mailbox_name(mailbox: &str, old_name: &str, new_name: &str, delimiter
         );
     }
     mailbox.to_string()
+}
+
+async fn mailbox_metadata_supported(session: &mut BoxedSession) -> Result<bool> {
+    let capabilities =
+        timeout_imap("read IMAP metadata capability", session.capabilities()).await?;
+    Ok(has_capability_ignore_ascii_case(&capabilities, "METADATA"))
 }
 
 fn validate_metadata(metadata: &MailboxMetadata) -> Result<()> {

@@ -31,13 +31,13 @@ use fm_imap::{
     fetch_legacy_folder_information, fetch_legacy_message_list, fetch_mailbox_status,
     fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
     legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
-    legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_subscription,
-    store_message_flag, store_message_keyword, store_seen_to_all, validate_eml, BodyPreviewPart,
-    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
-    LegacyFolder, LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest,
-    MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
-    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-    RuleExecutionReport,
+    legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_metadata,
+    set_mailbox_subscription, store_message_flag, store_message_keyword, store_seen_to_all,
+    update_mailbox_settings, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
+    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolder, LegacyFolderInformation,
+    LegacyMessageList, LegacyMessageListRequest, MailboxMetadata, MailboxStatus,
+    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
+    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::{
     parse_body, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader,
@@ -797,6 +797,12 @@ async fn native_compat_response(
         }
         "FolderRename" => {
             Some(native_legacy_folder_rename(state, original_action, payload, session).await)
+        }
+        "FolderSettings" => {
+            Some(native_legacy_folder_settings(state, original_action, payload, session).await)
+        }
+        "FolderSetMetadata" => {
+            Some(native_legacy_folder_set_metadata(state, original_action, payload, session).await)
         }
         "FolderSubscribe" => {
             Some(native_legacy_folder_subscribe(state, original_action, payload, session).await)
@@ -5705,6 +5711,168 @@ where
             account_id,
             error = %error.public_message(),
             "failed to update renamed mailbox checkable settings"
+        ),
+    }
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": true
+        }),
+    )
+}
+
+async fn native_legacy_folder_set_metadata(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_set_metadata_with_setter(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, metadata| async move {
+            set_mailbox_metadata(config, &password, &folder, metadata).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_set_metadata_with_setter<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    setter: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, MailboxMetadata) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let Some(folder) = payload
+        .get("folder")
+        .filter(|value| legacy_php_truthy(value))
+        .map(value_to_php_string)
+    else {
+        return legacy_message_bool_response(original_action, Ok(Ok(())));
+    };
+    let Some(key) = payload
+        .get("key")
+        .filter(|value| legacy_php_truthy(value))
+        .map(value_to_php_string)
+    else {
+        return legacy_message_bool_response(original_action, Ok(Ok(())));
+    };
+    let value = payload
+        .get("value")
+        .filter(|value| legacy_php_truthy(value))
+        .map(value_to_php_string);
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        setter(config, password, folder, MailboxMetadata { key, value }),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Folder metadata update timed out".to_string()));
+
+    legacy_message_bool_response(original_action, result)
+}
+
+async fn native_legacy_folder_settings(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_settings_with_updater(
+        state,
+        original_action,
+        payload,
+        session,
+        |config, password, folder, subscribe, metadata| async move {
+            update_mailbox_settings(config, &password, &folder, subscribe, metadata).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_settings_with_updater<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    updater: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, bool, Option<MailboxMetadata>) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let account_id = match resolve_message_body_account_id(payload, session, original_action).await
+    {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
+    let (config, password) = match imap_action_connection_for_selected_or_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        user.user_id,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+    let folder = payload_string(payload, "folder").unwrap_or_default();
+    let subscribe = payload.get("subscribe").is_some_and(legacy_php_truthy);
+    let checkable = payload.get("checkable").is_some_and(legacy_php_truthy);
+    let metadata = legacy_folder_kolab_metadata(payload);
+
+    match updater(config, password, folder.clone(), subscribe, metadata).await {
+        Ok(()) => {}
+        Err(error) => {
+            return json_result_error(original_action, &error.public_message());
+        }
+    }
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+    match SqlxUserRepository::set_mail_account_checkable_folder(
+        pool,
+        user.user_id,
+        account_id,
+        &folder,
+        checkable,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => warn!(
+            user_id = user.user_id,
+            account_id, "folder settings checkable account disappeared"
+        ),
+        Err(error) => warn!(
+            user_id = user.user_id,
+            account_id,
+            error = %error.public_message(),
+            "failed to update folder checkable settings"
         ),
     }
 
@@ -14721,6 +14889,150 @@ Subject: Empty body metadata\r\n\r\n"
         .await;
 
         assert_eq!(read_json(response).await["Result"], true);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_set_metadata_uses_selected_account_and_php_falsey_value() {
+        let key = [60_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1844, 1845, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1845 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_setter = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_set_metadata_with_setter(
+            &state,
+            "FolderSetMetadata",
+            &json!({
+                "folder": "Calendar",
+                "key": "/private/vendor/kolab/folder-type",
+                "value": "0"
+            }),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, metadata| {
+                let captured = Arc::clone(&captured_for_setter);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder, metadata));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderSetMetadata");
+        assert_eq!(body["Result"], true);
+        let (config, password, folder, metadata) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Calendar");
+        assert_eq!(
+            metadata,
+            MailboxMetadata {
+                key: "/private/vendor/kolab/folder-type".to_string(),
+                value: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_set_metadata_skips_php_falsey_folder_or_key() {
+        let key = [61_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1846, 1847, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1847 },
+            )
+            .await
+            .unwrap();
+        let called = Arc::new(Mutex::new(false));
+        let called_for_setter = Arc::clone(&called);
+
+        let response = super::native_legacy_folder_set_metadata_with_setter(
+            &state,
+            "FolderSetMetadata",
+            &json!({"folder": "0", "key": "/private/vendor/kolab/folder-type"}),
+            &session,
+            Duration::from_secs(1),
+            move |_config, _password, _folder, _metadata| {
+                let called = Arc::clone(&called_for_setter);
+                async move {
+                    *called.lock().unwrap() = true;
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(read_json(response).await["Result"], true);
+        assert!(!*called.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_settings_combines_best_effort_imap_and_checkable_state() {
+        let key = [62_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1848, 1849, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1849 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_updater = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_settings_with_updater(
+            &state,
+            "FolderSettings",
+            &json!({
+                "folder": "Calendar",
+                "subscribe": "0",
+                "checkable": "1",
+                "kolab": {
+                    "type": "/private/vendor/kolab/folder-type",
+                    "value": "event"
+                }
+            }),
+            &session,
+            move |config, password, folder, subscribe, metadata| {
+                let captured = Arc::clone(&captured_for_updater);
+                async move {
+                    *captured.lock().unwrap() =
+                        Some((config, password, folder, subscribe, metadata));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderSettings");
+        assert_eq!(body["Result"], true);
+        let (config, password, folder, subscribe, metadata) =
+            captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Calendar");
+        assert!(!subscribe);
+        assert_eq!(
+            metadata,
+            Some(MailboxMetadata {
+                key: "/private/vendor/kolab/folder-type".to_string(),
+                value: Some("event".to_string()),
+            })
+        );
+        assert_eq!(
+            mail_account_settings(state.db_pool().unwrap(), 1849).await["CheckableFolder"],
+            "[\"Calendar\"]"
+        );
     }
 
     #[tokio::test]

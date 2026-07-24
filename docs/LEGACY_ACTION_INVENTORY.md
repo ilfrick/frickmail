@@ -119,7 +119,9 @@ part of the full webmail core migration.
 | `FolderRename` | `dev/View/Popup/Folder.js` | native | Uses selected Frickmail mail account, renames the mailbox and subscribed descendants, applies requested root subscription and Kolab metadata best-effort, and rewrites account-local checkable descendants. |
 | `FolderCheckable` | `dev/Settings/User/Folders.js`, `dev/View/Popup/Folder.js` | native | Atomically adds/removes the folder in the selected account's legacy-compatible `CheckableFolder` setting while preserving unrelated settings. |
 | `SystemFoldersUpdate` | `dev/Stores/User/Folder.js`, `dev/View/Popup/FolderSystem.js` | native | Uses the selected Frickmail mail account and persists legacy system folder names into account-local settings (`SentFolder`, `DraftsFolder`, `JunkFolder`, `TrashFolder`, `ArchiveFolder`). |
-| `FolderSettings`, `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights`, `FolderSetMetadata` | `dev/View/Popup`, `dev/Settings/User/Folders.js` | compat-known | Combined folder settings, metadata, and ACL routes remain unmigrated. |
+| `FolderSettings` | `dev/View/Popup/Folder.js` | native | Uses the selected Frickmail mail account, applies subscription and Kolab metadata best-effort after login, and persists the account-local checkable setting without letting its save result change the legacy success response. |
+| `FolderSetMetadata` | `dev/Settings/User/Folders.js` | native | Uses the selected Frickmail mail account and safely emits a legacy-compatible IMAP `SETMETADATA`, including `NIL` removal for PHP-falsey values. |
+| `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights` | `dev/View/Popup` | compat-known | IMAP ACL routes remain unmigrated. |
 | `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | compat-known | Attachment actions remain on the compatibility roadmap. |
 
 ## Other Bundled Plugin JSON Hooks
