@@ -121,7 +121,9 @@ part of the full webmail core migration.
 | `SystemFoldersUpdate` | `dev/Stores/User/Folder.js`, `dev/View/Popup/FolderSystem.js` | native | Uses the selected Frickmail mail account and persists legacy system folder names into account-local settings (`SentFolder`, `DraftsFolder`, `JunkFolder`, `TrashFolder`, `ArchiveFolder`). |
 | `FolderSettings` | `dev/View/Popup/Folder.js` | native | Uses the selected Frickmail mail account, applies subscription and Kolab metadata best-effort after login, and persists the account-local checkable setting without letting its save result change the legacy success response. |
 | `FolderSetMetadata` | `dev/Settings/User/Folders.js` | native | Uses the selected Frickmail mail account and safely emits a legacy-compatible IMAP `SETMETADATA`, including `NIL` removal for PHP-falsey values. |
-| `FolderDeleteACL`, `FolderACL`, `FolderSetACL`, `FolderIdentifierRights` | `dev/View/Popup` | compat-known | IMAP ACL routes remain unmigrated. |
+| `FolderACL` | `dev/View/Popup/Folder.js` | native | Uses the selected Frickmail mail account, reads `MYRIGHTS`, and conditionally reads administrator-visible ACL entries into the legacy folder-rights collection shape. |
+| `FolderSetACL`, `FolderDeleteACL` | `dev/View/Popup/FolderAcl.js`, `dev/View/Popup/Folder.js` | native | Use the selected Frickmail mail account and safely quote capability-gated IMAP ACL mutations. |
+| `FolderIdentifierRights` | dormant code in `dev/View/Popup/FolderAcl.js` | compat-known | The only frontend call is commented out and the legacy PHP actions expose no matching handler; retained as a compatibility-known name pending removal or historical verification. |
 | `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | compat-known | Attachment actions remain on the compatibility roadmap. |
 
 ## Other Bundled Plugin JSON Hooks

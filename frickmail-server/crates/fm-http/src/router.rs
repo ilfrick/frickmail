@@ -27,17 +27,18 @@ use chrono::{Duration as ChronoDuration, Local, Utc};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
-    copy_messages, create_mailbox, delete_mailbox, delete_messages,
-    fetch_legacy_folder_information, fetch_legacy_message_list, fetch_mailbox_status,
-    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
+    copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
+    fetch_legacy_folder_information, fetch_legacy_message_list, fetch_mailbox_acl,
+    fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
     legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
-    legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_metadata,
-    set_mailbox_subscription, store_message_flag, store_message_keyword, store_seen_to_all,
-    update_mailbox_settings, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
-    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolder, LegacyFolderInformation,
-    LegacyMessageList, LegacyMessageListRequest, MailboxMetadata, MailboxStatus,
-    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
-    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+    legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_acl,
+    set_mailbox_metadata, set_mailbox_subscription, store_message_flag, store_message_keyword,
+    store_seen_to_all, update_mailbox_settings, validate_eml, BodyPreviewPart,
+    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
+    LegacyFolder, LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest,
+    MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction,
+    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    RuleExecutionReport,
 };
 use fm_mime::{
     parse_body, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader,
@@ -803,6 +804,15 @@ async fn native_compat_response(
         }
         "FolderSetMetadata" => {
             Some(native_legacy_folder_set_metadata(state, original_action, payload, session).await)
+        }
+        "FolderACL" => {
+            Some(native_legacy_folder_acl(state, original_action, payload, session).await)
+        }
+        "FolderSetACL" => {
+            Some(native_legacy_folder_set_acl(state, original_action, payload, session).await)
+        }
+        "FolderDeleteACL" => {
+            Some(native_legacy_folder_delete_acl(state, original_action, payload, session).await)
         }
         "FolderSubscribe" => {
             Some(native_legacy_folder_subscribe(state, original_action, payload, session).await)
@@ -5788,6 +5798,174 @@ where
     legacy_message_bool_response(original_action, result)
 }
 
+async fn native_legacy_folder_acl(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_acl_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        |config, password, folder| async move {
+            fetch_mailbox_acl(config, &password, &folder).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_acl_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Vec<MailboxAclEntry>>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+
+    match fetcher(config, password, folder).await {
+        Ok(entries) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({
+                "Result": {
+                    "@Object": "Collection/FolderACL",
+                    "@Collection": entries.iter().map(legacy_folder_acl_entry_json).collect::<Vec<_>>()
+                }
+            }),
+        ),
+        Err(error) => json_result_error(original_action, &error.public_message()),
+    }
+}
+
+async fn native_legacy_folder_set_acl(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_set_acl_with_setter(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, identifier, rights| async move {
+            set_mailbox_acl(config, &password, &folder, &identifier, &rights).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_set_acl_with_setter<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    setter: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, String, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let identifier = payload_string(payload, "identifier").unwrap_or_default();
+    let rights = payload_string(payload, "rights").unwrap_or_default();
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        setter(config, password, folder, identifier, rights),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Folder ACL update timed out".to_string()));
+
+    legacy_message_bool_response(original_action, result)
+}
+
+async fn native_legacy_folder_delete_acl(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_folder_delete_acl_with_deleter(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_MUTATION_DEADLINE,
+        |config, password, folder, identifier| async move {
+            delete_mailbox_acl(config, &password, &folder, &identifier).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_folder_delete_acl_with_deleter<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    mutation_deadline: Duration,
+    deleter: F,
+) -> Response
+where
+    F: FnOnce(ImapConnectionConfig, String, String, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<()>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+    let folder = match required_payload_string(payload, "folder", "folder required") {
+        Ok(folder) => folder,
+        Err(message) => return json_result_error(original_action, message),
+    };
+    let identifier = payload_string(payload, "identifier").unwrap_or_default();
+
+    let result = tokio::time::timeout(
+        mutation_deadline,
+        deleter(config, password, folder, identifier),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Folder ACL delete timed out".to_string()));
+
+    legacy_message_bool_response(original_action, result)
+}
+
+fn legacy_folder_acl_entry_json(entry: &MailboxAclEntry) -> Value {
+    json!({
+        "@Object": "Object/FolderACLRights",
+        "identifier": entry.identifier,
+        "rights": entry.rights,
+        "mine": entry.mine
+    })
+}
+
 async fn native_legacy_folder_settings(
     state: &AppState,
     original_action: &str,
@@ -9348,8 +9526,8 @@ mod tests {
         BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
         ImapMoveOptions, LegacyAttachmentSummary, LegacyFolder, LegacyFolderInformation,
         LegacyMessageFlags, LegacyMessageList, LegacyMessageListRequest, LegacyMessageSummary,
-        LegacyNewMessage, MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction,
-        RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+        LegacyNewMessage, MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits,
+        RuleAction, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
         RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
@@ -12285,6 +12463,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_api_dispatches_folder_acl_actions_to_native_auth_path() {
+        for action in ["FolderACL", "FolderSetACL", "FolderDeleteACL"] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("Action={action}&folder=Shared")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = read_json(response).await;
+
+            assert_eq!(body["Action"], action);
+            assert_eq!(body["Result"]["ok"], false);
+            assert_eq!(body["Result"]["error"], "Not authenticated");
+        }
+    }
+
+    #[tokio::test]
     async fn native_frickmail_get_message_body_validates_account_before_imap() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
@@ -15033,6 +15233,150 @@ Subject: Empty body metadata\r\n\r\n"
             mail_account_settings(state.db_pool().unwrap(), 1849).await["CheckableFolder"],
             "[\"Calendar\"]"
         );
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_acl_uses_selected_account_and_legacy_collection_shape() {
+        let key = [63_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1850, 1851, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1851 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_fetcher = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_acl_with_fetcher(
+            &state,
+            "FolderACL",
+            &json!({"folder": "Shared"}),
+            &session,
+            move |config, password, folder| {
+                let captured = Arc::clone(&captured_for_fetcher);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder));
+                    Ok(vec![
+                        MailboxAclEntry {
+                            identifier: "alice@example.com".to_string(),
+                            rights: "lrswipkxtea".to_string(),
+                            mine: true,
+                        },
+                        MailboxAclEntry {
+                            identifier: "bob@example.com".to_string(),
+                            rights: "lr".to_string(),
+                            mine: false,
+                        },
+                    ])
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "FolderACL");
+        assert_eq!(body["Result"]["@Object"], "Collection/FolderACL");
+        assert_eq!(
+            body["Result"]["@Collection"][0]["@Object"],
+            "Object/FolderACLRights"
+        );
+        assert_eq!(
+            body["Result"]["@Collection"][0]["identifier"],
+            "alice@example.com"
+        );
+        assert_eq!(body["Result"]["@Collection"][0]["mine"], true);
+        assert_eq!(body["Result"]["@Collection"][1]["rights"], "lr");
+        assert_eq!(body["Result"]["@Collection"][1]["mine"], false);
+
+        let (config, password, folder) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Shared");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_set_acl_preserves_empty_rights() {
+        let key = [64_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1852, 1853, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1853 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_setter = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_set_acl_with_setter(
+            &state,
+            "FolderSetACL",
+            &json!({
+                "folder": "Shared",
+                "identifier": "bob@example.com",
+                "rights": ""
+            }),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, identifier, rights| {
+                let captured = Arc::clone(&captured_for_setter);
+                async move {
+                    *captured.lock().unwrap() =
+                        Some((config, password, folder, identifier, rights));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(read_json(response).await["Result"], true);
+        let (config, password, folder, identifier, rights) =
+            captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Shared");
+        assert_eq!(identifier, "bob@example.com");
+        assert!(rights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_folder_delete_acl_uses_selected_account() {
+        let key = [65_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1854, 1855, &key).await;
+        session
+            .insert(
+                SELECTED_ACCOUNT_SESSION_KEY,
+                SelectedMailAccountSession { account_id: 1855 },
+            )
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let captured_for_deleter = Arc::clone(&captured);
+
+        let response = super::native_legacy_folder_delete_acl_with_deleter(
+            &state,
+            "FolderDeleteACL",
+            &json!({"folder": "Shared", "identifier": "bob@example.com"}),
+            &session,
+            Duration::from_secs(1),
+            move |config, password, folder, identifier| {
+                let captured = Arc::clone(&captured_for_deleter);
+                async move {
+                    *captured.lock().unwrap() = Some((config, password, folder, identifier));
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(read_json(response).await["Result"], true);
+        let (config, password, folder, identifier) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(password, "imap-secret");
+        assert_eq!(folder, "Shared");
+        assert_eq!(identifier, "bob@example.com");
     }
 
     #[tokio::test]

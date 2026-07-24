@@ -14,7 +14,8 @@ use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
     builders::command::{Command, CommandBuilder},
-    AttributeValue, BodyStructure, MessageSection, Response, SectionPath, Status,
+    AclRight, AttributeValue, BodyStructure, MessageSection, RequestId, Response, SectionPath,
+    Status,
 };
 use mail_parser::parsers::MessageStream;
 use md5::{Digest, Md5};
@@ -84,6 +85,13 @@ pub struct ImapConnectionConfig {
 pub struct MailboxMetadata {
     pub key: String,
     pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxAclEntry {
+    pub identifier: String,
+    pub rights: String,
+    pub mine: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -733,6 +741,109 @@ pub async fn update_mailbox_settings(
 
     logout_quietly(session).await;
     Ok(())
+}
+
+pub async fn fetch_mailbox_acl(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+) -> Result<Vec<MailboxAclEntry>> {
+    validate_mailbox(mailbox)?;
+
+    let login_identifier = config.login.clone();
+    let mut session = login(config, password).await?;
+    let result = async {
+        require_mailbox_acl_support(&mut session).await?;
+
+        let mailbox_arg = quote_imap_string("mailbox", mailbox)?;
+        let my_rights = run_acl_command(
+            &mut session,
+            &format!("MYRIGHTS {mailbox_arg}"),
+            "read mailbox rights",
+            mailbox,
+        )
+        .await?
+        .my_rights
+        .unwrap_or_default();
+        let mut entries = vec![MailboxAclEntry {
+            identifier: login_identifier.clone(),
+            rights: my_rights.clone(),
+            mine: true,
+        }];
+
+        if my_rights.contains('a') {
+            let responses = run_acl_command(
+                &mut session,
+                &format!("GETACL {mailbox_arg}"),
+                "read mailbox ACL",
+                mailbox,
+            )
+            .await?;
+            entries.extend(
+                responses
+                    .entries
+                    .into_iter()
+                    .filter(|entry| entry.identifier != login_identifier)
+                    .map(|entry| MailboxAclEntry {
+                        identifier: entry.identifier,
+                        rights: entry.rights,
+                        mine: false,
+                    }),
+            );
+        }
+
+        Ok(entries)
+    }
+    .await;
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn set_mailbox_acl(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    identifier: &str,
+    rights: &str,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    let command = set_acl_command(mailbox, identifier, rights)?;
+
+    let mut session = login(config, password).await?;
+    let result = async {
+        require_mailbox_acl_support(&mut session).await?;
+        timeout_imap(
+            "set mailbox ACL",
+            session.run_command_and_check_ok(&command),
+        )
+        .await
+    }
+    .await;
+    logout_quietly(session).await;
+    result
+}
+
+pub async fn delete_mailbox_acl(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    identifier: &str,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    let command = delete_acl_command(mailbox, identifier)?;
+
+    let mut session = login(config, password).await?;
+    let result = async {
+        require_mailbox_acl_support(&mut session).await?;
+        timeout_imap(
+            "delete mailbox ACL",
+            session.run_command_and_check_ok(&command),
+        )
+        .await
+    }
+    .await;
+    logout_quietly(session).await;
+    result
 }
 
 pub async fn create_mailbox(
@@ -3806,6 +3917,151 @@ async fn mailbox_metadata_supported(session: &mut BoxedSession) -> Result<bool> 
     Ok(has_capability_ignore_ascii_case(&capabilities, "METADATA"))
 }
 
+async fn require_mailbox_acl_support(session: &mut BoxedSession) -> Result<()> {
+    let capabilities = timeout_imap("read IMAP ACL capability", session.capabilities()).await?;
+    if has_capability_ignore_ascii_case(&capabilities, "ACL") {
+        Ok(())
+    } else {
+        Err(FrickmailError::BadRequest(
+            "IMAP server does not support ACL".to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, Default)]
+struct AclCommandResponses {
+    my_rights: Option<String>,
+    entries: Vec<MailboxAclEntry>,
+}
+
+async fn run_acl_command(
+    session: &mut BoxedSession,
+    command: &str,
+    operation: &'static str,
+    expected_mailbox: &str,
+) -> Result<AclCommandResponses> {
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut collected = AclCommandResponses::default();
+
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+
+                collect_acl_data_response(response.parsed(), expected_mailbox, &mut collected);
+                if acl_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(collected);
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+fn collect_acl_data_response(
+    response: &Response<'_>,
+    expected_mailbox: &str,
+    collected: &mut AclCommandResponses,
+) {
+    match response {
+        Response::MyRights(rights) if rights.mailbox == expected_mailbox => {
+            collected.my_rights = Some(acl_rights_string(&rights.rights));
+        }
+        Response::Acl(acl) if acl.mailbox == expected_mailbox => {
+            collected
+                .entries
+                .extend(acl.acls.iter().map(|entry| MailboxAclEntry {
+                    identifier: entry.identifier.to_string(),
+                    rights: acl_rights_string(&entry.rights),
+                    mine: false,
+                }));
+        }
+        _ => {}
+    }
+}
+
+fn acl_command_completion(
+    response: &Response<'_>,
+    request_id: &RequestId,
+    operation: &str,
+) -> Result<Option<()>> {
+    match response {
+        Response::Done {
+            tag,
+            status: Status::Ok,
+            ..
+        } if tag == request_id => Ok(Some(())),
+        Response::Done {
+            tag,
+            status,
+            information,
+            ..
+        } if tag == request_id => Err(imap_acl_status_error(
+            operation,
+            status,
+            information.as_deref(),
+        )),
+        Response::Data {
+            status: Status::Bye,
+            information,
+            ..
+        } => Err(imap_acl_status_error(
+            operation,
+            &Status::Bye,
+            information.as_deref(),
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn imap_acl_status_error(
+    operation: &str,
+    status: &Status,
+    information: Option<&str>,
+) -> FrickmailError {
+    FrickmailError::Upstream(format!(
+        "{operation} failed ({status:?}): {}",
+        information.unwrap_or("IMAP command failed")
+    ))
+}
+
+fn acl_rights_string(rights: &[AclRight]) -> String {
+    rights.iter().copied().map(char::from).collect()
+}
+
+fn set_acl_command(mailbox: &str, identifier: &str, rights: &str) -> Result<String> {
+    validate_mailbox(mailbox)?;
+    Ok(format!(
+        "SETACL {} {} {}",
+        quote_imap_string("mailbox", mailbox)?,
+        quote_imap_string("ACL identifier", identifier)?,
+        quote_imap_string("ACL rights", rights)?,
+    ))
+}
+
+fn delete_acl_command(mailbox: &str, identifier: &str) -> Result<String> {
+    validate_mailbox(mailbox)?;
+    Ok(format!(
+        "DELETEACL {} {}",
+        quote_imap_string("mailbox", mailbox)?,
+        quote_imap_string("ACL identifier", identifier)?,
+    ))
+}
+
 fn validate_metadata(metadata: &MailboxMetadata) -> Result<()> {
     required_field("metadata key", metadata.key.clone())?;
     if let Some(value) = metadata.value.as_deref() {
@@ -3821,10 +4077,10 @@ fn validate_metadata(metadata: &MailboxMetadata) -> Result<()> {
 fn set_metadata_command(mailbox: &str, metadata: &MailboxMetadata) -> Result<String> {
     validate_mailbox(mailbox)?;
     validate_metadata(metadata)?;
-    let mailbox = quote_mailbox_pattern(mailbox)?;
-    let key = quote_mailbox_pattern(metadata.key.trim())?;
+    let mailbox = quote_imap_string("mailbox", mailbox)?;
+    let key = quote_imap_string("metadata key", metadata.key.trim())?;
     let value = match metadata.value.as_deref() {
-        Some(value) => quote_mailbox_pattern(value)?,
+        Some(value) => quote_imap_string("metadata value", value)?,
         None => "NIL".to_string(),
     };
     Ok(format!("SETMETADATA {mailbox} ({key} {value})"))
@@ -3906,10 +4162,14 @@ async fn created_legacy_folder(
 }
 
 fn quote_mailbox_pattern(value: &str) -> Result<String> {
-    if contains_crlf(value) {
-        return Err(FrickmailError::BadRequest(
-            "mailbox must not contain CR or LF".to_string(),
-        ));
+    quote_imap_string("mailbox", value)
+}
+
+fn quote_imap_string(label: &str, value: &str) -> Result<String> {
+    if contains_crlf(value) || value.contains('\0') {
+        return Err(FrickmailError::BadRequest(format!(
+            "{label} must not contain NUL, CR, or LF"
+        )));
     }
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
@@ -4443,6 +4703,84 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn acl_commands_quote_fields_and_reject_command_injection() {
+        assert_eq!(
+            set_acl_command(r#"Team "A""#, r#"user\name"#, "lrswipkxtea").unwrap(),
+            r#"SETACL "Team \"A\"" "user\\name" "lrswipkxtea""#
+        );
+        assert_eq!(
+            set_acl_command("Shared", "bob@example.com", "").unwrap(),
+            r#"SETACL "Shared" "bob@example.com" """#
+        );
+        assert_eq!(
+            delete_acl_command("Shared", "bob@example.com").unwrap(),
+            r#"DELETEACL "Shared" "bob@example.com""#
+        );
+        assert!(set_acl_command("Shared", "bob@example.com\r\nNOOP", "lr").is_err());
+        assert!(set_acl_command("Shared", "bob@example.com", "lr\r\nNOOP").is_err());
+        assert!(delete_acl_command("Shared", "bob\0@example.com").is_err());
+    }
+
+    #[test]
+    fn acl_response_collection_preserves_mailbox_entries_and_rights_order() {
+        let mut input = concat!(
+            "* MYRIGHTS \"Shared\" lrswipkxtea\r\n",
+            "* ACL \"Shared\" \"alice@example.com\" lrswipkxtea \"bob@example.com\" lr\r\n",
+            "* ACL \"Other\" \"ignored@example.com\" a\r\n",
+        )
+        .as_bytes();
+        let mut collected = AclCommandResponses::default();
+
+        while !input.is_empty() {
+            let (remaining, response) = Response::from_bytes(input).unwrap();
+            collect_acl_data_response(&response, "Shared", &mut collected);
+            input = remaining;
+        }
+
+        assert_eq!(collected.my_rights.as_deref(), Some("lrswipkxtea"));
+        assert_eq!(
+            collected.entries,
+            vec![
+                MailboxAclEntry {
+                    identifier: "alice@example.com".to_string(),
+                    rights: "lrswipkxtea".to_string(),
+                    mine: false,
+                },
+                MailboxAclEntry {
+                    identifier: "bob@example.com".to_string(),
+                    rights: "lr".to_string(),
+                    mine: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn acl_command_completion_ignores_advisory_status_and_requires_matching_tag() {
+        let request_id = RequestId("A1".to_string());
+        let (_, advisory) = Response::from_bytes(b"* NO [ALERT] mailbox is read-only\r\n").unwrap();
+        assert!(acl_command_completion(&advisory, &request_id, "read ACL")
+            .unwrap()
+            .is_none());
+
+        let (_, other_tag) = Response::from_bytes(b"A2 NO other command failed\r\n").unwrap();
+        assert!(acl_command_completion(&other_tag, &request_id, "read ACL")
+            .unwrap()
+            .is_none());
+
+        let (_, success) = Response::from_bytes(b"A1 OK ACL completed\r\n").unwrap();
+        assert!(acl_command_completion(&success, &request_id, "read ACL")
+            .unwrap()
+            .is_some());
+
+        let (_, rejected) = Response::from_bytes(b"A1 NO permission denied\r\n").unwrap();
+        assert!(acl_command_completion(&rejected, &request_id, "read ACL").is_err());
+
+        let (_, bye) = Response::from_bytes(b"* BYE server shutting down\r\n").unwrap();
+        assert!(acl_command_completion(&bye, &request_id, "read ACL").is_err());
     }
 
     #[test]
