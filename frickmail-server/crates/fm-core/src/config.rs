@@ -1,7 +1,7 @@
-use std::env;
+use std::{collections::HashMap, env};
 
-use serde::Deserialize;
-use url::Url;
+use serde::{de::Error as _, Deserialize, Deserializer};
+use url::{Host, Url};
 
 use crate::{FrickmailError, Result};
 
@@ -58,6 +58,17 @@ pub struct MailDefaults {
     pub message_list_fast_simple_search: bool,
     #[serde(default)]
     pub message_list_permanent_filter: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_message_list_domain_overrides"
+    )]
+    pub message_list_domain_overrides: HashMap<String, MessageListDomainOverride>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MessageListDomainOverride {
+    pub fast_simple_search: Option<bool>,
+    pub permanent_filter: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,8 +144,92 @@ impl Default for MailDefaults {
             fetch_new_messages: default_fetch_new_messages(),
             message_list_fast_simple_search: default_message_list_fast_simple_search(),
             message_list_permanent_filter: String::new(),
+            message_list_domain_overrides: HashMap::new(),
         }
     }
+}
+
+impl MailDefaults {
+    pub fn message_list_search_settings(&self, email: &str) -> (bool, String) {
+        let domain = email
+            .rsplit_once('@')
+            .map(|(_, domain)| legacy_ascii_domain(domain))
+            .unwrap_or_default();
+        let domain_override = self
+            .message_list_domain_overrides
+            .iter()
+            .find(|(pattern, _)| !pattern.contains('*') && pattern.eq_ignore_ascii_case(&domain))
+            .map(|(_, value)| value)
+            .or_else(|| {
+                let mut patterns = self
+                    .message_list_domain_overrides
+                    .iter()
+                    .filter(|(pattern, _)| pattern.contains('*'))
+                    .collect::<Vec<_>>();
+                patterns.sort_unstable_by(|left, right| right.0.cmp(left.0));
+                patterns
+                    .into_iter()
+                    .find(|(pattern, _)| legacy_domain_pattern_matches(pattern, &domain))
+                    .map(|(_, value)| value)
+            });
+
+        let fast_simple_search = self.message_list_fast_simple_search
+            && domain_override
+                .and_then(|value| value.fast_simple_search)
+                .unwrap_or(true);
+        let domain_filter = domain_override
+            .and_then(|value| value.permanent_filter.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let permanent_filter = domain_filter
+            .unwrap_or_else(|| self.message_list_permanent_filter.trim())
+            .to_string();
+        (fast_simple_search, permanent_filter)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MessageListDomainOverridesInput {
+    Map(HashMap<String, MessageListDomainOverride>),
+    Json(String),
+}
+
+fn deserialize_message_list_domain_overrides<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, MessageListDomainOverride>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match MessageListDomainOverridesInput::deserialize(deserializer)? {
+        MessageListDomainOverridesInput::Map(overrides) => Ok(overrides),
+        MessageListDomainOverridesInput::Json(raw) if raw.trim().is_empty() => Ok(HashMap::new()),
+        MessageListDomainOverridesInput::Json(raw) => {
+            serde_json::from_str(&raw).map_err(D::Error::custom)
+        }
+    }
+}
+
+fn legacy_ascii_domain(domain: &str) -> String {
+    let domain = domain.trim();
+    Host::parse(domain)
+        .map(|host| host.to_string().to_ascii_lowercase())
+        .unwrap_or_else(|_| domain.to_ascii_lowercase())
+}
+
+fn legacy_domain_pattern_matches(pattern: &str, domain: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern.eq_ignore_ascii_case(domain);
+    }
+    let pattern = pattern.to_ascii_lowercase();
+    let mut remainder = domain;
+    for segment in pattern.split('*').filter(|segment| !segment.is_empty()) {
+        let Some(offset) = remainder.find(segment) else {
+            return false;
+        };
+        remainder = &remainder[offset + segment.len()..];
+    }
+    true
 }
 
 impl Default for FrickmailCacheConfig {
@@ -206,7 +301,6 @@ impl FrickmailConfig {
                 message: "must be greater than or equal to zero".to_string(),
             });
         }
-
         Ok(())
     }
 }
@@ -367,4 +461,82 @@ fn default_export_folder_max_messages() -> usize {
 
 fn default_export_folder_max_bytes() -> usize {
     25 * 1024 * 1024
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MailDefaults, MessageListDomainOverride};
+    use std::collections::HashMap;
+
+    #[test]
+    fn message_list_domain_overrides_match_legacy_precedence() {
+        let mail = MailDefaults {
+            message_list_fast_simple_search: true,
+            message_list_permanent_filter: "  NOT FLAGGED  ".to_string(),
+            message_list_domain_overrides: serde_json::from_str::<
+                HashMap<String, MessageListDomainOverride>,
+            >(
+                r#"{
+                "*": {"permanent_filter": "SEEN"},
+                "*.example.com": {"fast_simple_search": false},
+                "mail.example.com": {
+                    "fast_simple_search": true,
+                    "permanent_filter": "  ANSWERED  "
+                },
+                "xn--bcher-kva.de": {
+                    "permanent_filter": "UNSEEN"
+                }
+            }"#,
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            mail.message_list_search_settings("alice@mail.example.com"),
+            (true, "ANSWERED".to_string())
+        );
+        assert_eq!(
+            mail.message_list_search_settings("alice@MAIL.EXAMPLE.COM"),
+            (true, "ANSWERED".to_string())
+        );
+        assert_eq!(
+            mail.message_list_search_settings("alice@other.example.com"),
+            (false, "NOT FLAGGED".to_string())
+        );
+        assert_eq!(
+            mail.message_list_search_settings("alice@elsewhere.test"),
+            (true, "SEEN".to_string())
+        );
+        assert_eq!(
+            mail.message_list_search_settings("alice@bücher.de"),
+            (true, "UNSEEN".to_string())
+        );
+    }
+
+    #[test]
+    fn global_fast_search_disable_cannot_be_overridden_by_domain() {
+        let mail = MailDefaults {
+            message_list_fast_simple_search: false,
+            message_list_domain_overrides: serde_json::from_str::<
+                HashMap<String, MessageListDomainOverride>,
+            >(
+                r#"{
+                "example.com": {"fast_simple_search": true}
+            }"#,
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+
+        assert!(!mail.message_list_search_settings("alice@example.com").0);
+    }
+
+    #[test]
+    fn malformed_message_list_domain_overrides_are_rejected() {
+        assert!(serde_json::from_value::<MailDefaults>(serde_json::json!({
+            "message_list_domain_overrides": "{not-json"
+        }))
+        .is_err());
+    }
 }

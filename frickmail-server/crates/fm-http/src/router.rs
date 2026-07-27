@@ -4978,19 +4978,20 @@ where
         Ok(hide_deleted) => hide_deleted,
         Err(response) => return response,
     };
-    let (config, password) = match imap_action_connection_for_selected_or_payload(
-        state,
-        original_action,
-        payload,
-        session,
-        user.user_id,
-        &credential_key,
-    )
-    .await
-    {
-        Ok(connection) => connection,
-        Err(response) => return response,
-    };
+    let (config, password, account_email) =
+        match imap_action_connection_with_email_for_selected_or_payload(
+            state,
+            original_action,
+            payload,
+            session,
+            user.user_id,
+            &credential_key,
+        )
+        .await
+        {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
     let (mut request, raw_cache_hash) =
         match legacy_message_list_raw_key_request_from_payload(payload) {
             Ok(Some(raw_key_request)) => {
@@ -5008,13 +5009,10 @@ where
             Err(message) => return json_result_error(original_action, message),
         };
     request.hide_deleted = hide_deleted;
-    request.fast_simple_search = state.config().mail.message_list_fast_simple_search;
-    request.permanent_filter = state
+    (request.fast_simple_search, request.permanent_filter) = state
         .config()
         .mail
-        .message_list_permanent_filter
-        .trim()
-        .to_string();
+        .message_list_search_settings(&account_email);
 
     let result = tokio::time::timeout(fetch_deadline, fetcher(config, password, request.clone()))
         .await
@@ -7638,6 +7636,26 @@ async fn imap_action_connection_for_selected_or_payload(
     user_id: i64,
     credential_key: &[u8],
 ) -> Result<(ImapConnectionConfig, String), Response> {
+    let (config, password, _) = imap_action_connection_with_email_for_selected_or_payload(
+        state,
+        original_action,
+        payload,
+        session,
+        user_id,
+        credential_key,
+    )
+    .await?;
+    Ok((config, password))
+}
+
+async fn imap_action_connection_with_email_for_selected_or_payload(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    user_id: i64,
+    credential_key: &[u8],
+) -> Result<(ImapConnectionConfig, String, String), Response> {
     let Some(pool) = state.db_pool() else {
         return Err(json_result_error(
             original_action,
@@ -7663,7 +7681,7 @@ async fn imap_action_connection_for_selected_or_payload(
         Err(_) => return Err(json_result_error(original_action, "Missing IMAP password")),
     };
 
-    Ok((config, password))
+    Ok((config, password, account.email))
 }
 
 async fn native_frickmail_list_oidc_links(
@@ -14248,8 +14266,16 @@ Subject: Empty body metadata\r\n\r\n"
     async fn native_legacy_message_list_builds_request_and_returns_collection_shape() {
         let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let mut config = test_config(None);
-        config.mail.message_list_fast_simple_search = false;
         config.mail.message_list_permanent_filter = "  NOT FLAGGED  ".to_string();
+        config.mail.message_list_domain_overrides = serde_json::from_str(
+            r#"{
+            "example.com": {
+                "fast_simple_search": false,
+                "permanent_filter": "  ANSWERED  "
+            }
+        }"#,
+        )
+        .unwrap();
         let (state, session) = message_body_test_state_with_config(1820, 1821, &key, config).await;
         let captured = Arc::new(Mutex::new(None));
         let captured_for_fetch = Arc::clone(&captured);
@@ -14316,7 +14342,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(request.prev_uid_next, Some(52));
         assert!(request.hide_deleted);
         assert!(!request.fast_simple_search);
-        assert_eq!(request.permanent_filter, "NOT FLAGGED");
+        assert_eq!(request.permanent_filter, "ANSWERED");
         assert!(request.use_threads);
         assert_eq!(request.thread_uid, 77);
         assert_eq!(request.thread_algorithm, "REFERENCES");
