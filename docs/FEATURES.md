@@ -477,8 +477,11 @@ account during the broader SnappyMail/RainLoop runtime migration. Legacy
 `Message`, `FolderInformation`, and `FolderInformationMultiply` now have partial
 native selected-account POST support. Folder status includes PHP-compatible ETags,
 `flagsUids` message flag refreshes, and INBOX new-message notification payloads.
-`MessageList` remains on compatibility fallback until sort/search/threading,
-hidden-deleted filtering, dates, and cache semantics match the PHP runtime.
+`MessageList` remains on compatibility fallback while RFC 7377 folder scopes,
+threading, date grouping, previews, domain-level IMAP search overrides, and
+server-side UID/cache semantics are completed. Native staging already covers
+search criteria, hidden-deleted filtering, relative and absolute dates, and
+capability-gated server-side sorting.
 
 ### UI
 

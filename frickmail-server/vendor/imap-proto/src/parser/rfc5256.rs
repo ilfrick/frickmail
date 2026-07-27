@@ -38,7 +38,13 @@ pub(crate) fn mailbox_data_sort(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
         // Since the SORT command extends the SEARCH command, the trailing whitespace
         // is exceptionnaly allowed here (as for the SEARCH command).
         terminated(
-            preceded(tag_no_case(b"SORT"), many0(preceded(tag(" "), number))),
+            preceded(
+                preceded(
+                    opt(terminated(tag_no_case(b"UID"), tag(" "))),
+                    tag_no_case(b"SORT"),
+                ),
+                many0(preceded(tag(" "), number)),
+            ),
             opt(tag(" ")),
         ),
         MailboxDatum::Sort,

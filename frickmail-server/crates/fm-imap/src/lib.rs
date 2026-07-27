@@ -520,6 +520,8 @@ struct ImapFetchMetadataCapabilities {
     supports_gmail_id: bool,
     uses_utf8_search: bool,
     supports_within: bool,
+    supports_sort: bool,
+    supports_sort_display: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2389,43 +2391,33 @@ fn legacy_message_list_search_wire_with_settings(
     })
 }
 
-#[cfg(test)]
-async fn legacy_message_list_visible_uids(
-    session: &mut BoxedSession,
-    search: &str,
+#[derive(Debug, Clone, Copy)]
+struct LegacyMessageListQueryOptions<'a> {
     hide_deleted: bool,
+    fast_simple_search: bool,
+    permanent_filter: &'a str,
+    sort: Option<&'a str>,
     utf8_mode: bool,
     supports_within: bool,
-) -> Result<Vec<u32>> {
-    legacy_message_list_visible_uids_with_settings(
-        session,
-        search,
-        hide_deleted,
-        true,
-        "",
-        utf8_mode,
-        supports_within,
-    )
-    .await
 }
 
 async fn legacy_message_list_visible_uids_with_settings(
     session: &mut BoxedSession,
     search: &str,
-    hide_deleted: bool,
-    fast_simple_search: bool,
-    permanent_filter: &str,
-    utf8_mode: bool,
-    supports_within: bool,
+    options: LegacyMessageListQueryOptions<'_>,
 ) -> Result<Vec<u32>> {
-    let operation = "search legacy message list";
+    let operation = if options.sort.is_some() {
+        "sort legacy message list"
+    } else {
+        "search legacy message list"
+    };
     let wire = legacy_message_list_search_wire_with_settings(
         search,
-        hide_deleted,
-        fast_simple_search,
-        permanent_filter,
-        utf8_mode,
-        supports_within,
+        options.hide_deleted,
+        options.fast_simple_search,
+        options.permanent_filter,
+        options.utf8_mode,
+        options.supports_within,
     )?;
     timeout_result(
         operation,
@@ -2434,12 +2426,16 @@ async fn legacy_message_list_visible_uids_with_settings(
             let first = chunks.next().ok_or_else(|| {
                 FrickmailError::Upstream("empty message-list search command".to_string())
             })?;
-            let charset = if wire.needs_utf8_charset {
-                " CHARSET UTF-8"
+            let command = if let Some(sort) = options.sort {
+                format!("UID SORT ({sort}) UTF-8 {first}")
             } else {
-                ""
+                let charset = if wire.needs_utf8_charset {
+                    " CHARSET UTF-8"
+                } else {
+                    ""
+                };
+                format!("UID SEARCH{charset} {first}")
             };
-            let command = format!("UID SEARCH{charset} {first}");
             let request_id = session
                 .run_command(&command)
                 .await
@@ -2459,9 +2455,11 @@ async fn legacy_message_list_visible_uids_with_settings(
                                 "{operation} failed: IMAP connection closed"
                             ))
                         })?;
-                    if let Response::MailboxData(MailboxDatum::Search(found)) = response.parsed() {
-                        uids.extend(found.iter().copied());
-                    }
+                    collect_legacy_message_list_uids(
+                        response.parsed(),
+                        options.sort.is_some(),
+                        &mut uids,
+                    );
                     if matches!(response.parsed(), Response::Continue { .. }) {
                         break;
                     }
@@ -2490,9 +2488,11 @@ async fn legacy_message_list_visible_uids_with_settings(
                             "{operation} failed: IMAP connection closed"
                         ))
                     })?;
-                if let Response::MailboxData(MailboxDatum::Search(found)) = response.parsed() {
-                    uids.extend(found.iter().copied());
-                }
+                collect_legacy_message_list_uids(
+                    response.parsed(),
+                    options.sort.is_some(),
+                    &mut uids,
+                );
                 if matches!(response.parsed(), Response::Continue { .. }) {
                     return Err(FrickmailError::Upstream(format!(
                         "{operation} failed: unexpected IMAP continuation"
@@ -2505,6 +2505,18 @@ async fn legacy_message_list_visible_uids_with_settings(
         }),
     )
     .await?
+}
+
+fn collect_legacy_message_list_uids(response: &Response<'_>, sorted: bool, uids: &mut Vec<u32>) {
+    match response {
+        Response::MailboxData(MailboxDatum::Sort(found)) if sorted => {
+            uids.extend(found.iter().copied());
+        }
+        Response::MailboxData(MailboxDatum::Search(found)) if !sorted => {
+            uids.extend(found.iter().copied());
+        }
+        _ => {}
+    }
 }
 
 fn legacy_message_list_page_uids(uids: &[u32], offset: u32, limit: u32) -> Vec<u32> {
@@ -2536,6 +2548,41 @@ pub fn legacy_message_list_sort(sort: &str, use_sort: bool) -> String {
         sort_types.push("REVERSE DATE");
     }
     sort_types.join(" ")
+}
+
+fn legacy_message_list_sort_for_command(sort: &str, supports_sort_display: bool) -> Result<String> {
+    if sort
+        .bytes()
+        .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+    {
+        return Err(FrickmailError::BadRequest(
+            "message-list sort contains invalid command bytes".to_string(),
+        ));
+    }
+    let mut tokens = sort.split_ascii_whitespace();
+    while let Some(token) = tokens.next() {
+        let criterion = if token.eq_ignore_ascii_case("REVERSE") {
+            tokens.next().ok_or_else(|| {
+                FrickmailError::BadRequest(
+                    "message-list REVERSE sort requires a criterion".to_string(),
+                )
+            })?
+        } else {
+            token
+        };
+        let criterion = criterion.to_ascii_uppercase();
+        let supported = matches!(
+            criterion.as_str(),
+            "ARRIVAL" | "CC" | "DATE" | "FROM" | "SIZE" | "SUBJECT" | "TO"
+        ) || (supports_sort_display
+            && matches!(criterion.as_str(), "DISPLAYFROM" | "DISPLAYTO"));
+        if !supported {
+            return Err(FrickmailError::BadRequest(
+                "message-list sort contains an unsupported criterion".to_string(),
+            ));
+        }
+    }
+    Ok(legacy_message_list_sort(sort, true))
 }
 
 pub fn legacy_message_list_reported_sort(sort: &str) -> String {
@@ -2944,23 +2991,39 @@ async fn legacy_message_list_in_session(
     .await?;
     let folder_total = folder.total_emails.unwrap_or_default();
     let limit = legacy_message_list_limit(request.limit);
-    let (mut matching_uids, total) = if folder_total == 0 || request.offset > folder_total {
+    let can_query = folder_total > 0 && request.offset <= folder_total;
+    let used_sort = can_query && capabilities.supports_sort;
+    let (mut matching_uids, total) = if !can_query {
         (Vec::new(), folder_total)
     } else {
+        let sort = capabilities
+            .supports_sort
+            .then(|| {
+                legacy_message_list_sort_for_command(
+                    &request.sort,
+                    capabilities.supports_sort_display,
+                )
+            })
+            .transpose()?;
         let matching_uids = legacy_message_list_visible_uids_with_settings(
             session,
             &request.search,
-            request.hide_deleted,
-            request.fast_simple_search,
-            &request.permanent_filter,
-            capabilities.uses_utf8_search,
-            capabilities.supports_within,
+            LegacyMessageListQueryOptions {
+                hide_deleted: request.hide_deleted,
+                fast_simple_search: request.fast_simple_search,
+                permanent_filter: &request.permanent_filter,
+                sort: sort.as_deref(),
+                utf8_mode: capabilities.uses_utf8_search,
+                supports_within: capabilities.supports_within,
+            },
         )
         .await?;
         let total = u32::try_from(matching_uids.len()).unwrap_or(u32::MAX);
         (matching_uids, total)
     };
-    matching_uids.sort_unstable_by(|left, right| right.cmp(left));
+    if !used_sort {
+        matching_uids.sort_unstable_by(|left, right| right.cmp(left));
+    }
     let page_uids = legacy_message_list_page_uids(&matching_uids, request.offset, limit);
     let mut messages_by_uid = HashMap::new();
 
@@ -3006,7 +3069,7 @@ async fn legacy_message_list_in_session(
         offset: request.offset,
         limit,
         search: legacy_message_list_search(&request.search),
-        sort: legacy_message_list_reported_sort(&request.sort),
+        sort: legacy_message_list_sort(&request.sort, used_sort),
         limited: legacy_message_list_limited(false),
         thread_uid: request.thread_uid,
         messages,
@@ -4508,6 +4571,8 @@ async fn imap_fetch_metadata_capabilities(
         supports_gmail_id: has_capability_ignore_ascii_case(&capabilities, "X-GM-EXT-1"),
         uses_utf8_search: capabilities.iter().any(is_legacy_utf8_capability),
         supports_within: has_capability_ignore_ascii_case(&capabilities, "WITHIN"),
+        supports_sort: has_capability_ignore_ascii_case(&capabilities, "SORT"),
+        supports_sort_display: has_capability_ignore_ascii_case(&capabilities, "SORT=DISPLAY"),
     })
 }
 
@@ -7741,8 +7806,45 @@ mod tests {
         expected_criteria: &'static str,
         response: &'static str,
     ) -> Result<Vec<u32>> {
+        run_scripted_message_list_uid_query(ScriptedMessageListUidQuery {
+            search_value,
+            hide_deleted,
+            fast_simple_search,
+            permanent_filter,
+            sort: None,
+            supports_within,
+            expected_criteria,
+            response,
+        })
+        .await
+    }
+
+    struct ScriptedMessageListUidQuery {
+        search_value: &'static str,
+        hide_deleted: bool,
+        fast_simple_search: bool,
+        permanent_filter: &'static str,
+        sort: Option<&'static str>,
+        supports_within: bool,
+        expected_criteria: &'static str,
+        response: &'static str,
+    }
+
+    async fn run_scripted_message_list_uid_query(
+        query: ScriptedMessageListUidQuery,
+    ) -> Result<Vec<u32>> {
         use tokio::io::AsyncWriteExt as _;
 
+        let ScriptedMessageListUidQuery {
+            search_value,
+            hide_deleted,
+            fast_simple_search,
+            permanent_filter,
+            sort,
+            supports_within,
+            expected_criteria,
+            response,
+        } = query;
         let (client_stream, mut server_stream) = tokio::io::duplex(512);
         let server = tokio::spawn(async move {
             let login = read_scripted_imap_command(&mut server_stream).await;
@@ -7752,8 +7854,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            let search = read_scripted_imap_command(&mut server_stream).await;
-            assert_eq!(search, format!("A0002 UID SEARCH {expected_criteria}\r\n"));
+            let query = read_scripted_imap_command(&mut server_stream).await;
+            let expected = match sort {
+                Some(sort) => {
+                    format!("A0002 UID SORT ({sort}) UTF-8 {expected_criteria}\r\n")
+                }
+                None => format!("A0002 UID SEARCH {expected_criteria}\r\n"),
+            };
+            assert_eq!(query, expected);
             server_stream.write_all(response.as_bytes()).await.unwrap();
         });
 
@@ -7766,11 +7874,14 @@ mod tests {
         let result = legacy_message_list_visible_uids_with_settings(
             &mut session,
             search_value,
-            hide_deleted,
-            fast_simple_search,
-            permanent_filter,
-            true,
-            supports_within,
+            LegacyMessageListQueryOptions {
+                hide_deleted,
+                fast_simple_search,
+                permanent_filter,
+                sort,
+                utf8_mode: true,
+                supports_within,
+            },
         )
         .await;
         server.await.unwrap();
@@ -7841,8 +7952,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn message_list_uid_sort_preserves_server_order() {
+        assert_eq!(
+            run_scripted_message_list_uid_query(ScriptedMessageListUidQuery {
+                search_value: "from:alice",
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: Some("FROM REVERSE DATE"),
+                supports_within: false,
+                expected_criteria: "FROM \"alice\" UNDELETED",
+                response: "* UID SORT 74 105 99\r\nA0002 OK sorted\r\n",
+            })
+            .await
+            .unwrap(),
+            vec![74, 105, 99]
+        );
+    }
+
     async fn run_scripted_unicode_uid_search(
         utf8_mode: bool,
+        continuation_response: &'static str,
+    ) -> Result<Vec<u32>> {
+        run_scripted_unicode_uid_query(utf8_mode, None, continuation_response).await
+    }
+
+    async fn run_scripted_unicode_uid_query(
+        utf8_mode: bool,
+        sort: Option<&'static str>,
         continuation_response: &'static str,
     ) -> Result<Vec<u32>> {
         use tokio::io::AsyncWriteExt as _;
@@ -7856,15 +7994,29 @@ mod tests {
                 .await
                 .unwrap();
 
-            let search = read_scripted_imap_command(&mut server_stream).await;
+            let query = read_scripted_imap_command(&mut server_stream).await;
             if utf8_mode {
-                assert_eq!(search, "A0002 UID SEARCH SUBJECT \"café\" UNDELETED\r\n");
-                server_stream
-                    .write_all(b"* SEARCH 8\r\nA0002 OK searched\r\n")
-                    .await
-                    .unwrap();
+                let expected = match sort {
+                    Some(sort) => {
+                        format!("A0002 UID SORT ({sort}) UTF-8 SUBJECT \"café\" UNDELETED\r\n")
+                    }
+                    None => "A0002 UID SEARCH SUBJECT \"café\" UNDELETED\r\n".to_string(),
+                };
+                assert_eq!(query, expected);
+                let response = if sort.is_some() {
+                    b"* SORT 8\r\nA0002 OK sorted\r\n".as_slice()
+                } else {
+                    b"* SEARCH 8\r\nA0002 OK searched\r\n".as_slice()
+                };
+                server_stream.write_all(response).await.unwrap();
             } else {
-                assert_eq!(search, "A0002 UID SEARCH CHARSET UTF-8 SUBJECT {5}\r\n");
+                let expected = match sort {
+                    Some(sort) => {
+                        format!("A0002 UID SORT ({sort}) UTF-8 SUBJECT {{5}}\r\n")
+                    }
+                    None => "A0002 UID SEARCH CHARSET UTF-8 SUBJECT {5}\r\n".to_string(),
+                };
+                assert_eq!(query, expected);
                 server_stream
                     .write_all(continuation_response.as_bytes())
                     .await
@@ -7872,10 +8024,12 @@ mod tests {
                 if continuation_response.starts_with('+') {
                     let literal = read_scripted_imap_command(&mut server_stream).await;
                     assert_eq!(literal, "café UNDELETED\r\n");
-                    server_stream
-                        .write_all(b"* SEARCH 8\r\nA0002 OK searched\r\n")
-                        .await
-                        .unwrap();
+                    let response = if sort.is_some() {
+                        b"* SORT 8\r\nA0002 OK sorted\r\n".as_slice()
+                    } else {
+                        b"* SEARCH 8\r\nA0002 OK searched\r\n".as_slice()
+                    };
+                    server_stream.write_all(response).await.unwrap();
                 }
             }
         });
@@ -7886,9 +8040,19 @@ mod tests {
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let result =
-            legacy_message_list_visible_uids(&mut session, "subject:café", true, utf8_mode, false)
-                .await;
+        let result = legacy_message_list_visible_uids_with_settings(
+            &mut session,
+            "subject:café",
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort,
+                utf8_mode,
+                supports_within: false,
+            },
+        )
+        .await;
         server.await.unwrap();
         result
     }
@@ -7901,6 +8065,16 @@ mod tests {
         );
         assert_eq!(
             run_scripted_unicode_uid_search(false, "+ continue\r\n")
+                .await
+                .unwrap(),
+            vec![8]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_list_unicode_sort_uses_utf8_charset_and_classic_literal() {
+        assert_eq!(
+            run_scripted_unicode_uid_query(false, Some("REVERSE DATE"), "+ continue\r\n")
                 .await
                 .unwrap(),
             vec![8]
@@ -8434,6 +8608,26 @@ mod tests {
             "REVERSE DATE"
         );
         assert_eq!(legacy_message_list_sort("date", true), "date REVERSE DATE");
+        assert_eq!(
+            legacy_message_list_sort_for_command("REVERSE FROM SIZE", false).unwrap(),
+            "REVERSE FROM SIZE REVERSE DATE"
+        );
+        assert_eq!(
+            legacy_message_list_sort_for_command("DISPLAYFROM", true).unwrap(),
+            "DISPLAYFROM REVERSE DATE"
+        );
+        for sort in [
+            "REVERSE",
+            "DISPLAYFROM",
+            "FROM\r\nDATE",
+            "FROM\r\nUID SEARCH ALL",
+            "NOT-A-SORT",
+        ] {
+            assert!(
+                legacy_message_list_sort_for_command(sort, false).is_err(),
+                "{sort:?} must not produce an IMAP SORT command"
+            );
+        }
     }
 
     #[test]

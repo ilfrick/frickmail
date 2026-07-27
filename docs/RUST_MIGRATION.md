@@ -520,9 +520,11 @@ Every migration slice must follow this loop:
 2. Complete native parity for legacy `MessageList`, `Message`, and folder status
    routes. `Message` plus folder status POST paths are partial-native; folder
    status now covers PHP-compatible ETags, `flagsUids`, and INBOX new-message
-   payloads. `MessageList` dispatch stays on compatibility fallback until
-   search/threading, sort/cache behavior, hidden-deleted filtering, dates,
-   previews, and RawKey GET paths match the PHP runtime.
+   payloads. `MessageList` dispatch stays on compatibility fallback until RFC
+   7377 folder scopes, threading, date grouping, previews, domain-level IMAP
+   search overrides, and server-side UID/cache behavior match the PHP runtime;
+   native search, hidden-deleted filtering, date criteria, and capability-gated
+   sorting are staged.
 3. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
    compatibility.
 4. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user
