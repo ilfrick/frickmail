@@ -73,10 +73,16 @@ pub struct MessageListDomainOverride {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FrickmailCacheConfig {
+    #[serde(default = "default_cache_enable")]
+    pub enable: bool,
     #[serde(default = "default_cache_index")]
     pub index: String,
+    #[serde(default = "default_cache_fast_cache_index")]
+    pub fast_cache_index: String,
     #[serde(default = "default_cache_http_expires")]
     pub http_expires: i64,
+    #[serde(default = "default_cache_server_uids")]
+    pub server_uids: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -235,8 +241,11 @@ fn legacy_domain_pattern_matches(pattern: &str, domain: &str) -> bool {
 impl Default for FrickmailCacheConfig {
     fn default() -> Self {
         Self {
+            enable: default_cache_enable(),
             index: default_cache_index(),
+            fast_cache_index: default_cache_fast_cache_index(),
             http_expires: default_cache_http_expires(),
+            server_uids: default_cache_server_uids(),
         }
     }
 }
@@ -431,8 +440,20 @@ fn default_cache_index() -> String {
     "v1".to_string()
 }
 
+fn default_cache_enable() -> bool {
+    true
+}
+
+fn default_cache_fast_cache_index() -> String {
+    "v1".to_string()
+}
+
 fn default_cache_http_expires() -> i64 {
     3600
+}
+
+fn default_cache_server_uids() -> bool {
+    true
 }
 
 fn default_transactional_smtp_port() -> u16 {
@@ -465,7 +486,7 @@ fn default_export_folder_max_bytes() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{MailDefaults, MessageListDomainOverride};
+    use super::{FrickmailCacheConfig, MailDefaults, MessageListDomainOverride};
     use std::collections::HashMap;
 
     #[test]
@@ -538,5 +559,14 @@ mod tests {
             "message_list_domain_overrides": "{not-json"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn cache_defaults_match_legacy_server_uid_cache_settings() {
+        let cache = serde_json::from_value::<FrickmailCacheConfig>(serde_json::json!({})).unwrap();
+
+        assert!(cache.enable);
+        assert_eq!(cache.fast_cache_index, "v1");
+        assert!(cache.server_uids);
     }
 }

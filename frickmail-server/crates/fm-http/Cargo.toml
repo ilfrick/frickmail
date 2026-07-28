@@ -7,9 +7,11 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 chrono = { workspace = true, features = ["clock"] }
+deadpool-redis.workspace = true
 fm-core = { path = "../fm-core" }
 fm-imap = { path = "../fm-imap" }
 fm-mime = { path = "../fm-mime" }
@@ -23,6 +25,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
+sha1.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tower.workspace = true
@@ -34,4 +37,3 @@ url.workspace = true
 data-encoding.workspace = true
 hmac.workspace = true
 openssl.workspace = true
-sha1.workspace = true

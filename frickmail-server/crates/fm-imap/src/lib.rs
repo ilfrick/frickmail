@@ -436,6 +436,12 @@ pub struct LegacyMessageListRequest {
     pub thread_algorithm: String,
 }
 
+#[async_trait::async_trait]
+pub trait LegacyMessageListUidCache: Send + Sync {
+    async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>>;
+    async fn set(&self, raw_key: &str, folder_hash: &str, uids: &[u32]);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleExecutionPlan {
     pub rule_id: i64,
@@ -525,6 +531,7 @@ struct ImapRuleCapabilities {
 struct ImapFetchMetadataCapabilities {
     supports_gmail_id: bool,
     supports_preview: bool,
+    supports_literal_plus: bool,
     uses_utf8_search: bool,
     supports_within: bool,
     supports_multisearch: bool,
@@ -803,13 +810,28 @@ pub async fn fetch_legacy_message_list(
     password: &str,
     request: LegacyMessageListRequest,
 ) -> Result<LegacyMessageList> {
+    fetch_legacy_message_list_with_uid_cache(config, password, request, None).await
+}
+
+pub async fn fetch_legacy_message_list_with_uid_cache(
+    config: ImapConnectionConfig,
+    password: &str,
+    request: LegacyMessageListRequest,
+    uid_cache: Option<&dyn LegacyMessageListUidCache>,
+) -> Result<LegacyMessageList> {
     validate_mailbox(&request.mailbox)?;
 
     let client_hash = legacy_imap_client_hash(&config);
     let mut session = login(config, password).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
-    let result =
-        legacy_message_list_in_session(&mut session, request, &client_hash, capabilities).await;
+    let result = legacy_message_list_in_session(
+        &mut session,
+        request,
+        &client_hash,
+        capabilities,
+        uid_cache,
+    )
+    .await;
     logout_quietly(session).await;
     result
 }
@@ -2323,15 +2345,9 @@ fn legacy_message_list_search_criteria_at_with_settings(
     {
         criteria.push("UNDELETED".to_string());
     }
-    if legacy_php_truthy(permanent_filter) {
-        if permanent_filter
-            .bytes()
-            .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
-        {
-            return Err(FrickmailError::BadRequest(
-                "message-list permanent filter contains invalid command bytes".to_string(),
-            ));
-        }
+    if let Some(permanent_filter) =
+        legacy_message_list_validated_permanent_filter(permanent_filter)?
+    {
         criteria.push(permanent_filter.to_string());
     }
     Ok(if criteria.is_empty() {
@@ -2339,6 +2355,21 @@ fn legacy_message_list_search_criteria_at_with_settings(
     } else {
         criteria.join(" ")
     })
+}
+
+fn legacy_message_list_validated_permanent_filter(permanent_filter: &str) -> Result<Option<&str>> {
+    if !legacy_php_truthy(permanent_filter) {
+        return Ok(None);
+    }
+    if permanent_filter
+        .bytes()
+        .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+    {
+        return Err(FrickmailError::BadRequest(
+            "message-list permanent filter contains invalid command bytes".to_string(),
+        ));
+    }
+    Ok(Some(permanent_filter))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2456,6 +2487,7 @@ struct LegacyMessageListQueryOptions<'a> {
     sort: Option<&'a str>,
     utf8_mode: bool,
     supports_within: bool,
+    supports_literal_plus: bool,
 }
 
 async fn legacy_message_list_visible_uids_with_settings(
@@ -2464,6 +2496,90 @@ async fn legacy_message_list_visible_uids_with_settings(
     options: LegacyMessageListQueryOptions<'_>,
 ) -> Result<Vec<u32>> {
     legacy_message_list_visible_uids_with_settings_bounded(session, search, options, None).await
+}
+
+async fn legacy_message_list_visible_uids_cached(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    folder_hash: &str,
+    client_hash: &str,
+    search: &str,
+    options: LegacyMessageListQueryOptions<'_>,
+    cache: Option<&dyn LegacyMessageListUidCache>,
+) -> Result<Vec<u32>> {
+    let Some(cache) = cache.filter(|_| legacy_message_list_uid_cache_eligible(search)) else {
+        return legacy_message_list_visible_uids_with_settings(session, search, options).await;
+    };
+    let raw_key = legacy_message_list_uid_cache_key(mailbox, client_hash, search, options)?;
+    if let Some(uids) = cache.get(&raw_key, folder_hash).await {
+        return Ok(uids);
+    }
+
+    let uids = legacy_message_list_visible_uids_with_settings(session, search, options).await?;
+    cache.set(&raw_key, folder_hash, &uids).await;
+    Ok(uids)
+}
+
+fn legacy_message_list_uid_cache_key(
+    mailbox: &str,
+    client_hash: &str,
+    search: &str,
+    options: LegacyMessageListQueryOptions<'_>,
+) -> Result<String> {
+    let mut criteria = if options.supports_literal_plus {
+        legacy_message_list_search_wire_with_settings(
+            search,
+            options.hide_deleted,
+            options.fast_simple_search,
+            "",
+            false,
+            options.supports_within,
+        )?
+        .chunks
+        .join("\r\n")
+    } else {
+        legacy_message_list_search_criteria_with_settings(
+            search,
+            options.hide_deleted,
+            options.fast_simple_search,
+            options.supports_within,
+            "",
+        )?
+    };
+    if let Some(permanent_filter) =
+        legacy_message_list_validated_permanent_filter(options.permanent_filter)?
+    {
+        if criteria == "ALL" {
+            criteria.clear();
+        } else {
+            criteria.push(' ');
+        }
+        criteria.push_str(permanent_filter);
+    }
+    Ok(format!(
+        "GetUIDS/{}/{client_hash}/{mailbox}/{criteria}",
+        options.sort.unwrap_or_default()
+    ))
+}
+
+fn legacy_message_list_uid_cache_eligible(search: &str) -> bool {
+    !legacy_message_list_search_fields(legacy_php_trim(search))
+        .iter()
+        .any(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "FLAGGED"
+                    | "UNFLAGGED"
+                    | "SEEN"
+                    | "UNSEEN"
+                    | "ANSWERED"
+                    | "UNANSWERED"
+                    | "DELETED"
+                    | "UNDELETED"
+                    | "READ"
+                    | "UNREAD"
+            )
+        })
 }
 
 async fn legacy_message_list_visible_uids_with_settings_bounded(
@@ -3560,6 +3676,7 @@ async fn legacy_message_list_in_session(
     request: LegacyMessageListRequest,
     client_hash: &str,
     capabilities: ImapFetchMetadataCapabilities,
+    uid_cache: Option<&dyn LegacyMessageListUidCache>,
 ) -> Result<LegacyMessageList> {
     let fetch_new_messages = legacy_message_list_fetches_new_messages(request.thread_uid);
     let folder = legacy_folder_information_in_session(
@@ -3592,6 +3709,7 @@ async fn legacy_message_list_in_session(
                 sort: None,
                 utf8_mode: capabilities.uses_utf8_search,
                 supports_within: capabilities.supports_within,
+                supports_literal_plus: capabilities.supports_literal_plus,
             },
             true,
         )
@@ -3610,6 +3728,7 @@ async fn legacy_message_list_in_session(
             sort: None,
             utf8_mode: capabilities.uses_utf8_search,
             supports_within: capabilities.supports_within,
+            supports_literal_plus: capabilities.supports_literal_plus,
         };
         let messages = timeout_result(
             "fetch multisearch legacy message-list page",
@@ -3670,8 +3789,11 @@ async fn legacy_message_list_in_session(
         } else {
             &request.search
         };
-        let mut uids = legacy_message_list_visible_uids_with_settings(
+        let mut uids = legacy_message_list_visible_uids_cached(
             session,
+            &request.mailbox,
+            &folder.etag,
+            client_hash,
             initial_search,
             LegacyMessageListQueryOptions {
                 hide_deleted: request.hide_deleted,
@@ -3680,7 +3802,9 @@ async fn legacy_message_list_in_session(
                 sort: sort.as_deref(),
                 utf8_mode: capabilities.uses_utf8_search,
                 supports_within: capabilities.supports_within,
+                supports_literal_plus: capabilities.supports_literal_plus,
             },
+            uid_cache,
         )
         .await?;
         if !used_sort {
@@ -3696,8 +3820,11 @@ async fn legacy_message_list_in_session(
                 message_threads = vec![uids.clone()];
             } else {
                 legacy_thread_representatives(&mut uids, &threads);
-                unseen_uids = legacy_message_list_visible_uids_with_settings(
+                unseen_uids = legacy_message_list_visible_uids_cached(
                     session,
+                    &request.mailbox,
+                    &folder.etag,
+                    client_hash,
                     "unseen",
                     LegacyMessageListQueryOptions {
                         hide_deleted: request.hide_deleted,
@@ -3706,15 +3833,20 @@ async fn legacy_message_list_in_session(
                         sort: None,
                         utf8_mode: capabilities.uses_utf8_search,
                         supports_within: capabilities.supports_within,
+                        supports_literal_plus: capabilities.supports_literal_plus,
                     },
+                    uid_cache,
                 )
                 .await?;
                 message_threads = threads;
             }
 
             if !legacy_message_list_search(&request.search).is_empty() {
-                let searched_uids = legacy_message_list_visible_uids_with_settings(
+                let searched_uids = legacy_message_list_visible_uids_cached(
                     session,
+                    &request.mailbox,
+                    &folder.etag,
+                    client_hash,
                     &request.search,
                     LegacyMessageListQueryOptions {
                         hide_deleted: request.hide_deleted,
@@ -3723,7 +3855,9 @@ async fn legacy_message_list_in_session(
                         sort: None,
                         utf8_mode: capabilities.uses_utf8_search,
                         supports_within: capabilities.supports_within,
+                        supports_literal_plus: capabilities.supports_literal_plus,
                     },
+                    uid_cache,
                 )
                 .await?;
                 if request.thread_uid > 0 {
@@ -5304,6 +5438,7 @@ async fn imap_fetch_metadata_capabilities(
     Ok(ImapFetchMetadataCapabilities {
         supports_gmail_id: has_capability_ignore_ascii_case(&capabilities, "X-GM-EXT-1"),
         supports_preview: has_capability_ignore_ascii_case(&capabilities, "PREVIEW"),
+        supports_literal_plus: has_capability_ignore_ascii_case(&capabilities, "LITERAL+"),
         uses_utf8_search: capabilities.iter().any(is_legacy_utf8_capability),
         supports_within: has_capability_ignore_ascii_case(&capabilities, "WITHIN"),
         supports_multisearch: has_capability_ignore_ascii_case(&capabilities, "MULTISEARCH"),
@@ -7635,6 +7770,32 @@ fn default_security() -> ImapSecurity {
 mod tests {
     use super::*;
     use std::borrow::Cow;
+    use std::sync::Mutex;
+
+    struct RecordingUidCache {
+        returned_uids: Option<Vec<u32>>,
+        gets: Mutex<Vec<(String, String)>>,
+        sets: Mutex<Vec<(String, String, Vec<u32>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LegacyMessageListUidCache for RecordingUidCache {
+        async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>> {
+            self.gets
+                .lock()
+                .unwrap()
+                .push((raw_key.to_string(), folder_hash.to_string()));
+            self.returned_uids.clone()
+        }
+
+        async fn set(&self, raw_key: &str, folder_hash: &str, uids: &[u32]) {
+            self.sets.lock().unwrap().push((
+                raw_key.to_string(),
+                folder_hash.to_string(),
+                uids.to_vec(),
+            ));
+        }
+    }
 
     #[test]
     fn normalizes_legacy_secure_modes_and_ports() {
@@ -8527,6 +8688,180 @@ mod tests {
         );
     }
 
+    #[test]
+    fn server_uid_cache_skips_flag_dependent_searches() {
+        assert!(legacy_message_list_uid_cache_eligible(""));
+        assert!(legacy_message_list_uid_cache_eligible("subject=report"));
+        assert!(!legacy_message_list_uid_cache_eligible("unseen"));
+        assert!(!legacy_message_list_uid_cache_eligible(
+            "subject=report&is=flagged"
+        ));
+        assert!(!legacy_message_list_uid_cache_eligible("is=read"));
+    }
+
+    #[test]
+    fn server_uid_cache_key_matches_php_literal_plus_unicode_contract() {
+        let options = LegacyMessageListQueryOptions {
+            hide_deleted: true,
+            fast_simple_search: true,
+            permanent_filter: "",
+            sort: None,
+            utf8_mode: false,
+            supports_within: false,
+            supports_literal_plus: false,
+        };
+        let literal_options = LegacyMessageListQueryOptions {
+            supports_literal_plus: true,
+            ..options
+        };
+
+        assert_eq!(
+            legacy_message_list_uid_cache_key("INBOX", "client-hash", "subject=réport", options)
+                .unwrap(),
+            "GetUIDS//client-hash/INBOX/SUBJECT \"réport\" UNDELETED"
+        );
+        assert_eq!(
+            legacy_message_list_uid_cache_key(
+                "INBOX",
+                "client-hash",
+                "subject=réport",
+                literal_options
+            )
+            .unwrap(),
+            "GetUIDS//client-hash/INBOX/SUBJECT {7}\r\nréport UNDELETED"
+        );
+
+        let literal_permanent_filter = LegacyMessageListQueryOptions {
+            permanent_filter: "SUBJECT \"réport\"",
+            ..literal_options
+        };
+        assert_eq!(
+            legacy_message_list_uid_cache_key("INBOX", "client-hash", "", literal_permanent_filter)
+                .unwrap(),
+            "GetUIDS//client-hash/INBOX/UNDELETED SUBJECT \"réport\""
+        );
+    }
+
+    #[tokio::test]
+    async fn server_uid_cache_hit_uses_legacy_key_without_imap_query() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let cache = RecordingUidCache {
+            returned_uids: Some(vec![9, 4]),
+            gets: Mutex::new(Vec::new()),
+            sets: Mutex::new(Vec::new()),
+        };
+
+        let result = legacy_message_list_visible_uids_cached(
+            &mut session,
+            "INBOX",
+            "folder-etag",
+            "client-hash",
+            "subject=report",
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: Some("REVERSE DATE"),
+                utf8_mode: false,
+                supports_within: false,
+                supports_literal_plus: false,
+            },
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result, vec![9, 4]);
+        assert_eq!(
+            *cache.gets.lock().unwrap(),
+            vec![(
+                "GetUIDS/REVERSE DATE/client-hash/INBOX/SUBJECT \"report\" UNDELETED".to_string(),
+                "folder-etag".to_string()
+            )]
+        );
+        assert!(cache.sets.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_uid_cache_miss_queries_imap_and_populates_cache() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+            let search = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(search, "A0002 UID SEARCH SUBJECT \"report\" UNDELETED\r\n");
+            server_stream
+                .write_all(b"* SEARCH 4 9\r\nA0002 OK searched\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let cache = RecordingUidCache {
+            returned_uids: None,
+            gets: Mutex::new(Vec::new()),
+            sets: Mutex::new(Vec::new()),
+        };
+
+        let result = legacy_message_list_visible_uids_cached(
+            &mut session,
+            "INBOX",
+            "folder-etag",
+            "client-hash",
+            "subject=report",
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: None,
+                utf8_mode: false,
+                supports_within: false,
+                supports_literal_plus: false,
+            },
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result, vec![4, 9]);
+        assert_eq!(
+            *cache.sets.lock().unwrap(),
+            vec![(
+                "GetUIDS//client-hash/INBOX/SUBJECT \"report\" UNDELETED".to_string(),
+                "folder-etag".to_string(),
+                vec![4, 9]
+            )]
+        );
+    }
+
     async fn read_scripted_imap_command(stream: &mut tokio::io::DuplexStream) -> String {
         use tokio::io::AsyncWriteExt as _;
 
@@ -8662,6 +8997,7 @@ mod tests {
                 sort,
                 utf8_mode: true,
                 supports_within,
+                supports_literal_plus: false,
             },
         )
         .await;
@@ -8714,6 +9050,7 @@ mod tests {
                 sort: None,
                 utf8_mode,
                 supports_within: false,
+                supports_literal_plus: false,
             },
             true,
         )
@@ -8812,6 +9149,7 @@ mod tests {
                 sort: None,
                 utf8_mode: true,
                 supports_within: false,
+                supports_literal_plus: false,
             },
             false,
         )
@@ -9207,6 +9545,7 @@ mod tests {
             },
             "client-hash",
             capabilities,
+            None,
         )
         .await
         .unwrap();
@@ -9302,10 +9641,12 @@ mod tests {
                 sort: None,
                 utf8_mode: false,
                 supports_within: false,
+                supports_literal_plus: false,
             },
             &ImapFetchMetadataCapabilities {
                 supports_gmail_id: false,
                 supports_preview: false,
+                supports_literal_plus: false,
                 uses_utf8_search: false,
                 supports_within: false,
                 supports_multisearch: true,
@@ -9358,10 +9699,12 @@ mod tests {
                 sort: None,
                 utf8_mode: false,
                 supports_within: false,
+                supports_literal_plus: false,
             },
             &ImapFetchMetadataCapabilities {
                 supports_gmail_id: false,
                 supports_preview: false,
+                supports_literal_plus: false,
                 uses_utf8_search: false,
                 supports_within: false,
                 supports_multisearch: true,
@@ -9496,6 +9839,7 @@ mod tests {
             },
             "client-hash",
             capabilities,
+            None,
         )
         .await
         .unwrap();
@@ -9598,6 +9942,7 @@ mod tests {
                 sort,
                 utf8_mode,
                 supports_within: false,
+                supports_literal_plus: false,
             },
         )
         .await;

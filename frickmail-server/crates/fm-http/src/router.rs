@@ -28,18 +28,18 @@ use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, Hea
 use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
     copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
-    fetch_legacy_folder_information, fetch_legacy_folders, fetch_legacy_message_list,
-    fetch_mailbox_acl, fetch_mailbox_status, fetch_message_body_preview, fetch_raw_folder_messages,
-    fetch_raw_message, legacy_message_cache_key, legacy_message_hash,
-    legacy_message_list_cache_key, legacy_message_list_params_hash, move_messages, rename_mailbox,
-    set_mailbox_acl, set_mailbox_metadata, set_mailbox_subscription, store_message_flag,
-    store_message_keyword, store_seen_to_all, update_mailbox_settings, validate_eml,
-    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
-    ImapMoveOptions, LegacyFolder, LegacyFolderCollection, LegacyFolderInformation,
-    LegacyMessageList, LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry,
-    MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
-    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-    RuleExecutionReport,
+    fetch_legacy_folder_information, fetch_legacy_folders,
+    fetch_legacy_message_list_with_uid_cache, fetch_mailbox_acl, fetch_mailbox_status,
+    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
+    legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
+    legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_acl,
+    set_mailbox_metadata, set_mailbox_subscription, store_message_flag, store_message_keyword,
+    store_seen_to_all, update_mailbox_settings, validate_eml, BodyPreviewPart,
+    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
+    LegacyFolder, LegacyFolderCollection, LegacyFolderInformation, LegacyMessageList,
+    LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry, MailboxMetadata, MailboxStatus,
+    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
+    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::{
     parse_body, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader,
@@ -65,7 +65,7 @@ use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
 use tracing::warn;
 
-use crate::AppState;
+use crate::{uid_cache::RedisLegacyMessageListUidCache, AppState};
 
 const INVALID_INPUT_ARGUMENT: u16 = 903;
 const UNKNOWN_ERROR: u16 = 999;
@@ -4936,6 +4936,8 @@ async fn native_legacy_message_list(
     session: &fm_session::Session,
     headers: &HeaderMap,
 ) -> Response {
+    let redis_pool = state.redis_pool().cloned();
+    let fast_cache_index = state.config().cache.fast_cache_index.clone();
     native_legacy_message_list_with_fetcher(
         state,
         original_action,
@@ -4943,8 +4945,21 @@ async fn native_legacy_message_list(
         session,
         headers,
         MESSAGE_LIST_DEADLINE,
-        |config, password, request| async move {
-            fetch_legacy_message_list(config, &password, request).await
+        move |config, password, request, account_email| {
+            let uid_cache = redis_pool.map(|pool| {
+                RedisLegacyMessageListUidCache::new(pool, &account_email, fast_cache_index)
+            });
+            async move {
+                fetch_legacy_message_list_with_uid_cache(
+                    config,
+                    &password,
+                    request,
+                    uid_cache
+                        .as_ref()
+                        .map(|cache| cache as &dyn fm_imap::LegacyMessageListUidCache),
+                )
+                .await
+            }
         },
     )
     .await
@@ -4961,7 +4976,7 @@ async fn native_legacy_message_list_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, LegacyMessageListRequest) -> Fut,
+    F: FnOnce(ImapConnectionConfig, String, LegacyMessageListRequest, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<LegacyMessageList>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
@@ -5013,10 +5028,23 @@ where
         .config()
         .mail
         .message_list_search_settings(&account_email);
+    let cache_account_email = match state.db_pool() {
+        Some(pool) => SqlxUserRepository::list_mail_accounts(pool, user.user_id)
+            .await
+            .ok()
+            .and_then(|accounts| accounts.into_iter().next())
+            .map(|account| account.email)
+            .filter(|email| !email.trim().is_empty())
+            .unwrap_or_else(|| account_email.clone()),
+        None => account_email.clone(),
+    };
 
-    let result = tokio::time::timeout(fetch_deadline, fetcher(config, password, request.clone()))
-        .await
-        .map_err(|_| FrickmailError::Upstream("Message list fetch timed out".to_string()));
+    let result = tokio::time::timeout(
+        fetch_deadline,
+        fetcher(config, password, request.clone(), cache_account_email),
+    )
+    .await
+    .map_err(|_| FrickmailError::Upstream("Message list fetch timed out".to_string()));
 
     match result {
         Ok(Ok(list)) => {
@@ -14304,10 +14332,11 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            move |config, password, request| {
+            move |config, password, request, cache_account_email| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, request.clone()));
+                    *captured.lock().unwrap() =
+                        Some((config, password, request.clone(), cache_account_email));
                     Ok(LegacyMessageList {
                         folder: legacy_test_folder_information(),
                         total_emails: 12,
@@ -14336,7 +14365,8 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["Result"]["totalThreads"], 6);
         assert_eq!(body["Result"]["threadUid"], 77);
 
-        let (config, password, request) = captured.lock().unwrap().clone().unwrap();
+        let (config, password, request, cache_account_email) =
+            captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
         assert_eq!(password, "imap-secret");
@@ -14352,6 +14382,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(request.use_threads);
         assert_eq!(request.thread_uid, 77);
         assert_eq!(request.thread_algorithm, "REFERENCES");
+        assert_eq!(cache_account_email, "work@example.com");
     }
 
     #[tokio::test]
@@ -14373,7 +14404,7 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            move |_config, _password, request| {
+            move |_config, _password, request, _account_email| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
                     *captured.lock().unwrap() = Some(request.clone());
@@ -14417,7 +14448,7 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            |_config, _password, request| async move {
+            |_config, _password, request, _account_email| async move {
                 Ok(legacy_test_message_list_for_request(&request, "etag"))
             },
         )
@@ -14466,7 +14497,7 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            |_config, _password, request| async move {
+            |_config, _password, request, _account_email| async move {
                 Ok(legacy_test_message_list_for_request(&request, "etag"))
             },
         )
@@ -14504,7 +14535,7 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &headers,
             Duration::from_secs(1),
-            |_config, _password, request| async move {
+            |_config, _password, request, _account_email| async move {
                 Ok(legacy_test_message_list_for_request(&request, "etag"))
             },
         )
@@ -14534,7 +14565,7 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &headers,
             Duration::from_secs(1),
-            |_config, _password, request| async move {
+            |_config, _password, request, _account_email| async move {
                 Ok(legacy_test_message_list_for_request(&request, "etag"))
             },
         )
