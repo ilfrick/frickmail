@@ -10,7 +10,7 @@ use std::str::from_utf8;
 use nom::{
     branch::alt,
     bytes::streaming::{tag, tag_no_case, take_while, take_while1},
-    character::streaming::char,
+    character::streaming::{char, one_of},
     combinator::{map, map_res, opt, recognize, value},
     multi::{many0, many1},
     sequence::{delimited, pair, preceded, terminated, tuple},
@@ -566,6 +566,49 @@ fn msg_att_rfc822_text(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     })(i)
 }
 
+fn msg_att_preview(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
+    map(
+        preceded(tag_no_case("PREVIEW "), preview_nstring),
+        AttributeValue::Preview,
+    )(i)
+}
+
+fn preview_nstring(i: &[u8]) -> IResult<&[u8], Option<Cow<'_, [u8]>>> {
+    alt((
+        map(nil, |_| None),
+        map(literal, |value| Some(Cow::Borrowed(value))),
+        map(
+            delimited(
+                char('"'),
+                recognize(many0(alt((
+                    take_while1(|byte| {
+                        (is_text_char(byte) || byte >= 0x80) && !is_quoted_specials(byte)
+                    }),
+                    recognize(pair(char('\\'), one_of("\\\""))),
+                )))),
+                char('"'),
+            ),
+            |value| Some(unescape_preview_quoted(value)),
+        ),
+    ))(i)
+}
+
+fn unescape_preview_quoted(value: &[u8]) -> Cow<'_, [u8]> {
+    if !value.contains(&b'\\') {
+        return Cow::Borrowed(value);
+    }
+    let mut unescaped = Vec::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < value.len() {
+        if value[cursor] == b'\\' && cursor + 1 < value.len() {
+            cursor += 1;
+        }
+        unescaped.push(value[cursor]);
+        cursor += 1;
+    }
+    Cow::Owned(unescaped)
+}
+
 fn msg_att_uid(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     map(preceded(tag_no_case("UID "), number), AttributeValue::Uid)(i)
 }
@@ -595,6 +638,7 @@ fn msg_att(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
         msg_att_rfc822_header,
         msg_att_rfc822_size,
         msg_att_rfc822_text,
+        msg_att_preview,
         msg_att_uid,
         gmail::msg_att_gmail_labels,
         gmail::msg_att_gmail_msgid,

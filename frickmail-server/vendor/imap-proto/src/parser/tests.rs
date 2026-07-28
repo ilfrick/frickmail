@@ -413,6 +413,43 @@ fn test_body_text() {
 }
 
 #[test]
+fn test_preview() {
+    for (response, expected) in [
+        (
+            b"* 2 FETCH (UID 9 PREVIEW \"Preview text!\")\r\n".as_slice(),
+            Some(b"Preview text!".as_slice()),
+        ),
+        (
+            "* 2 FETCH (UID 9 PREVIEW \"Café\")\r\n".as_bytes(),
+            Some("Café".as_bytes()),
+        ),
+        (
+            b"* 2 FETCH (UID 9 PREVIEW \"\")\r\n".as_slice(),
+            Some(b"".as_slice()),
+        ),
+        (
+            b"* 2 FETCH (UID 9 PREVIEW \"Quote: \\\" and slash: \\\\\")\r\n".as_slice(),
+            Some(br#"Quote: " and slash: \"#.as_slice()),
+        ),
+        (
+            b"* 2 FETCH (UID 9 PREVIEW {5}\r\nhello)\r\n".as_slice(),
+            Some(b"hello".as_slice()),
+        ),
+        (b"* 2 FETCH (UID 9 PREVIEW NIL)\r\n".as_slice(), None),
+    ] {
+        match parse_response(response) {
+            Ok((_, Response::Fetch(_, attrs))) => {
+                assert_eq!(
+                    attrs.get(1),
+                    Some(&AttributeValue::Preview(expected.map(Cow::Borrowed)))
+                );
+            }
+            rsp => panic!("unexpected response {rsp:?}"),
+        }
+    }
+}
+
+#[test]
 fn test_body_structure() {
     const RESPONSE: &[u8] = b"* 15 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"iso-8859-1\") NIL NIL \"QUOTED-PRINTABLE\" 1315 42 NIL NIL NIL NIL))\r\n";
     match parse_response(RESPONSE) {

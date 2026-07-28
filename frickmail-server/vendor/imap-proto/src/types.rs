@@ -198,8 +198,8 @@ impl<'a> ResponseCode<'a> {
 #[non_exhaustive]
 pub enum StatusAttribute {
     AppendLimit(Option<u64>), // RFC 7889
-    HighestModSeq(u64), // RFC 4551
-    MailboxId(String), // RFC 8474
+    HighestModSeq(u64),       // RFC 4551
+    MailboxId(String),        // RFC 8474
     Messages(u32),
     Recent(u32),
     Size(u64), // RFC 8438
@@ -357,6 +357,8 @@ pub enum AttributeValue<'a> {
     Rfc822Header(Option<Cow<'a, [u8]>>),
     Rfc822Size(u32),
     Rfc822Text(Option<Cow<'a, [u8]>>),
+    /// RFC 8970 server-generated UTF-8 message preview.
+    Preview(Option<Cow<'a, [u8]>>),
     Uid(u32),
     /// https://developers.google.com/gmail/imap/imap-extensions#access_to_gmail_labels_x-gm-labels
     GmailLabels(Vec<Cow<'a, str>>),
@@ -387,6 +389,7 @@ impl<'a> AttributeValue<'a> {
             AttributeValue::Rfc822Header(v) => AttributeValue::Rfc822Header(v.map(to_owned_cow)),
             AttributeValue::Rfc822Size(v) => AttributeValue::Rfc822Size(v),
             AttributeValue::Rfc822Text(v) => AttributeValue::Rfc822Text(v.map(to_owned_cow)),
+            AttributeValue::Preview(v) => AttributeValue::Preview(v.map(to_owned_cow)),
             AttributeValue::Uid(v) => AttributeValue::Uid(v),
             AttributeValue::GmailLabels(v) => {
                 AttributeValue::GmailLabels(v.into_iter().map(to_owned_cow).collect())

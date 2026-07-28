@@ -518,6 +518,7 @@ struct ImapRuleCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ImapFetchMetadataCapabilities {
     supports_gmail_id: bool,
+    supports_preview: bool,
     uses_utf8_search: bool,
     supports_within: bool,
     supports_sort: bool,
@@ -2519,6 +2520,64 @@ fn collect_legacy_message_list_uids(response: &Response<'_>, sorted: bool, uids:
     }
 }
 
+async fn fetch_legacy_message_list_previews(
+    session: &mut BoxedSession,
+    uid_set: &str,
+) -> Result<HashMap<u32, String>> {
+    let operation = "fetch legacy message-list previews";
+    let command = format!("UID FETCH {uid_set} (UID PREVIEW)");
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(&command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut previews = HashMap::new();
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                if let Response::Fetch(_, attrs) = response.parsed() {
+                    let uid = attrs.iter().find_map(|attr| match attr {
+                        AttributeValue::Uid(uid) => Some(*uid),
+                        _ => None,
+                    });
+                    let preview = attrs.iter().find_map(|attr| match attr {
+                        AttributeValue::Preview(Some(preview)) => Some(preview.as_ref()),
+                        _ => None,
+                    });
+                    if let (Some(uid), Some(preview)) = (uid, preview) {
+                        let preview = std::str::from_utf8(preview).map_err(|_| {
+                            FrickmailError::Upstream(
+                                "IMAP PREVIEW response was not valid UTF-8".to_string(),
+                            )
+                        })?;
+                        previews.insert(uid, preview.to_string());
+                    }
+                }
+                if matches!(response.parsed(), Response::Continue { .. }) {
+                    return Err(FrickmailError::Upstream(format!(
+                        "{operation} failed: unexpected IMAP continuation"
+                    )));
+                }
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(previews);
+                }
+            }
+        }),
+    )
+    .await?
+}
+
 fn legacy_message_list_page_uids(uids: &[u32], offset: u32, limit: u32) -> Vec<u32> {
     uids.iter()
         .copied()
@@ -3031,7 +3090,7 @@ async fn legacy_message_list_in_session(
         let mut fetches = timeout_imap(
             "fetch legacy message list",
             session.uid_fetch(
-                uid_set,
+                uid_set.clone(),
                 legacy_message_list_fetch_query_with_gmail_id(capabilities.supports_gmail_id),
             ),
         )
@@ -3055,6 +3114,15 @@ async fn legacy_message_list_in_session(
                 fetch.gmail_msg_id().map(u64::to_string),
             );
             messages_by_uid.insert(uid, summary);
+        }
+        drop(fetches);
+
+        if capabilities.supports_preview {
+            for (uid, preview) in fetch_legacy_message_list_previews(session, &uid_set).await? {
+                if let Some(message) = messages_by_uid.get_mut(&uid) {
+                    message.preview = Some(preview);
+                }
+            }
         }
     }
     let messages = page_uids
@@ -4569,6 +4637,7 @@ async fn imap_fetch_metadata_capabilities(
     let capabilities = timeout_imap("read IMAP capabilities", session.capabilities()).await?;
     Ok(ImapFetchMetadataCapabilities {
         supports_gmail_id: has_capability_ignore_ascii_case(&capabilities, "X-GM-EXT-1"),
+        supports_preview: has_capability_ignore_ascii_case(&capabilities, "PREVIEW"),
         uses_utf8_search: capabilities.iter().any(is_legacy_utf8_capability),
         supports_within: has_capability_ignore_ascii_case(&capabilities, "WITHIN"),
         supports_sort: has_capability_ignore_ascii_case(&capabilities, "SORT"),
@@ -7969,6 +8038,46 @@ mod tests {
             .unwrap(),
             vec![74, 105, 99]
         );
+    }
+
+    #[tokio::test]
+    async fn message_list_preview_fetch_collects_utf8_and_skips_nil() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let query = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(query, "A0002 UID FETCH 9,11 (UID PREVIEW)\r\n");
+            server_stream
+                .write_all(
+                    "* 2 FETCH (UID 9 PREVIEW \"Café preview\")\r\n\
+                     * 3 FETCH (UID 11 PREVIEW NIL)\r\n\
+                     A0002 OK fetched\r\n"
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let previews = fetch_legacy_message_list_previews(&mut session, "9,11")
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(previews.get(&9).map(String::as_str), Some("Café preview"));
+        assert!(!previews.contains_key(&11));
     }
 
     async fn run_scripted_unicode_uid_search(
