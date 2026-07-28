@@ -7577,10 +7577,71 @@ fn legacy_email_collection_from_strings(addresses: &[String]) -> Vec<Value> {
 }
 
 fn legacy_email_collection(raw: &str) -> Vec<Value> {
-    raw.split(',')
-        .filter_map(|item| legacy_email_json(item.trim()))
+    legacy_address_items(raw)
+        .into_iter()
+        .filter_map(legacy_encoded_email_json)
         .take(LEGACY_EMAIL_COLLECTION_JSON_LIMIT)
         .collect()
+}
+
+fn legacy_address_items(raw: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut angle_depth = 0_u32;
+    let mut comment_depth = 0_u32;
+
+    for (index, ch) in raw.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && (quote.is_some() || comment_depth > 0) {
+            escaped = true;
+            continue;
+        }
+        if let Some(expected) = quote {
+            if ch == expected {
+                quote = None;
+            }
+            continue;
+        }
+        if comment_depth > 0 {
+            match ch {
+                '(' => comment_depth = comment_depth.saturating_add(1),
+                ')' => comment_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' => comment_depth = 1,
+            '<' => angle_depth = angle_depth.saturating_add(1),
+            '>' if angle_depth > 0 => angle_depth -= 1,
+            ',' | ';' if angle_depth == 0 => {
+                let item = raw[start..index].trim();
+                if !item.is_empty() {
+                    items.push(item);
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let item = raw[start..].trim();
+    if !item.is_empty() {
+        items.push(item);
+    }
+    items
+}
+
+fn legacy_encoded_email_json(raw: &str) -> Option<Value> {
+    let decoded = fm_imap::legacy_decode_rfc2047_header_value(raw);
+    let raw = decoded.trim_matches(|ch| ch == ' ' || ch <= '\u{1f}');
+    legacy_email_json(raw)
 }
 
 fn legacy_email_json(raw: &str) -> Option<Value> {
@@ -15180,6 +15241,41 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(attachment["cId"], "<part@example.com>");
         assert_eq!(attachment["contentLocation"], "cid:report");
         assert_eq!(attachment["isInline"], true);
+    }
+
+    #[test]
+    fn legacy_message_and_notification_json_decode_addresses_after_tokenizing() {
+        let encoded =
+            "=?UTF-8?Q?Doe=2C_John?= <john@example.com>, =?UTF-8?Q?Mar=C3=ADa?= <maria@example.com>";
+        let mut summary = legacy_test_message_summary();
+        summary.from = encoded.to_string();
+
+        let message = super::legacy_message_summary_json(&summary);
+        assert_eq!(message["from"].as_array().unwrap().len(), 2);
+        assert_eq!(message["from"][0]["name"], "Doe, John");
+        assert_eq!(message["from"][0]["email"], "john@example.com");
+        assert_eq!(message["from"][1]["name"], "María");
+        assert_eq!(message["from"][1]["email"], "maria@example.com");
+
+        let notification = super::legacy_new_message_json(&LegacyNewMessage {
+            folder: "INBOX".to_string(),
+            uid: 52,
+            subject: "Fresh mail".to_string(),
+            from: "=?UTF-8?Q?Doe=2C_John?= <john@example.com>".to_string(),
+        });
+        assert_eq!(notification["from"].as_array().unwrap().len(), 1);
+        assert_eq!(notification["from"][0]["name"], "Doe, John");
+        assert_eq!(notification["from"][0]["email"], "john@example.com");
+
+        let decoded_literal = vec!["=?UTF-8?Q?foo?= <literal@example.com>".to_string()];
+        let parsed = super::legacy_email_collection_from_strings(&decoded_literal);
+        assert_eq!(parsed[0]["name"], "=?UTF-8?Q?foo?=");
+        assert_eq!(parsed[0]["email"], "literal@example.com");
+
+        let raw_outer = "=?UTF-8?Q?=3D=3FUTF-8=3FQ=3Ffoo=3F=3D?= <raw@example.com>";
+        let parsed = super::legacy_email_collection(raw_outer);
+        assert_eq!(parsed[0]["name"], "=?UTF-8?Q?foo?=");
+        assert_eq!(parsed[0]["email"], "raw@example.com");
     }
 
     #[test]

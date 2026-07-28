@@ -20,7 +20,7 @@ use imap_proto::{
     AclRight, AttributeValue, BodyStructure, MailboxDatum, MessageSection, RequestId, Response,
     SectionPath, Status, StatusAttribute,
 };
-use mail_parser::parsers::MessageStream;
+use mail_parser::decoders::{base64::base64_decode, charsets::map::charset_decoder};
 use md5::{Digest, Md5};
 use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
@@ -4662,7 +4662,7 @@ async fn fetch_legacy_new_messages(
         messages.push(LegacyNewMessage {
             folder: mailbox.to_string(),
             uid,
-            subject: legacy_header_subject(&header_value(header, "Subject").unwrap_or_default()),
+            subject: legacy_header_subject(&legacy_decoded_header_value(header, "Subject")),
             from: header_value(header, "From").unwrap_or_default(),
         });
     }
@@ -4703,8 +4703,7 @@ fn legacy_message_summary_from_fetch_with_email_id<'a>(
     header: &[u8],
     email_id: Option<String>,
 ) -> LegacyMessageSummary {
-    let header_subject =
-        legacy_header_subject(&header_value(header, "Subject").unwrap_or_default());
+    let header_subject = legacy_header_subject(&legacy_decoded_header_value(header, "Subject"));
     let subject = legacy_message_subject(&header_subject);
     let message_id = header_value(header, "Message-ID")
         .or_else(|| header_value(header, "Message-Id"))
@@ -4777,13 +4776,12 @@ fn legacy_message_timestamp(date: &str, internal_timestamp: Option<i64>) -> (i64
 }
 
 fn legacy_read_receipt(header: &[u8]) -> String {
-    let primary = header_value(header, "Disposition-Notification-To")
-        .map(|value| legacy_php_trim(&value).to_string())
-        .unwrap_or_default();
+    let primary = legacy_header_subject(&legacy_decoded_header_value(
+        header,
+        "Disposition-Notification-To",
+    ));
     let selected = if primary.is_empty() {
-        header_value(header, "X-Confirm-Reading-To")
-            .map(|value| legacy_php_trim(&value).to_string())
-            .unwrap_or_default()
+        legacy_header_subject(&legacy_decoded_header_value(header, "X-Confirm-Reading-To"))
     } else {
         primary
     };
@@ -4898,6 +4896,12 @@ fn legacy_php_trim(value: &str) -> &str {
 
 fn legacy_header_subject(value: &str) -> String {
     legacy_php_trim(value).to_string()
+}
+
+fn legacy_decoded_header_value(header: &[u8], name: &str) -> String {
+    header_value(header, name)
+        .map(|value| legacy_decode_rfc2047_header_value(&value))
+        .unwrap_or_default()
 }
 
 pub fn legacy_message_subject(value: &str) -> String {
@@ -6128,35 +6132,230 @@ fn legacy_decode_envelope_header(value: Option<&Cow<'_, [u8]>>) -> String {
     legacy_decode_rfc2047_header_value(&legacy_envelope_string(value))
 }
 
-fn legacy_decode_rfc2047_header_value(value: &str) -> String {
-    let mut decoded = String::with_capacity(value.len());
+pub fn legacy_decode_rfc2047_header_value(value: &str) -> String {
+    let value = legacy_collapse_encoded_word_whitespace(value);
+    let bytes = value.as_bytes();
+    let mut words = Vec::new();
     let mut index = 0;
 
     while let Some(relative_start) = value[index..].find("=?") {
         let start = index + relative_start;
-        decoded.push_str(&value[index..start]);
-
-        let mut stream = MessageStream::new(&value.as_bytes()[start + 1..]);
-        if let Some(token) = stream.decode_rfc2047() {
-            decoded.push_str(&token);
-            index = start + 1 + stream.offset();
-
-            let whitespace_len = value[index..]
-                .chars()
-                .take_while(|ch| ch.is_ascii_whitespace())
-                .map(char::len_utf8)
-                .sum::<usize>();
-            if value[index + whitespace_len..].starts_with("=?") {
-                index += whitespace_len;
-            }
+        let charset_start = start + 2;
+        let Some(charset_end) = value[charset_start..]
+            .find('?')
+            .map(|offset| charset_start + offset)
+        else {
+            break;
+        };
+        if charset_end == charset_start {
+            index = charset_start;
+            continue;
+        }
+        let encoding_index = charset_end + 1;
+        if encoding_index + 1 >= bytes.len()
+            || bytes[encoding_index + 1] != b'?'
+            || !matches!(bytes[encoding_index], b'q' | b'Q' | b'b' | b'B')
+        {
+            index = charset_end + 1;
+            continue;
+        }
+        let data_start = encoding_index + 2;
+        let Some(end) = value[data_start..]
+            .find("?=")
+            .map(|offset| data_start + offset + 2)
+        else {
+            break;
+        };
+        let data = &bytes[data_start..end - 2];
+        let decoded = if matches!(bytes[encoding_index], b'q' | b'Q') {
+            legacy_php_quoted_printable_decode(data)
         } else {
-            decoded.push_str("=?");
-            index = start + 2;
+            legacy_php_base64_decode(data)
+        };
+        let charset = legacy_normalize_rfc2047_charset(&value[charset_start..charset_end]);
+        words.push(LegacyEncodedWord {
+            start,
+            end,
+            charset,
+            decoded,
+        });
+        index = end;
+    }
+
+    if words.is_empty() {
+        return value;
+    }
+
+    let one_charset = words.iter().all(|word| word.charset == words[0].charset);
+    if one_charset {
+        let mut output = Vec::with_capacity(value.len());
+        let mut previous = 0;
+        for word in &words {
+            output.extend_from_slice(&bytes[previous..word.start]);
+            output.extend_from_slice(&word.decoded);
+            previous = word.end;
+        }
+        output.extend_from_slice(&bytes[previous..]);
+        return legacy_decode_rfc2047_charset(&words[0].charset, &output);
+    }
+
+    let mut output = String::with_capacity(value.len());
+    let mut previous = 0;
+    for word in &words {
+        output.push_str(&value[previous..word.start]);
+        output.push_str(&legacy_decode_rfc2047_charset(&word.charset, &word.decoded));
+        previous = word.end;
+    }
+    output.push_str(&value[previous..]);
+    output
+}
+
+struct LegacyEncodedWord {
+    start: usize,
+    end: usize,
+    charset: String,
+    decoded: Vec<u8>,
+}
+
+fn legacy_collapse_encoded_word_whitespace(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"?=") {
+            output.extend_from_slice(b"?=");
+            index += 2;
+            let whitespace_start = index;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            let whitespace_len = index - whitespace_start;
+            if (1..=5).contains(&whitespace_len) && bytes[index..].starts_with(b"=?") {
+                continue;
+            }
+            output.extend_from_slice(&bytes[whitespace_start..index]);
+            continue;
+        }
+        if matches!(bytes[index], b'\r' | b'\n' | b'\t') {
+            output.push(b' ');
+            while index < bytes.len() && matches!(bytes[index], b'\r' | b'\n' | b'\t') {
+                index += 1;
+            }
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(output)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
+fn legacy_php_quoted_printable_decode(value: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(value.len());
+    let mut index = 0;
+
+    while index < value.len() {
+        match value[index] {
+            b'_' => {
+                output.push(b' ');
+                index += 1;
+            }
+            b'=' if index + 2 < value.len()
+                && value[index + 1] == b'\r'
+                && value[index + 2] == b'\n' =>
+            {
+                index += 3;
+            }
+            b'=' if index + 2 < value.len() => {
+                if let (Some(high), Some(low)) = (
+                    legacy_hex_nibble(value[index + 1]),
+                    legacy_hex_nibble(value[index + 2]),
+                ) {
+                    output.push((high << 4) | low);
+                    index += 3;
+                } else {
+                    output.push(b'=');
+                    index += 1;
+                }
+            }
+            b'=' if index + 1 == value.len() => {
+                index += 1;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
         }
     }
 
-    decoded.push_str(&value[index..]);
-    decoded.trim().to_string()
+    output
+}
+
+fn legacy_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn legacy_php_base64_decode(value: &[u8]) -> Vec<u8> {
+    if let Some(decoded) = base64_decode(value) {
+        return decoded;
+    }
+
+    let compact = value
+        .iter()
+        .copied()
+        .filter(|byte| !matches!(byte, b' ' | b'\r' | b'\n' | b'\t'))
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'=' | b'+' | b'/'))
+        .collect::<Vec<_>>();
+    base64_decode(&compact).unwrap_or_default()
+}
+
+fn legacy_normalize_rfc2047_charset(value: &str) -> String {
+    let mut value = value.to_ascii_lowercase();
+    if let Some(suffix) = value.strip_prefix("iso8") {
+        value = format!("iso-8{suffix}");
+    }
+    match value.as_str() {
+        "asci" | "ascii" | "us-asci" | "us-ascii" | "utf8" | "utf-8" => "utf-8".to_string(),
+        "unicode-1-1-utf-7" | "unicode-1-utf-7" | "unicode-utf-7" => "utf-7".to_string(),
+        "ks-c-5601-1987" | "ks_c_5601-1987" | "ks_c_5601_1987" => "euc-kr".to_string(),
+        "x-gbk" => "gb2312".to_string(),
+        "iso-8859-i" | "iso-8859-8-i" => "iso-8859-8".to_string(),
+        _ => {
+            let windows_code_page = value
+                .strip_prefix("cp")
+                .or_else(|| value.strip_prefix("windows"))
+                .map(|suffix| suffix.strip_prefix('-').unwrap_or(suffix))
+                .filter(|suffix| {
+                    suffix.starts_with("12")
+                        && suffix.len() > 2
+                        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                });
+            windows_code_page
+                .map(|suffix| format!("windows-{suffix}"))
+                .unwrap_or(value)
+        }
+    }
+}
+
+fn legacy_decode_rfc2047_charset(charset: &str, value: &[u8]) -> String {
+    let effective_charset = if charset != "utf-8"
+        && !charset.contains("iso-2022-jp")
+        && std::str::from_utf8(value).is_ok()
+    {
+        "utf-8"
+    } else {
+        charset
+    };
+    charset_decoder(effective_charset.as_bytes())
+        .map(|decoder| decoder(value))
+        .unwrap_or_else(|| String::from_utf8_lossy(value).into_owned())
 }
 
 async fn fetch_body_part_specs(
@@ -12050,6 +12249,76 @@ mod tests {
             b"Subject: [Preview] Preview subject\r\n\r\n",
         );
         assert_eq!(summary.subject, "Preview subject");
+    }
+
+    #[test]
+    fn legacy_message_summary_decodes_rfc2047_subject_and_receipt_like_mailso() {
+        let header = b"Subject: =?UTF-8?Q?[Preview]_Ol=C3=A1?=\r\nFrom: =?UTF-8?Q?Jos=C3=A9?= <jose@example.com>\r\nReply-To: =?UTF-8?B?Sm9zw6k=?= <reply@example.com>\r\nTo: =?UTF-8?Q?Mar=C3=ADa?= <maria@example.com>\r\nCc: =?UTF-8?Q?Andr=C3=A9?= <andre@example.com>\r\nBcc: =?UTF-8?Q?Zo=C3=AB?= <zoe@example.com>\r\nSender: =?UTF-8?Q?Ren=C3=A9?= <rene@example.com>\r\nDelivered-To: =?UTF-8?Q?Bj=C3=B6rn?= <bjorn@example.com>\r\nDisposition-Notification-To: =?UTF-8?Q?L=C3=A9a?= <lea@example.com>\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            46,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.subject, "Olá");
+        assert_eq!(summary.from, "=?UTF-8?Q?Jos=C3=A9?= <jose@example.com>");
+        assert_eq!(summary.read_receipt, "Léa <lea@example.com>");
+    }
+
+    #[test]
+    fn legacy_new_message_headers_decode_rfc2047_without_preview_normalization() {
+        let header = b"Subject: =?UTF-8?Q?[Preview]_Ol=C3=A1?=\r\nFrom: =?UTF-8?Q?Jos=C3=A9?= <jose@example.com>\r\n\r\n";
+
+        assert_eq!(
+            legacy_header_subject(&legacy_decoded_header_value(header, "Subject")),
+            "[Preview] Olá"
+        );
+        assert_eq!(
+            header_value(header, "From").as_deref(),
+            Some("=?UTF-8?Q?Jos=C3=A9?= <jose@example.com>")
+        );
+    }
+
+    #[test]
+    fn legacy_rfc2047_decoder_matches_mailso_edge_cases() {
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("=?UTF-8?Q?one?=      =?UTF-8?Q?two?="),
+            "one      two"
+        );
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("=?UTF-8?Q?one?=     =?UTF-8?Q?two?="),
+            "onetwo"
+        );
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("=?UTF-8?Q?bad=ZZ?="),
+            "bad=ZZ"
+        );
+        assert_eq!(legacy_decode_rfc2047_header_value("=?UTF-8?B?%%%?="), "");
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("\u{a0} plain \u{a0}"),
+            "\u{a0} plain \u{a0}"
+        );
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("=?ISO-8859-1?Q?Andr=E9?="),
+            "André"
+        );
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("=?ISO8859-1?B?QW5kcuk=?="),
+            "André"
+        );
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("=?CP1252?Q?=93quoted=94?="),
+            "“quoted”"
+        );
+        assert_eq!(
+            legacy_decode_rfc2047_header_value("=?windows1252?B?k3F1b3RlZJQ=?="),
+            "“quoted”"
+        );
     }
 
     #[test]
