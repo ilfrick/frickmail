@@ -11,6 +11,7 @@ pub mod rfc3501;
 pub mod rfc4314;
 pub mod rfc4315;
 pub mod rfc4551;
+pub mod rfc4731;
 pub mod rfc5161;
 pub mod rfc5256;
 pub mod rfc5464;

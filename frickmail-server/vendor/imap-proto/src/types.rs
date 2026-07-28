@@ -227,6 +227,7 @@ pub enum MailboxDatum<'a> {
     Search(Vec<u32>),
     Sort(Vec<u32>),
     Thread(Vec<Thread>),
+    ESearch(ESearchResult<'a>),
     Status {
         mailbox: Cow<'a, str>,
         status: Vec<StatusAttribute>,
@@ -267,6 +268,7 @@ impl<'a> MailboxDatum<'a> {
             MailboxDatum::Search(seqs) => MailboxDatum::Search(seqs),
             MailboxDatum::Sort(seqs) => MailboxDatum::Sort(seqs),
             MailboxDatum::Thread(threads) => MailboxDatum::Thread(threads),
+            MailboxDatum::ESearch(result) => MailboxDatum::ESearch(result.into_owned()),
             MailboxDatum::Status { mailbox, status } => MailboxDatum::Status {
                 mailbox: to_owned_cow(mailbox),
                 status,
@@ -289,6 +291,47 @@ impl<'a> MailboxDatum<'a> {
             }
             MailboxDatum::GmailMsgId(msgid) => MailboxDatum::GmailMsgId(msgid),
             MailboxDatum::GmailThrId(thrid) => MailboxDatum::GmailThrId(thrid),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ESearchSequenceValue {
+    Number(u32),
+    Star,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ESearchSequenceRange {
+    pub start: ESearchSequenceValue,
+    pub end: ESearchSequenceValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ESearchResult<'a> {
+    pub tag: Option<Cow<'a, str>>,
+    pub mailbox: Option<Cow<'a, str>>,
+    pub uid_validity: Option<u32>,
+    pub uid: bool,
+    pub all: Vec<ESearchSequenceRange>,
+    pub min: Option<u32>,
+    pub max: Option<u32>,
+    pub count: Option<u32>,
+    pub mod_seq: Option<u64>,
+}
+
+impl<'a> ESearchResult<'a> {
+    pub fn into_owned(self) -> ESearchResult<'static> {
+        ESearchResult {
+            tag: self.tag.map(to_owned_cow),
+            mailbox: self.mailbox.map(to_owned_cow),
+            uid_validity: self.uid_validity,
+            uid: self.uid,
+            all: self.all,
+            min: self.min,
+            max: self.max,
+            count: self.count,
+            mod_seq: self.mod_seq,
         }
     }
 }

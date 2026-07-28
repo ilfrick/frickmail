@@ -20,7 +20,7 @@ use nom::{
 use crate::{
     parser::{
         core::*, rfc2087, rfc2971, rfc3501::body::*, rfc3501::body_structure::*, rfc4314, rfc4315,
-        rfc4551, rfc5161, rfc5256, rfc5464, rfc7162,
+        rfc4551, rfc4731, rfc5161, rfc5256, rfc5464, rfc7162,
     },
     types::*,
 };
@@ -402,6 +402,7 @@ fn mailbox_data(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
         gmail::mailbox_data_gmail_labels,
         gmail::mailbox_data_gmail_msgid,
         gmail::mailbox_data_gmail_thrid,
+        rfc4731::mailbox_data_esearch,
         rfc5256::mailbox_data_sort,
         rfc5256::mailbox_data_thread,
     ))(i)

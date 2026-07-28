@@ -610,6 +610,119 @@ fn test_thread() {
 }
 
 #[test]
+fn test_esearch_with_multimailbox_correlators() {
+    match parse_response(
+        b"* ESEARCH (TAG \"A0007\" MAILBOX \"Projects/Alpha\" UIDVALIDITY 42) \
+          UID ALL 3:5,9 MIN 3 MAX 9 COUNT 4 MODSEQ 4294967297\r\n",
+    ) {
+        Ok((_, Response::MailboxData(MailboxDatum::ESearch(result)))) => {
+            assert_eq!(result.tag.as_deref(), Some("A0007"));
+            assert_eq!(result.mailbox.as_deref(), Some("Projects/Alpha"));
+            assert_eq!(result.uid_validity, Some(42));
+            assert!(result.uid);
+            assert_eq!(
+                result.all,
+                vec![
+                    ESearchSequenceRange {
+                        start: ESearchSequenceValue::Number(3),
+                        end: ESearchSequenceValue::Number(5),
+                    },
+                    ESearchSequenceRange {
+                        start: ESearchSequenceValue::Number(9),
+                        end: ESearchSequenceValue::Number(9),
+                    },
+                ]
+            );
+            assert_eq!(result.min, Some(3));
+            assert_eq!(result.max, Some(9));
+            assert_eq!(result.count, Some(4));
+            assert_eq!(result.mod_seq, Some(4_294_967_297));
+        }
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+}
+
+#[test]
+fn test_esearch_preserves_reversed_and_star_sequence_ranges() {
+    match parse_response(b"* ESEARCH ALL 9:7,*,4:*\r\n") {
+        Ok((_, Response::MailboxData(MailboxDatum::ESearch(result)))) => {
+            assert_eq!(
+                result.all,
+                vec![
+                    ESearchSequenceRange {
+                        start: ESearchSequenceValue::Number(9),
+                        end: ESearchSequenceValue::Number(7),
+                    },
+                    ESearchSequenceRange {
+                        start: ESearchSequenceValue::Star,
+                        end: ESearchSequenceValue::Star,
+                    },
+                    ESearchSequenceRange {
+                        start: ESearchSequenceValue::Number(4),
+                        end: ESearchSequenceValue::Star,
+                    },
+                ]
+            );
+        }
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+}
+
+#[test]
+fn test_esearch_decodes_quoted_and_literal_correlators() {
+    match parse_response(
+        b"* ESEARCH (TAG \"A1\" MAILBOX \"Projects \\\"Red\\\" \\\\ Shared\" \
+          UIDVALIDITY 1) COUNT 0\r\n",
+    ) {
+        Ok((_, Response::MailboxData(MailboxDatum::ESearch(result)))) => {
+            assert_eq!(result.tag.as_deref(), Some("A1"));
+            assert_eq!(
+                result.mailbox.as_deref(),
+                Some("Projects \"Red\" \\ Shared")
+            );
+        }
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+
+    match parse_response(b"* ESEARCH (TAG \"A2\" MAILBOX {5}\r\nInbox UIDVALIDITY 2) COUNT 0\r\n") {
+        Ok((_, Response::MailboxData(MailboxDatum::ESearch(result)))) => {
+            assert_eq!(result.mailbox.as_deref(), Some("Inbox"));
+        }
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+}
+
+#[test]
+fn test_esearch_accepts_base_tag_correlator() {
+    match parse_response(b"* ESEARCH (TAG \"A3\") COUNT 0\r\n") {
+        Ok((_, Response::MailboxData(MailboxDatum::ESearch(result)))) => {
+            assert_eq!(result.tag.as_deref(), Some("A3"));
+            assert_eq!(result.count, Some(0));
+        }
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+}
+
+#[test]
+fn test_esearch_rejects_zero_nz_numbers_and_duplicate_correlators() {
+    for response in [
+        b"* ESEARCH MIN 0\r\n".as_slice(),
+        b"* ESEARCH MAX 0\r\n".as_slice(),
+        b"* ESEARCH ALL 0\r\n".as_slice(),
+        b"* ESEARCH (TAG \"A1\" UIDVALIDITY 0) COUNT 0\r\n".as_slice(),
+        b"* ESEARCH (TAG \"A1\" TAG \"A2\") COUNT 0\r\n".as_slice(),
+        b"* ESEARCH (MAILBOX Inbox MAILBOX Archive) COUNT 0\r\n".as_slice(),
+        b"* ESEARCH (UIDVALIDITY 1 UIDVALIDITY 2) COUNT 0\r\n".as_slice(),
+    ] {
+        assert!(
+            parse_response(response).is_err(),
+            "unexpectedly accepted {}",
+            String::from_utf8_lossy(response)
+        );
+    }
+}
+
+#[test]
 fn test_uid_fetch() {
     match parse_response(b"* 4 FETCH (UID 71372 RFC822.HEADER {10275}\r\n") {
         Err(nom::Err::Incomplete(nom::Needed::Size(size))) => {
