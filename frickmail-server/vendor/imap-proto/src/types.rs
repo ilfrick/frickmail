@@ -226,6 +226,7 @@ pub enum MailboxDatum<'a> {
     },
     Search(Vec<u32>),
     Sort(Vec<u32>),
+    Thread(Vec<Thread>),
     Status {
         mailbox: Cow<'a, str>,
         status: Vec<StatusAttribute>,
@@ -265,6 +266,7 @@ impl<'a> MailboxDatum<'a> {
             },
             MailboxDatum::Search(seqs) => MailboxDatum::Search(seqs),
             MailboxDatum::Sort(seqs) => MailboxDatum::Sort(seqs),
+            MailboxDatum::Thread(threads) => MailboxDatum::Thread(threads),
             MailboxDatum::Status { mailbox, status } => MailboxDatum::Status {
                 mailbox: to_owned_cow(mailbox),
                 status,
@@ -289,6 +291,35 @@ impl<'a> MailboxDatum<'a> {
             MailboxDatum::GmailThrId(thrid) => MailboxDatum::GmailThrId(thrid),
         }
     }
+}
+
+/// One top-level RFC 5256 THREAD result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Thread {
+    pub members: Vec<ThreadMember>,
+}
+
+impl Thread {
+    pub fn flatten(&self) -> Vec<u32> {
+        fn append(thread: &Thread, flattened: &mut Vec<u32>) {
+            for member in &thread.members {
+                match member {
+                    ThreadMember::Message(id) => flattened.push(*id),
+                    ThreadMember::Nested(thread) => append(thread, flattened),
+                }
+            }
+        }
+
+        let mut flattened = Vec::new();
+        append(self, &mut flattened);
+        flattened
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThreadMember {
+    Message(u32),
+    Nested(Thread),
 }
 
 #[derive(Debug, Eq, PartialEq, Hash)]

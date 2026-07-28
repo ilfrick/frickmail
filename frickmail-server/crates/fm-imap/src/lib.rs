@@ -390,6 +390,8 @@ pub struct LegacyMessageSummary {
     pub has_attachments: bool,
     pub attachments: Vec<LegacyAttachmentSummary>,
     pub preview: Option<String>,
+    pub threads: Vec<u32>,
+    pub thread_unseen: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -515,7 +517,7 @@ struct ImapRuleCapabilities {
     supports_uidplus: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ImapFetchMetadataCapabilities {
     supports_gmail_id: bool,
     supports_preview: bool,
@@ -523,6 +525,7 @@ struct ImapFetchMetadataCapabilities {
     supports_within: bool,
     supports_sort: bool,
     supports_sort_display: bool,
+    thread_algorithms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2520,6 +2523,111 @@ fn collect_legacy_message_list_uids(response: &Response<'_>, sorted: bool, uids:
     }
 }
 
+async fn fetch_legacy_message_threads(
+    session: &mut BoxedSession,
+    algorithm: &str,
+) -> Result<Vec<Vec<u32>>> {
+    let operation = "thread legacy message list";
+    let command = format!("UID THREAD {algorithm} UTF-8 ALL");
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(&command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut threads = Vec::new();
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                if let Response::MailboxData(MailboxDatum::Thread(found)) = response.parsed() {
+                    threads.extend(found.iter().map(imap_proto::Thread::flatten));
+                }
+                if matches!(response.parsed(), Response::Continue { .. }) {
+                    return Err(FrickmailError::Upstream(format!(
+                        "{operation} failed: unexpected IMAP continuation"
+                    )));
+                }
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(threads);
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+async fn fetch_legacy_message_threads_compat(
+    session: &mut BoxedSession,
+    algorithm: &str,
+) -> Vec<Vec<u32>> {
+    fetch_legacy_message_threads(session, algorithm)
+        .await
+        .unwrap_or_default()
+}
+
+fn legacy_thread_representatives(uids: &mut Vec<u32>, threads: &[Vec<u32>]) {
+    let old_uids = threads
+        .iter()
+        .flat_map(|thread| {
+            let newest = thread.iter().copied().max();
+            thread
+                .iter()
+                .copied()
+                .filter(move |uid| Some(*uid) != newest)
+        })
+        .collect::<HashSet<_>>();
+    uids.retain(|uid| !old_uids.contains(uid));
+}
+
+fn legacy_selected_thread_uids(thread_uid: u32, threads: &[Vec<u32>]) -> Vec<u32> {
+    threads
+        .iter()
+        .find(|thread| thread.contains(&thread_uid))
+        .cloned()
+        .unwrap_or_else(|| vec![thread_uid])
+}
+
+fn legacy_filter_thread_search_results(
+    uids: &mut Vec<u32>,
+    searched_uids: &[u32],
+    threads: &[Vec<u32>],
+) {
+    let searched = searched_uids.iter().copied().collect::<HashSet<_>>();
+    let matching_thread_uids = threads
+        .iter()
+        .filter(|thread| thread.iter().any(|uid| searched.contains(uid)))
+        .flatten()
+        .copied()
+        .collect::<HashSet<_>>();
+    uids.retain(|uid| searched.contains(uid) || matching_thread_uids.contains(uid));
+}
+
+fn legacy_message_thread_metadata(
+    uid: u32,
+    threads: &[Vec<u32>],
+    unseen_uids: &[u32],
+) -> (Vec<u32>, Vec<u32>) {
+    let Some(thread) = threads.iter().find(|thread| thread.contains(&uid)) else {
+        return (Vec::new(), Vec::new());
+    };
+    let thread_unseen = unseen_uids
+        .iter()
+        .copied()
+        .filter(|unseen_uid| thread.contains(unseen_uid))
+        .collect();
+    (thread.clone(), thread_unseen)
+}
+
 async fn fetch_legacy_message_list_previews(
     session: &mut BoxedSession,
     uid_set: &str,
@@ -3050,23 +3158,41 @@ async fn legacy_message_list_in_session(
     .await?;
     let folder_total = folder.total_emails.unwrap_or_default();
     let limit = legacy_message_list_limit(request.limit);
+    let thread_algorithm = request
+        .use_threads
+        .then(|| {
+            legacy_message_list_thread_algorithm(
+                &capabilities.thread_algorithms,
+                &request.thread_algorithm,
+            )
+        })
+        .flatten();
+    if request.thread_uid > 0 && thread_algorithm.is_none() {
+        return Err(FrickmailError::Upstream(
+            "THREAD is not supported by the IMAP server".to_string(),
+        ));
+    }
     let can_query = folder_total > 0 && request.offset <= folder_total;
     let used_sort = can_query && capabilities.supports_sort;
-    let (mut matching_uids, total) = if !can_query {
-        (Vec::new(), folder_total)
+    let sort = used_sort
+        .then(|| {
+            legacy_message_list_sort_for_command(&request.sort, capabilities.supports_sort_display)
+        })
+        .transpose()?;
+    let mut message_threads = Vec::new();
+    let mut unseen_uids = Vec::new();
+    let mut total_threads = None;
+    let matching_uids = if !can_query {
+        Vec::new()
     } else {
-        let sort = capabilities
-            .supports_sort
-            .then(|| {
-                legacy_message_list_sort_for_command(
-                    &request.sort,
-                    capabilities.supports_sort_display,
-                )
-            })
-            .transpose()?;
-        let matching_uids = legacy_message_list_visible_uids_with_settings(
+        let initial_search = if thread_algorithm.is_some() {
+            ""
+        } else {
+            &request.search
+        };
+        let mut uids = legacy_message_list_visible_uids_with_settings(
             session,
-            &request.search,
+            initial_search,
             LegacyMessageListQueryOptions {
                 hide_deleted: request.hide_deleted,
                 fast_simple_search: request.fast_simple_search,
@@ -3077,12 +3203,68 @@ async fn legacy_message_list_in_session(
             },
         )
         .await?;
-        let total = u32::try_from(matching_uids.len()).unwrap_or(u32::MAX);
-        (matching_uids, total)
+        if !used_sort {
+            uids.sort_unstable_by(|left, right| right.cmp(left));
+        }
+
+        if let Some(algorithm) = thread_algorithm.as_deref() {
+            let threads = fetch_legacy_message_threads_compat(session, algorithm).await;
+            total_threads = Some(u32::try_from(threads.len()).unwrap_or(u32::MAX));
+
+            if request.thread_uid > 0 {
+                uids = legacy_selected_thread_uids(request.thread_uid, &threads);
+                message_threads = vec![uids.clone()];
+            } else {
+                legacy_thread_representatives(&mut uids, &threads);
+                unseen_uids = legacy_message_list_visible_uids_with_settings(
+                    session,
+                    "unseen",
+                    LegacyMessageListQueryOptions {
+                        hide_deleted: request.hide_deleted,
+                        fast_simple_search: request.fast_simple_search,
+                        permanent_filter: &request.permanent_filter,
+                        sort: None,
+                        utf8_mode: capabilities.uses_utf8_search,
+                        supports_within: capabilities.supports_within,
+                    },
+                )
+                .await?;
+                message_threads = threads;
+            }
+
+            if !legacy_message_list_search(&request.search).is_empty() {
+                let searched_uids = legacy_message_list_visible_uids_with_settings(
+                    session,
+                    &request.search,
+                    LegacyMessageListQueryOptions {
+                        hide_deleted: request.hide_deleted,
+                        fast_simple_search: request.fast_simple_search,
+                        permanent_filter: &request.permanent_filter,
+                        sort: None,
+                        utf8_mode: capabilities.uses_utf8_search,
+                        supports_within: capabilities.supports_within,
+                    },
+                )
+                .await?;
+                if request.thread_uid > 0 {
+                    let searched = searched_uids.into_iter().collect::<HashSet<_>>();
+                    uids.retain(|uid| searched.contains(uid));
+                } else {
+                    legacy_filter_thread_search_results(
+                        &mut uids,
+                        &searched_uids,
+                        &message_threads,
+                    );
+                }
+            }
+        }
+        uids
     };
-    if !used_sort {
-        matching_uids.sort_unstable_by(|left, right| right.cmp(left));
-    }
+    let total = if can_query {
+        u32::try_from(matching_uids.len()).unwrap_or(u32::MAX)
+    } else {
+        folder_total
+    };
     let page_uids = legacy_message_list_page_uids(&matching_uids, request.offset, limit);
     let mut messages_by_uid = HashMap::new();
 
@@ -3103,7 +3285,7 @@ async fn legacy_message_list_in_session(
                 continue;
             };
             let header = fetch.header().unwrap_or_default();
-            let summary = legacy_message_summary_from_fetch_with_email_id(
+            let mut summary = legacy_message_summary_from_fetch_with_email_id(
                 &request.mailbox,
                 uid,
                 fetch.internal_date().map(|value| value.timestamp()),
@@ -3113,6 +3295,8 @@ async fn legacy_message_list_in_session(
                 header,
                 fetch.gmail_msg_id().map(u64::to_string),
             );
+            (summary.threads, summary.thread_unseen) =
+                legacy_message_thread_metadata(uid, &message_threads, &unseen_uids);
             messages_by_uid.insert(uid, summary);
         }
         drop(fetches);
@@ -3133,7 +3317,7 @@ async fn legacy_message_list_in_session(
     Ok(LegacyMessageList {
         folder,
         total_emails: total,
-        total_threads: None,
+        total_threads,
         offset: request.offset,
         limit,
         search: legacy_message_list_search(&request.search),
@@ -3355,6 +3539,8 @@ fn legacy_message_summary_from_fetch_with_email_id<'a>(
         has_attachments: !attachments.is_empty(),
         attachments,
         preview: None,
+        threads: Vec::new(),
+        thread_unseen: Vec::new(),
     }
 }
 
@@ -4642,6 +4828,7 @@ async fn imap_fetch_metadata_capabilities(
         supports_within: has_capability_ignore_ascii_case(&capabilities, "WITHIN"),
         supports_sort: has_capability_ignore_ascii_case(&capabilities, "SORT"),
         supports_sort_display: has_capability_ignore_ascii_case(&capabilities, "SORT=DISPLAY"),
+        thread_algorithms: legacy_thread_algorithms(&capabilities),
     })
 }
 
@@ -6915,6 +7102,50 @@ fn has_capability_ignore_ascii_case(capabilities: &Capabilities, name: &str) -> 
     })
 }
 
+fn legacy_thread_algorithms(capabilities: &Capabilities) -> Vec<String> {
+    let mut algorithms = Vec::new();
+    for capability in capabilities.iter() {
+        let Capability::Atom(atom) = capability else {
+            continue;
+        };
+        let Some(prefix) = atom.get(..7) else {
+            continue;
+        };
+        let Some(algorithm) = atom.get(7..) else {
+            continue;
+        };
+        if !prefix.eq_ignore_ascii_case("THREAD=") || algorithm.is_empty() {
+            continue;
+        }
+        let algorithm = algorithm.to_ascii_uppercase();
+        if !algorithms.contains(&algorithm) {
+            algorithms.push(algorithm);
+        }
+    }
+    algorithms
+}
+
+fn legacy_message_list_thread_algorithm(advertised: &[String], requested: &str) -> Option<String> {
+    let requested = requested.trim();
+    if !requested.is_empty() {
+        if let Some(algorithm) = advertised
+            .iter()
+            .find(|algorithm| algorithm.eq_ignore_ascii_case(requested))
+        {
+            return Some(algorithm.clone());
+        }
+    }
+
+    ["REFS", "REFERENCES", "ORDEREDSUBJECT"]
+        .iter()
+        .find_map(|preferred| {
+            advertised
+                .iter()
+                .find(|algorithm| algorithm.eq_ignore_ascii_case(preferred))
+                .cloned()
+        })
+}
+
 fn default_security() -> ImapSecurity {
     ImapSecurity::Tls
 }
@@ -8080,6 +8311,223 @@ mod tests {
         assert!(!previews.contains_key(&11));
     }
 
+    #[tokio::test]
+    async fn message_list_thread_fetch_flattens_top_level_threads() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let query = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(query, "A0002 UID THREAD REFERENCES UTF-8 ALL\r\n");
+            server_stream
+                .write_all(
+                    b"* THREAD (2)(3 6 (4 23)(44 7 96))\r\n\
+                      A0002 OK threaded\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let threads = fetch_legacy_message_threads(&mut session, "REFERENCES")
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(threads, vec![vec![2], vec![3, 6, 4, 23, 44, 7, 96]]);
+    }
+
+    #[tokio::test]
+    async fn message_list_thread_failure_degrades_to_empty_map_and_keeps_session_aligned() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let thread = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(thread, "A0002 UID THREAD REFERENCES UTF-8 ALL\r\n");
+            server_stream
+                .write_all(b"A0002 NO threading unavailable\r\n")
+                .await
+                .unwrap();
+
+            let noop = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(noop, "A0003 NOOP\r\n");
+            server_stream.write_all(b"A0003 OK noop\r\n").await.unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let threads = fetch_legacy_message_threads_compat(&mut session, "REFERENCES").await;
+        assert!(threads.is_empty());
+        session.noop().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_list_threading_selects_representatives_and_populates_metadata() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            for tag in ["A0002", "A0003"] {
+                let capability = read_scripted_imap_command(&mut server_stream).await;
+                assert_eq!(capability, format!("{tag} CAPABILITY\r\n"));
+                server_stream
+                    .write_all(
+                        format!(
+                            "* CAPABILITY IMAP4rev1 THREAD=REFERENCES\r\n\
+                             {tag} OK capability\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let status = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                status,
+                "A0004 STATUS \"INBOX\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)\r\n"
+            );
+            server_stream
+                .write_all(
+                    b"* STATUS \"INBOX\" (MESSAGES 6 UNSEEN 3 UIDNEXT 13 UIDVALIDITY 1)\r\n\
+                      A0004 OK status\r\n",
+                )
+                .await
+                .unwrap();
+
+            let examine = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(examine, "A0005 EXAMINE \"INBOX\"\r\n");
+            server_stream
+                .write_all(
+                    b"* FLAGS (\\Seen \\Deleted)\r\n\
+                      * 6 EXISTS\r\n\
+                      * 0 RECENT\r\n\
+                      * OK [UIDVALIDITY 1] valid\r\n\
+                      * OK [UIDNEXT 13] next\r\n\
+                      * OK [PERMANENTFLAGS (\\Seen \\Deleted)] flags\r\n\
+                      A0005 OK [READ-ONLY] examined\r\n",
+                )
+                .await
+                .unwrap();
+
+            let initial_search = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(initial_search, "A0006 UID SEARCH UNDELETED\r\n");
+            server_stream
+                .write_all(b"* SEARCH 7 8 9 10 11 12\r\nA0006 OK searched\r\n")
+                .await
+                .unwrap();
+
+            let thread = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(thread, "A0007 UID THREAD REFERENCES UTF-8 ALL\r\n");
+            server_stream
+                .write_all(
+                    b"* THREAD (7 8 9)(10 12)(11)\r\n\
+                      A0007 OK threaded\r\n",
+                )
+                .await
+                .unwrap();
+
+            let unseen = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(unseen, "A0008 UID SEARCH UNSEEN UNDELETED\r\n");
+            server_stream
+                .write_all(b"* SEARCH 8 11 12\r\nA0008 OK searched\r\n")
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert!(fetch.starts_with("A0009 UID FETCH 9,11,12 ("));
+            server_stream
+                .write_all(
+                    b"* 1 FETCH (UID 9)\r\n\
+                      * 2 FETCH (UID 11)\r\n\
+                      * 3 FETCH (UID 12)\r\n\
+                      A0009 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let capabilities = imap_fetch_metadata_capabilities(&mut session)
+            .await
+            .unwrap();
+        let result = legacy_message_list_in_session(
+            &mut session,
+            LegacyMessageListRequest {
+                mailbox: "INBOX".to_string(),
+                offset: 0,
+                limit: 10,
+                search: String::new(),
+                sort: String::new(),
+                prev_uid_next: None,
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: String::new(),
+                use_threads: true,
+                thread_uid: 0,
+                thread_algorithm: "REFERENCES".to_string(),
+            },
+            "client-hash",
+            capabilities,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.total_emails, 3);
+        assert_eq!(result.total_threads, Some(3));
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .map(|message| message.uid)
+                .collect::<Vec<_>>(),
+            vec![12, 11, 9]
+        );
+        assert_eq!(result.messages[0].threads, vec![10, 12]);
+        assert_eq!(result.messages[0].thread_unseen, vec![12]);
+        assert_eq!(result.messages[1].threads, vec![11]);
+        assert_eq!(result.messages[1].thread_unseen, vec![11]);
+        assert_eq!(result.messages[2].threads, vec![7, 8, 9]);
+        assert_eq!(result.messages[2].thread_unseen, vec![8]);
+    }
+
     async fn run_scripted_unicode_uid_search(
         utf8_mode: bool,
         continuation_response: &'static str,
@@ -8663,6 +9111,72 @@ mod tests {
         assert!(legacy_message_list_fetches_new_messages(0));
         assert!(!legacy_message_list_fetches_new_messages(1));
         assert!(!legacy_message_list_fetches_new_messages(u32::MAX));
+    }
+
+    #[test]
+    fn message_list_thread_algorithm_matches_mailso_preference_and_fallback() {
+        let advertised = vec![
+            "ORDEREDSUBJECT".to_string(),
+            "REFERENCES".to_string(),
+            "REFS".to_string(),
+            "X-TEST".to_string(),
+        ];
+
+        assert_eq!(
+            legacy_message_list_thread_algorithm(&advertised, ""),
+            Some("REFS".to_string())
+        );
+        assert_eq!(
+            legacy_message_list_thread_algorithm(&advertised, "references"),
+            Some("REFERENCES".to_string())
+        );
+        assert_eq!(
+            legacy_message_list_thread_algorithm(&advertised, "x-test"),
+            Some("X-TEST".to_string())
+        );
+        assert_eq!(
+            legacy_message_list_thread_algorithm(&advertised, "unsupported"),
+            Some("REFS".to_string())
+        );
+        assert_eq!(
+            legacy_message_list_thread_algorithm(&[], "REFERENCES"),
+            None
+        );
+    }
+
+    #[test]
+    fn message_list_thread_representatives_use_highest_uid_like_mailso() {
+        let mut uids = vec![12, 11, 10, 9, 8, 7];
+        legacy_thread_representatives(&mut uids, &[vec![7, 9, 8], vec![10, 12], vec![11]]);
+        assert_eq!(uids, vec![12, 11, 9]);
+    }
+
+    #[test]
+    fn message_list_selected_thread_uses_map_or_requested_uid_fallback() {
+        let threads = vec![vec![7, 9, 8], vec![10, 12]];
+        assert_eq!(legacy_selected_thread_uids(9, &threads), vec![7, 9, 8]);
+        assert_eq!(legacy_selected_thread_uids(11, &threads), vec![11]);
+    }
+
+    #[test]
+    fn message_list_thread_search_keeps_threads_with_any_matching_member() {
+        let mut uids = vec![12, 11, 9, 6];
+        let threads = vec![vec![7, 9, 8], vec![10, 12], vec![11], vec![5, 6]];
+        legacy_filter_thread_search_results(&mut uids, &[8, 11], &threads);
+        assert_eq!(uids, vec![11, 9]);
+    }
+
+    #[test]
+    fn message_list_thread_metadata_preserves_map_and_unseen_order() {
+        let threads = vec![vec![7, 9, 8], vec![10, 12]];
+        assert_eq!(
+            legacy_message_thread_metadata(9, &threads, &[12, 8, 7]),
+            (vec![7, 9, 8], vec![8, 7])
+        );
+        assert_eq!(
+            legacy_message_thread_metadata(11, &threads, &[12, 8, 7]),
+            (Vec::new(), Vec::new())
+        );
     }
 
     #[test]

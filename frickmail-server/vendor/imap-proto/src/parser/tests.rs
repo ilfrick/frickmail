@@ -576,6 +576,40 @@ fn test_sort() {
 }
 
 #[test]
+fn test_thread() {
+    for empty_response in &["* THREAD\r\n", "* UID THREAD\r\n"] {
+        match parse_response(empty_response.as_bytes()) {
+            Ok((_, Response::MailboxData(MailboxDatum::Thread(threads)))) => {
+                assert!(threads.is_empty());
+            }
+            rsp => panic!("unexpected response {rsp:?}"),
+        }
+    }
+
+    for response in &[
+        "* THREAD (2)(3 6 (4 23)(44 7 96))\r\n",
+        "* UID THREAD (2)(3 6 (4 23)(44 7 96))\r\n",
+    ] {
+        match parse_response(response.as_bytes()) {
+            Ok((_, Response::MailboxData(MailboxDatum::Thread(threads)))) => {
+                assert_eq!(threads.len(), 2);
+                assert_eq!(threads[0].flatten(), vec![2]);
+                assert_eq!(threads[1].flatten(), vec![3, 6, 4, 23, 44, 7, 96]);
+            }
+            rsp => panic!("unexpected response {rsp:?}"),
+        }
+    }
+
+    match parse_response(b"* THREAD ((3)(5))\r\n") {
+        Ok((_, Response::MailboxData(MailboxDatum::Thread(threads)))) => {
+            assert_eq!(threads.len(), 1);
+            assert_eq!(threads[0].flatten(), vec![3, 5]);
+        }
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+}
+
+#[test]
 fn test_uid_fetch() {
     match parse_response(b"* 4 FETCH (UID 71372 RFC822.HEADER {10275}\r\n") {
         Err(nom::Err::Incomplete(nom::Needed::Size(size))) => {

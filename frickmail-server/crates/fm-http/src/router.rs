@@ -7030,6 +7030,12 @@ fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value
     if !message.references.is_empty() {
         value["references"] = json!(message.references);
     }
+    if !message.threads.is_empty() {
+        value["threads"] = json!(message.threads);
+    }
+    if !message.thread_unseen.is_empty() {
+        value["threadUnseen"] = json!(message.thread_unseen);
+    }
 
     value
 }
@@ -15122,6 +15128,8 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(message["references"], "<one@example> <two@example>");
         assert_eq!(message["size"], 4096);
         assert_eq!(message["preview"], "Preview text");
+        assert_eq!(message["threads"], json!([40, 44, 47]));
+        assert_eq!(message["threadUnseen"], json!([47]));
 
         assert_eq!(attachment["@Object"], "Object/Attachment");
         assert_eq!(attachment["mimeIndex"], "2");
@@ -15131,6 +15139,18 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(attachment["cId"], "<part@example.com>");
         assert_eq!(attachment["contentLocation"], "cid:report");
         assert_eq!(attachment["isInline"], true);
+    }
+
+    #[test]
+    fn legacy_message_summary_json_omits_empty_thread_fields() {
+        let mut summary = legacy_test_message_summary();
+        summary.threads.clear();
+        summary.thread_unseen.clear();
+
+        let value = super::legacy_message_summary_json(&summary);
+
+        assert!(value.get("threads").is_none());
+        assert!(value.get("threadUnseen").is_none());
     }
 
     #[test]
@@ -19555,6 +19575,8 @@ Subject: Empty body metadata\r\n\r\n"
                 is_inline: true,
             }],
             preview: Some("Preview text".to_string()),
+            threads: vec![40, 44, 47],
+            thread_unseen: vec![47],
         }
     }
 

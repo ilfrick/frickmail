@@ -403,6 +403,7 @@ fn mailbox_data(i: &[u8]) -> IResult<&[u8], MailboxDatum<'_>> {
         gmail::mailbox_data_gmail_msgid,
         gmail::mailbox_data_gmail_thrid,
         rfc5256::mailbox_data_sort,
+        rfc5256::mailbox_data_thread,
     ))(i)
 }
 
