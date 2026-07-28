@@ -7481,6 +7481,7 @@ fn legacy_message_body_response(
             .map(|attachments| json!(attachments))
             .unwrap_or(Value::Null)
     };
+    let subject = fm_imap::legacy_message_subject(&subject);
     json_value_envelope(
         StatusCode::OK,
         action,
@@ -12953,7 +12954,7 @@ mod tests {
                 assert_eq!(uid, 51);
                 Ok(Some(vec![BodyPreviewPart {
                     kind: BodyPartKind::RawMessage,
-                    raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nDisposition-Notification-To: receipt@example.com\r\nX-Confirm-Reading-To: fallback@example.com\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\nSubject: Legacy body\r\n\r\nHello legacy".to_vec(),
+                    raw: b"From: \"Sender, Example\" <sender@example.com>\r\nReply-To: reply@example.com\r\nTo: Recipient <recipient@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSender: Actual <actual@example.com>\r\nDelivered-To: delivered@example.com\r\nMessage-ID: <message@example.com>\r\nIn-Reply-To: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\nDisposition-Notification-To: receipt@example.com\r\nX-Confirm-Reading-To: fallback@example.com\r\nDate: Tue, 1 Jul 2003 10:52:37 CEST\r\nSubject: [Preview] Legacy body\r\n\r\nHello legacy".to_vec(),
                     is_complete: true,
                 flags: Vec::new(),
                     crypto: Default::default(),
@@ -13009,7 +13010,7 @@ mod tests {
             "<root@example.com>  <parent@example.com>"
         );
         assert_eq!(headers[13]["name"], "Subject");
-        assert_eq!(headers[13]["value"], "Legacy body");
+        assert_eq!(headers[13]["value"], "[Preview] Legacy body");
         assert_eq!(body["Result"]["dateTimestamp"], 1_057_049_557);
         assert_eq!(body["Result"]["dateTimestampSource"], "header");
         assert!(body["Result"].get("date").is_none());

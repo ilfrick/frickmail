@@ -4662,7 +4662,7 @@ async fn fetch_legacy_new_messages(
         messages.push(LegacyNewMessage {
             folder: mailbox.to_string(),
             uid,
-            subject: legacy_message_subject(&header_value(header, "Subject").unwrap_or_default()),
+            subject: legacy_header_subject(&header_value(header, "Subject").unwrap_or_default()),
             from: header_value(header, "From").unwrap_or_default(),
         });
     }
@@ -4703,7 +4703,9 @@ fn legacy_message_summary_from_fetch_with_email_id<'a>(
     header: &[u8],
     email_id: Option<String>,
 ) -> LegacyMessageSummary {
-    let subject = legacy_message_subject(&header_value(header, "Subject").unwrap_or_default());
+    let header_subject =
+        legacy_header_subject(&header_value(header, "Subject").unwrap_or_default());
+    let subject = legacy_message_subject(&header_subject);
     let message_id = header_value(header, "Message-ID")
         .or_else(|| header_value(header, "Message-Id"))
         .unwrap_or_default();
@@ -4722,7 +4724,7 @@ fn legacy_message_summary_from_fetch_with_email_id<'a>(
         &header_value(header, "Content-Type").unwrap_or_default(),
         bodystructure,
     );
-    let spam = legacy_message_spam_summary(header, &subject);
+    let spam = legacy_message_spam_summary(header, &header_subject);
     let (date_timestamp, date_timestamp_source) =
         legacy_message_timestamp(&date, internal_timestamp);
     let flags = legacy_unique_flag_strings(flags.map(|flag| legacy_message_flag_string(&flag)));
@@ -4894,8 +4896,15 @@ fn legacy_php_trim(value: &str) -> &str {
     value.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0b'))
 }
 
-fn legacy_message_subject(value: &str) -> String {
+fn legacy_header_subject(value: &str) -> String {
     legacy_php_trim(value).to_string()
+}
+
+pub fn legacy_message_subject(value: &str) -> String {
+    let without_preview = value
+        .strip_prefix("[Preview]")
+        .map(|value| value.chars().skip(1).collect::<String>());
+    legacy_header_subject(without_preview.as_deref().unwrap_or(value))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12014,6 +12023,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_message_summary_removes_preview_prefix_like_mailso() {
+        assert_eq!(
+            legacy_message_subject("[Preview] Preview subject"),
+            "Preview subject"
+        );
+        assert_eq!(legacy_message_subject("[Preview]Xsubject"), "subject");
+        assert_eq!(legacy_message_subject("[Preview]🦀subject"), "subject");
+        assert_eq!(legacy_message_subject("[Preview]"), "");
+        assert_eq!(
+            legacy_message_subject(" [Preview] untouched "),
+            "[Preview] untouched"
+        );
+        assert_eq!(
+            legacy_header_subject("[Preview] notification subject"),
+            "[Preview] notification subject"
+        );
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            45,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            b"Subject: [Preview] Preview subject\r\n\r\n",
+        );
+        assert_eq!(summary.subject, "Preview subject");
+    }
+
+    #[test]
     fn legacy_message_summary_preserves_subject_nbsp_like_mailso() {
         let header = b"Subject: \xc2\xa0 Trimmed subject \xc2\xa0 \r\n\r\n";
 
@@ -12281,6 +12320,25 @@ mod tests {
 
         assert_eq!(summary.spam_score, 100);
         assert_eq!(summary.spam_result, "7.13 / 9.00");
+        assert!(summary.is_spam);
+    }
+
+    #[test]
+    fn legacy_message_summary_checks_spam_before_removing_preview_prefix() {
+        let header = b"Subject: [Preview]*** SPAM ***\r\nX-Spamd-Result: default: False [1.00 / 9.00]; BAYES_SPAM\r\n\r\n";
+
+        let summary = legacy_message_summary_from_fetch(
+            "INBOX",
+            44,
+            None,
+            1,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            header,
+        );
+
+        assert_eq!(summary.subject, "** SPAM ***");
+        assert_eq!(summary.spam_score, 100);
         assert!(summary.is_spam);
     }
 
