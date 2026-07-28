@@ -16,8 +16,8 @@ use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, TryStreamExt};
 use imap_proto::{
     builders::command::{Command, CommandBuilder},
-    AclRight, AttributeValue, BodyStructure, MailboxDatum, MessageSection, RequestId, Response,
-    SectionPath, Status, StatusAttribute,
+    AclRight, AttributeValue, BodyStructure, ESearchSequenceRange, MailboxDatum, MessageSection,
+    RequestId, Response, SectionPath, Status, StatusAttribute,
 };
 use mail_parser::parsers::MessageStream;
 use md5::{Digest, Md5};
@@ -38,6 +38,8 @@ const DEFAULT_PLAIN_PORT: u16 = 143;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const FOLDER_METADATA_FALLBACK_BUDGET: Duration = Duration::from_secs(30);
+const MULTISEARCH_MAILBOX_RESULT_LIMIT: usize = 4_096;
+const MULTISEARCH_RANGE_RESULT_LIMIT: usize = 262_144;
 pub const BODY_PREVIEW_PART_LIMIT_BYTES: usize = 256 * 1024;
 
 trait ImapIo:
@@ -526,6 +528,32 @@ struct ImapFetchMetadataCapabilities {
     supports_sort: bool,
     supports_sort_display: bool,
     thread_algorithms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyMessageListMultiSearchScope {
+    Mailboxes,
+    Subtree,
+    SubtreeOne,
+}
+
+impl LegacyMessageListMultiSearchScope {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Mailboxes => "mailboxes",
+            Self::Subtree => "subtree",
+            Self::SubtreeOne => "subtree-one",
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyMessageListMailboxMatches {
+    mailbox: String,
+    uid_validity: u32,
+    all: Vec<ESearchSequenceRange>,
+    count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1674,6 +1702,21 @@ fn legacy_message_list_unique_search_fields(
     unique
 }
 
+fn legacy_message_list_multisearch_scope(
+    search: &str,
+) -> Option<LegacyMessageListMultiSearchScope> {
+    let value = legacy_message_list_search_fields(legacy_php_trim(search))
+        .into_iter()
+        .find(|(name, _)| name == "IN")?
+        .1;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mailboxes" => Some(LegacyMessageListMultiSearchScope::Mailboxes),
+        "subtree" => Some(LegacyMessageListMultiSearchScope::Subtree),
+        "subtree-one" => Some(LegacyMessageListMultiSearchScope::SubtreeOne),
+        _ => None,
+    }
+}
+
 fn legacy_message_list_search_date(value: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
@@ -2509,6 +2552,198 @@ async fn legacy_message_list_visible_uids_with_settings(
         }),
     )
     .await?
+}
+
+#[allow(dead_code)]
+async fn legacy_message_list_multisearch_matches(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    search: &str,
+    options: LegacyMessageListQueryOptions<'_>,
+    supports_multisearch: bool,
+) -> Result<Option<Vec<LegacyMessageListMailboxMatches>>> {
+    let Some(scope) = legacy_message_list_multisearch_scope(search) else {
+        return Ok(None);
+    };
+    if !supports_multisearch {
+        return Ok(None);
+    }
+    let operation = "multisearch legacy message list";
+    let wire = legacy_message_list_search_wire_with_settings(
+        search,
+        options.hide_deleted,
+        options.fast_simple_search,
+        options.permanent_filter,
+        options.utf8_mode,
+        options.supports_within,
+    )?;
+    let wire_mailbox = imap_mailbox_from_utf8(mailbox, options.utf8_mode);
+    let mailbox = quote_imap_string("message-list multisearch mailbox", &wire_mailbox)?;
+
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let mut chunks = wire.chunks.into_iter();
+            let first = chunks.next().ok_or_else(|| {
+                FrickmailError::Upstream("empty message-list multisearch command".to_string())
+            })?;
+            let charset = if wire.needs_utf8_charset {
+                " CHARSET UTF-8"
+            } else {
+                ""
+            };
+            let command = format!(
+                "ESEARCH IN ({} {mailbox}) RETURN (ALL COUNT){charset} {first}",
+                scope.wire_name()
+            );
+            let request_id = session
+                .run_command(&command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut matches = Vec::new();
+            let mut seen_mailboxes = HashSet::new();
+            let mut range_count = 0;
+
+            for chunk in chunks {
+                loop {
+                    let response = session
+                        .read_response()
+                        .await
+                        .map_err(|error| {
+                            FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                        })?
+                        .ok_or_else(|| {
+                            FrickmailError::Upstream(format!(
+                                "{operation} failed: IMAP connection closed"
+                            ))
+                        })?;
+                    collect_legacy_message_list_multisearch_match(
+                        response.parsed(),
+                        &request_id,
+                        options.utf8_mode,
+                        &mut seen_mailboxes,
+                        &mut range_count,
+                        &mut matches,
+                    )?;
+                    if matches!(response.parsed(), Response::Continue { .. }) {
+                        break;
+                    }
+                    if imap_command_completion(response.parsed(), &request_id, operation)?.is_some()
+                    {
+                        return Err(FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP server completed before literal continuation"
+                        )));
+                    }
+                }
+                session
+                    .run_command_untagged(&chunk)
+                    .await
+                    .map_err(|error| imap_error(operation, error))?;
+            }
+
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                collect_legacy_message_list_multisearch_match(
+                    response.parsed(),
+                    &request_id,
+                    options.utf8_mode,
+                    &mut seen_mailboxes,
+                    &mut range_count,
+                    &mut matches,
+                )?;
+                if matches!(response.parsed(), Response::Continue { .. }) {
+                    return Err(FrickmailError::Upstream(format!(
+                        "{operation} failed: unexpected IMAP continuation"
+                    )));
+                }
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(Some(matches));
+                }
+            }
+        }),
+    )
+    .await?
+}
+
+fn collect_legacy_message_list_multisearch_match(
+    response: &Response<'_>,
+    request_id: &RequestId,
+    utf8_mode: bool,
+    seen_mailboxes: &mut HashSet<String>,
+    range_count: &mut usize,
+    matches: &mut Vec<LegacyMessageListMailboxMatches>,
+) -> Result<()> {
+    let Response::MailboxData(MailboxDatum::ESearch(result)) = response else {
+        return Ok(());
+    };
+    let Some(tag) = result.tag.as_deref() else {
+        return Ok(());
+    };
+    if tag.as_bytes() != request_id.as_bytes() {
+        return Ok(());
+    }
+    if !result.uid {
+        return Err(FrickmailError::Upstream(
+            "multisearch legacy message list returned non-UID results".to_string(),
+        ));
+    }
+    let mailbox = result.mailbox.as_deref().ok_or_else(|| {
+        FrickmailError::Upstream(
+            "multisearch legacy message list returned ESEARCH without MAILBOX".to_string(),
+        )
+    })?;
+    let uid_validity = result.uid_validity.ok_or_else(|| {
+        FrickmailError::Upstream(
+            "multisearch legacy message list returned ESEARCH without UIDVALIDITY".to_string(),
+        )
+    })?;
+    let count = result.count.ok_or_else(|| {
+        FrickmailError::Upstream(
+            "multisearch legacy message list returned ESEARCH without COUNT".to_string(),
+        )
+    })?;
+    if count == 0 || result.all.is_empty() {
+        return Err(FrickmailError::Upstream(
+            "multisearch legacy message list returned an empty mailbox result".to_string(),
+        ));
+    }
+    if matches.len() >= MULTISEARCH_MAILBOX_RESULT_LIMIT {
+        return Err(FrickmailError::Upstream(
+            "multisearch legacy message list returned too many mailboxes".to_string(),
+        ));
+    }
+    *range_count = range_count
+        .checked_add(result.all.len())
+        .filter(|count| *count <= MULTISEARCH_RANGE_RESULT_LIMIT)
+        .ok_or_else(|| {
+            FrickmailError::Upstream(
+                "multisearch legacy message list returned too many UID ranges".to_string(),
+            )
+        })?;
+
+    let mailbox = imap_mailbox_to_utf8(mailbox, utf8_mode);
+    if !seen_mailboxes.insert(mailbox.clone()) {
+        return Err(FrickmailError::Upstream(
+            "multisearch legacy message list returned a duplicate mailbox result".to_string(),
+        ));
+    }
+    matches.push(LegacyMessageListMailboxMatches {
+        mailbox,
+        uid_validity,
+        all: result.all.clone(),
+        count,
+    });
+    Ok(())
 }
 
 fn collect_legacy_message_list_uids(response: &Response<'_>, sorted: bool, uids: &mut Vec<u32>) {
@@ -8188,6 +8423,59 @@ mod tests {
         result
     }
 
+    async fn run_scripted_message_list_multisearch(
+        search_value: &'static str,
+        utf8_mode: bool,
+        expected_command: &'static str,
+        expected_literal: Option<&'static str>,
+        response: &'static str,
+    ) -> Result<Option<Vec<LegacyMessageListMailboxMatches>>> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(1024);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let query = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(query, expected_command);
+            if let Some(expected_literal) = expected_literal {
+                server_stream.write_all(b"+ continue\r\n").await.unwrap();
+                let literal = read_scripted_imap_command(&mut server_stream).await;
+                assert_eq!(literal, expected_literal);
+            }
+            server_stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let result = legacy_message_list_multisearch_matches(
+            &mut session,
+            "INBOX",
+            search_value,
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: None,
+                utf8_mode,
+                supports_within: false,
+            },
+            true,
+        )
+        .await;
+        server.await.unwrap();
+        result
+    }
+
     #[tokio::test]
     async fn message_list_uid_search_collects_ids_and_validates_success_completion() {
         assert_eq!(
@@ -8201,6 +8489,125 @@ mod tests {
             .unwrap(),
             vec![105, 74, 99]
         );
+    }
+
+    #[tokio::test]
+    async fn message_list_multisearch_collects_mailbox_correlated_uid_ranges() {
+        let matches = run_scripted_message_list_multisearch(
+            "in=subtree&subject=quarterly",
+            true,
+            "A0002 ESEARCH IN (subtree \"INBOX\") RETURN (ALL COUNT) \
+             SUBJECT \"quarterly\" UNDELETED\r\n",
+            None,
+            "* ESEARCH UID ALL 99 COUNT 1\r\n\
+             * ESEARCH (TAG \"OTHER\" MAILBOX \"Ignored\" UIDVALIDITY 1) \
+             UID ALL 1 COUNT 1\r\n\
+             * ESEARCH (TAG \"A0002\" MAILBOX \"Projects \\\"Red\\\"\" UIDVALIDITY 42) \
+             UID ALL 9:7 COUNT 3\r\n\
+             * ESEARCH (TAG \"A0002\" MAILBOX Archive UIDVALIDITY 88) \
+             UID ALL 2,5 COUNT 2\r\n\
+             A0002 OK searched\r\n",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].mailbox, "Projects \"Red\"");
+        assert_eq!(matches[0].uid_validity, 42);
+        assert_eq!(matches[0].count, 3);
+        assert_eq!(
+            matches[0].all,
+            vec![ESearchSequenceRange {
+                start: imap_proto::ESearchSequenceValue::Number(9),
+                end: imap_proto::ESearchSequenceValue::Number(7),
+            }]
+        );
+        assert_eq!(matches[1].mailbox, "Archive");
+        assert_eq!(matches[1].count, 2);
+    }
+
+    #[tokio::test]
+    async fn message_list_multisearch_frames_unicode_literals_and_allows_no_matches() {
+        let matches = run_scripted_message_list_multisearch(
+            "in=subtree-one&subject=café",
+            false,
+            "A0002 ESEARCH IN (subtree-one \"INBOX\") RETURN (ALL COUNT) \
+             CHARSET UTF-8 SUBJECT {5}\r\n",
+            Some("café UNDELETED\r\n"),
+            "A0002 OK searched\r\n",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn message_list_multisearch_is_capability_gated() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let matches = legacy_message_list_multisearch_matches(
+            &mut session,
+            "INBOX",
+            "in=subtree&subject=test",
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: None,
+                utf8_mode: true,
+                supports_within: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(matches, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_list_multisearch_rejects_missing_and_duplicate_correlators() {
+        let missing = run_scripted_message_list_multisearch(
+            "in=mailboxes",
+            true,
+            "A0002 ESEARCH IN (mailboxes \"INBOX\") RETURN (ALL COUNT) UNDELETED\r\n",
+            None,
+            "* ESEARCH (TAG \"A0002\" UIDVALIDITY 1) UID ALL 1 COUNT 1\r\n\
+             A0002 OK searched\r\n",
+        )
+        .await
+        .unwrap_err();
+        assert!(missing.to_string().contains("without MAILBOX"));
+
+        let duplicate = run_scripted_message_list_multisearch(
+            "in=mailboxes",
+            true,
+            "A0002 ESEARCH IN (mailboxes \"INBOX\") RETURN (ALL COUNT) UNDELETED\r\n",
+            None,
+            "* ESEARCH (TAG \"A0002\" MAILBOX INBOX UIDVALIDITY 1) UID ALL 1 COUNT 1\r\n\
+             * ESEARCH (TAG \"A0002\" MAILBOX INBOX UIDVALIDITY 1) UID ALL 2 COUNT 1\r\n\
+             A0002 OK searched\r\n",
+        )
+        .await
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("duplicate mailbox"));
     }
 
     #[tokio::test]
@@ -8664,6 +9071,24 @@ mod tests {
                 .contains("search legacy message list"));
             assert!(error.public_message().contains("failed"));
         }
+    }
+
+    #[test]
+    fn message_list_multisearch_scope_accepts_only_legacy_selectors() {
+        assert_eq!(
+            legacy_message_list_multisearch_scope("in=subtree"),
+            Some(LegacyMessageListMultiSearchScope::Subtree)
+        );
+        assert_eq!(
+            legacy_message_list_multisearch_scope("in:SUBTREE-ONE subject:test"),
+            Some(LegacyMessageListMultiSearchScope::SubtreeOne)
+        );
+        assert_eq!(
+            legacy_message_list_multisearch_scope("subject=test&in=mailboxes"),
+            Some(LegacyMessageListMultiSearchScope::Mailboxes)
+        );
+        assert_eq!(legacy_message_list_multisearch_scope("in=personal"), None);
+        assert_eq!(legacy_message_list_multisearch_scope("subject=test"), None);
     }
 
     #[test]
