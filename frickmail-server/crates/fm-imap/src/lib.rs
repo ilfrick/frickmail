@@ -2,7 +2,8 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     fmt,
-    sync::Arc,
+    pin::Pin,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
     time::{Duration, SystemTime},
 };
 
@@ -13,7 +14,7 @@ use async_imap::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
 use fm_core::{FrickmailError, Result};
-use futures::{pin_mut, TryStreamExt};
+use futures::{pin_mut, Stream, TryStreamExt};
 use imap_proto::{
     builders::command::{Command, CommandBuilder},
     AclRight, AttributeValue, BodyStructure, MailboxDatum, MessageSection, RequestId, Response,
@@ -26,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::{
     net::TcpStream,
+    sync::{OwnedSemaphorePermit, Semaphore},
     time::{timeout, Instant},
 };
 use tokio_rustls::{
@@ -42,6 +44,10 @@ const MULTISEARCH_MAILBOX_RESULT_LIMIT: usize = 4_096;
 const MULTISEARCH_PAGE_MAILBOX_LIMIT: usize = 32;
 const MULTISEARCH_UID_ENUMERATION_LIMIT: u32 = 100_000;
 const MULTISEARCH_PAGE_BUDGET: Duration = Duration::from_secs(45);
+const MESSAGE_LIST_CACHE_WARM_BUDGET: Duration = Duration::from_secs(45);
+const MESSAGE_LIST_CACHE_WARM_CONCURRENCY: usize = 4;
+static MESSAGE_LIST_CACHE_WARM_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static MESSAGE_LIST_CACHE_WARM_KEYS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 pub const BODY_PREVIEW_PART_LIMIT_BYTES: usize = 256 * 1024;
 
 trait ImapIo:
@@ -431,6 +437,7 @@ pub struct LegacyMessageListRequest {
     pub hide_deleted: bool,
     pub fast_simple_search: bool,
     pub permanent_filter: String,
+    pub message_list_limit: u32,
     pub use_threads: bool,
     pub thread_uid: u32,
     pub thread_algorithm: String,
@@ -438,6 +445,14 @@ pub struct LegacyMessageListRequest {
 
 #[async_trait::async_trait]
 pub trait LegacyMessageListUidCache: Send + Sync {
+    fn max_uid_entries(&self) -> usize {
+        usize::MAX
+    }
+
+    fn coordination_namespace(&self) -> String {
+        String::new()
+    }
+
     async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>>;
     async fn set(&self, raw_key: &str, folder_hash: &str, uids: &[u32]);
 
@@ -452,6 +467,80 @@ pub trait LegacyMessageListUidCache: Send + Sync {
     }
 
     async fn set_thread_uids(&self, _raw_key: &str, _uids: &[u32]) {}
+}
+
+struct LegacyMessageListCacheWarmGuard {
+    key: String,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for LegacyMessageListCacheWarmGuard {
+    fn drop(&mut self) {
+        let Some(keys) = MESSAGE_LIST_CACHE_WARM_KEYS.get() else {
+            return;
+        };
+        keys.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+    }
+}
+
+fn try_start_legacy_message_list_cache_warm(
+    key: String,
+) -> Option<LegacyMessageListCacheWarmGuard> {
+    let semaphore = MESSAGE_LIST_CACHE_WARM_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(MESSAGE_LIST_CACHE_WARM_CONCURRENCY)))
+        .clone();
+    let permit = semaphore.try_acquire_owned().ok()?;
+    let mut keys = MESSAGE_LIST_CACHE_WARM_KEYS
+        .get_or_init(|| StdMutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !keys.insert(key.clone()) {
+        return None;
+    }
+    Some(LegacyMessageListCacheWarmGuard {
+        key,
+        _permit: permit,
+    })
+}
+
+fn legacy_message_list_cache_warm_cacheable(
+    folder_total: Option<u32>,
+    max_uid_entries: usize,
+) -> bool {
+    folder_total
+        .and_then(|total| usize::try_from(total).ok())
+        .is_some_and(|total| total <= max_uid_entries)
+}
+
+fn legacy_message_list_cache_warm_key(
+    request: &LegacyMessageListRequest,
+    client_hash: &str,
+    capabilities: &ImapFetchMetadataCapabilities,
+    uid_cache: &dyn LegacyMessageListUidCache,
+) -> Result<String> {
+    let sort = capabilities
+        .supports_sort
+        .then(|| {
+            legacy_message_list_sort_for_command(&request.sort, capabilities.supports_sort_display)
+        })
+        .transpose()?;
+    let raw_key = legacy_message_list_uid_cache_key(
+        &request.mailbox,
+        client_hash,
+        "",
+        LegacyMessageListQueryOptions {
+            hide_deleted: request.hide_deleted,
+            fast_simple_search: request.fast_simple_search,
+            permanent_filter: &request.permanent_filter,
+            sort: sort.as_deref(),
+            utf8_mode: capabilities.uses_utf8_search,
+            supports_within: capabilities.supports_within,
+            supports_literal_plus: capabilities.supports_literal_plus,
+        },
+    )?;
+    Ok(format!("{}\0{raw_key}", uid_cache.coordination_namespace()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -829,22 +918,58 @@ pub async fn fetch_legacy_message_list_with_uid_cache(
     config: ImapConnectionConfig,
     password: &str,
     request: LegacyMessageListRequest,
-    uid_cache: Option<&dyn LegacyMessageListUidCache>,
+    uid_cache: Option<Arc<dyn LegacyMessageListUidCache>>,
 ) -> Result<LegacyMessageList> {
     validate_mailbox(&request.mailbox)?;
 
     let client_hash = legacy_imap_client_hash(&config);
+    let warm_config = config.clone();
+    let warm_password = password.to_string();
+    let warm_request = request.clone();
     let mut session = login(config, password).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
+    let warm_key = uid_cache
+        .as_deref()
+        .map(|cache| {
+            legacy_message_list_cache_warm_key(&request, &client_hash, &capabilities, cache)
+        })
+        .transpose()
+        .ok()
+        .flatten();
     let result = legacy_message_list_in_session(
         &mut session,
         request,
         &client_hash,
         capabilities,
-        uid_cache,
+        uid_cache.as_deref(),
     )
     .await;
     logout_quietly(session).await;
+    if let (Ok(list), Some(uid_cache), Some(warm_key)) = (&result, uid_cache, warm_key) {
+        let cacheable = legacy_message_list_cache_warm_cacheable(
+            list.folder.total_emails,
+            uid_cache.max_uid_entries(),
+        );
+        if list.limited && cacheable {
+            let folder_hash = list.folder.etag.clone();
+            if let Some(guard) = try_start_legacy_message_list_cache_warm(warm_key) {
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    let _ = timeout(
+                        MESSAGE_LIST_CACHE_WARM_BUDGET,
+                        warm_legacy_message_list_cache(
+                            warm_config,
+                            &warm_password,
+                            warm_request,
+                            folder_hash,
+                            uid_cache,
+                        ),
+                    )
+                    .await;
+                });
+            }
+        }
+    }
     result
 }
 
@@ -1483,6 +1608,60 @@ pub fn legacy_message_list_limit(limit: u32) -> u32 {
     } else {
         limit
     }
+}
+
+pub fn legacy_message_list_optimization_enabled(configured_limit: u32, total: u32) -> bool {
+    configured_limit >= 100 && configured_limit <= total
+}
+
+fn legacy_message_list_optimized_sequence_ids(
+    total: u32,
+    offset: u32,
+    limit: u32,
+    sorted: bool,
+) -> Vec<u32> {
+    if total == 0 || limit == 0 || offset > total {
+        return Vec::new();
+    }
+    let (start, end) = if sorted {
+        let end = u64::from(total)
+            .min(
+                u64::from(total)
+                    .saturating_sub(u64::from(offset))
+                    .saturating_add(u64::from(limit))
+                    .max(1),
+            )
+            .try_into()
+            .unwrap_or(total);
+        let start = end
+            .saturating_sub(limit.saturating_mul(3).saturating_sub(1))
+            .max(1);
+        (start, end)
+    } else {
+        let end = total.saturating_sub(offset).max(1);
+        let start = end.saturating_sub(limit.saturating_sub(1)).max(1);
+        (start, end)
+    };
+    (start..=end).rev().collect()
+}
+
+fn legacy_message_list_optimized_sorted_page(
+    sorted_ids: &[u32],
+    offset: u32,
+    limit: u32,
+) -> Vec<u32> {
+    let skip = if offset > 0 { limit } else { 0 };
+    sorted_ids
+        .iter()
+        .copied()
+        .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        .collect()
+}
+
+fn legacy_sequence_set_preserving_order(ids: &[u32]) -> Option<String> {
+    (!ids.is_empty() && ids.iter().all(|id| *id > 0))
+        .then(|| ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
 }
 
 pub fn legacy_message_list_fetches_new_messages(thread_uid: u32) -> bool {
@@ -2502,14 +2681,6 @@ struct LegacyMessageListQueryOptions<'a> {
     supports_literal_plus: bool,
 }
 
-async fn legacy_message_list_visible_uids_with_settings(
-    session: &mut BoxedSession,
-    search: &str,
-    options: LegacyMessageListQueryOptions<'_>,
-) -> Result<Vec<u32>> {
-    legacy_message_list_visible_uids_with_settings_bounded(session, search, options, None).await
-}
-
 async fn legacy_message_list_visible_uids_cached(
     session: &mut BoxedSession,
     mailbox: &str,
@@ -2519,17 +2690,61 @@ async fn legacy_message_list_visible_uids_cached(
     options: LegacyMessageListQueryOptions<'_>,
     cache: Option<&dyn LegacyMessageListUidCache>,
 ) -> Result<Vec<u32>> {
+    legacy_message_list_visible_uids_cached_bounded(
+        session,
+        mailbox,
+        folder_hash,
+        client_hash,
+        search,
+        options,
+        cache,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn legacy_message_list_visible_uids_cached_bounded(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    folder_hash: &str,
+    client_hash: &str,
+    search: &str,
+    options: LegacyMessageListQueryOptions<'_>,
+    cache: Option<&dyn LegacyMessageListUidCache>,
+    uid_limit: Option<usize>,
+) -> Result<Vec<u32>> {
     let Some(cache) = cache.filter(|_| legacy_message_list_uid_cache_eligible(search)) else {
-        return legacy_message_list_visible_uids_with_settings(session, search, options).await;
+        return legacy_message_list_visible_uids_with_settings_bounded(
+            session, search, options, uid_limit,
+        )
+        .await;
     };
     let raw_key = legacy_message_list_uid_cache_key(mailbox, client_hash, search, options)?;
     if let Some(uids) = cache.get(&raw_key, folder_hash).await {
         return Ok(uids);
     }
 
-    let uids = legacy_message_list_visible_uids_with_settings(session, search, options).await?;
+    let uids =
+        legacy_message_list_visible_uids_with_settings_bounded(session, search, options, uid_limit)
+            .await?;
     cache.set(&raw_key, folder_hash, &uids).await;
     Ok(uids)
+}
+
+async fn legacy_message_list_visible_uids_from_cache(
+    mailbox: &str,
+    folder_hash: &str,
+    client_hash: &str,
+    search: &str,
+    options: LegacyMessageListQueryOptions<'_>,
+    cache: Option<&dyn LegacyMessageListUidCache>,
+) -> Result<Option<Vec<u32>>> {
+    let Some(cache) = cache.filter(|_| legacy_message_list_uid_cache_eligible(search)) else {
+        return Ok(None);
+    };
+    let raw_key = legacy_message_list_uid_cache_key(mailbox, client_hash, search, options)?;
+    Ok(cache.get(&raw_key, folder_hash).await)
 }
 
 fn legacy_message_list_uid_cache_key(
@@ -2600,6 +2815,18 @@ async fn legacy_message_list_visible_uids_with_settings_bounded(
     options: LegacyMessageListQueryOptions<'_>,
     uid_limit: Option<usize>,
 ) -> Result<Vec<u32>> {
+    legacy_message_list_ids_with_settings_bounded(session, search, options, uid_limit, true, None)
+        .await
+}
+
+async fn legacy_message_list_ids_with_settings_bounded(
+    session: &mut BoxedSession,
+    search: &str,
+    options: LegacyMessageListQueryOptions<'_>,
+    id_limit: Option<usize>,
+    return_uid: bool,
+    sequence_set: Option<&str>,
+) -> Result<Vec<u32>> {
     let operation = if options.sort.is_some() {
         "sort legacy message list"
     } else {
@@ -2620,15 +2847,22 @@ async fn legacy_message_list_visible_uids_with_settings_bounded(
             let first = chunks.next().ok_or_else(|| {
                 FrickmailError::Upstream("empty message-list search command".to_string())
             })?;
+            let first = if let Some(sequence_set) = sequence_set {
+                format!("{sequence_set} {first}")
+            } else {
+                first
+            };
             let command = if let Some(sort) = options.sort {
-                format!("UID SORT ({sort}) UTF-8 {first}")
+                let uid = if return_uid { "UID " } else { "" };
+                format!("{uid}SORT ({sort}) UTF-8 {first}")
             } else {
                 let charset = if wire.needs_utf8_charset {
                     " CHARSET UTF-8"
                 } else {
                     ""
                 };
-                format!("UID SEARCH{charset} {first}")
+                let uid = if return_uid { "UID " } else { "" };
+                format!("{uid}SEARCH{charset} {first}")
             };
             let request_id = session
                 .run_command(&command)
@@ -2653,7 +2887,7 @@ async fn legacy_message_list_visible_uids_with_settings_bounded(
                         response.parsed(),
                         options.sort.is_some(),
                         &mut uids,
-                        uid_limit,
+                        id_limit,
                     )?;
                     if matches!(response.parsed(), Response::Continue { .. }) {
                         break;
@@ -2687,7 +2921,7 @@ async fn legacy_message_list_visible_uids_with_settings_bounded(
                     response.parsed(),
                     options.sort.is_some(),
                     &mut uids,
-                    uid_limit,
+                    id_limit,
                 )?;
                 if matches!(response.parsed(), Response::Continue { .. }) {
                     return Err(FrickmailError::Upstream(format!(
@@ -3159,6 +3393,102 @@ async fn fetch_legacy_message_list_previews(
         }),
     )
     .await?
+}
+
+#[derive(Clone, Copy)]
+enum LegacyMessageListFetchMode {
+    Uids,
+    Sequences,
+}
+
+async fn fetch_legacy_message_list_summaries(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    ids: &[u32],
+    mode: LegacyMessageListFetchMode,
+    capabilities: &ImapFetchMetadataCapabilities,
+    message_threads: &[Vec<u32>],
+    unseen_uids: &[u32],
+) -> Result<Vec<LegacyMessageSummary>> {
+    let Some(id_set) = (match mode {
+        LegacyMessageListFetchMode::Uids => legacy_uid_sequence_set(ids),
+        LegacyMessageListFetchMode::Sequences => legacy_sequence_set_preserving_order(ids),
+    }) else {
+        return Ok(Vec::new());
+    };
+    let query = legacy_message_list_fetch_query_with_gmail_id(capabilities.supports_gmail_id);
+    let mut fetches: Pin<
+        Box<
+            dyn Stream<
+                    Item = std::result::Result<async_imap::types::Fetch, async_imap::error::Error>,
+                > + Send
+                + '_,
+        >,
+    > = match mode {
+        LegacyMessageListFetchMode::Uids => Box::pin(
+            timeout_imap(
+                "fetch legacy message list",
+                session.uid_fetch(id_set, query),
+            )
+            .await?,
+        ),
+        LegacyMessageListFetchMode::Sequences => Box::pin(
+            timeout_imap(
+                "fetch limited legacy message list",
+                session.fetch(id_set, query),
+            )
+            .await?,
+        ),
+    };
+    let mut messages_by_id = HashMap::new();
+    while let Some(fetch) =
+        timeout_imap("read legacy message list item", fetches.try_next()).await?
+    {
+        let Some(uid) = fetch.uid else {
+            continue;
+        };
+        let id = match mode {
+            LegacyMessageListFetchMode::Uids => uid,
+            LegacyMessageListFetchMode::Sequences => fetch.message,
+        };
+        let header = fetch.header().unwrap_or_default();
+        let mut summary = legacy_message_summary_from_fetch_with_email_id(
+            mailbox,
+            uid,
+            fetch.internal_date().map(|value| value.timestamp()),
+            fetch.size.unwrap_or_default(),
+            fetch.flags(),
+            fetch.bodystructure(),
+            header,
+            fetch.gmail_msg_id().map(u64::to_string),
+        );
+        (summary.threads, summary.thread_unseen) =
+            legacy_message_thread_metadata(uid, message_threads, unseen_uids);
+        messages_by_id.insert(id, summary);
+    }
+    drop(fetches);
+
+    if capabilities.supports_preview {
+        let fetched_uids = messages_by_id
+            .values()
+            .map(|message| message.uid)
+            .collect::<Vec<_>>();
+        if let Some(uid_set) = legacy_uid_sequence_set(&fetched_uids) {
+            for (uid, preview) in fetch_legacy_message_list_previews(session, &uid_set).await? {
+                if let Some(message) = messages_by_id
+                    .values_mut()
+                    .find(|message| message.uid == uid)
+                {
+                    message.preview = Some(preview);
+                }
+            }
+        }
+    }
+
+    Ok(ids
+        .iter()
+        .filter_map(|id| messages_by_id.remove(id))
+        .collect())
 }
 
 async fn fetch_legacy_message_list_multisearch_page(
@@ -3732,6 +4062,187 @@ async fn legacy_folder_information_in_session(
     Ok(info)
 }
 
+async fn warm_legacy_message_list_cache(
+    config: ImapConnectionConfig,
+    password: &str,
+    request: LegacyMessageListRequest,
+    folder_hash: String,
+    uid_cache: Arc<dyn LegacyMessageListUidCache>,
+) -> Result<()> {
+    let client_hash = legacy_imap_client_hash(&config);
+    let mut session = login(config, password).await?;
+    let result = async {
+        let mut capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
+        let advertised = timeout_imap(
+            "read message-list warm capabilities",
+            session.capabilities(),
+        )
+        .await?;
+        capabilities.uses_utf8_search = enable_legacy_utf8(&mut session, &advertised).await?;
+        let wire_mailbox = imap_mailbox_from_utf8(&request.mailbox, capabilities.uses_utf8_search);
+        timeout_imap(
+            "examine mailbox for message-list cache warm",
+            session.examine(&wire_mailbox),
+        )
+        .await?;
+        warm_legacy_message_list_cache_in_session(
+            &mut session,
+            &request,
+            &folder_hash,
+            &client_hash,
+            &capabilities,
+            uid_cache.as_ref(),
+        )
+        .await
+    }
+    .await;
+    logout_quietly(session).await;
+    result
+}
+
+async fn warm_legacy_message_list_cache_in_session(
+    session: &mut BoxedSession,
+    request: &LegacyMessageListRequest,
+    folder_hash: &str,
+    client_hash: &str,
+    capabilities: &ImapFetchMetadataCapabilities,
+    uid_cache: &dyn LegacyMessageListUidCache,
+) -> Result<()> {
+    let sort = capabilities
+        .supports_sort
+        .then(|| {
+            legacy_message_list_sort_for_command(&request.sort, capabilities.supports_sort_display)
+        })
+        .transpose()?;
+    legacy_message_list_visible_uids_cached_bounded(
+        session,
+        &request.mailbox,
+        folder_hash,
+        client_hash,
+        "",
+        LegacyMessageListQueryOptions {
+            hide_deleted: request.hide_deleted,
+            fast_simple_search: request.fast_simple_search,
+            permanent_filter: &request.permanent_filter,
+            sort: sort.as_deref(),
+            utf8_mode: capabilities.uses_utf8_search,
+            supports_within: capabilities.supports_within,
+            supports_literal_plus: capabilities.supports_literal_plus,
+        },
+        Some(uid_cache),
+        Some(uid_cache.max_uid_entries()),
+    )
+    .await?;
+
+    if request.use_threads {
+        if let Some(algorithm) = legacy_message_list_thread_algorithm(
+            &capabilities.thread_algorithms,
+            &request.thread_algorithm,
+        ) {
+            fetch_legacy_message_threads_cached(session, &algorithm, folder_hash, Some(uid_cache))
+                .await;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn legacy_message_list_optimized_in_session(
+    session: &mut BoxedSession,
+    request: &LegacyMessageListRequest,
+    folder: LegacyFolderInformation,
+    folder_total: u32,
+    limit: u32,
+    used_sort: bool,
+    sort: Option<&str>,
+    client_hash: &str,
+    capabilities: &ImapFetchMetadataCapabilities,
+    uid_cache: Option<&dyn LegacyMessageListUidCache>,
+) -> Result<LegacyMessageList> {
+    let search = legacy_message_list_search(&request.search);
+    let query_options = |sort| LegacyMessageListQueryOptions {
+        hide_deleted: request.hide_deleted,
+        fast_simple_search: request.fast_simple_search,
+        permanent_filter: &request.permanent_filter,
+        sort,
+        utf8_mode: capabilities.uses_utf8_search,
+        supports_within: capabilities.supports_within,
+        supports_literal_plus: capabilities.supports_literal_plus,
+    };
+
+    let (total_emails, sort, mode, page_ids) = if !search.is_empty() {
+        let uids = legacy_message_list_visible_uids_cached(
+            session,
+            &request.mailbox,
+            &folder.etag,
+            client_hash,
+            &request.search,
+            query_options(None),
+            uid_cache,
+        )
+        .await?;
+        (
+            u32::try_from(uids.len()).unwrap_or(u32::MAX),
+            String::new(),
+            LegacyMessageListFetchMode::Uids,
+            legacy_message_list_page_uids(&uids, request.offset, limit),
+        )
+    } else if used_sort {
+        let candidates =
+            legacy_message_list_optimized_sequence_ids(folder_total, request.offset, limit, true);
+        let sequence_set = legacy_sequence_set_preserving_order(&candidates);
+        let sorted_ids = if let Some(sequence_set) = sequence_set.as_deref() {
+            legacy_message_list_ids_with_settings_bounded(
+                session,
+                "",
+                query_options(sort),
+                Some(candidates.len()),
+                false,
+                Some(sequence_set),
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        (
+            folder_total,
+            legacy_message_list_sort(&request.sort, true),
+            LegacyMessageListFetchMode::Sequences,
+            legacy_message_list_optimized_sorted_page(&sorted_ids, request.offset, limit),
+        )
+    } else {
+        (
+            folder_total,
+            String::new(),
+            LegacyMessageListFetchMode::Sequences,
+            legacy_message_list_optimized_sequence_ids(folder_total, request.offset, limit, false),
+        )
+    };
+    let messages = fetch_legacy_message_list_summaries(
+        session,
+        &request.mailbox,
+        &page_ids,
+        mode,
+        capabilities,
+        &[],
+        &[],
+    )
+    .await?;
+
+    Ok(LegacyMessageList {
+        folder,
+        total_emails,
+        total_threads: None,
+        offset: request.offset,
+        limit,
+        search,
+        sort,
+        limited: legacy_message_list_limited(true),
+        thread_uid: 0,
+        messages,
+    })
+}
+
 async fn legacy_message_list_in_session(
     session: &mut BoxedSession,
     request: LegacyMessageListRequest,
@@ -3839,23 +4350,15 @@ async fn legacy_message_list_in_session(
             legacy_message_list_sort_for_command(&request.sort, capabilities.supports_sort_display)
         })
         .transpose()?;
-    let mut message_threads = Vec::new();
-    let mut unseen_uids = Vec::new();
-    let mut total_threads = None;
-    let matching_uids = if !can_query {
-        Vec::new()
-    } else {
-        let initial_search = if thread_algorithm.is_some() {
-            ""
-        } else {
-            &request.search
-        };
-        let mut uids = legacy_message_list_visible_uids_cached(
-            session,
+    let optimization_enabled = can_query
+        && request.thread_uid == 0
+        && legacy_message_list_optimization_enabled(request.message_list_limit, folder_total);
+    let mut cached_full_uids = if optimization_enabled {
+        legacy_message_list_visible_uids_from_cache(
             &request.mailbox,
             &folder.etag,
             client_hash,
-            initial_search,
+            "",
             LegacyMessageListQueryOptions {
                 hide_deleted: request.hide_deleted,
                 fast_simple_search: request.fast_simple_search,
@@ -3867,7 +4370,59 @@ async fn legacy_message_list_in_session(
             },
             uid_cache,
         )
-        .await?;
+        .await?
+    } else {
+        None
+    };
+    if optimization_enabled && cached_full_uids.is_none() {
+        return legacy_message_list_optimized_in_session(
+            session,
+            &request,
+            folder,
+            folder_total,
+            limit,
+            used_sort,
+            sort.as_deref(),
+            client_hash,
+            &capabilities,
+            uid_cache,
+        )
+        .await;
+    }
+    let used_cached_full_uids = cached_full_uids.is_some();
+    let mut message_threads = Vec::new();
+    let mut unseen_uids = Vec::new();
+    let mut total_threads = None;
+    let matching_uids = if !can_query {
+        Vec::new()
+    } else {
+        let initial_search = if thread_algorithm.is_some() {
+            ""
+        } else {
+            &request.search
+        };
+        let mut uids = if let Some(cached_uids) = cached_full_uids.take() {
+            cached_uids
+        } else {
+            legacy_message_list_visible_uids_cached(
+                session,
+                &request.mailbox,
+                &folder.etag,
+                client_hash,
+                initial_search,
+                LegacyMessageListQueryOptions {
+                    hide_deleted: request.hide_deleted,
+                    fast_simple_search: request.fast_simple_search,
+                    permanent_filter: &request.permanent_filter,
+                    sort: sort.as_deref(),
+                    utf8_mode: capabilities.uses_utf8_search,
+                    supports_within: capabilities.supports_within,
+                    supports_literal_plus: capabilities.supports_literal_plus,
+                },
+                uid_cache,
+            )
+            .await?
+        };
         if !used_sort {
             uids.sort_unstable_by(|left, right| right.cmp(left));
         }
@@ -3936,6 +4491,27 @@ async fn legacy_message_list_in_session(
                     );
                 }
             }
+        } else if used_cached_full_uids && !legacy_message_list_search(&request.search).is_empty() {
+            let searched_uids = legacy_message_list_visible_uids_cached(
+                session,
+                &request.mailbox,
+                &folder.etag,
+                client_hash,
+                &request.search,
+                LegacyMessageListQueryOptions {
+                    hide_deleted: request.hide_deleted,
+                    fast_simple_search: request.fast_simple_search,
+                    permanent_filter: &request.permanent_filter,
+                    sort: None,
+                    utf8_mode: capabilities.uses_utf8_search,
+                    supports_within: capabilities.supports_within,
+                    supports_literal_plus: capabilities.supports_literal_plus,
+                },
+                uid_cache,
+            )
+            .await?;
+            let searched = searched_uids.into_iter().collect::<HashSet<_>>();
+            uids.retain(|uid| searched.contains(uid));
         }
         uids
     };
@@ -3945,53 +4521,16 @@ async fn legacy_message_list_in_session(
         folder_total
     };
     let page_uids = legacy_message_list_page_uids(&matching_uids, request.offset, limit);
-    let mut messages_by_uid = HashMap::new();
-
-    if let Some(uid_set) = legacy_uid_sequence_set(&page_uids) {
-        let mut fetches = timeout_imap(
-            "fetch legacy message list",
-            session.uid_fetch(
-                uid_set.clone(),
-                legacy_message_list_fetch_query_with_gmail_id(capabilities.supports_gmail_id),
-            ),
-        )
-        .await?;
-
-        while let Some(fetch) =
-            timeout_imap("read legacy message list item", fetches.try_next()).await?
-        {
-            let Some(uid) = fetch.uid else {
-                continue;
-            };
-            let header = fetch.header().unwrap_or_default();
-            let mut summary = legacy_message_summary_from_fetch_with_email_id(
-                &request.mailbox,
-                uid,
-                fetch.internal_date().map(|value| value.timestamp()),
-                fetch.size.unwrap_or_default(),
-                fetch.flags(),
-                fetch.bodystructure(),
-                header,
-                fetch.gmail_msg_id().map(u64::to_string),
-            );
-            (summary.threads, summary.thread_unseen) =
-                legacy_message_thread_metadata(uid, &message_threads, &unseen_uids);
-            messages_by_uid.insert(uid, summary);
-        }
-        drop(fetches);
-
-        if capabilities.supports_preview {
-            for (uid, preview) in fetch_legacy_message_list_previews(session, &uid_set).await? {
-                if let Some(message) = messages_by_uid.get_mut(&uid) {
-                    message.preview = Some(preview);
-                }
-            }
-        }
-    }
-    let messages = page_uids
-        .iter()
-        .filter_map(|uid| messages_by_uid.remove(uid))
-        .collect();
+    let messages = fetch_legacy_message_list_summaries(
+        session,
+        &request.mailbox,
+        &page_uids,
+        LegacyMessageListFetchMode::Uids,
+        &capabilities,
+        &message_threads,
+        &unseen_uids,
+    )
+    .await?;
 
     Ok(LegacyMessageList {
         folder,
@@ -7843,6 +8382,12 @@ mod tests {
         sets: Mutex<Vec<(String, String, Vec<u32>)>>,
     }
 
+    #[derive(Default)]
+    struct StatefulUidCache {
+        uids: Mutex<Option<(String, String, Vec<u32>)>>,
+        thread_map: Mutex<Option<(String, Vec<Vec<u32>>)>>,
+    }
+
     #[async_trait::async_trait]
     impl LegacyMessageListUidCache for RecordingUidCache {
         async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>> {
@@ -7859,6 +8404,36 @@ mod tests {
                 folder_hash.to_string(),
                 uids.to_vec(),
             ));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LegacyMessageListUidCache for StatefulUidCache {
+        async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>> {
+            self.uids
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(key, hash, _)| key == raw_key && hash == folder_hash)
+                .map(|(_, _, uids)| uids.clone())
+        }
+
+        async fn set(&self, raw_key: &str, folder_hash: &str, uids: &[u32]) {
+            *self.uids.lock().unwrap() =
+                Some((raw_key.to_string(), folder_hash.to_string(), uids.to_vec()));
+        }
+
+        async fn get_thread_map(&self, raw_key: &str) -> Option<Vec<Vec<u32>>> {
+            self.thread_map
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(key, _)| key == raw_key)
+                .map(|(_, threads)| threads.clone())
+        }
+
+        async fn set_thread_map(&self, raw_key: &str, threads: &[Vec<u32>]) {
+            *self.thread_map.lock().unwrap() = Some((raw_key.to_string(), threads.to_vec()));
         }
     }
 
@@ -8106,8 +8681,10 @@ mod tests {
 
     #[test]
     fn keyword_support_matches_legacy_permanent_flags() {
-        let mut mailbox = async_imap::types::Mailbox::default();
-        mailbox.permanent_flags = vec![Flag::Custom("$label1".into())];
+        let mut mailbox = async_imap::types::Mailbox {
+            permanent_flags: vec![Flag::Custom("$label1".into())],
+            ..Default::default()
+        };
         assert!(keyword_supported(&mailbox, "$label1"));
         assert!(!keyword_supported(&mailbox, "$label2"));
         assert!(!keyword_supported(&mailbox, "$Label1"));
@@ -8927,6 +9504,204 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn limited_message_list_sort_uses_sequence_numbers() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+            let sort = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(sort, "A0002 SORT (REVERSE DATE) UTF-8 9,8,7 UNDELETED\r\n");
+            server_stream
+                .write_all(b"* SORT 8 7 9\r\nA0002 OK sorted\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+
+        let ids = legacy_message_list_ids_with_settings_bounded(
+            &mut session,
+            "",
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: Some("REVERSE DATE"),
+                utf8_mode: false,
+                supports_within: false,
+                supports_literal_plus: false,
+            },
+            None,
+            false,
+            Some("9,8,7"),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(ids, vec![8, 7, 9]);
+    }
+
+    #[tokio::test]
+    async fn limited_message_list_cache_warm_populates_next_request_keys() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(1024);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let sort = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(sort, "A0002 UID SORT (REVERSE DATE) UTF-8 UNDELETED\r\n");
+            server_stream
+                .write_all(b"* SORT 49 50\r\nA0002 OK sorted\r\n")
+                .await
+                .unwrap();
+
+            let thread = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(thread, "A0003 UID THREAD REFERENCES UTF-8 ALL\r\n");
+            server_stream
+                .write_all(b"* THREAD (49 50)\r\nA0003 OK threaded\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let cache = StatefulUidCache::default();
+        let request = LegacyMessageListRequest {
+            mailbox: "INBOX".to_string(),
+            offset: 0,
+            limit: 10,
+            search: "subject=report".to_string(),
+            sort: String::new(),
+            prev_uid_next: None,
+            hide_deleted: true,
+            fast_simple_search: true,
+            permanent_filter: String::new(),
+            message_list_limit: 10_000,
+            use_threads: true,
+            thread_uid: 0,
+            thread_algorithm: "REFERENCES".to_string(),
+        };
+        let capabilities = ImapFetchMetadataCapabilities {
+            supports_gmail_id: false,
+            supports_preview: false,
+            supports_literal_plus: false,
+            uses_utf8_search: false,
+            supports_within: false,
+            supports_multisearch: false,
+            supports_sort: true,
+            supports_sort_display: false,
+            thread_algorithms: vec!["REFERENCES".to_string()],
+        };
+
+        warm_legacy_message_list_cache_in_session(
+            &mut session,
+            &request,
+            "folder-etag",
+            "client-hash",
+            &capabilities,
+            &cache,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let cached = legacy_message_list_visible_uids_from_cache(
+            "INBOX",
+            "folder-etag",
+            "client-hash",
+            "",
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: Some("REVERSE DATE"),
+                utf8_mode: false,
+                supports_within: false,
+                supports_literal_plus: false,
+            },
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached, Some(vec![49, 50]));
+        assert_eq!(
+            cache
+                .get_thread_map("ThreadsMap/REFERENCES/ALL/folder-etag")
+                .await,
+            Some(vec![vec![49, 50]])
+        );
+    }
+
+    #[tokio::test]
+    async fn limited_message_list_sort_rejects_oversized_response() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+            let sort = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(sort, "A0002 SORT (REVERSE DATE) UTF-8 9,8,7 UNDELETED\r\n");
+            server_stream
+                .write_all(b"* SORT 9 8 7 6\r\nA0002 OK sorted\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+
+        let error = legacy_message_list_ids_with_settings_bounded(
+            &mut session,
+            "",
+            LegacyMessageListQueryOptions {
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: "",
+                sort: Some("REVERSE DATE"),
+                utf8_mode: false,
+                supports_within: false,
+                supports_literal_plus: false,
+            },
+            Some(3),
+            false,
+            Some("9,8,7"),
+        )
+        .await
+        .unwrap_err();
+        server.await.unwrap();
+
+        assert!(error.to_string().contains("too many UIDs"));
+    }
+
     async fn read_scripted_imap_command(stream: &mut tokio::io::DuplexStream) -> String {
         use tokio::io::AsyncWriteExt as _;
 
@@ -9052,7 +9827,7 @@ mod tests {
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let result = legacy_message_list_visible_uids_with_settings(
+        let result = legacy_message_list_visible_uids_with_settings_bounded(
             &mut session,
             search_value,
             LegacyMessageListQueryOptions {
@@ -9064,6 +9839,7 @@ mod tests {
                 supports_within,
                 supports_literal_plus: false,
             },
+            None,
         )
         .await;
         server.await.unwrap();
@@ -9604,6 +10380,7 @@ mod tests {
                 hide_deleted: true,
                 fast_simple_search: true,
                 permanent_filter: String::new(),
+                message_list_limit: 10_000,
                 use_threads: true,
                 thread_uid: 0,
                 thread_algorithm: "REFERENCES".to_string(),
@@ -9898,6 +10675,7 @@ mod tests {
                 hide_deleted: true,
                 fast_simple_search: true,
                 permanent_filter: String::new(),
+                message_list_limit: 10_000,
                 use_threads: true,
                 thread_uid: 0,
                 thread_algorithm: "REFERENCES".to_string(),
@@ -9926,6 +10704,261 @@ mod tests {
         assert_eq!(result.messages[1].thread_unseen, vec![11]);
         assert_eq!(result.messages[2].threads, vec![7, 8, 9]);
         assert_eq!(result.messages[2].thread_unseen, vec![8]);
+    }
+
+    #[tokio::test]
+    async fn large_message_list_uses_limited_sequence_sort_and_skips_threads() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let candidates = legacy_message_list_optimized_sequence_ids(10_000, 0, 10, true);
+        let candidate_set = legacy_sequence_set_preserving_order(&candidates).unwrap();
+        let (client_stream, mut server_stream) = tokio::io::duplex(8192);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            for tag in ["A0002", "A0003"] {
+                let capability = read_scripted_imap_command(&mut server_stream).await;
+                assert_eq!(capability, format!("{tag} CAPABILITY\r\n"));
+                server_stream
+                    .write_all(
+                        format!(
+                            "* CAPABILITY IMAP4rev1 SORT THREAD=REFERENCES\r\n\
+                             {tag} OK capability\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let status = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                status,
+                "A0004 STATUS \"INBOX\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)\r\n"
+            );
+            server_stream
+                .write_all(
+                    b"* STATUS \"INBOX\" (MESSAGES 10000 UNSEEN 3 UIDNEXT 50001 UIDVALIDITY 1)\r\n\
+                      A0004 OK status\r\n",
+                )
+                .await
+                .unwrap();
+
+            let examine = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(examine, "A0005 EXAMINE \"INBOX\"\r\n");
+            server_stream
+                .write_all(
+                    b"* FLAGS (\\Seen \\Deleted)\r\n\
+                      * 10000 EXISTS\r\n\
+                      * 0 RECENT\r\n\
+                      * OK [UIDVALIDITY 1] valid\r\n\
+                      * OK [UIDNEXT 50001] next\r\n\
+                      * OK [PERMANENTFLAGS (\\Seen \\Deleted)] flags\r\n\
+                      A0005 OK [READ-ONLY] examined\r\n",
+                )
+                .await
+                .unwrap();
+
+            let sort = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                sort,
+                format!("A0006 SORT (REVERSE DATE) UTF-8 {candidate_set} UNDELETED\r\n")
+            );
+            server_stream
+                .write_all(b"* SORT 9998 10000 9999\r\nA0006 OK sorted\r\n")
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert!(fetch.starts_with("A0007 FETCH 9998,10000,9999 ("));
+            server_stream
+                .write_all(
+                    b"* 10000 FETCH (UID 50000)\r\n\
+                      * 9999 FETCH (UID 49999)\r\n\
+                      * 9998 FETCH (UID 49998)\r\n\
+                      A0007 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let capabilities = imap_fetch_metadata_capabilities(&mut session)
+            .await
+            .unwrap();
+        let result = legacy_message_list_in_session(
+            &mut session,
+            LegacyMessageListRequest {
+                mailbox: "INBOX".to_string(),
+                offset: 0,
+                limit: 10,
+                search: String::new(),
+                sort: String::new(),
+                prev_uid_next: None,
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: String::new(),
+                message_list_limit: 10_000,
+                use_threads: true,
+                thread_uid: 0,
+                thread_algorithm: "REFERENCES".to_string(),
+            },
+            "client-hash",
+            capabilities,
+            None,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.total_emails, 10_000);
+        assert_eq!(result.total_threads, None);
+        assert_eq!(result.sort, "REVERSE DATE");
+        assert!(result.limited);
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .map(|message| message.uid)
+                .collect::<Vec<_>>(),
+            vec![49_998, 50_000, 49_999]
+        );
+        assert!(result
+            .messages
+            .iter()
+            .all(|message| message.threads.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn large_message_list_full_uid_cache_hit_bypasses_limiting() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            for tag in ["A0002", "A0003"] {
+                let capability = read_scripted_imap_command(&mut server_stream).await;
+                assert_eq!(capability, format!("{tag} CAPABILITY\r\n"));
+                server_stream
+                    .write_all(
+                        format!(
+                            "* CAPABILITY IMAP4rev1 SORT\r\n\
+                             {tag} OK capability\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let status = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                status,
+                "A0004 STATUS \"INBOX\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)\r\n"
+            );
+            server_stream
+                .write_all(
+                    b"* STATUS \"INBOX\" (MESSAGES 10000 UNSEEN 3 UIDNEXT 50001 UIDVALIDITY 1)\r\n\
+                      A0004 OK status\r\n",
+                )
+                .await
+                .unwrap();
+
+            let examine = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(examine, "A0005 EXAMINE \"INBOX\"\r\n");
+            server_stream
+                .write_all(
+                    b"* FLAGS (\\Seen \\Deleted)\r\n\
+                      * 10000 EXISTS\r\n\
+                      * 0 RECENT\r\n\
+                      * OK [UIDVALIDITY 1] valid\r\n\
+                      * OK [UIDNEXT 50001] next\r\n\
+                      * OK [PERMANENTFLAGS (\\Seen \\Deleted)] flags\r\n\
+                      A0005 OK [READ-ONLY] examined\r\n",
+                )
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert!(fetch.starts_with("A0006 UID FETCH 49999,50000 ("));
+            server_stream
+                .write_all(
+                    b"* 9999 FETCH (UID 49999)\r\n\
+                      * 10000 FETCH (UID 50000)\r\n\
+                      A0006 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let capabilities = imap_fetch_metadata_capabilities(&mut session)
+            .await
+            .unwrap();
+        let cache = RecordingUidCache {
+            returned_uids: Some(vec![50_000, 49_999]),
+            gets: Mutex::new(Vec::new()),
+            sets: Mutex::new(Vec::new()),
+        };
+        let result = legacy_message_list_in_session(
+            &mut session,
+            LegacyMessageListRequest {
+                mailbox: "INBOX".to_string(),
+                offset: 0,
+                limit: 10,
+                search: String::new(),
+                sort: String::new(),
+                prev_uid_next: None,
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: String::new(),
+                message_list_limit: 10_000,
+                use_threads: false,
+                thread_uid: 0,
+                thread_algorithm: String::new(),
+            },
+            "client-hash",
+            capabilities,
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert!(!result.limited);
+        assert_eq!(result.total_emails, 2);
+        assert_eq!(result.sort, "REVERSE DATE");
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .map(|message| message.uid)
+                .collect::<Vec<_>>(),
+            vec![50_000, 49_999]
+        );
+        assert_eq!(cache.gets.lock().unwrap().len(), 1);
+        assert!(cache.sets.lock().unwrap().is_empty());
     }
 
     async fn run_scripted_unicode_uid_search(
@@ -9997,7 +11030,7 @@ mod tests {
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let result = legacy_message_list_visible_uids_with_settings(
+        let result = legacy_message_list_visible_uids_with_settings_bounded(
             &mut session,
             "subject:café",
             LegacyMessageListQueryOptions {
@@ -10009,6 +11042,7 @@ mod tests {
                 supports_within: false,
                 supports_literal_plus: false,
             },
+            None,
         )
         .await;
         server.await.unwrap();
@@ -10586,6 +11620,119 @@ mod tests {
         assert_eq!(legacy_message_list_limit(999), 999);
         assert_eq!(legacy_message_list_limit(1_000), 50);
         assert_eq!(legacy_message_list_limit(u32::MAX), 50);
+    }
+
+    #[test]
+    fn message_list_optimization_threshold_matches_mailso() {
+        assert!(!legacy_message_list_optimization_enabled(0, 20_000));
+        assert!(!legacy_message_list_optimization_enabled(99, 20_000));
+        assert!(legacy_message_list_optimization_enabled(100, 20_000));
+        assert!(legacy_message_list_optimization_enabled(10_000, 10_000));
+        assert!(!legacy_message_list_optimization_enabled(10_000, 9_999));
+    }
+
+    #[test]
+    fn message_list_cache_warm_requires_cacheable_folder_cardinality() {
+        assert!(legacy_message_list_cache_warm_cacheable(
+            Some(100_000),
+            100_000
+        ));
+        assert!(!legacy_message_list_cache_warm_cacheable(
+            Some(100_001),
+            100_000
+        ));
+        assert!(!legacy_message_list_cache_warm_cacheable(None, 100_000));
+    }
+
+    #[test]
+    fn message_list_cache_warm_is_single_flight_per_key() {
+        let key = "single-flight-test-key".to_string();
+        let first =
+            try_start_legacy_message_list_cache_warm(key.clone()).expect("first warm should start");
+        assert!(try_start_legacy_message_list_cache_warm(key.clone()).is_none());
+        drop(first);
+        let restarted =
+            try_start_legacy_message_list_cache_warm(key).expect("completed warm should restart");
+        drop(restarted);
+    }
+
+    #[test]
+    fn message_list_cache_warm_identity_ignores_folder_generation_and_thread_knobs() {
+        let cache = StatefulUidCache::default();
+        let capabilities = ImapFetchMetadataCapabilities {
+            supports_gmail_id: false,
+            supports_preview: false,
+            supports_literal_plus: false,
+            uses_utf8_search: false,
+            supports_within: false,
+            supports_multisearch: false,
+            supports_sort: true,
+            supports_sort_display: false,
+            thread_algorithms: vec!["REFERENCES".to_string()],
+        };
+        let mut request = LegacyMessageListRequest {
+            mailbox: "INBOX".to_string(),
+            offset: 0,
+            limit: 50,
+            search: String::new(),
+            sort: String::new(),
+            prev_uid_next: None,
+            hide_deleted: true,
+            fast_simple_search: true,
+            permanent_filter: String::new(),
+            message_list_limit: 10_000,
+            use_threads: false,
+            thread_uid: 0,
+            thread_algorithm: String::new(),
+        };
+        let older_generation_key =
+            legacy_message_list_cache_warm_key(&request, "client-hash", &capabilities, &cache)
+                .unwrap();
+
+        request.sort = "REVERSE DATE".to_string();
+        request.use_threads = true;
+        request.thread_algorithm = "REFERENCES".to_string();
+        let newer_generation_key =
+            legacy_message_list_cache_warm_key(&request, "client-hash", &capabilities, &cache)
+                .unwrap();
+
+        assert_eq!(older_generation_key, newer_generation_key);
+        let older = try_start_legacy_message_list_cache_warm(older_generation_key)
+            .expect("older folder generation should acquire the UID cache key");
+        assert!(
+            try_start_legacy_message_list_cache_warm(newer_generation_key).is_none(),
+            "newer folder generation must not race a writer for the same UID cache key"
+        );
+        drop(older);
+    }
+
+    #[test]
+    fn message_list_optimized_sequence_windows_match_mailso() {
+        let first_sorted = legacy_message_list_optimized_sequence_ids(20_000, 0, 50, true);
+        assert_eq!(first_sorted.len(), 150);
+        assert_eq!(first_sorted.first(), Some(&20_000));
+        assert_eq!(first_sorted.last(), Some(&19_851));
+
+        let later_sorted = legacy_message_list_optimized_sequence_ids(20_000, 100, 50, true);
+        assert_eq!(later_sorted.first(), Some(&19_950));
+        assert_eq!(later_sorted.last(), Some(&19_801));
+        assert_eq!(
+            legacy_message_list_optimized_sorted_page(&later_sorted, 100, 50),
+            (19_851..=19_900).rev().collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            legacy_message_list_optimized_sequence_ids(20_000, 50, 50, false),
+            (19_901..=19_950).rev().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            legacy_message_list_optimized_sequence_ids(20_000, 20_000, 50, false),
+            vec![1]
+        );
+        assert_eq!(
+            legacy_sequence_set_preserving_order(&[9, 7, 8]),
+            Some("9,7,8".to_string())
+        );
     }
 
     #[test]
@@ -11871,11 +13018,11 @@ mod tests {
         assert_eq!(smime_encrypted.part_id, "1");
         assert_eq!(opaque.part_id, "1");
         assert_eq!(opaque.sig_part_id, None);
-        assert_eq!(opaque.detached, false);
+        assert!(!opaque.detached);
         assert_eq!(detached.part_id, "TEXT");
         assert_eq!(detached.sig_part_id.as_deref(), Some("2"));
         assert_eq!(detached.mic_alg, "sha-256");
-        assert_eq!(detached.detached, true);
+        assert!(detached.detached);
     }
 
     #[test]
@@ -12075,6 +13222,7 @@ mod tests {
             hide_deleted: true,
             fast_simple_search: true,
             permanent_filter: String::new(),
+            message_list_limit: 10_000,
             use_threads: true,
             thread_uid: 77,
             thread_algorithm: "REFERENCES".to_string(),

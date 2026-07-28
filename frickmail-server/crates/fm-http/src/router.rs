@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     net::{IpAddr, SocketAddr},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -4947,18 +4948,15 @@ async fn native_legacy_message_list(
         MESSAGE_LIST_DEADLINE,
         move |config, password, request, account_email| {
             let uid_cache = redis_pool.map(|pool| {
-                RedisLegacyMessageListUidCache::new(pool, &account_email, fast_cache_index)
+                Arc::new(RedisLegacyMessageListUidCache::new(
+                    pool,
+                    &account_email,
+                    fast_cache_index,
+                )) as Arc<dyn fm_imap::LegacyMessageListUidCache>
             });
             async move {
-                fetch_legacy_message_list_with_uid_cache(
-                    config,
-                    &password,
-                    request,
-                    uid_cache
-                        .as_ref()
-                        .map(|cache| cache as &dyn fm_imap::LegacyMessageListUidCache),
-                )
-                .await
+                fetch_legacy_message_list_with_uid_cache(config, &password, request, uid_cache)
+                    .await
             }
         },
     )
@@ -5028,6 +5026,7 @@ where
         .config()
         .mail
         .message_list_search_settings(&account_email);
+    request.message_list_limit = state.config().mail.message_list_limit(&account_email);
     let cache_account_email = match state.db_pool() {
         Some(pool) => SqlxUserRepository::list_mail_accounts(pool, user.user_id)
             .await
@@ -5124,6 +5123,7 @@ fn legacy_message_list_request_from_payload_with_limit_default(
         hide_deleted: true,
         fast_simple_search: true,
         permanent_filter: String::new(),
+        message_list_limit: 10_000,
         use_threads,
         thread_uid,
         thread_algorithm,
@@ -9754,6 +9754,11 @@ mod tests {
     use super::{legacy_json_action, SqlxUserRepository, JSON_BODY_LIMIT_BYTES};
     use crate::{build_router, AppState};
 
+    type ExportMessageCapture = Arc<Mutex<Option<(String, String, String, u32)>>>;
+    type AppendMessageCapture = Arc<Mutex<Option<(String, String, String, Vec<u8>)>>>;
+    type RuleExecutionCapture =
+        Arc<Mutex<Option<(ImapConnectionConfig, String, Vec<RuleExecutionPlan>)>>>;
+
     #[derive(Debug, Clone, Default)]
     struct BridgeCapture {
         method: String,
@@ -11217,7 +11222,7 @@ mod tests {
             SqlxUserRepository::verify_totp_login_code(&pool, 1514, "JBSWY3DPEHPK3PXP", code)
                 .await
                 .unwrap();
-        assert_eq!(replay.ok, false);
+        assert!(!replay.ok);
         assert_eq!(
             replay.error.as_deref(),
             Some("Two-factor code already used")
@@ -14305,7 +14310,8 @@ Subject: Empty body metadata\r\n\r\n"
             r#"{
             "example.com": {
                 "fast_simple_search": false,
-                "permanent_filter": "  ANSWERED  "
+                "permanent_filter": "  ANSWERED  ",
+                "message_list_limit": 25000
             }
         }"#,
         )
@@ -14379,6 +14385,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(request.hide_deleted);
         assert!(!request.fast_simple_search);
         assert_eq!(request.permanent_filter, "ANSWERED");
+        assert_eq!(request.message_list_limit, 25_000);
         assert!(request.use_threads);
         assert_eq!(request.thread_uid, 77);
         assert_eq!(request.thread_algorithm, "REFERENCES");
@@ -14598,6 +14605,7 @@ Subject: Empty body metadata\r\n\r\n"
                 hide_deleted: true,
                 fast_simple_search: true,
                 permanent_filter: String::new(),
+                message_list_limit: 10_000,
                 use_threads: false,
                 thread_uid: 0,
                 thread_algorithm: String::new(),
@@ -14742,6 +14750,7 @@ Subject: Empty body metadata\r\n\r\n"
             hide_deleted: true,
             fast_simple_search: true,
             permanent_filter: String::new(),
+            message_list_limit: 10_000,
             use_threads: true,
             thread_uid: 77,
             thread_algorithm: "REFERENCES".to_string(),
@@ -16378,8 +16387,7 @@ Subject: Empty body metadata\r\n\r\n"
     async fn native_frickmail_export_message_returns_safe_eml_payload() {
         let key = [30_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1640, 1641, &key).await;
-        let captured: Arc<Mutex<Option<(String, String, String, u32)>>> =
-            Arc::new(Mutex::new(None));
+        let captured: ExportMessageCapture = Arc::new(Mutex::new(None));
         let captured_for_fetch = Arc::clone(&captured);
 
         let response = super::native_frickmail_export_message_with_fetcher(
@@ -16514,8 +16522,7 @@ Subject: Empty body metadata\r\n\r\n"
         let key = [32_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1644, 1645, &key).await;
         let raw = b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nImported body";
-        let captured: Arc<Mutex<Option<(String, String, String, Vec<u8>)>>> =
-            Arc::new(Mutex::new(None));
+        let captured: AppendMessageCapture = Arc::new(Mutex::new(None));
         let captured_for_append = Arc::clone(&captured);
 
         let response = super::native_frickmail_import_eml_with_appender(
@@ -16723,8 +16730,7 @@ Subject: Empty body metadata\r\n\r\n"
             .await
             .unwrap();
         let raw = b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nAppended body";
-        let captured: Arc<Mutex<Option<(String, String, String, Vec<u8>)>>> =
-            Arc::new(Mutex::new(None));
+        let captured: AppendMessageCapture = Arc::new(Mutex::new(None));
         let captured_for_append = Arc::clone(&captured);
 
         let response = super::native_legacy_folder_append_multipart_with_appender(
@@ -17361,8 +17367,7 @@ Subject: Empty body metadata\r\n\r\n"
         let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
         let session =
             credential_session(148, "apply-rules", Some("apply-rules@example.com"), &key).await;
-        let captured: Arc<Mutex<Option<(ImapConnectionConfig, String, Vec<RuleExecutionPlan>)>>> =
-            Arc::new(Mutex::new(None));
+        let captured: RuleExecutionCapture = Arc::new(Mutex::new(None));
         let captured_for_executor = Arc::clone(&captured);
 
         let response = super::native_frickmail_apply_rules_with_executor(

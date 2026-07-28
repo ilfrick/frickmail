@@ -114,6 +114,14 @@ impl RedisLegacyMessageListUidCache {
 
 #[async_trait::async_trait]
 impl LegacyMessageListUidCache for RedisLegacyMessageListUidCache {
+    fn max_uid_entries(&self) -> usize {
+        MAX_CACHED_UIDS
+    }
+
+    fn coordination_namespace(&self) -> String {
+        format!("{}\0{}", self.account_prefix, self.fast_cache_index)
+    }
+
     async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>> {
         let payload = self.read_payload(raw_key, "uids").await?;
         let cached = match serde_json::from_slice::<CachedUids>(&payload) {

@@ -58,6 +58,8 @@ pub struct MailDefaults {
     pub message_list_fast_simple_search: bool,
     #[serde(default)]
     pub message_list_permanent_filter: String,
+    #[serde(default = "default_message_list_limit")]
+    pub message_list_limit: u32,
     #[serde(
         default,
         deserialize_with = "deserialize_message_list_domain_overrides"
@@ -69,6 +71,7 @@ pub struct MailDefaults {
 pub struct MessageListDomainOverride {
     pub fast_simple_search: Option<bool>,
     pub permanent_filter: Option<String>,
+    pub message_list_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,19 +153,19 @@ impl Default for MailDefaults {
             fetch_new_messages: default_fetch_new_messages(),
             message_list_fast_simple_search: default_message_list_fast_simple_search(),
             message_list_permanent_filter: String::new(),
+            message_list_limit: default_message_list_limit(),
             message_list_domain_overrides: HashMap::new(),
         }
     }
 }
 
 impl MailDefaults {
-    pub fn message_list_search_settings(&self, email: &str) -> (bool, String) {
+    fn message_list_domain_override(&self, email: &str) -> Option<&MessageListDomainOverride> {
         let domain = email
             .rsplit_once('@')
             .map(|(_, domain)| legacy_ascii_domain(domain))
             .unwrap_or_default();
-        let domain_override = self
-            .message_list_domain_overrides
+        self.message_list_domain_overrides
             .iter()
             .find(|(pattern, _)| !pattern.contains('*') && pattern.eq_ignore_ascii_case(&domain))
             .map(|(_, value)| value)
@@ -177,7 +180,11 @@ impl MailDefaults {
                     .into_iter()
                     .find(|(pattern, _)| legacy_domain_pattern_matches(pattern, &domain))
                     .map(|(_, value)| value)
-            });
+            })
+    }
+
+    pub fn message_list_search_settings(&self, email: &str) -> (bool, String) {
+        let domain_override = self.message_list_domain_override(email);
 
         let fast_simple_search = self.message_list_fast_simple_search
             && domain_override
@@ -191,6 +198,12 @@ impl MailDefaults {
             .unwrap_or_else(|| self.message_list_permanent_filter.trim())
             .to_string();
         (fast_simple_search, permanent_filter)
+    }
+
+    pub fn message_list_limit(&self, email: &str) -> u32 {
+        self.message_list_domain_override(email)
+            .and_then(|value| value.message_list_limit)
+            .unwrap_or(self.message_list_limit)
     }
 }
 
@@ -436,6 +449,10 @@ fn default_message_list_fast_simple_search() -> bool {
     true
 }
 
+fn default_message_list_limit() -> u32 {
+    10_000
+}
+
 fn default_cache_index() -> String {
     "v1".to_string()
 }
@@ -502,7 +519,8 @@ mod tests {
                 "*.example.com": {"fast_simple_search": false},
                 "mail.example.com": {
                     "fast_simple_search": true,
-                    "permanent_filter": "  ANSWERED  "
+                    "permanent_filter": "  ANSWERED  ",
+                    "message_list_limit": 25000
                 },
                 "xn--bcher-kva.de": {
                     "permanent_filter": "UNSEEN"
@@ -533,6 +551,8 @@ mod tests {
             mail.message_list_search_settings("alice@bücher.de"),
             (true, "UNSEEN".to_string())
         );
+        assert_eq!(mail.message_list_limit("alice@mail.example.com"), 25_000);
+        assert_eq!(mail.message_list_limit("alice@other.example.com"), 10_000);
     }
 
     #[test]
@@ -559,6 +579,18 @@ mod tests {
             "message_list_domain_overrides": "{not-json"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn message_list_limit_defaults_to_mailso_value_and_allows_disable() {
+        let defaults = serde_json::from_value::<MailDefaults>(serde_json::json!({})).unwrap();
+        assert_eq!(defaults.message_list_limit("alice@example.com"), 10_000);
+
+        let disabled = serde_json::from_value::<MailDefaults>(serde_json::json!({
+            "message_list_limit": 0
+        }))
+        .unwrap();
+        assert_eq!(disabled.message_list_limit("alice@example.com"), 0);
     }
 
     #[test]
