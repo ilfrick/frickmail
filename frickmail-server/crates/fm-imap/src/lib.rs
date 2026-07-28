@@ -440,6 +440,18 @@ pub struct LegacyMessageListRequest {
 pub trait LegacyMessageListUidCache: Send + Sync {
     async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>>;
     async fn set(&self, raw_key: &str, folder_hash: &str, uids: &[u32]);
+
+    async fn get_thread_map(&self, _raw_key: &str) -> Option<Vec<Vec<u32>>> {
+        None
+    }
+
+    async fn set_thread_map(&self, _raw_key: &str, _threads: &[Vec<u32>]) {}
+
+    async fn get_thread_uids(&self, _raw_key: &str) -> Option<Vec<u32>> {
+        None
+    }
+
+    async fn set_thread_uids(&self, _raw_key: &str, _uids: &[u32]) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2989,8 +3001,35 @@ async fn fetch_legacy_message_threads_compat(
         .unwrap_or_default()
 }
 
-fn legacy_thread_representatives(uids: &mut Vec<u32>, threads: &[Vec<u32>]) {
-    let old_uids = threads
+fn legacy_message_list_thread_map_cache_key(algorithm: &str, folder_hash: &str) -> String {
+    format!("ThreadsMap/{algorithm}/ALL/{folder_hash}")
+}
+
+fn legacy_message_list_thread_uids_cache_key(folder_hash: &str) -> String {
+    format!("ThreadsOldUids/{folder_hash}/N")
+}
+
+async fn fetch_legacy_message_threads_cached(
+    session: &mut BoxedSession,
+    algorithm: &str,
+    folder_hash: &str,
+    cache: Option<&dyn LegacyMessageListUidCache>,
+) -> Vec<Vec<u32>> {
+    let Some(cache) = cache else {
+        return fetch_legacy_message_threads_compat(session, algorithm).await;
+    };
+    let raw_key = legacy_message_list_thread_map_cache_key(algorithm, folder_hash);
+    if let Some(threads) = cache.get_thread_map(&raw_key).await {
+        return threads;
+    }
+
+    let threads = fetch_legacy_message_threads_compat(session, algorithm).await;
+    cache.set_thread_map(&raw_key, &threads).await;
+    threads
+}
+
+fn legacy_thread_old_uids(threads: &[Vec<u32>]) -> Vec<u32> {
+    threads
         .iter()
         .flat_map(|thread| {
             let newest = thread.iter().copied().max();
@@ -2999,7 +3038,29 @@ fn legacy_thread_representatives(uids: &mut Vec<u32>, threads: &[Vec<u32>]) {
                 .copied()
                 .filter(move |uid| Some(*uid) != newest)
         })
-        .collect::<HashSet<_>>();
+        .collect()
+}
+
+async fn legacy_thread_old_uids_cached(
+    threads: &[Vec<u32>],
+    folder_hash: &str,
+    cache: Option<&dyn LegacyMessageListUidCache>,
+) -> Vec<u32> {
+    let Some(cache) = cache else {
+        return legacy_thread_old_uids(threads);
+    };
+    let raw_key = legacy_message_list_thread_uids_cache_key(folder_hash);
+    if let Some(uids) = cache.get_thread_uids(&raw_key).await {
+        return uids;
+    }
+
+    let uids = legacy_thread_old_uids(threads);
+    cache.set_thread_uids(&raw_key, &uids).await;
+    uids
+}
+
+fn legacy_thread_representatives(uids: &mut Vec<u32>, old_uids: &[u32]) {
+    let old_uids = old_uids.iter().copied().collect::<HashSet<_>>();
     uids.retain(|uid| !old_uids.contains(uid));
 }
 
@@ -3812,14 +3873,18 @@ async fn legacy_message_list_in_session(
         }
 
         if let Some(algorithm) = thread_algorithm.as_deref() {
-            let threads = fetch_legacy_message_threads_compat(session, algorithm).await;
+            let threads =
+                fetch_legacy_message_threads_cached(session, algorithm, &folder.etag, uid_cache)
+                    .await;
             total_threads = Some(u32::try_from(threads.len()).unwrap_or(u32::MAX));
 
             if request.thread_uid > 0 {
                 uids = legacy_selected_thread_uids(request.thread_uid, &threads);
                 message_threads = vec![uids.clone()];
             } else {
-                legacy_thread_representatives(&mut uids, &threads);
+                let old_uids =
+                    legacy_thread_old_uids_cached(&threads, &folder.etag, uid_cache).await;
+                legacy_thread_representatives(&mut uids, &old_uids);
                 unseen_uids = legacy_message_list_visible_uids_cached(
                     session,
                     &request.mailbox,
@@ -10564,8 +10629,23 @@ mod tests {
     #[test]
     fn message_list_thread_representatives_use_highest_uid_like_mailso() {
         let mut uids = vec![12, 11, 10, 9, 8, 7];
-        legacy_thread_representatives(&mut uids, &[vec![7, 9, 8], vec![10, 12], vec![11]]);
+        let threads = [vec![7, 9, 8], vec![10, 12], vec![11]];
+        let old_uids = legacy_thread_old_uids(&threads);
+        legacy_thread_representatives(&mut uids, &old_uids);
         assert_eq!(uids, vec![12, 11, 9]);
+        assert_eq!(old_uids, vec![7, 8, 10]);
+    }
+
+    #[test]
+    fn message_list_thread_cache_keys_match_mailso() {
+        assert_eq!(
+            legacy_message_list_thread_map_cache_key("REFERENCES", "etag"),
+            "ThreadsMap/REFERENCES/ALL/etag"
+        );
+        assert_eq!(
+            legacy_message_list_thread_uids_cache_key("etag"),
+            "ThreadsOldUids/etag/N"
+        );
     }
 
     #[test]

@@ -32,6 +32,18 @@ struct CachedUids {
     uids: Vec<u32>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct CachedThreadMap {
+    #[serde(rename = "ThreadsUids")]
+    threads_uids: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CachedThreadUids {
+    #[serde(rename = "ThreadsUids")]
+    threads_uids: Vec<u32>,
+}
+
 impl RedisLegacyMessageListUidCache {
     pub(crate) fn new(pool: Pool, account_email: &str, fast_cache_index: String) -> Self {
         Self {
@@ -61,25 +73,49 @@ impl RedisLegacyMessageListUidCache {
             .query_async(&mut connection)
             .await?)
     }
+
+    async fn read_payload(&self, raw_key: &str, cache_kind: &str) -> Option<Vec<u8>> {
+        let backend_key =
+            legacy_cache_backend_key(&self.account_prefix, raw_key, &self.fast_cache_index);
+        match timeout(CACHE_OPERATION_TIMEOUT, self.get_value(&backend_key)).await {
+            Ok(Ok(Some(payload))) if payload.len() <= MAX_CACHE_PAYLOAD_BYTES => Some(payload),
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => {
+                warn!(%error, cache_kind, "legacy message-list cache read failed");
+                None
+            }
+            Err(_) => {
+                warn!(cache_kind, "legacy message-list cache read timed out");
+                None
+            }
+        }
+    }
+
+    async fn write_payload(&self, raw_key: &str, payload: &[u8], cache_kind: &str) {
+        if payload.len() > MAX_CACHE_PAYLOAD_BYTES {
+            return;
+        }
+        let backend_key =
+            legacy_cache_backend_key(&self.account_prefix, raw_key, &self.fast_cache_index);
+        match timeout(
+            CACHE_OPERATION_TIMEOUT,
+            self.set_value(&backend_key, payload),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, cache_kind, "legacy message-list cache write failed")
+            }
+            Err(_) => warn!(cache_kind, "legacy message-list cache write timed out"),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl LegacyMessageListUidCache for RedisLegacyMessageListUidCache {
     async fn get(&self, raw_key: &str, folder_hash: &str) -> Option<Vec<u32>> {
-        let backend_key =
-            legacy_cache_backend_key(&self.account_prefix, raw_key, &self.fast_cache_index);
-        let payload = match timeout(CACHE_OPERATION_TIMEOUT, self.get_value(&backend_key)).await {
-            Ok(Ok(Some(payload))) if payload.len() <= MAX_CACHE_PAYLOAD_BYTES => payload,
-            Ok(Ok(_)) => return None,
-            Ok(Err(error)) => {
-                warn!(%error, "server UID cache read failed");
-                return None;
-            }
-            Err(_) => {
-                warn!("server UID cache read timed out");
-                return None;
-            }
-        };
+        let payload = self.read_payload(raw_key, "uids").await?;
         let cached = match serde_json::from_slice::<CachedUids>(&payload) {
             Ok(cached) if cached.folder_hash == folder_hash && valid_cached_uids(&cached.uids) => {
                 cached
@@ -99,21 +135,44 @@ impl LegacyMessageListUidCache for RedisLegacyMessageListUidCache {
         }) else {
             return;
         };
-        if payload.len() > MAX_CACHE_PAYLOAD_BYTES {
+        self.write_payload(raw_key, &payload, "uids").await;
+    }
+
+    async fn get_thread_map(&self, raw_key: &str) -> Option<Vec<Vec<u32>>> {
+        let payload = self.read_payload(raw_key, "thread map").await?;
+        let cached = serde_json::from_slice::<CachedThreadMap>(&payload).ok()?;
+        valid_cached_threads(&cached.threads_uids).then_some(cached.threads_uids)
+    }
+
+    async fn set_thread_map(&self, raw_key: &str, threads: &[Vec<u32>]) {
+        if !valid_cached_threads(threads) {
             return;
         }
-        let backend_key =
-            legacy_cache_backend_key(&self.account_prefix, raw_key, &self.fast_cache_index);
-        match timeout(
-            CACHE_OPERATION_TIMEOUT,
-            self.set_value(&backend_key, &payload),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => warn!(%error, "server UID cache write failed"),
-            Err(_) => warn!("server UID cache write timed out"),
+        let Ok(payload) = serde_json::to_vec(&CachedThreadMap {
+            threads_uids: threads.to_vec(),
+        }) else {
+            return;
+        };
+        self.write_payload(raw_key, &payload, "thread map").await;
+    }
+
+    async fn get_thread_uids(&self, raw_key: &str) -> Option<Vec<u32>> {
+        let payload = self.read_payload(raw_key, "old thread UIDs").await?;
+        let cached = serde_json::from_slice::<CachedThreadUids>(&payload).ok()?;
+        valid_cached_uids(&cached.threads_uids).then_some(cached.threads_uids)
+    }
+
+    async fn set_thread_uids(&self, raw_key: &str, uids: &[u32]) {
+        if !valid_cached_uids(uids) {
+            return;
         }
+        let Ok(payload) = serde_json::to_vec(&CachedThreadUids {
+            threads_uids: uids.to_vec(),
+        }) else {
+            return;
+        };
+        self.write_payload(raw_key, &payload, "old thread UIDs")
+            .await;
     }
 }
 
@@ -121,6 +180,19 @@ fn valid_cached_uids(uids: &[u32]) -> bool {
     uids.len() <= MAX_CACHED_UIDS
         && uids.iter().all(|uid| *uid > 0)
         && uids.iter().copied().collect::<HashSet<_>>().len() == uids.len()
+}
+
+fn valid_cached_threads(threads: &[Vec<u32>]) -> bool {
+    if threads.len() > MAX_CACHED_UIDS {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    threads.iter().all(|thread| {
+        !thread.is_empty()
+            && thread
+                .iter()
+                .all(|uid| *uid > 0 && seen.len() < MAX_CACHED_UIDS && seen.insert(*uid))
+    })
 }
 
 fn legacy_cache_account_prefix(account_email: &str) -> String {
@@ -172,7 +244,8 @@ fn legacy_cache_backend_key(account_prefix: &str, raw_key: &str, fast_index: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        legacy_cache_account_prefix, legacy_cache_backend_key, valid_cached_uids, CachedUids,
+        legacy_cache_account_prefix, legacy_cache_backend_key, valid_cached_threads,
+        valid_cached_uids, CachedThreadMap, CachedThreadUids, CachedUids,
         RedisLegacyMessageListUidCache, MAX_CACHED_UIDS,
     };
     use deadpool_redis::{redis::cmd, Config, Runtime};
@@ -207,6 +280,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(payload, r#"{"FolderHash":"etag","Uids":[9,4]}"#);
+        assert_eq!(
+            serde_json::to_string(&CachedThreadMap {
+                threads_uids: vec![vec![9, 4], vec![7]]
+            })
+            .unwrap(),
+            r#"{"ThreadsUids":[[9,4],[7]]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CachedThreadUids {
+                threads_uids: vec![4, 7]
+            })
+            .unwrap(),
+            r#"{"ThreadsUids":[4,7]}"#
+        );
     }
 
     #[test]
@@ -215,6 +302,16 @@ mod tests {
         assert!(!valid_cached_uids(&[9, 0]));
         assert!(!valid_cached_uids(&[9, 9]));
         assert!(!valid_cached_uids(&vec![1; MAX_CACHED_UIDS + 1]));
+    }
+
+    #[test]
+    fn cached_threads_are_bounded_positive_nonempty_and_globally_unique() {
+        assert!(valid_cached_threads(&[vec![9, 4], vec![7]]));
+        assert!(valid_cached_threads(&[]));
+        assert!(!valid_cached_threads(&[vec![]]));
+        assert!(!valid_cached_threads(&[vec![9, 0]]));
+        assert!(!valid_cached_threads(&[vec![9], vec![9]]));
+        assert!(!valid_cached_threads(&[vec![1; MAX_CACHED_UIDS + 1]]));
     }
 
     #[tokio::test]
@@ -238,6 +335,22 @@ mod tests {
         assert_eq!(cache.get(&raw_key, "etag-1").await, Some(vec![9, 4]));
         assert_eq!(cache.get(&raw_key, "stale-etag").await, None);
 
+        let thread_map_key = format!("ThreadsMap/REFERENCES/ALL/test-etag-{}", std::process::id());
+        cache
+            .set_thread_map(&thread_map_key, &[vec![9, 4], vec![7]])
+            .await;
+        assert_eq!(
+            cache.get_thread_map(&thread_map_key).await,
+            Some(vec![vec![9, 4], vec![7]])
+        );
+
+        let thread_uids_key = format!("ThreadsOldUids/test-etag-{}/N", std::process::id());
+        cache.set_thread_uids(&thread_uids_key, &[4, 7]).await;
+        assert_eq!(
+            cache.get_thread_uids(&thread_uids_key).await,
+            Some(vec![4, 7])
+        );
+
         let mut connection = pool.get().await.unwrap();
         let ttl: i64 = cmd("TTL")
             .arg(&backend_key)
@@ -250,5 +363,13 @@ mod tests {
             .query_async(&mut connection)
             .await
             .unwrap();
+        for raw_key in [&thread_map_key, &thread_uids_key] {
+            let backend_key = legacy_cache_backend_key(&account_prefix, raw_key, "test-v1");
+            let _: usize = cmd("DEL")
+                .arg(backend_key)
+                .query_async(&mut connection)
+                .await
+                .unwrap();
+        }
     }
 }
