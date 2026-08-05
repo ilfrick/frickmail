@@ -654,6 +654,10 @@ struct ImapFetchMetadataCapabilities {
     thread_algorithms: Vec<String>,
 }
 
+fn legacy_message_fetches_gmail_id(capabilities: &ImapFetchMetadataCapabilities) -> bool {
+    capabilities.supports_gmail_id && !capabilities.supports_object_id
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LegacyMessageListMultiSearchScope {
     Mailboxes,
@@ -771,8 +775,24 @@ async fn fetch_legacy_message_email_id(
         return Ok(None);
     }
 
-    let operation = "fetch message EMAILID";
-    let command = format!("UID FETCH {uid} (UID EMAILID)");
+    let mut email_ids =
+        fetch_legacy_message_email_ids(session, &[uid], "fetch message EMAILID").await?;
+    Ok(email_ids.remove(&uid))
+}
+
+async fn fetch_legacy_message_email_ids(
+    session: &mut BoxedSession,
+    uids: &[u32],
+    operation: &'static str,
+) -> Result<HashMap<u32, String>> {
+    let requested_uids = uids
+        .iter()
+        .copied()
+        .filter(|uid| *uid > 0)
+        .collect::<HashSet<_>>();
+    let uid_set = legacy_uid_sequence_set(uids)
+        .ok_or_else(|| FrickmailError::BadRequest("uid required".to_string()))?;
+    let command = format!("UID FETCH {uid_set} (UID EMAILID)");
     timeout_result(
         operation,
         timeout(COMMAND_TIMEOUT, async {
@@ -780,7 +800,7 @@ async fn fetch_legacy_message_email_id(
                 .run_command(&command)
                 .await
                 .map_err(|error| imap_error(operation, error))?;
-            let mut email_id = None;
+            let mut email_ids = HashMap::new();
             loop {
                 let response = session
                     .read_response()
@@ -798,12 +818,13 @@ async fn fetch_legacy_message_email_id(
                         AttributeValue::Uid(value) => Some(*value),
                         _ => None,
                     });
-                    if response_uid == Some(uid) {
-                        if let Some(value) = attrs.iter().find_map(|attr| match attr {
-                            AttributeValue::EmailId(value) => Some(value.to_string()),
-                            _ => None,
-                        }) {
-                            email_id = Some(value);
+                    let email_id = attrs.iter().find_map(|attr| match attr {
+                        AttributeValue::EmailId(value) => Some(value.to_string()),
+                        _ => None,
+                    });
+                    if let (Some(response_uid), Some(email_id)) = (response_uid, email_id) {
+                        if requested_uids.contains(&response_uid) {
+                            email_ids.insert(response_uid, email_id);
                         }
                     }
                 }
@@ -813,7 +834,7 @@ async fn fetch_legacy_message_email_id(
                     )));
                 }
                 if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
-                    return Ok(email_id);
+                    return Ok(email_ids);
                 }
             }
         }),
@@ -3522,7 +3543,10 @@ async fn fetch_legacy_message_list_summaries(
     }) else {
         return Ok(Vec::new());
     };
-    let query = legacy_message_list_fetch_query_with_gmail_id(capabilities.supports_gmail_id);
+    let query = legacy_message_list_fetch_query_with_gmail_id(legacy_message_fetches_gmail_id(
+        capabilities,
+    ));
+    let requested_ids = ids.iter().copied().collect::<HashSet<_>>();
     let mut fetches: Pin<
         Box<
             dyn Stream<
@@ -3553,10 +3577,16 @@ async fn fetch_legacy_message_list_summaries(
         let Some(uid) = fetch.uid else {
             continue;
         };
+        let Some(bodystructure) = fetch.bodystructure() else {
+            continue;
+        };
         let id = match mode {
             LegacyMessageListFetchMode::Uids => uid,
             LegacyMessageListFetchMode::Sequences => fetch.message,
         };
+        if !requested_ids.contains(&id) {
+            continue;
+        }
         let header = fetch.header().unwrap_or_default();
         let mut summary = legacy_message_summary_from_fetch_with_email_id(
             mailbox,
@@ -3564,7 +3594,7 @@ async fn fetch_legacy_message_list_summaries(
             fetch.internal_date().map(|value| value.timestamp()),
             fetch.size.unwrap_or_default(),
             fetch.flags(),
-            fetch.bodystructure(),
+            Some(bodystructure),
             header,
             fetch.gmail_msg_id().map(u64::to_string),
         );
@@ -3573,6 +3603,26 @@ async fn fetch_legacy_message_list_summaries(
         messages_by_id.insert(id, summary);
     }
     drop(fetches);
+
+    if capabilities.supports_object_id {
+        let fetched_uids = messages_by_id
+            .values()
+            .map(|message| message.uid)
+            .collect::<Vec<_>>();
+        if !fetched_uids.is_empty() {
+            let mut email_ids = fetch_legacy_message_email_ids(
+                session,
+                &fetched_uids,
+                "fetch legacy message-list EMAILIDs",
+            )
+            .await?;
+            for message in messages_by_id.values_mut() {
+                if let Some(email_id) = email_ids.remove(&message.uid) {
+                    message.email_id = Some(email_id);
+                }
+            }
+        }
+    }
 
     if capabilities.supports_preview {
         let fetched_uids = messages_by_id
@@ -3655,12 +3705,15 @@ async fn fetch_legacy_message_list_multisearch_page(
                 "multisearch legacy message list produced an empty UID page".to_string(),
             )
         })?;
+        let requested_uids = page_uids.iter().copied().collect::<HashSet<_>>();
         let mut messages_by_uid = HashMap::new();
         let mut fetches = timeout_imap(
             "fetch multisearch legacy message list",
             session.uid_fetch(
                 uid_set.clone(),
-                legacy_message_list_fetch_query_with_gmail_id(capabilities.supports_gmail_id),
+                legacy_message_list_fetch_query_with_gmail_id(legacy_message_fetches_gmail_id(
+                    capabilities,
+                )),
             ),
         )
         .await?;
@@ -3674,6 +3727,12 @@ async fn fetch_legacy_message_list_multisearch_page(
             let Some(uid) = fetch.uid else {
                 continue;
             };
+            let Some(bodystructure) = fetch.bodystructure() else {
+                continue;
+            };
+            if !requested_uids.contains(&uid) {
+                continue;
+            }
             let header = fetch.header().unwrap_or_default();
             let summary = legacy_message_summary_from_fetch_with_email_id(
                 mailbox,
@@ -3681,7 +3740,7 @@ async fn fetch_legacy_message_list_multisearch_page(
                 fetch.internal_date().map(|value| value.timestamp()),
                 fetch.size.unwrap_or_default(),
                 fetch.flags(),
-                fetch.bodystructure(),
+                Some(bodystructure),
                 header,
                 fetch.gmail_msg_id().map(u64::to_string),
             );
@@ -3696,6 +3755,19 @@ async fn fetch_legacy_message_list_multisearch_page(
             return Err(FrickmailError::Upstream(format!(
                 "multisearch legacy message list changed while fetching {mailbox}"
             )));
+        }
+        if capabilities.supports_object_id {
+            for (uid, email_id) in fetch_legacy_message_email_ids(
+                session,
+                &page_uids,
+                "fetch multisearch legacy message-list EMAILIDs",
+            )
+            .await?
+            {
+                if let Some(message) = messages_by_uid.get_mut(&uid) {
+                    message.email_id = Some(email_id);
+                }
+            }
         }
         if capabilities.supports_preview {
             for (uid, preview) in fetch_legacy_message_list_previews(session, &uid_set).await? {
@@ -6777,7 +6849,7 @@ async fn fetch_body_part_specs(
             uid.to_string(),
             uid_fetch_bodystructure_query_with_gmail_id(
                 uid,
-                capabilities.supports_gmail_id && !capabilities.supports_object_id,
+                legacy_message_fetches_gmail_id(&capabilities),
             )?,
         ),
     )
@@ -11539,6 +11611,163 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         assert_eq!(email_id.as_deref(), Some("M6d99ac3275bb4e"));
     }
 
+    #[tokio::test]
+    async fn message_list_fetch_prefers_correlated_object_email_ids_over_gmail_ids() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert!(fetch.starts_with("A0002 UID FETCH 41,42 (UID FLAGS "));
+            assert!(!fetch.contains("X-GM-MSGID"));
+            server_stream
+                .write_all(
+                    b"* 99 FETCH (UID 99)\r\n\
+                      * 1 FETCH (UID 41 FLAGS (\\Answered) RFC822.SIZE 123 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 1 FETCH (UID 41 FLAGS (\\Seen))\r\n\
+                      * 2 FETCH (UID 42 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      A0002 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+
+            let email_ids = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(email_ids, "A0003 UID FETCH 41,42 (UID EMAILID)\r\n");
+            server_stream
+                .write_all(
+                    b"* 3 FETCH (UID 99 EMAILID (Mwrongmessage))\r\n\
+                      * 1 FETCH (UID 41 EMAILID (Mmessage41))\r\n\
+                      * 1 FETCH (UID 41 FLAGS (\\Seen))\r\n\
+                      * 2 FETCH (UID 42 EMAILID (Mmessage42))\r\n\
+                      A0003 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let messages = fetch_legacy_message_list_summaries(
+            &mut session,
+            "INBOX",
+            &[42, 41],
+            LegacyMessageListFetchMode::Uids,
+            &ImapFetchMetadataCapabilities {
+                supports_gmail_id: true,
+                supports_object_id: true,
+                supports_preview: false,
+                supports_literal_plus: false,
+                uses_utf8_search: false,
+                supports_within: false,
+                supports_multisearch: false,
+                supports_sort: false,
+                supports_sort_display: false,
+                thread_algorithms: Vec::new(),
+            },
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.uid, message.email_id.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(42, Some("Mmessage42")), (41, Some("Mmessage41"))]
+        );
+        assert_eq!(messages[1].size, 123);
+        assert_eq!(messages[1].flags, vec!["\\answered"]);
+    }
+
+    #[tokio::test]
+    async fn limited_sequence_message_list_maps_object_email_ids_by_uid() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert!(fetch.starts_with("A0002 FETCH 2,1 (UID FLAGS "));
+            server_stream
+                .write_all(
+                    b"* 99 FETCH (UID 99)\r\n\
+                      * 1 FETCH (UID 41 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 1 FETCH (UID 41 FLAGS (\\Seen))\r\n\
+                      * 2 FETCH (UID 42 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      A0002 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+
+            let email_ids = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(email_ids, "A0003 UID FETCH 41,42 (UID EMAILID)\r\n");
+            server_stream
+                .write_all(
+                    b"* 1 FETCH (UID 41 EMAILID (Mmessage41))\r\n\
+                      * 2 FETCH (UID 42 EMAILID (Mmessage42))\r\n\
+                      A0003 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let messages = fetch_legacy_message_list_summaries(
+            &mut session,
+            "INBOX",
+            &[2, 1],
+            LegacyMessageListFetchMode::Sequences,
+            &ImapFetchMetadataCapabilities {
+                supports_gmail_id: false,
+                supports_object_id: true,
+                supports_preview: false,
+                supports_literal_plus: false,
+                uses_utf8_search: false,
+                supports_within: false,
+                supports_multisearch: false,
+                supports_sort: false,
+                supports_sort_display: false,
+                thread_algorithms: Vec::new(),
+            },
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.uid, message.email_id.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(42, Some("Mmessage42")), (41, Some("Mmessage41"))]
+        );
+    }
+
     async fn run_scripted_visible_uid_search(
         search_value: &'static str,
         hide_deleted: bool,
@@ -12155,7 +12384,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 server_stream
                     .write_all(
                         format!(
-                            "* CAPABILITY IMAP4rev1 MULTISEARCH SORT THREAD=REFERENCES\r\n\
+                            "* CAPABILITY IMAP4rev1 MULTISEARCH OBJECTID SORT THREAD=REFERENCES\r\n\
                              {tag} OK capability\r\n"
                         )
                         .as_bytes(),
@@ -12167,11 +12396,11 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             let status = read_scripted_imap_command(&mut server_stream).await;
             assert_eq!(
                 status,
-                "A0004 STATUS \"INBOX\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)\r\n"
+                "A0004 STATUS \"INBOX\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY MAILBOXID)\r\n"
             );
             server_stream
                 .write_all(
-                    b"* STATUS \"INBOX\" (MESSAGES 0 UNSEEN 0 UIDNEXT 1 UIDVALIDITY 1)\r\n\
+                    b"* STATUS \"INBOX\" (MESSAGES 0 UNSEEN 0 UIDNEXT 1 UIDVALIDITY 1 MAILBOXID (Minbox))\r\n\
                       A0004 OK status\r\n",
                 )
                 .await
@@ -12235,20 +12464,31 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             assert!(fetch_archive.starts_with("A0009 UID FETCH 2 ("));
             server_stream
                 .write_all(
-                    b"* 1 FETCH (UID 2)\r\n\
+                    b"* 99 FETCH (UID 99 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 1 FETCH (UID 2 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
                       A0009 OK fetched\r\n",
                 )
                 .await
                 .unwrap();
 
+            let archive_email_ids = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(archive_email_ids, "A0010 UID FETCH 2 (UID EMAILID)\r\n");
+            server_stream
+                .write_all(
+                    b"* 1 FETCH (UID 2 EMAILID (Marchive2))\r\n\
+                      A0010 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+
             let examine_projects = read_scripted_imap_command(&mut server_stream).await;
-            assert_eq!(examine_projects, "A0010 EXAMINE \"Projects\"\r\n");
+            assert_eq!(examine_projects, "A0011 EXAMINE \"Projects\"\r\n");
             server_stream
                 .write_all(
                     b"* 9 EXISTS\r\n\
                       * 0 RECENT\r\n\
                       * OK [UIDVALIDITY 42] valid\r\n\
-                      A0010 OK [READ-ONLY] examined\r\n",
+                      A0011 OK [READ-ONLY] examined\r\n",
                 )
                 .await
                 .unwrap();
@@ -12256,30 +12496,51 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             let search_projects = read_scripted_imap_command(&mut server_stream).await;
             assert_eq!(
                 search_projects,
-                "A0011 UID SEARCH SUBJECT \"report\" UNDELETED\r\n"
+                "A0012 UID SEARCH SUBJECT \"report\" UNDELETED\r\n"
             );
             server_stream
                 .write_all(
                     b"* SEARCH 10 11 12 13 14 15 16 17 18\r\n\
-                      A0011 OK searched\r\n",
+                      A0012 OK searched\r\n",
                 )
                 .await
                 .unwrap();
 
             let fetch_projects = read_scripted_imap_command(&mut server_stream).await;
-            assert!(fetch_projects.starts_with("A0012 UID FETCH 10,11,12,13,14,15,16,17,18 ("));
+            assert!(fetch_projects.starts_with("A0013 UID FETCH 10,11,12,13,14,15,16,17,18 ("));
             server_stream
                 .write_all(
-                    b"* 1 FETCH (UID 10)\r\n\
-                      * 2 FETCH (UID 11)\r\n\
-                      * 3 FETCH (UID 12)\r\n\
-                      * 4 FETCH (UID 13)\r\n\
-                      * 5 FETCH (UID 14)\r\n\
-                      * 6 FETCH (UID 15)\r\n\
-                      * 7 FETCH (UID 16)\r\n\
-                      * 8 FETCH (UID 17)\r\n\
-                      * 9 FETCH (UID 18)\r\n\
-                      A0012 OK fetched\r\n",
+                    b"* 1 FETCH (UID 10 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 2 FETCH (UID 11 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 3 FETCH (UID 12 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 4 FETCH (UID 13 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 5 FETCH (UID 14 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 6 FETCH (UID 15 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 7 FETCH (UID 16 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 8 FETCH (UID 17 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 9 FETCH (UID 18 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      A0013 OK fetched\r\n",
+                )
+                .await
+                .unwrap();
+
+            let project_email_ids = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                project_email_ids,
+                "A0014 UID FETCH 10,11,12,13,14,15,16,17,18 (UID EMAILID)\r\n"
+            );
+            server_stream
+                .write_all(
+                    b"* 1 FETCH (UID 10 EMAILID (Mproject10))\r\n\
+                      * 2 FETCH (UID 11 EMAILID (Mproject11))\r\n\
+                      * 3 FETCH (UID 12 EMAILID (Mproject12))\r\n\
+                      * 4 FETCH (UID 13 EMAILID (Mproject13))\r\n\
+                      * 5 FETCH (UID 14 EMAILID (Mproject14))\r\n\
+                      * 6 FETCH (UID 15 EMAILID (Mproject15))\r\n\
+                      * 7 FETCH (UID 16 EMAILID (Mproject16))\r\n\
+                      * 8 FETCH (UID 17 EMAILID (Mproject17))\r\n\
+                      * 9 FETCH (UID 18 EMAILID (Mproject18))\r\n\
+                      A0014 OK fetched\r\n",
                 )
                 .await
                 .unwrap();
@@ -12326,19 +12587,25 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             result
                 .messages
                 .iter()
-                .map(|message| (message.folder.as_str(), message.uid))
+                .map(|message| {
+                    (
+                        message.folder.as_str(),
+                        message.uid,
+                        message.email_id.as_deref(),
+                    )
+                })
                 .collect::<Vec<_>>(),
             vec![
-                ("Archive", 2),
-                ("Projects", 18),
-                ("Projects", 17),
-                ("Projects", 16),
-                ("Projects", 15),
-                ("Projects", 14),
-                ("Projects", 13),
-                ("Projects", 12),
-                ("Projects", 11),
-                ("Projects", 10),
+                ("Archive", 2, Some("Marchive2")),
+                ("Projects", 18, Some("Mproject18")),
+                ("Projects", 17, Some("Mproject17")),
+                ("Projects", 16, Some("Mproject16")),
+                ("Projects", 15, Some("Mproject15")),
+                ("Projects", 14, Some("Mproject14")),
+                ("Projects", 13, Some("Mproject13")),
+                ("Projects", 12, Some("Mproject12")),
+                ("Projects", 11, Some("Mproject11")),
+                ("Projects", 10, Some("Mproject10")),
             ]
         );
     }
@@ -12573,9 +12840,9 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             assert!(fetch.starts_with("A0009 UID FETCH 9,11,12 ("));
             server_stream
                 .write_all(
-                    b"* 1 FETCH (UID 9)\r\n\
-                      * 2 FETCH (UID 11)\r\n\
-                      * 3 FETCH (UID 12)\r\n\
+                    b"* 1 FETCH (UID 9 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 2 FETCH (UID 11 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 3 FETCH (UID 12 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
                       A0009 OK fetched\r\n",
                 )
                 .await
@@ -12706,9 +12973,9 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             assert!(fetch.starts_with("A0007 FETCH 9998,10000,9999 ("));
             server_stream
                 .write_all(
-                    b"* 10000 FETCH (UID 50000)\r\n\
-                      * 9999 FETCH (UID 49999)\r\n\
-                      * 9998 FETCH (UID 49998)\r\n\
+                    b"* 10000 FETCH (UID 50000 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 9999 FETCH (UID 49999 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 9998 FETCH (UID 49998 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
                       A0007 OK fetched\r\n",
                 )
                 .await
@@ -12827,8 +13094,8 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             assert!(fetch.starts_with("A0006 UID FETCH 49999,50000 ("));
             server_stream
                 .write_all(
-                    b"* 9999 FETCH (UID 49999)\r\n\
-                      * 10000 FETCH (UID 50000)\r\n\
+                    b"* 9999 FETCH (UID 49999 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
+                      * 10000 FETCH (UID 50000 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0))\r\n\
                       A0006 OK fetched\r\n",
                 )
                 .await
