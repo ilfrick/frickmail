@@ -7154,16 +7154,25 @@ fn legacy_message_json(
 
 fn legacy_apply_message_crypto_json(value: &mut Value, crypto: &fm_imap::LegacyMessageCrypto) {
     if let Some(pgp_signed) = &crypto.pgp_signed {
-        value["pgpSigned"] = json!({
+        let mut signed = json!({
             "partId": pgp_signed.part_id,
-            "sigPartId": pgp_signed.sig_part_id,
-            "micAlg": pgp_signed.mic_alg,
         });
+        if let Some(sig_part_id) = &pgp_signed.sig_part_id {
+            signed["sigPartId"] = json!(sig_part_id);
+        }
+        if let Some(mic_alg) = &pgp_signed.mic_alg {
+            signed["micAlg"] = json!(mic_alg);
+        }
+        value["pgpSigned"] = signed;
     }
     if let Some(pgp_encrypted) = &crypto.pgp_encrypted {
-        value["pgpEncrypted"] = json!({
+        let mut encrypted = json!({
             "partId": pgp_encrypted.part_id,
         });
+        if let Some(key_ids) = &pgp_encrypted.key_ids {
+            encrypted["keyIds"] = json!(key_ids);
+        }
+        value["pgpEncrypted"] = encrypted;
     }
     if let Some(smime_signed) = &crypto.smime_signed {
         let mut signed = json!({
@@ -13614,8 +13623,9 @@ Version: 1
                     is_complete: false,
                     flags: Vec::new(),
                     crypto: fm_imap::LegacyMessageCrypto {
-                        pgp_encrypted: Some(fm_imap::LegacyPartId {
+                        pgp_encrypted: Some(fm_imap::LegacyPgpEncrypted {
                             part_id: "2".to_string(),
+                            key_ids: None,
                         }),
                         ..Default::default()
                     },
@@ -14503,11 +14513,12 @@ Subject: Empty body metadata\r\n\r\n"
         let crypto = fm_imap::LegacyMessageCrypto {
             pgp_signed: Some(fm_imap::LegacyPgpSigned {
                 part_id: "1".to_string(),
-                sig_part_id: "2".to_string(),
-                mic_alg: "pgp-sha256".to_string(),
+                sig_part_id: Some("2".to_string()),
+                mic_alg: Some("pgp-sha256".to_string()),
             }),
-            pgp_encrypted: Some(fm_imap::LegacyPartId {
+            pgp_encrypted: Some(fm_imap::LegacyPgpEncrypted {
                 part_id: "2".to_string(),
+                key_ids: None,
             }),
             smime_signed: Some(fm_imap::LegacySmimeSigned {
                 part_id: "TEXT".to_string(),
@@ -14526,11 +14537,34 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(value["pgpSigned"]["sigPartId"], "2");
         assert_eq!(value["pgpSigned"]["micAlg"], "pgp-sha256");
         assert_eq!(value["pgpEncrypted"]["partId"], "2");
+        assert!(value["pgpEncrypted"].get("keyIds").is_none());
         assert_eq!(value["smimeSigned"]["partId"], "TEXT");
         assert_eq!(value["smimeSigned"]["sigPartId"], "2");
         assert_eq!(value["smimeSigned"]["micAlg"], "sha-256");
         assert_eq!(value["smimeSigned"]["detached"], true);
         assert_eq!(value["smimeEncrypted"]["partId"], "1");
+
+        let mut armored = json!({});
+        super::legacy_apply_message_crypto_json(
+            &mut armored,
+            &fm_imap::LegacyMessageCrypto {
+                pgp_signed: Some(fm_imap::LegacyPgpSigned {
+                    part_id: "3.2".to_string(),
+                    sig_part_id: None,
+                    mic_alg: None,
+                }),
+                pgp_encrypted: Some(fm_imap::LegacyPgpEncrypted {
+                    part_id: "3.2".to_string(),
+                    key_ids: Some(vec!["0123456789ABCDEF".to_string()]),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(armored["pgpSigned"], json!({"partId": "3.2"}));
+        assert_eq!(
+            armored["pgpEncrypted"],
+            json!({"partId": "3.2", "keyIds": ["0123456789ABCDEF"]})
+        );
     }
 
     #[tokio::test]

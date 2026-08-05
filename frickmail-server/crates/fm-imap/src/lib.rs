@@ -186,7 +186,7 @@ pub struct BodyPreviewPart {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LegacyMessageCrypto {
     pub pgp_signed: Option<LegacyPgpSigned>,
-    pub pgp_encrypted: Option<LegacyPartId>,
+    pub pgp_encrypted: Option<LegacyPgpEncrypted>,
     pub smime_signed: Option<LegacySmimeSigned>,
     pub smime_encrypted: Option<LegacyPartId>,
 }
@@ -261,10 +261,16 @@ pub struct LegacyPartId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyPgpEncrypted {
+    pub part_id: String,
+    pub key_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyPgpSigned {
     pub part_id: String,
-    pub sig_part_id: String,
-    pub mic_alg: String,
+    pub sig_part_id: Option<String>,
+    pub mic_alg: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5173,8 +5179,9 @@ fn legacy_message_crypto_metadata(body: &BodyStructure<'_>) -> LegacyMessageCryp
     legacy_walk_body_parts(body, "", &mut |part, part_id, parent_id| {
         if let BodyStructure::Multipart { .. } = part {
             if legacy_body_is_pgp_encrypted(part) {
-                crypto.pgp_encrypted = Some(LegacyPartId {
+                crypto.pgp_encrypted = Some(LegacyPgpEncrypted {
                     part_id: legacy_body_child_part_id(parent_id, 1),
+                    key_ids: None,
                 });
             }
         }
@@ -5204,8 +5211,8 @@ fn legacy_message_crypto_metadata(body: &BodyStructure<'_>) -> LegacyMessageCryp
             if legacy_body_is_pgp_signed(part) {
                 crypto.pgp_signed = Some(LegacyPgpSigned {
                     part_id: legacy_body_child_part_id(parent_id, 0),
-                    sig_part_id: legacy_body_child_part_id(parent_id, 1),
-                    mic_alg: legacy_body_root_mic_alg(part, parent_id),
+                    sig_part_id: Some(legacy_body_child_part_id(parent_id, 1)),
+                    mic_alg: Some(legacy_body_root_mic_alg(part, parent_id)),
                 });
             } else if legacy_body_is_detached_smime_signed(part, bodies) {
                 crypto.smime_signed = Some(LegacySmimeSigned {
@@ -6491,19 +6498,28 @@ async fn fetch_preview_parts(
         }
 
         let mut parts = Vec::new();
+        let mut detected_crypto = crypto.clone();
         for spec in specs {
             match spec.path_vec() {
                 Some(path) => {
+                    let part_id = section_path(&path);
                     let body = fetch
                         .section(&SectionPath::Part(path, None))
                         .unwrap_or_default();
                     if !body.is_empty() {
+                        let text = decode_body_preview_text(spec, body);
+                        detect_armored_pgp_metadata(
+                            &mut detected_crypto,
+                            &part_id,
+                            text.as_bytes(),
+                        );
+                        let raw = render_decoded_body_preview_part(spec, text);
                         parts.push(BodyPreviewPart {
                             kind: spec.kind,
-                            raw: decode_body_preview_part(spec, body),
+                            raw,
                             is_complete: false,
                             flags: flags.to_vec(),
-                            crypto: crypto.clone(),
+                            crypto: LegacyMessageCrypto::default(),
                             metadata: metadata.clone(),
                         });
                     }
@@ -6521,6 +6537,10 @@ async fn fetch_preview_parts(
                     }
                 }
             }
+        }
+
+        for part in &mut parts {
+            part.crypto = detected_crypto.clone();
         }
 
         if parts.is_empty() {
@@ -6867,19 +6887,27 @@ fn is_attachment(common: &imap_proto::BodyContentCommon<'_>) -> bool {
         .is_some_and(|disposition| disposition.ty.eq_ignore_ascii_case("attachment"))
 }
 
+#[cfg(test)]
 fn decode_body_preview_part(spec: &BodyPartSpec, body: &[u8]) -> Vec<u8> {
+    render_decoded_body_preview_part(spec, decode_body_preview_text(spec, body))
+}
+
+fn decode_body_preview_text(spec: &BodyPartSpec, body: &[u8]) -> String {
     let decoded = match spec.transfer_encoding {
         BodyPartTransferEncoding::Identity => body.to_vec(),
         BodyPartTransferEncoding::Base64 => legacy_php_base64_decode(body),
         BodyPartTransferEncoding::QuotedPrintable => legacy_php_body_quoted_printable_decode(body),
     };
-    let mut text = if spec.charset.eq_ignore_ascii_case("utf-8") {
+    if spec.charset.eq_ignore_ascii_case("utf-8") {
         decode_utf8_without_invalid_bytes(&decoded)
     } else {
         charset_decoder(spec.charset.as_bytes())
             .map(|decoder| decoder(&decoded))
             .unwrap_or_else(|| decode_utf8_without_invalid_bytes(&decoded))
-    };
+    }
+}
+
+fn render_decoded_body_preview_part(spec: &BodyPartSpec, mut text: String) -> Vec<u8> {
     if spec.decode_flowed {
         text = decode_legacy_flowed_text(&text);
     }
@@ -6892,6 +6920,306 @@ fn decode_body_preview_part(spec: &BodyPartSpec, body: &[u8]) -> Vec<u8> {
     raw.extend_from_slice(format!("Content-Type: {mime_type}; charset=utf-8\r\n\r\n").as_bytes());
     raw.extend_from_slice(text.as_bytes());
     raw
+}
+
+fn detect_armored_pgp_metadata(
+    crypto: &mut LegacyMessageCrypto,
+    part_id: &str,
+    decoded_part: &[u8],
+) {
+    if crypto.pgp_signed.is_none()
+        && find_bytes(decoded_part, b"-----BEGIN PGP SIGNED MESSAGE-----").is_some()
+    {
+        crypto.pgp_signed = Some(LegacyPgpSigned {
+            part_id: part_id.to_string(),
+            sig_part_id: None,
+            mic_alg: None,
+        });
+    }
+
+    if find_bytes(decoded_part, b"-----BEGIN PGP MESSAGE-----").is_some() {
+        crypto.pgp_encrypted = Some(LegacyPgpEncrypted {
+            part_id: part_id.to_string(),
+            key_ids: Some(armored_pgp_recipient_key_ids(decoded_part)),
+        });
+    }
+}
+
+fn armored_pgp_recipient_key_ids(value: &[u8]) -> Vec<String> {
+    const BEGIN: &[u8] = b"-----BEGIN PGP MESSAGE-----";
+    const END: &[u8] = b"-----END PGP MESSAGE-----";
+    const MAX_RECIPIENTS: usize = 256;
+
+    let mut key_ids = Vec::new();
+    let mut search_start = 0;
+    while search_start < value.len() && key_ids.len() < MAX_RECIPIENTS {
+        let Some((_, relative_block_start)) =
+            find_openpgp_armor_delimiter_line(&value[search_start..], BEGIN, false)
+        else {
+            break;
+        };
+        let block_start = search_start + relative_block_start;
+        let (block, next_search) =
+            match find_openpgp_armor_delimiter_line(&value[block_start..], END, true) {
+                Some((relative_end, relative_after_end)) => (
+                    &value[block_start..block_start + relative_end],
+                    block_start + relative_after_end,
+                ),
+                None => (&value[block_start..], value.len()),
+            };
+        let Some(packets) = decode_openpgp_armor_block(block) else {
+            break;
+        };
+        collect_openpgp_recipient_key_ids(&packets, &mut key_ids, MAX_RECIPIENTS);
+        search_start = next_search;
+    }
+    key_ids
+}
+
+fn find_openpgp_armor_delimiter_line(
+    value: &[u8],
+    delimiter: &[u8],
+    allow_leading_whitespace: bool,
+) -> Option<(usize, usize)> {
+    let mut line_start = 0;
+    while line_start < value.len() {
+        let relative_end = value[line_start..].iter().position(|byte| *byte == b'\n');
+        let line_end = relative_end
+            .map(|offset| line_start + offset)
+            .unwrap_or(value.len());
+        let raw_line = value[line_start..line_end]
+            .strip_suffix(b"\r")
+            .unwrap_or(&value[line_start..line_end]);
+        let line = if allow_leading_whitespace {
+            trim_ascii_horizontal_whitespace(raw_line)
+        } else {
+            trim_ascii_horizontal_whitespace_end(raw_line)
+        };
+        if line == delimiter {
+            let after_line = relative_end.map_or(line_end, |_| line_end + 1);
+            return Some((line_start, after_line));
+        }
+        if relative_end.is_none() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    None
+}
+
+fn decode_openpgp_armor_block(block: &[u8]) -> Option<Vec<u8>> {
+    let mut armor_body = Vec::new();
+    let mut checksum = None;
+    let mut in_headers = true;
+    for raw_line in block.split(|byte| *byte == b'\n') {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        let line = trim_ascii_horizontal_whitespace(line);
+        if in_headers {
+            if line.is_empty() {
+                in_headers = false;
+            }
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if checksum.is_some() {
+            continue;
+        }
+        if let Some(encoded_checksum) = line.strip_prefix(b"=") {
+            if encoded_checksum.len() != 4 {
+                return None;
+            }
+            let decoded = base64_decode(encoded_checksum)?;
+            if decoded.len() != 3 {
+                return None;
+            }
+            checksum = Some(decoded);
+            continue;
+        }
+        if !line
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        {
+            return None;
+        }
+        armor_body.extend_from_slice(line);
+    }
+
+    let packets = base64_decode(&armor_body)?;
+    if packets.is_empty() {
+        return None;
+    }
+    if let Some(checksum) = checksum {
+        if openpgp_crc24(&packets).to_be_bytes()[1..] != checksum {
+            return None;
+        }
+    }
+    Some(packets)
+}
+
+fn trim_ascii_horizontal_whitespace(mut value: &[u8]) -> &[u8] {
+    while value
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        value = &value[1..];
+    }
+    while value
+        .last()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn trim_ascii_horizontal_whitespace_end(mut value: &[u8]) -> &[u8] {
+    while value
+        .last()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn openpgp_crc24(value: &[u8]) -> u32 {
+    let mut crc = 0x00B7_04CE_u32;
+    for byte in value {
+        crc ^= u32::from(*byte) << 16;
+        for _ in 0..8 {
+            crc <<= 1;
+            if crc & 0x0100_0000 != 0 {
+                crc ^= 0x0186_4CFB;
+            }
+        }
+    }
+    crc & 0x00FF_FFFF
+}
+
+fn collect_openpgp_recipient_key_ids(packets: &[u8], key_ids: &mut Vec<String>, limit: usize) {
+    let mut cursor = 0;
+    while cursor < packets.len() && key_ids.len() < limit {
+        let Some((tag, body, next)) = openpgp_packet_at(packets, cursor) else {
+            break;
+        };
+        if tag == 1 && gpg_reports_pkesk_recipient(body) {
+            key_ids.push(
+                body[1..9]
+                    .iter()
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect(),
+            );
+        }
+        cursor = next;
+    }
+}
+
+fn gpg_reports_pkesk_recipient(body: &[u8]) -> bool {
+    if body.len() <= 10 || !matches!(body[0], 2 | 3) {
+        return false;
+    }
+
+    let algorithm = body[9];
+    let mut cursor = 10;
+    let valid = match algorithm {
+        1..=3 => read_openpgp_mpi(body, &mut cursor, true),
+        16 | 20 => {
+            read_openpgp_mpi(body, &mut cursor, true) && read_openpgp_mpi(body, &mut cursor, true)
+        }
+        18 => {
+            if !read_openpgp_mpi(body, &mut cursor, false) {
+                return false;
+            }
+            let Some(wrapped_len) = body.get(cursor).copied().map(usize::from) else {
+                return false;
+            };
+            cursor = cursor.saturating_add(1);
+            let Some(end) = cursor.checked_add(wrapped_len) else {
+                return false;
+            };
+            wrapped_len >= 2 && end <= body.len()
+        }
+        // GnuPG emits ENC_TO for unknown algorithms once the fixed fields are
+        // followed by at least two packet octets, without interpreting them.
+        // The PHP implementation copies that status verbatim.
+        _ => body.len() >= 12,
+    };
+    valid
+}
+
+fn read_openpgp_mpi(value: &[u8], cursor: &mut usize, allow_zero: bool) -> bool {
+    let Some(length_bytes) = value.get(*cursor..cursor.saturating_add(2)) else {
+        return false;
+    };
+    let bits = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+    if bits == 0 && !allow_zero {
+        return false;
+    }
+    let octets = bits.div_ceil(8);
+    let Some(start) = cursor.checked_add(2) else {
+        return false;
+    };
+    let Some(end) = start.checked_add(octets) else {
+        return false;
+    };
+    if value.get(start..end).is_none() {
+        return false;
+    }
+    *cursor = end;
+    true
+}
+
+fn openpgp_packet_at(value: &[u8], cursor: usize) -> Option<(u8, &[u8], usize)> {
+    let packet = *value.get(cursor)?;
+    if packet & 0x80 == 0 {
+        return None;
+    }
+
+    let (tag, body_start, body_len) = if packet & 0x40 != 0 {
+        let tag = packet & 0x3f;
+        let length = *value.get(cursor + 1)?;
+        match length {
+            0..=191 => (tag, cursor + 2, usize::from(length)),
+            192..=223 => {
+                let second = usize::from(*value.get(cursor + 2)?);
+                let length = ((usize::from(length) - 192) << 8) + second + 192;
+                (tag, cursor + 3, length)
+            }
+            255 => {
+                let bytes: [u8; 4] = value.get(cursor + 2..cursor + 6)?.try_into().ok()?;
+                (tag, cursor + 6, u32::from_be_bytes(bytes) as usize)
+            }
+            _ => return None,
+        }
+    } else {
+        let tag = (packet >> 2) & 0x0f;
+        match packet & 0x03 {
+            0 => (tag, cursor + 2, usize::from(*value.get(cursor + 1)?)),
+            1 => {
+                let bytes: [u8; 2] = value.get(cursor + 1..cursor + 3)?.try_into().ok()?;
+                (tag, cursor + 3, usize::from(u16::from_be_bytes(bytes)))
+            }
+            2 => {
+                let bytes: [u8; 4] = value.get(cursor + 1..cursor + 5)?.try_into().ok()?;
+                (tag, cursor + 5, u32::from_be_bytes(bytes) as usize)
+            }
+            _ => return None,
+        }
+    };
+    let body_end = body_start.checked_add(body_len)?;
+    Some((tag, value.get(body_start..body_end)?, body_end))
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    (!needle.is_empty())
+        .then(|| {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        })
+        .flatten()
 }
 
 fn decode_legacy_flowed_text(value: &str) -> String {
@@ -9328,6 +9656,238 @@ mod tests {
             .ends_with("first \r\nsecond="));
         let malformed = decode_body_preview_part(&specs[2], b"abc=\rX");
         assert!(String::from_utf8(malformed).unwrap().ends_with("abcX"));
+
+        let split_marker = decode_body_preview_text(&specs[0], b"-----BEGIN PGP \r\nMESSAGE-----");
+        let mut crypto = LegacyMessageCrypto::default();
+        detect_armored_pgp_metadata(&mut crypto, "1", split_marker.as_bytes());
+        assert!(crypto.pgp_encrypted.is_none());
+        assert!(
+            String::from_utf8(render_decoded_body_preview_part(&specs[0], split_marker))
+                .unwrap()
+                .ends_with("-----BEGIN PGP MESSAGE-----")
+        );
+    }
+
+    #[test]
+    fn body_preview_detects_armored_openpgp_metadata_and_recipient_key_ids() {
+        const ARMORED: &[u8] = b"-----BEGIN PGP MESSAGE-----\n\n\
+hIwDV7lfsBK4eqEBBACL9v0/kcOWeynLGEVVwWdlotHEf9h7Vj8VQhb3mysyXL0s\n\
+P1AofPgSjB7M4w+F2enESDNR1dSnB347o4+Ii3utpH4YeHE9B9uk1jzdf48Jp417\n\
+SMp2qx4dLv+3bRl+hKDwwtPI9HispRfV+ZF/MlYEFpLewF5TYHbPsB+TNMRGndRe\n\
+AQkCEBcF2cYHRVuWN9gmPXNugVEiKgYMCNxCFTBrWQ+7oMiIR6aTD2Kammp4qdq3\n\
+H+A5nkHbF0uq2xPAkDYsN4kc9rN1JqYnKONuJya4rxhjtaHLwJnJ8/VyYGq5QA==\n\
+=93SZ\n-----END PGP MESSAGE-----\n";
+        let armored = [
+            b"-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\ntext\n".as_slice(),
+            ARMORED,
+        ]
+        .concat();
+        let mut crypto = LegacyMessageCrypto::default();
+
+        detect_armored_pgp_metadata(&mut crypto, "3.2", &armored);
+
+        let signed = crypto.pgp_signed.as_ref().unwrap();
+        assert_eq!(signed.part_id, "3.2");
+        assert!(signed.sig_part_id.is_none());
+        assert!(signed.mic_alg.is_none());
+        let encrypted = crypto.pgp_encrypted.as_ref().unwrap();
+        assert_eq!(encrypted.part_id, "3.2");
+        assert_eq!(
+            encrypted.key_ids.as_deref(),
+            Some(["57B95FB012B87AA1".to_string()].as_slice())
+        );
+
+        let doubled = [ARMORED, ARMORED].concat();
+        assert_eq!(
+            armored_pgp_recipient_key_ids(&doubled),
+            vec![
+                "57B95FB012B87AA1".to_string(),
+                "57B95FB012B87AA1".to_string()
+            ]
+        );
+        let capped = armored_pgp_recipient_key_ids(&ARMORED.repeat(257));
+        assert_eq!(capped.len(), 256);
+        assert!(capped.iter().all(|key_id| key_id == "57B95FB012B87AA1"));
+
+        let end = find_bytes(ARMORED, b"-----END PGP MESSAGE-----").unwrap();
+        assert_eq!(
+            armored_pgp_recipient_key_ids(&ARMORED[..end]),
+            vec!["57B95FB012B87AA1".to_string()]
+        );
+        let without_crc = String::from_utf8(ARMORED.to_vec())
+            .unwrap()
+            .replace("=93SZ\n", "");
+        assert_eq!(
+            armored_pgp_recipient_key_ids(without_crc.as_bytes()),
+            vec!["57B95FB012B87AA1".to_string()]
+        );
+        let leading_space_end =
+            without_crc.replace("-----END PGP MESSAGE-----", " \t-----END PGP MESSAGE-----");
+        assert_eq!(
+            armored_pgp_recipient_key_ids(leading_space_end.as_bytes()),
+            vec!["57B95FB012B87AA1".to_string()]
+        );
+        let end_in_header = String::from_utf8(ARMORED.to_vec())
+            .unwrap()
+            .replace("\n\nhIw", "\nComment: -----END PGP MESSAGE-----\n\nhIw");
+        assert_eq!(
+            armored_pgp_recipient_key_ids(end_in_header.as_bytes()),
+            vec!["57B95FB012B87AA1".to_string()]
+        );
+        let prefixed_begin = String::from_utf8(ARMORED.to_vec()).unwrap().replacen(
+            "-----BEGIN PGP MESSAGE-----",
+            "x-----BEGIN PGP MESSAGE-----",
+            1,
+        );
+        assert!(armored_pgp_recipient_key_ids(prefixed_begin.as_bytes()).is_empty());
+        let trailing_space_delimiters = String::from_utf8(ARMORED.to_vec())
+            .unwrap()
+            .replace(
+                "-----BEGIN PGP MESSAGE-----",
+                "-----BEGIN PGP MESSAGE-----\t ",
+            )
+            .replace("-----END PGP MESSAGE-----", "-----END PGP MESSAGE----- ");
+        assert_eq!(
+            armored_pgp_recipient_key_ids(trailing_space_delimiters.as_bytes()),
+            vec!["57B95FB012B87AA1".to_string()]
+        );
+        for prefix in [" ", "\t"] {
+            let leading_space_begin = String::from_utf8(ARMORED.to_vec()).unwrap().replacen(
+                "-----BEGIN PGP MESSAGE-----",
+                &format!("{prefix}-----BEGIN PGP MESSAGE-----"),
+                1,
+            );
+            assert!(armored_pgp_recipient_key_ids(leading_space_begin.as_bytes()).is_empty());
+        }
+        let bad_crc = String::from_utf8(ARMORED.to_vec())
+            .unwrap()
+            .replace("=93SZ", "=AAAA");
+        assert!(armored_pgp_recipient_key_ids(bad_crc.as_bytes()).is_empty());
+        assert!(armored_pgp_recipient_key_ids(&[bad_crc.as_bytes(), ARMORED].concat()).is_empty());
+        assert_eq!(
+            armored_pgp_recipient_key_ids(&[ARMORED, bad_crc.as_bytes()].concat()),
+            vec!["57B95FB012B87AA1".to_string()]
+        );
+        let corrupt_body = String::from_utf8(ARMORED.to_vec())
+            .unwrap()
+            .replace("=93SZ", "not!base64\n=93SZ");
+        assert!(armored_pgp_recipient_key_ids(corrupt_body.as_bytes()).is_empty());
+        for after_checksum in ["=93SZ\njunk", "=93SZ\n=AAAA"] {
+            let trailing_corruption = String::from_utf8(ARMORED.to_vec())
+                .unwrap()
+                .replace("=93SZ", after_checksum);
+            assert_eq!(
+                armored_pgp_recipient_key_ids(trailing_corruption.as_bytes()),
+                vec!["57B95FB012B87AA1".to_string()]
+            );
+        }
+
+        let existing_signed = crypto.pgp_signed.clone();
+        detect_armored_pgp_metadata(
+            &mut crypto,
+            "4",
+            b"-----BEGIN PGP SIGNED MESSAGE-----\n-----BEGIN PGP MESSAGE-----",
+        );
+        assert_eq!(crypto.pgp_signed, existing_signed);
+        assert_eq!(crypto.pgp_encrypted.as_ref().unwrap().part_id, "4");
+        assert_eq!(crypto.pgp_encrypted.unwrap().key_ids, Some(Vec::new()));
+
+        assert!(armored_pgp_recipient_key_ids(
+            b"-----BEGIN PGP MESSAGE-----\n\n\
+wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
+        )
+        .is_empty());
+
+        let valid_rsa = [3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 1, 0, 1, 1];
+        assert!(gpg_reports_pkesk_recipient(&valid_rsa));
+        let mut legacy_v2 = valid_rsa;
+        legacy_v2[0] = 2;
+        assert!(gpg_reports_pkesk_recipient(&legacy_v2));
+        for rejected_version in [4, 6] {
+            let mut rejected = valid_rsa;
+            rejected[0] = rejected_version;
+            assert!(!gpg_reports_pkesk_recipient(&rejected));
+        }
+        let mut unknown_algorithm = valid_rsa;
+        unknown_algorithm[9] = 99;
+        assert!(gpg_reports_pkesk_recipient(&unknown_algorithm));
+        assert!(!gpg_reports_pkesk_recipient(&unknown_algorithm[..11]));
+        let mut rsa_sign_only = valid_rsa;
+        rsa_sign_only[9] = 3;
+        assert!(gpg_reports_pkesk_recipient(&rsa_sign_only));
+        let mut short_mpi = valid_rsa;
+        short_mpi[10] = 0;
+        short_mpi[11] = 16;
+        assert!(!gpg_reports_pkesk_recipient(&short_mpi));
+        let mut elgamal_one_mpi = valid_rsa;
+        elgamal_one_mpi[9] = 20;
+        assert!(!gpg_reports_pkesk_recipient(&elgamal_one_mpi));
+        let rsa_zero_mpi = [3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 1, 0, 0];
+        assert!(gpg_reports_pkesk_recipient(&rsa_zero_mpi));
+        assert!(gpg_reports_pkesk_recipient(&[
+            3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 1, 0, 0, 0
+        ]));
+        let rsa_noncanonical_mpi = [
+            3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 1, 0, 16, 0, 1,
+        ];
+        assert!(gpg_reports_pkesk_recipient(&rsa_noncanonical_mpi));
+        let elgamal_zero_mpis = [
+            3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 20, 0, 0, 0, 0,
+        ];
+        assert!(gpg_reports_pkesk_recipient(&elgamal_zero_mpis));
+        let ecdh_zero_mpi = [
+            3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 18, 0, 0, 1, 0,
+        ];
+        assert!(!gpg_reports_pkesk_recipient(&ecdh_zero_mpi));
+        let ecdh_wrapped_len_one = [
+            3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 18, 0, 1, 1, 1, 0,
+        ];
+        assert!(!gpg_reports_pkesk_recipient(&ecdh_wrapped_len_one));
+        assert!(gpg_reports_pkesk_recipient(&[
+            3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 18, 0, 1, 1, 2, 0, 0
+        ]));
+        assert!(gpg_reports_pkesk_recipient(&[
+            3, 1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 18, 0, 1, 1, 2, 0, 0, 0
+        ]));
+
+        let new_packet = [vec![0xc1, 13], valid_rsa.to_vec()].concat();
+        let old_packet = [vec![0x84, 13], valid_rsa.to_vec()].concat();
+        for packet in [&new_packet, &old_packet] {
+            let (tag, body, next) = openpgp_packet_at(packet, 0).unwrap();
+            assert_eq!(tag, 1);
+            assert_eq!(next, packet.len());
+            assert!(gpg_reports_pkesk_recipient(body));
+        }
+    }
+
+    #[test]
+    fn openpgp_packet_parser_covers_legacy_and_modern_length_forms() {
+        let cases = [
+            (vec![0xc1, 191], 191_usize),
+            (vec![0xc1, 192, 0], 192),
+            (vec![0xc1, 223, 255], 8_383),
+            (vec![0xc1, 255, 0, 0, 0x20, 0xc0], 8_384),
+            (vec![0x85, 0x01, 0x00], 256),
+            (vec![0x86, 0, 1, 0, 0], 65_536),
+        ];
+        for (header, body_len) in cases {
+            let packet = [header, vec![0; body_len]].concat();
+            let (tag, body, next) = openpgp_packet_at(&packet, 0).unwrap();
+            assert_eq!(tag, 1);
+            assert_eq!(body.len(), body_len);
+            assert_eq!(next, packet.len());
+        }
+
+        for truncated in [
+            vec![0xc1],
+            vec![0xc1, 192],
+            vec![0xc1, 255, 0, 0],
+            vec![0xc1, 2, 0],
+            vec![0x85, 0],
+            vec![0x86, 0, 0, 0],
+        ] {
+            assert!(openpgp_packet_at(&truncated, 0).is_none());
+        }
     }
 
     #[test]
@@ -9383,8 +9943,9 @@ mod tests {
     fn metadata_only_body_preview_preserves_header_fetch_result() {
         let flags = vec!["\\Seen".to_string()];
         let crypto = LegacyMessageCrypto {
-            pgp_encrypted: Some(LegacyPartId {
+            pgp_encrypted: Some(LegacyPgpEncrypted {
                 part_id: "2".to_string(),
+                key_ids: None,
             }),
             ..Default::default()
         };
@@ -13758,7 +14319,9 @@ mod tests {
 
         let crypto = legacy_message_crypto_metadata(&body);
 
-        assert_eq!(crypto.pgp_encrypted.unwrap().part_id, "2");
+        let encrypted = crypto.pgp_encrypted.unwrap();
+        assert_eq!(encrypted.part_id, "2");
+        assert!(encrypted.key_ids.is_none());
         assert!(crypto.pgp_signed.is_none());
     }
 
@@ -13794,8 +14357,8 @@ mod tests {
         let signed = crypto.pgp_signed.unwrap();
 
         assert_eq!(signed.part_id, "1");
-        assert_eq!(signed.sig_part_id, "2");
-        assert_eq!(signed.mic_alg, "pgp-sha256");
+        assert_eq!(signed.sig_part_id.as_deref(), Some("2"));
+        assert_eq!(signed.mic_alg.as_deref(), Some("pgp-sha256"));
     }
 
     #[test]
@@ -13833,8 +14396,8 @@ mod tests {
         let signed = legacy_message_crypto_metadata(&body).pgp_signed.unwrap();
 
         assert_eq!(signed.part_id, "1.1");
-        assert_eq!(signed.sig_part_id, "1.2");
-        assert_eq!(signed.mic_alg, "");
+        assert_eq!(signed.sig_part_id.as_deref(), Some("1.2"));
+        assert_eq!(signed.mic_alg.as_deref(), Some(""));
     }
 
     #[test]
