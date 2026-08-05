@@ -43,7 +43,8 @@ use fm_imap::{
     RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::{
-    parse_body, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment, ParsedMessageHeader,
+    parse_body, parse_body_part_text, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment,
+    ParsedMessageHeader,
 };
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
@@ -7261,6 +7262,8 @@ fn legacy_message_body_response(
         .unwrap_or(&[]);
     let mut html = String::new();
     let mut plain = String::new();
+    let mut html_parts = 0_usize;
+    let mut plain_parts = 0_usize;
     let mut subject = String::new();
     let mut draft_info = None;
     let mut message_id = String::new();
@@ -7362,19 +7365,37 @@ fn legacy_message_body_response(
     }
 
     for part in &parts {
-        let Some(body) = parse_body(&part.raw) else {
+        let parsed_body = parse_body(&part.raw);
+        let Some(body) = parsed_body else {
+            match part.kind {
+                fm_imap::BodyPartKind::Html => {
+                    let text = parse_body_part_text(&part.raw).unwrap_or_default();
+                    legacy_append_message_body_part(&mut html, &mut html_parts, &text, "<br>");
+                }
+                fm_imap::BodyPartKind::Plain => {
+                    let text = parse_body_part_text(&part.raw).unwrap_or_default();
+                    legacy_append_message_body_part(&mut plain, &mut plain_parts, &text, "\n");
+                }
+                fm_imap::BodyPartKind::RawMessage => {}
+            }
             continue;
         };
         match part.kind {
             fm_imap::BodyPartKind::Html => {
-                if html.is_empty() && !body.html.is_empty() {
-                    html = body.html;
-                }
+                let text = if body.html.is_empty() {
+                    parse_body_part_text(&part.raw).unwrap_or_default()
+                } else {
+                    body.html
+                };
+                legacy_append_message_body_part(&mut html, &mut html_parts, &text, "<br>");
             }
             fm_imap::BodyPartKind::Plain => {
-                if plain.is_empty() && !body.plain.is_empty() {
-                    plain = body.plain;
-                }
+                let text = if body.plain.is_empty() {
+                    parse_body_part_text(&part.raw).unwrap_or_default()
+                } else {
+                    body.plain
+                };
+                legacy_append_message_body_part(&mut plain, &mut plain_parts, &text, "\n");
             }
             fm_imap::BodyPartKind::RawMessage => {
                 if message_id.is_empty() {
@@ -7449,6 +7470,8 @@ fn legacy_message_body_response(
         }
     }
 
+    plain = legacy_message_body_trim(&plain).to_string();
+
     if html.is_empty()
         && plain.is_empty()
         && subject.is_empty()
@@ -7522,6 +7545,23 @@ fn legacy_message_body_response(
             )
         }),
     )
+}
+
+fn legacy_append_message_body_part(
+    output: &mut String,
+    part_count: &mut usize,
+    part: &str,
+    separator: &str,
+) {
+    if *part_count > 0 {
+        output.push_str(separator);
+    }
+    output.push_str(part);
+    *part_count += 1;
+}
+
+fn legacy_message_body_trim(value: &str) -> &str {
+    value.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\0' | '\u{0b}'))
 }
 
 const LEGACY_EMAIL_COLLECTION_JSON_LIMIT: usize = 100;
@@ -14227,6 +14267,117 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_legacy_message_aggregates_all_selected_text_parts_like_mailso() {
+        let key = [50_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(2030, 2031, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 2031, "folder": "INBOX", "uid": 54}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![
+                    BodyPreviewPart {
+                        kind: BodyPartKind::Plain,
+                        raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\n  First plain  "
+                            .to_vec(),
+                        is_complete: false,
+                        flags: Vec::new(),
+                        crypto: Default::default(),
+                        metadata: Default::default(),
+                    },
+                    BodyPreviewPart {
+                        kind: BodyPartKind::Html,
+                        raw: b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>First HTML</p>"
+                            .to_vec(),
+                        is_complete: false,
+                        flags: Vec::new(),
+                        crypto: Default::default(),
+                        metadata: Default::default(),
+                    },
+                    BodyPreviewPart {
+                        kind: BodyPartKind::Plain,
+                        raw: b"Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n=\r\n"
+                            .to_vec(),
+                        is_complete: false,
+                        flags: Vec::new(),
+                        crypto: Default::default(),
+                        metadata: Default::default(),
+                    },
+                    BodyPreviewPart {
+                        kind: BodyPartKind::Html,
+                        raw: b"Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n=\r\n"
+                            .to_vec(),
+                        is_complete: false,
+                        flags: Vec::new(),
+                        crypto: Default::default(),
+                        metadata: Default::default(),
+                    },
+                    BodyPreviewPart {
+                        kind: BodyPartKind::Plain,
+                        raw: b"Content-Type: text/plain; charset=utf-8\r\n\r\nSecond plain"
+                            .to_vec(),
+                        is_complete: false,
+                        flags: Vec::new(),
+                        crypto: Default::default(),
+                        metadata: Default::default(),
+                    },
+                    BodyPreviewPart {
+                        kind: BodyPartKind::Html,
+                        raw: b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>Second HTML</p>"
+                            .to_vec(),
+                        is_complete: false,
+                        flags: Vec::new(),
+                        crypto: Default::default(),
+                        metadata: Default::default(),
+                    },
+                ]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["plain"], "First plain  \n\nSecond plain");
+        assert_eq!(
+            body["Result"]["html"],
+            "<p>First HTML</p><br><br><p>Second HTML</p>"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_uses_decoded_text_attachment_fallback() {
+        let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(2032, 2033, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 2033, "folder": "INBOX", "uid": 55}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::Plain,
+                    raw: b"Content-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=message.txt\r\n\r\nAttachment-only body"
+                        .to_vec(),
+                    is_complete: false,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: Default::default(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["plain"], "Attachment-only body");
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_omits_empty_body_fields_like_php() {
         let key = [47_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1814, 1815, &key).await;
@@ -14332,6 +14483,18 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(message.get("date").is_none());
         assert!(message.get("threads").is_none());
         assert!(message.get("threadUnseen").is_none());
+    }
+
+    #[test]
+    fn legacy_message_body_trim_matches_php_default_charlist() {
+        assert_eq!(
+            super::legacy_message_body_trim(" \t\r\n\0\u{0b}body\u{0b}\0\n "),
+            "body"
+        );
+        assert_eq!(
+            super::legacy_message_body_trim("\u{0c}\u{1}body\u{1}\u{0c}"),
+            "\u{0c}\u{1}body\u{1}\u{0c}"
+        );
     }
 
     #[test]

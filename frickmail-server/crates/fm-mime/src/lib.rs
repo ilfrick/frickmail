@@ -184,6 +184,18 @@ pub fn parse_body(raw: &[u8]) -> Option<ParsedMessageBody> {
     })
 }
 
+pub fn parse_body_part_text(raw: &[u8]) -> Option<String> {
+    let message = mail_parser::MessageParser::default().parse(raw)?;
+    match &message.parts.first()?.body {
+        PartType::Text(text) => Some(text.to_string()),
+        PartType::Html(html) => Some(sanitize_html(html)),
+        PartType::Binary(bytes) | PartType::InlineBinary(bytes) => {
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        }
+        PartType::Message(_) | PartType::Multipart(_) => None,
+    }
+}
+
 fn legacy_auth_statuses(raw: &[u8]) -> ParsedAuthStatuses {
     let mut result = ParsedAuthStatuses::default();
     let authentication_results = raw_header_values(raw, "Authentication-Results");
@@ -882,7 +894,7 @@ fn sanitize_html(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_body, parse_summary};
+    use super::{parse_body, parse_body_part_text, parse_summary};
 
     #[test]
     fn parses_summary_headers_and_attachment_presence() {
@@ -908,6 +920,29 @@ Attachment text.
         assert_eq!(summary.subject.as_deref(), Some("Test message"));
         assert_eq!(summary.from, vec!["Sender <sender@example.com>"]);
         assert!(summary.has_attachments);
+    }
+
+    #[test]
+    fn parses_text_attachment_and_binary_leaf_content() {
+        let text = br#"Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="message.txt"
+
+Attached text.
+"#;
+        assert_eq!(
+            parse_body_part_text(text).as_deref(),
+            Some("Attached text.\n")
+        );
+
+        let binary = br#"Content-Type: application/octet-stream
+Content-Transfer-Encoding: base64
+
+LS0tLS1CRUdJTiBQR1AgTUVTU0FHRS0tLS0t
+"#;
+        assert_eq!(
+            parse_body_part_text(binary).as_deref(),
+            Some("-----BEGIN PGP MESSAGE-----")
+        );
     }
 
     #[test]

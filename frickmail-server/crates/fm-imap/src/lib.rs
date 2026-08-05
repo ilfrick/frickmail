@@ -17,10 +17,13 @@ use fm_core::{FrickmailError, Result};
 use futures::{pin_mut, Stream, TryStreamExt};
 use imap_proto::{
     builders::command::{Command, CommandBuilder},
-    AclRight, AttributeValue, BodyStructure, MailboxDatum, MessageSection, RequestId, Response,
-    SectionPath, Status, StatusAttribute,
+    AclRight, AttributeValue, BodyStructure, MailboxDatum, RequestId, Response, SectionPath,
+    Status, StatusAttribute,
 };
-use mail_parser::decoders::{base64::base64_decode, charsets::map::charset_decoder};
+use mail_parser::{
+    decoders::{base64::base64_decode, charsets::map::charset_decoder},
+    MimeHeaders,
+};
 use md5::{Digest, Md5};
 use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
@@ -49,6 +52,9 @@ const MESSAGE_LIST_CACHE_WARM_CONCURRENCY: usize = 4;
 static MESSAGE_LIST_CACHE_WARM_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static MESSAGE_LIST_CACHE_WARM_KEYS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 pub const BODY_PREVIEW_PART_LIMIT_BYTES: usize = 256 * 1024;
+const BODY_PREVIEW_TEXT_PART_LIMIT: usize = 32;
+const BODY_PREVIEW_TOTAL_LIMIT_BYTES: usize = 1024 * 1024;
+const BODY_PREVIEW_HEADER_LIMIT_BYTES: usize = 64 * 1024;
 
 trait ImapIo:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + fmt::Debug + 'static
@@ -681,12 +687,22 @@ pub enum BodyPartKind {
     RawMessage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BodyPartSpec {
     path: Option<[u32; 8]>,
     depth: usize,
     kind: BodyPartKind,
     octets: u32,
+    charset: String,
+    transfer_encoding: BodyPartTransferEncoding,
+    decode_flowed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyPartTransferEncoding {
+    Identity,
+    Base64,
+    QuotedPrintable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,7 +714,7 @@ struct BodyPreviewFetchSpec {
 }
 
 impl BodyPartSpec {
-    fn path_vec(self) -> Option<Vec<u32>> {
+    fn path_vec(&self) -> Option<Vec<u32>> {
         self.path.map(|path| path[..self.depth].to_vec())
     }
 }
@@ -1536,22 +1552,26 @@ pub fn examine_mailbox_command(mailbox: &str) -> Result<Vec<u8>> {
     Ok(command.args)
 }
 
-pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<&'static str> {
+pub fn uid_fetch_bodystructure_query(uid: u32) -> Result<String> {
     uid_fetch_bodystructure_query_with_gmail_id(uid, false)
 }
 
 pub fn uid_fetch_bodystructure_query_with_gmail_id(
     uid: u32,
     include_gmail_id: bool,
-) -> Result<&'static str> {
+) -> Result<String> {
     if uid == 0 {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
     }
 
     Ok(if include_gmail_id {
-        "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER] X-GM-MSGID)"
+        format!(
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER]<0.{BODY_PREVIEW_HEADER_LIMIT_BYTES}> X-GM-MSGID)"
+        )
     } else {
-        "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER])"
+        format!(
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER]<0.{BODY_PREVIEW_HEADER_LIMIT_BYTES}>)"
+        )
     })
 }
 
@@ -6396,6 +6416,9 @@ async fn fetch_body_part_specs(
                     depth: 0,
                     kind: BodyPartKind::RawMessage,
                     octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
+                    charset: String::new(),
+                    transfer_encoding: BodyPartTransferEncoding::Identity,
+                    decode_flowed: false,
                 }],
                 flags,
                 crypto: LegacyMessageCrypto::default(),
@@ -6411,6 +6434,7 @@ async fn fetch_body_part_specs(
         };
         let crypto = legacy_message_crypto_metadata(bodystructure);
         let attachments = legacy_message_attachments(folder, uid, Some(bodystructure));
+        let specs = body_preview_part_specs(bodystructure, &header);
         let metadata = LegacyMessageFetchMetadata {
             header,
             internal_timestamp,
@@ -6419,7 +6443,6 @@ async fn fetch_body_part_specs(
             attachments,
             envelope,
         };
-        let specs = body_preview_part_specs(bodystructure);
         if specs.is_empty() {
             return Ok(Some(BodyPreviewFetchSpec {
                 parts: vec![BodyPartSpec {
@@ -6427,6 +6450,9 @@ async fn fetch_body_part_specs(
                     depth: 0,
                     kind: BodyPartKind::RawMessage,
                     octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
+                    charset: String::new(),
+                    transfer_encoding: BodyPartTransferEncoding::Identity,
+                    decode_flowed: false,
                 }],
                 flags,
                 crypto,
@@ -6468,16 +6494,13 @@ async fn fetch_preview_parts(
         for spec in specs {
             match spec.path_vec() {
                 Some(path) => {
-                    let mime = fetch
-                        .section(&SectionPath::Part(path.clone(), Some(MessageSection::Mime)))
-                        .unwrap_or_default();
                     let body = fetch
                         .section(&SectionPath::Part(path, None))
                         .unwrap_or_default();
                     if !body.is_empty() {
                         parts.push(BodyPreviewPart {
                             kind: spec.kind,
-                            raw: join_mime_part(mime, body),
+                            raw: decode_body_preview_part(spec, body),
                             is_complete: false,
                             flags: flags.to_vec(),
                             crypto: crypto.clone(),
@@ -6534,73 +6557,276 @@ fn raw_message_preview_is_complete(body: &[u8], expected_octets: u32) -> bool {
         && usize::try_from(expected_octets).is_ok_and(|expected| body.len() >= expected)
 }
 
-fn body_preview_part_specs(body: &BodyStructure<'_>) -> Vec<BodyPartSpec> {
-    let mut html = None;
-    let mut plain = None;
-    collect_body_preview_part_specs(body, &mut Vec::new(), &mut html, &mut plain);
+fn body_preview_part_specs(body: &BodyStructure<'_>, header: &[u8]) -> Vec<BodyPartSpec> {
+    let shared_charset = body_preview_shared_charset(body, header);
+    let mut specs = Vec::new();
+    let mut remaining_bytes = BODY_PREVIEW_TOTAL_LIMIT_BYTES;
+    collect_body_preview_text_part_specs(
+        body,
+        &mut Vec::new(),
+        false,
+        &shared_charset,
+        &mut remaining_bytes,
+        &mut specs,
+    );
 
-    [html, plain].into_iter().flatten().collect()
+    if specs.is_empty() {
+        collect_pgp_encrypted_preview_part_spec(
+            body,
+            &mut Vec::new(),
+            &shared_charset,
+            &mut remaining_bytes,
+            &mut specs,
+        );
+    }
+    if specs.is_empty() {
+        collect_body_preview_text_part_specs(
+            body,
+            &mut Vec::new(),
+            true,
+            &shared_charset,
+            &mut remaining_bytes,
+            &mut specs,
+        );
+    }
+
+    specs
 }
 
-fn collect_body_preview_part_specs(
+fn collect_body_preview_text_part_specs(
     body: &BodyStructure<'_>,
     path: &mut Vec<u32>,
-    html: &mut Option<BodyPartSpec>,
-    plain: &mut Option<BodyPartSpec>,
-) {
+    include_attachments: bool,
+    shared_charset: &str,
+    remaining_bytes: &mut usize,
+    specs: &mut Vec<BodyPartSpec>,
+) -> bool {
+    if specs.len() >= BODY_PREVIEW_TEXT_PART_LIMIT || *remaining_bytes == 0 {
+        return true;
+    }
+
     match body {
-        BodyStructure::Text { common, other, .. } if !is_attachment(common) => {
+        BodyStructure::Text { common, other, .. }
+            if include_attachments || !is_attachment(common) =>
+        {
+            let depth = path.len().max(1);
             let Some(path) = path_array(path) else {
-                return;
+                return false;
             };
             let kind = if common.ty.subtype.eq_ignore_ascii_case("html") {
                 BodyPartKind::Html
-            } else if common.ty.subtype.eq_ignore_ascii_case("plain") {
+            } else if common.ty.subtype.eq_ignore_ascii_case("plain")
+                || common.ty.subtype.eq_ignore_ascii_case("x-amp-html")
+            {
                 BodyPartKind::Plain
             } else {
-                return;
+                return false;
             };
             let spec = BodyPartSpec {
                 path: Some(path),
-                depth: path.len(),
+                depth,
                 kind,
                 octets: other.octets,
+                charset: body_preview_part_charset(common, shared_charset),
+                transfer_encoding: body_preview_transfer_encoding(&other.transfer_encoding),
+                decode_flowed: kind != BodyPartKind::Html
+                    && legacy_body_param_eq(common, "format", "flowed")
+                    && !matches!(
+                        other.transfer_encoding,
+                        imap_proto::ContentEncoding::Base64
+                            | imap_proto::ContentEncoding::QuotedPrintable
+                    ),
             };
-            match kind {
-                BodyPartKind::Html if html.is_none() => *html = Some(spec),
-                BodyPartKind::Plain if plain.is_none() => *plain = Some(spec),
-                _ => {}
-            }
+            return push_bounded_body_preview_spec(spec, remaining_bytes, specs);
         }
         BodyStructure::Multipart { bodies, .. } => {
             for (index, child) in bodies.iter().enumerate() {
                 path.push((index + 1) as u32);
-                collect_body_preview_part_specs(child, path, html, plain);
+                let complete = collect_body_preview_text_part_specs(
+                    child,
+                    path,
+                    include_attachments,
+                    shared_charset,
+                    remaining_bytes,
+                    specs,
+                );
                 path.pop();
-                if html.is_some() && plain.is_some() {
-                    break;
+                if complete {
+                    return true;
                 }
             }
         }
         _ => {}
     }
+    false
+}
+
+fn collect_pgp_encrypted_preview_part_spec(
+    body: &BodyStructure<'_>,
+    path: &mut Vec<u32>,
+    shared_charset: &str,
+    remaining_bytes: &mut usize,
+    specs: &mut Vec<BodyPartSpec>,
+) -> bool {
+    let BodyStructure::Multipart { bodies, .. } = body else {
+        return false;
+    };
+
+    if legacy_body_is_pgp_encrypted(body) {
+        let Some(payload) = bodies.get(1) else {
+            return false;
+        };
+        path.push(2);
+        let depth = path.len();
+        let path_value = path_array(path);
+        path.pop();
+        if let (Some(path), Some(single)) = (path_value, legacy_body_single_part(payload)) {
+            let spec = BodyPartSpec {
+                path: Some(path),
+                depth,
+                kind: BodyPartKind::Plain,
+                octets: single.octets,
+                charset: body_preview_part_charset(legacy_body_common(payload), shared_charset),
+                transfer_encoding: body_preview_transfer_encoding(&single.transfer_encoding),
+                decode_flowed: false,
+            };
+            push_bounded_body_preview_spec(spec, remaining_bytes, specs);
+            return !specs.is_empty();
+        }
+    }
+
+    for (index, child) in bodies.iter().enumerate() {
+        path.push((index + 1) as u32);
+        let found = collect_pgp_encrypted_preview_part_spec(
+            child,
+            path,
+            shared_charset,
+            remaining_bytes,
+            specs,
+        );
+        path.pop();
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+fn push_bounded_body_preview_spec(
+    spec: BodyPartSpec,
+    remaining_bytes: &mut usize,
+    specs: &mut Vec<BodyPartSpec>,
+) -> bool {
+    let requested = preview_fetch_bytes(spec.octets);
+    if specs.len() >= BODY_PREVIEW_TEXT_PART_LIMIT || requested > *remaining_bytes {
+        return true;
+    }
+    *remaining_bytes -= requested;
+    specs.push(spec);
+    specs.len() >= BODY_PREVIEW_TEXT_PART_LIMIT || *remaining_bytes == 0
+}
+
+fn body_preview_part_charset(
+    common: &imap_proto::BodyContentCommon<'_>,
+    shared_charset: &str,
+) -> String {
+    common
+        .ty
+        .params
+        .as_deref()
+        .and_then(|params| legacy_body_param_exact(params, "charset"))
+        .map(|charset| legacy_normalize_body_charset(charset, true))
+        .filter(|charset| !charset.is_empty())
+        .unwrap_or_else(|| shared_charset.to_string())
+}
+
+fn body_preview_shared_charset(body: &BodyStructure<'_>, header: &[u8]) -> String {
+    if let Some(charset) = body_preview_header_charset(header) {
+        return charset;
+    }
+
+    body_preview_find_charset(body, false, false)
+        .or_else(|| body_preview_find_charset(body, true, false))
+        .unwrap_or_else(|| "utf-8".to_string())
+}
+
+fn body_preview_header_charset(header: &[u8]) -> Option<String> {
+    let message = mail_parser::MessageParser::default().parse(header)?;
+    message
+        .content_type()?
+        .attribute("charset")
+        .map(|charset| legacy_normalize_body_charset(charset, false))
+        .filter(|charset| !charset.is_empty())
+}
+
+fn body_preview_find_charset(
+    body: &BodyStructure<'_>,
+    attachments: bool,
+    parent_pgp_encrypted: bool,
+) -> Option<String> {
+    let common = legacy_body_common(body);
+    let charset = common
+        .ty
+        .params
+        .as_deref()
+        .and_then(|params| legacy_body_param_exact(params, "charset"))
+        .map(|charset| legacy_normalize_body_charset(charset, false))
+        .filter(|charset| !charset.is_empty());
+    let is_attachment = !parent_pgp_encrypted && legacy_body_part_is_attachment(body);
+    let is_eligible_text = matches!(body, BodyStructure::Text { .. })
+        && (common.ty.subtype.eq_ignore_ascii_case("plain")
+            || common.ty.subtype.eq_ignore_ascii_case("html")
+            || common.ty.subtype.eq_ignore_ascii_case("x-amp-html"));
+    if charset.is_some()
+        && ((attachments && is_attachment) || (!attachments && is_eligible_text && !is_attachment))
+    {
+        return charset;
+    }
+
+    if let BodyStructure::Multipart { bodies, .. } = body {
+        let current_pgp_encrypted = legacy_body_is_pgp_encrypted(body);
+        for child in bodies {
+            if let Some(charset) =
+                body_preview_find_charset(child, attachments, current_pgp_encrypted)
+            {
+                return Some(charset);
+            }
+        }
+    }
+    None
+}
+
+fn body_preview_transfer_encoding(
+    encoding: &imap_proto::ContentEncoding<'_>,
+) -> BodyPartTransferEncoding {
+    match encoding {
+        imap_proto::ContentEncoding::Base64 => BodyPartTransferEncoding::Base64,
+        imap_proto::ContentEncoding::QuotedPrintable => BodyPartTransferEncoding::QuotedPrintable,
+        _ => BodyPartTransferEncoding::Identity,
+    }
+}
+
+fn legacy_normalize_body_charset(value: &str, ascii_as_utf8: bool) -> String {
+    let value = value.to_ascii_lowercase();
+    if matches!(value.as_str(), "asci" | "ascii" | "us-asci" | "us-ascii") {
+        return if ascii_as_utf8 {
+            "utf-8".to_string()
+        } else {
+            "iso-8859-1".to_string()
+        };
+    }
+    legacy_normalize_rfc2047_charset(&value)
 }
 
 fn body_preview_fetch_query(specs: &[BodyPartSpec]) -> String {
     let attrs = specs
         .iter()
-        .flat_map(|spec| match spec.path_vec() {
+        .map(|spec| match spec.path_vec() {
             Some(path) => {
                 let path = section_path(&path);
-                vec![
-                    format!("BODY.PEEK[{path}.MIME]"),
-                    format!("BODY.PEEK[{path}]<0.{}>", preview_fetch_bytes(spec.octets)),
-                ]
+                format!("BODY.PEEK[{path}]<0.{}>", preview_fetch_bytes(spec.octets))
             }
-            None => vec![format!(
-                "BODY.PEEK[]<0.{}>",
-                preview_fetch_bytes(spec.octets)
-            )],
+            None => format!("BODY.PEEK[]<0.{}>", preview_fetch_bytes(spec.octets)),
         })
         .collect::<Vec<_>>()
         .join(" ");
@@ -6622,11 +6848,15 @@ fn section_path(path: &[u32]) -> String {
 }
 
 fn path_array(path: &[u32]) -> Option<[u32; 8]> {
-    if path.is_empty() || path.len() > 8 {
+    if path.len() > 8 {
         return None;
     }
     let mut out = [0; 8];
-    out[..path.len()].copy_from_slice(path);
+    if path.is_empty() {
+        out[0] = 1;
+    } else {
+        out[..path.len()].copy_from_slice(path);
+    }
     Some(out)
 }
 
@@ -6637,17 +6867,102 @@ fn is_attachment(common: &imap_proto::BodyContentCommon<'_>) -> bool {
         .is_some_and(|disposition| disposition.ty.eq_ignore_ascii_case("attachment"))
 }
 
-fn join_mime_part(mime: &[u8], body: &[u8]) -> Vec<u8> {
-    let mut raw = Vec::with_capacity(mime.len() + body.len() + 4);
-    raw.extend_from_slice(mime);
-    if !raw.ends_with(b"\r\n\r\n") {
-        if !raw.ends_with(b"\r\n") {
-            raw.extend_from_slice(b"\r\n");
-        }
-        raw.extend_from_slice(b"\r\n");
+fn decode_body_preview_part(spec: &BodyPartSpec, body: &[u8]) -> Vec<u8> {
+    let decoded = match spec.transfer_encoding {
+        BodyPartTransferEncoding::Identity => body.to_vec(),
+        BodyPartTransferEncoding::Base64 => legacy_php_base64_decode(body),
+        BodyPartTransferEncoding::QuotedPrintable => legacy_php_body_quoted_printable_decode(body),
+    };
+    let mut text = if spec.charset.eq_ignore_ascii_case("utf-8") {
+        decode_utf8_without_invalid_bytes(&decoded)
+    } else {
+        charset_decoder(spec.charset.as_bytes())
+            .map(|decoder| decoder(&decoded))
+            .unwrap_or_else(|| decode_utf8_without_invalid_bytes(&decoded))
+    };
+    if spec.decode_flowed {
+        text = decode_legacy_flowed_text(&text);
     }
-    raw.extend_from_slice(body);
+
+    let mime_type = match spec.kind {
+        BodyPartKind::Html => "text/html",
+        BodyPartKind::Plain | BodyPartKind::RawMessage => "text/plain",
+    };
+    let mut raw = Vec::with_capacity(text.len() + 48);
+    raw.extend_from_slice(format!("Content-Type: {mime_type}; charset=utf-8\r\n\r\n").as_bytes());
+    raw.extend_from_slice(text.as_bytes());
     raw
+}
+
+fn decode_legacy_flowed_text(value: &str) -> String {
+    value.replace(" \r\n", " ").replace(" \n", " ")
+}
+
+fn decode_utf8_without_invalid_bytes(mut value: &[u8]) -> String {
+    let mut output = String::with_capacity(value.len());
+    while !value.is_empty() {
+        match std::str::from_utf8(value) {
+            Ok(valid) => {
+                output.push_str(valid);
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                output.push_str(
+                    std::str::from_utf8(&value[..valid])
+                        .expect("from_utf8 valid_up_to prefix must be valid UTF-8"),
+                );
+                let skip = error.error_len().unwrap_or(value.len() - valid);
+                value = &value[valid + skip..];
+            }
+        }
+    }
+    output
+}
+
+fn legacy_php_body_quoted_printable_decode(value: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] != b'=' {
+            output.push(value[index]);
+            index += 1;
+            continue;
+        }
+        if index + 1 == value.len() {
+            break;
+        }
+        if index + 2 < value.len() {
+            if let (Some(high), Some(low)) = (
+                legacy_hex_nibble(value[index + 1]),
+                legacy_hex_nibble(value[index + 2]),
+            ) {
+                output.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+
+        let mut newline = index + 1;
+        while newline < value.len() && matches!(value[newline], b' ' | b'\t') {
+            newline += 1;
+        }
+        if newline < value.len() && value[newline] == b'\r' {
+            index = newline + 1;
+            if index < value.len() && value[index] == b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if newline < value.len() && value[newline] == b'\n' {
+            index = newline + 1;
+            continue;
+        }
+
+        output.push(b'=');
+        index += 1;
+    }
+    output
 }
 
 async fn login(config: ImapConnectionConfig, password: &str) -> Result<BoxedSession> {
@@ -8726,11 +9041,11 @@ mod tests {
 
         assert_eq!(
             uid_fetch_bodystructure_query(42).unwrap(),
-            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER])"
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER]<0.65536>)"
         );
         assert_eq!(
             uid_fetch_bodystructure_query_with_gmail_id(42, true).unwrap(),
-            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER] X-GM-MSGID)"
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER]<0.65536> X-GM-MSGID)"
         );
         assert!(uid_fetch_bodystructure_query(0).is_err());
         assert_eq!(
@@ -8747,11 +9062,15 @@ mod tests {
             depth: 1,
             kind: BodyPartKind::Html,
             octets: u32::MAX,
+            charset: "utf-8".to_string(),
+            transfer_encoding: BodyPartTransferEncoding::Identity,
+            decode_flowed: false,
         }];
         assert_eq!(
             body_preview_fetch_query(&specs),
-            "(UID BODY.PEEK[1.MIME] BODY.PEEK[1]<0.262144>)"
+            "(UID BODY.PEEK[1]<0.262144>)"
         );
+        assert!(!body_preview_fetch_query(&specs).contains(".MIME"));
         assert!(!body_preview_fetch_query(&specs).contains("RFC822"));
     }
 
@@ -8763,6 +9082,301 @@ mod tests {
             b"abcd",
             BODY_PREVIEW_PART_LIMIT_BYTES as u32,
         ));
+    }
+
+    #[test]
+    fn body_preview_selects_all_non_attachment_text_parts_in_tree_order() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", None),
+                    other: test_body_single_part(10),
+                    lines: 1,
+                    extension: None,
+                },
+                BodyStructure::Multipart {
+                    common: test_body_common("multipart", "alternative", None),
+                    bodies: vec![
+                        BodyStructure::Text {
+                            common: test_body_common("text", "x-amp-html", None),
+                            other: test_body_single_part(20),
+                            lines: 1,
+                            extension: None,
+                        },
+                        BodyStructure::Text {
+                            common: test_body_common("text", "html", None),
+                            other: test_body_single_part(30),
+                            lines: 1,
+                            extension: None,
+                        },
+                    ],
+                    extension: None,
+                },
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", Some("attachment")),
+                    other: test_body_single_part(40),
+                    lines: 1,
+                    extension: None,
+                },
+                BodyStructure::Text {
+                    common: test_body_common("text", "calendar", None),
+                    other: test_body_single_part(50),
+                    lines: 1,
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let specs = body_preview_part_specs(&body, b"");
+
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].path_vec(), Some(vec![1]));
+        assert_eq!(specs[0].kind, BodyPartKind::Plain);
+        assert_eq!(specs[1].path_vec(), Some(vec![2, 1]));
+        assert_eq!(specs[1].kind, BodyPartKind::Plain);
+        assert_eq!(specs[2].path_vec(), Some(vec![2, 2]));
+        assert_eq!(specs[2].kind, BodyPartKind::Html);
+    }
+
+    #[test]
+    fn body_preview_uses_pgp_payload_before_text_attachment_fallback() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", Some("attachment")),
+                    other: test_body_single_part(40),
+                    lines: 1,
+                    extension: None,
+                },
+                BodyStructure::Multipart {
+                    common: test_body_common_with_params(
+                        "multipart",
+                        "encrypted",
+                        None,
+                        Some(vec![("protocol", "application/pgp-encrypted")]),
+                    ),
+                    bodies: vec![
+                        BodyStructure::Basic {
+                            common: test_body_common("application", "pgp-encrypted", None),
+                            other: test_body_single_part(11),
+                            extension: None,
+                        },
+                        BodyStructure::Basic {
+                            common: test_body_common("application", "octet-stream", None),
+                            other: test_body_single_part(1024),
+                            extension: None,
+                        },
+                    ],
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let specs = body_preview_part_specs(&body, b"");
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].path_vec(), Some(vec![2, 2]));
+        assert_eq!(specs[0].kind, BodyPartKind::Plain);
+    }
+
+    #[test]
+    fn body_preview_falls_back_to_text_attachments_when_no_body_exists() {
+        let body = BodyStructure::Text {
+            common: test_body_common("text", "plain", Some("attachment")),
+            other: test_body_single_part(40),
+            lines: 1,
+            extension: None,
+        };
+
+        let specs = body_preview_part_specs(&body, b"");
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].path_vec(), Some(vec![1]));
+        assert_eq!(specs[0].kind, BodyPartKind::Plain);
+    }
+
+    #[test]
+    fn body_preview_bounds_selected_part_count_and_total_bytes() {
+        let small_parts = (0..(BODY_PREVIEW_TEXT_PART_LIMIT + 1))
+            .map(|_| BodyStructure::Text {
+                common: test_body_common("text", "plain", None),
+                other: test_body_single_part(1),
+                lines: 1,
+                extension: None,
+            })
+            .collect();
+        let many = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: small_parts,
+            extension: None,
+        };
+        assert_eq!(
+            body_preview_part_specs(&many, b"").len(),
+            BODY_PREVIEW_TEXT_PART_LIMIT
+        );
+
+        let large_parts = (0..5)
+            .map(|_| BodyStructure::Text {
+                common: test_body_common("text", "plain", None),
+                other: test_body_single_part(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
+                lines: 1,
+                extension: None,
+            })
+            .collect();
+        let large = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: large_parts,
+            extension: None,
+        };
+        assert_eq!(body_preview_part_specs(&large, b"").len(), 4);
+    }
+
+    #[test]
+    fn body_preview_decodes_flowed_only_for_unencoded_plain_parts() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common_with_params(
+                        "text",
+                        "plain",
+                        None,
+                        Some(vec![("format", "flowed")]),
+                    ),
+                    other: test_body_single_part_full(
+                        32,
+                        imap_proto::ContentEncoding::SevenBit,
+                        None,
+                    ),
+                    lines: 2,
+                    extension: None,
+                },
+                BodyStructure::Text {
+                    common: test_body_common_with_params(
+                        "text",
+                        "plain",
+                        None,
+                        Some(vec![("format", "flowed")]),
+                    ),
+                    other: test_body_single_part_full(
+                        32,
+                        imap_proto::ContentEncoding::Base64,
+                        None,
+                    ),
+                    lines: 2,
+                    extension: None,
+                },
+                BodyStructure::Text {
+                    common: test_body_common_with_params(
+                        "text",
+                        "plain",
+                        None,
+                        Some(vec![("format", "flowed")]),
+                    ),
+                    other: test_body_single_part_full(
+                        32,
+                        imap_proto::ContentEncoding::QuotedPrintable,
+                        None,
+                    ),
+                    lines: 2,
+                    extension: None,
+                },
+                BodyStructure::Text {
+                    common: test_body_common_with_params(
+                        "text",
+                        "html",
+                        None,
+                        Some(vec![("format", "flowed")]),
+                    ),
+                    other: test_body_single_part_full(
+                        32,
+                        imap_proto::ContentEncoding::SevenBit,
+                        None,
+                    ),
+                    lines: 2,
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let specs = body_preview_part_specs(&body, b"");
+
+        assert!(specs[0].decode_flowed);
+        assert!(!specs[1].decode_flowed);
+        assert!(!specs[2].decode_flowed);
+        assert!(!specs[3].decode_flowed);
+        let decoded = decode_body_preview_part(&specs[0], b"first \r\nsecond \nthird");
+        assert!(String::from_utf8(decoded)
+            .unwrap()
+            .ends_with("first second third"));
+        let html = decode_body_preview_part(&specs[3], b"first \r\nsecond");
+        assert!(String::from_utf8(html)
+            .unwrap()
+            .ends_with("first \r\nsecond"));
+        let base64 = decode_body_preview_part(&specs[1], b"Zmlyc3QgDQpzZWNvbmQ=");
+        assert!(String::from_utf8(base64)
+            .unwrap()
+            .ends_with("first \r\nsecond"));
+        let quoted_printable = decode_body_preview_part(&specs[2], b"first=20\r\nsecond=3D");
+        assert!(String::from_utf8(quoted_printable)
+            .unwrap()
+            .ends_with("first \r\nsecond="));
+        let malformed = decode_body_preview_part(&specs[2], b"abc=\rX");
+        assert!(String::from_utf8(malformed).unwrap().ends_with("abcX"));
+    }
+
+    #[test]
+    fn body_preview_applies_shared_and_top_header_charset_fallbacks() {
+        let body = BodyStructure::Multipart {
+            common: test_body_common("multipart", "mixed", None),
+            bodies: vec![
+                BodyStructure::Text {
+                    common: test_body_common_with_params(
+                        "text",
+                        "plain",
+                        None,
+                        Some(vec![("charset", "US-ASCII")]),
+                    ),
+                    other: test_body_single_part(16),
+                    lines: 1,
+                    extension: None,
+                },
+                BodyStructure::Text {
+                    common: test_body_common("text", "plain", None),
+                    other: test_body_single_part(16),
+                    lines: 1,
+                    extension: None,
+                },
+            ],
+            extension: None,
+        };
+
+        let specs = body_preview_part_specs(&body, b"");
+        assert_eq!(specs[0].charset, "utf-8");
+        assert_eq!(specs[1].charset, "iso-8859-1");
+        let decoded = decode_body_preview_part(&specs[1], b"caf\xe9");
+        assert!(String::from_utf8(decoded).unwrap().ends_with("café"));
+        let explicit_ascii = decode_body_preview_part(&specs[0], b"a\xffb\xef\xbf\xbdc");
+        assert!(String::from_utf8(explicit_ascii).unwrap().ends_with("ab�c"));
+
+        let overridden = body_preview_part_specs(
+            &body,
+            b"Content-Type: multipart/mixed; charset=windows-1252\r\n\r\n",
+        );
+        assert_eq!(overridden[0].charset, "utf-8");
+        assert_eq!(overridden[1].charset, "windows-1252");
+
+        let ascii_header = body_preview_part_specs(
+            &body,
+            b"Content-Type: multipart/mixed; charset=US-ASCII\r\n\r\n",
+        );
+        assert_eq!(ascii_header[0].charset, "utf-8");
+        assert_eq!(ascii_header[1].charset, "iso-8859-1");
     }
 
     #[test]
