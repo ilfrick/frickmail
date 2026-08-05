@@ -4,6 +4,7 @@
   <p>Self-hosted webmail, now migrating to a full Rust backend and Frickmail-owned runtime.</p>
   <p>
     <a href="docs/OAUTH2.md">OAuth2 setup</a> •
+    <a href="docs/DEPLOYMENT.md">Build and deployment</a> •
     <a href="SECURITY.md">Security policy</a> •
     <a href="docker-compose.frickmail.yml">Docker compose</a>
   </p>
@@ -73,6 +74,9 @@ rewrite progresses:
 ```bash
 docker build -f .docker/release/Dockerfile -t frickmail:latest .
 ```
+
+See **[Build and deployment](docs/DEPLOYMENT.md)** for backup, isolated smoke
+test, rollout, verification, and rollback instructions.
 
 ## License
 

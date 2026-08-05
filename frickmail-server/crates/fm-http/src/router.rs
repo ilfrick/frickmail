@@ -30,7 +30,7 @@ use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
     copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
     fetch_legacy_folder_information, fetch_legacy_folders,
-    fetch_legacy_message_list_with_uid_cache, fetch_mailbox_acl, fetch_mailbox_status,
+    fetch_legacy_message_list_with_uid_cache_if_changed, fetch_mailbox_acl, fetch_mailbox_status,
     fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
     legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
     legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_acl,
@@ -71,6 +71,9 @@ use crate::{uid_cache::RedisLegacyMessageListUidCache, AppState};
 
 const INVALID_INPUT_ARGUMENT: u16 = 903;
 const UNKNOWN_ERROR: u16 = 999;
+const AUTH_ERROR: u16 = 102;
+const CONNECTION_ERROR: u16 = 104;
+const CANT_GET_MESSAGE_LIST: u16 = 201;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const TOTP_PENDING_SESSION_KEY: &str = "frickmail_totp_pending_secret";
 const MESSAGE_BODY_FETCH_DEADLINE: Duration = Duration::from_secs(20);
@@ -789,6 +792,9 @@ async fn native_compat_response(
         "Message" if legacy_message_payload_is_native_candidate(payload) => {
             Some(native_legacy_message(state, original_action, payload, session, headers).await)
         }
+        "MessageList" => Some(
+            native_legacy_message_list(state, original_action, payload, session, headers).await,
+        ),
         "Folders" => Some(native_legacy_folders(state, original_action, payload, session).await),
         "FolderInformation" => {
             Some(native_legacy_folder_information(state, original_action, payload, session).await)
@@ -4930,7 +4936,6 @@ fn legacy_message_raw_key_request_from_payload(
     }))
 }
 
-#[allow(dead_code)]
 async fn native_legacy_message_list(
     state: &AppState,
     original_action: &str,
@@ -4947,7 +4952,7 @@ async fn native_legacy_message_list(
         session,
         headers,
         MESSAGE_LIST_DEADLINE,
-        move |config, password, request, account_email| {
+        move |config, password, request, account_email, unchanged_folder_etag| {
             let uid_cache = redis_pool.map(|pool| {
                 Arc::new(RedisLegacyMessageListUidCache::new(
                     pool,
@@ -4956,15 +4961,20 @@ async fn native_legacy_message_list(
                 )) as Arc<dyn fm_imap::LegacyMessageListUidCache>
             });
             async move {
-                fetch_legacy_message_list_with_uid_cache(config, &password, request, uid_cache)
-                    .await
+                fetch_legacy_message_list_with_uid_cache_if_changed(
+                    config,
+                    &password,
+                    request,
+                    uid_cache,
+                    unchanged_folder_etag,
+                )
+                .await
             }
         },
     )
     .await
 }
 
-#[allow(dead_code)]
 async fn native_legacy_message_list_with_fetcher<F, Fut>(
     state: &AppState,
     original_action: &str,
@@ -4975,12 +4985,18 @@ async fn native_legacy_message_list_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, LegacyMessageListRequest, String) -> Fut,
-    Fut: std::future::Future<Output = fm_core::Result<LegacyMessageList>>,
+    F: FnOnce(
+        ImapConnectionConfig,
+        String,
+        LegacyMessageListRequest,
+        String,
+        Option<String>,
+    ) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Option<LegacyMessageList>>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
         Ok(auth) => auth,
-        Err(response) => return response,
+        Err(_) => return legacy_action_error(original_action, AUTH_ERROR, "Not authenticated"),
     };
     let hide_deleted = match legacy_message_list_hide_deleted_setting(
         state,
@@ -4990,7 +5006,13 @@ where
     .await
     {
         Ok(hide_deleted) => hide_deleted,
-        Err(response) => return response,
+        Err(_) => {
+            return legacy_action_error(
+                original_action,
+                CANT_GET_MESSAGE_LIST,
+                "Cannot read message-list settings",
+            )
+        }
     };
     let (config, password, account_email) =
         match imap_action_connection_with_email_for_selected_or_payload(
@@ -5004,7 +5026,13 @@ where
         .await
         {
             Ok(connection) => connection,
-            Err(response) => return response,
+            Err(_) => {
+                return legacy_action_error(
+                    original_action,
+                    CONNECTION_ERROR,
+                    "Cannot connect to the selected mail account",
+                )
+            }
         };
     let (mut request, raw_cache_hash) =
         match legacy_message_list_raw_key_request_from_payload(payload) {
@@ -5018,9 +5046,13 @@ where
             }
             Ok(None) => match legacy_message_list_request_from_payload(payload) {
                 Ok(request) => (request, None),
-                Err(message) => return json_result_error(original_action, message),
+                Err(message) => {
+                    return legacy_action_error(original_action, CANT_GET_MESSAGE_LIST, message)
+                }
             },
-            Err(message) => return json_result_error(original_action, message),
+            Err(message) => {
+                return legacy_action_error(original_action, CANT_GET_MESSAGE_LIST, message)
+            }
         };
     request.hide_deleted = hide_deleted;
     (request.fast_simple_search, request.permanent_filter) = state
@@ -5038,16 +5070,35 @@ where
             .unwrap_or_else(|| account_email.clone()),
         None => account_email.clone(),
     };
+    let conditional_cache = raw_cache_hash.as_deref().and_then(|cache_hash| {
+        let folder_etag = legacy_message_list_request_hash_validator(cache_hash)?;
+        let cache_state = legacy_message_list_raw_cache_state(cache_hash, &request, &folder_etag)?;
+        let response = legacy_message_list_cache_validation_response(
+            headers,
+            &state.config().cache,
+            &cache_state,
+        )?;
+        Some((folder_etag, response.status()))
+    });
+    let unchanged_folder_etag = conditional_cache
+        .as_ref()
+        .map(|(folder_etag, _)| folder_etag.clone());
 
     let result = tokio::time::timeout(
         fetch_deadline,
-        fetcher(config, password, request.clone(), cache_account_email),
+        fetcher(
+            config,
+            password,
+            request.clone(),
+            cache_account_email,
+            unchanged_folder_etag,
+        ),
     )
     .await
     .map_err(|_| FrickmailError::Upstream("Message list fetch timed out".to_string()));
 
     match result {
-        Ok(Ok(list)) => {
+        Ok(Ok(Some(list))) => {
             let raw_cache_state = raw_cache_hash.as_deref().and_then(|cache_hash| {
                 legacy_message_list_raw_cache_state(cache_hash, &request, &list.folder.etag)
             });
@@ -5077,11 +5128,21 @@ where
             }
             response
         }
-        Ok(Err(err)) | Err(err) => json_result_error(original_action, &err.public_message()),
+        Ok(Ok(None)) => conditional_cache
+            .map(|(_, status)| legacy_empty_response(status))
+            .unwrap_or_else(|| {
+                legacy_action_error(
+                    original_action,
+                    CANT_GET_MESSAGE_LIST,
+                    "Message-list cache validation failed",
+                )
+            }),
+        Ok(Err(err)) | Err(err) => {
+            legacy_action_error(original_action, CANT_GET_MESSAGE_LIST, err.public_message())
+        }
     }
 }
 
-#[allow(dead_code)]
 fn legacy_message_list_request_from_payload(
     payload: &Value,
 ) -> Result<LegacyMessageListRequest, &'static str> {
@@ -6997,7 +7058,6 @@ fn legacy_optional_scalar_string(value: Option<&str>) -> Value {
     value.map(|value| json!(value)).unwrap_or(Value::Null)
 }
 
-#[allow(dead_code)]
 fn legacy_message_list_json(list: &fm_imap::LegacyMessageList) -> Value {
     let mut folder = legacy_folder_information_json(&list.folder);
     if let Some(folder) = folder.as_object_mut() {
@@ -7021,7 +7081,6 @@ fn legacy_message_list_json(list: &fm_imap::LegacyMessageList) -> Value {
     })
 }
 
-#[allow(dead_code)]
 fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value {
     let mut value = json!({
         "@Object": "Object/Message",
@@ -8498,6 +8557,10 @@ fn json_result_error(action: &str, error: &str) -> Response {
             }
         }),
     )
+}
+
+fn legacy_action_error(action: &str, code: u16, message: impl Into<String>) -> Response {
+    json_value_envelope(StatusCode::OK, action, compat_error(code, message))
 }
 
 fn bridge_target_url(bridge_url: &str, uri: &Uri) -> Result<String, url::ParseError> {
@@ -12958,7 +13021,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_api_recognizes_unmigrated_legacy_mailbox_actions() {
+    async fn json_api_dispatches_message_list_get_to_native_auth_path() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -12973,11 +13036,31 @@ mod tests {
 
         assert_eq!(body["Action"], "MessageList");
         assert_eq!(body["Result"], false);
-        assert_eq!(body["code"], 501);
-        assert_eq!(
-            body["message"],
-            "Frickmail compatibility hook 'MessageList' is not migrated yet"
-        );
+        assert_eq!(body["code"], super::AUTH_ERROR);
+        assert_eq!(body["message"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn json_api_dispatches_message_list_post_to_native_auth_path() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Action=MessageList&folder=INBOX&offset=0&limit=50",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], super::AUTH_ERROR);
+        assert_eq!(body["message"], "Not authenticated");
     }
 
     #[tokio::test]
@@ -14822,12 +14905,17 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            move |config, password, request, cache_account_email| {
+            move |config, password, request, cache_account_email, unchanged_folder_etag| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
-                    *captured.lock().unwrap() =
-                        Some((config, password, request.clone(), cache_account_email));
-                    Ok(LegacyMessageList {
+                    *captured.lock().unwrap() = Some((
+                        config,
+                        password,
+                        request.clone(),
+                        cache_account_email,
+                        unchanged_folder_etag,
+                    ));
+                    Ok(Some(LegacyMessageList {
                         folder: legacy_test_folder_information(),
                         total_emails: 12,
                         total_threads: Some(6),
@@ -14838,7 +14926,7 @@ Subject: Empty body metadata\r\n\r\n"
                         limited: false,
                         thread_uid: request.thread_uid,
                         messages: vec![legacy_test_message_summary()],
-                    })
+                    }))
                 }
             },
         )
@@ -14855,7 +14943,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["Result"]["totalThreads"], 6);
         assert_eq!(body["Result"]["threadUid"], 77);
 
-        let (config, password, request, cache_account_email) =
+        let (config, password, request, cache_account_email, unchanged_folder_etag) =
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
@@ -14874,6 +14962,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(request.thread_uid, 77);
         assert_eq!(request.thread_algorithm, "REFERENCES");
         assert_eq!(cache_account_email, "work@example.com");
+        assert_eq!(unchanged_folder_etag, None);
     }
 
     #[tokio::test]
@@ -14895,11 +14984,11 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            move |_config, _password, request, _account_email| {
+            move |_config, _password, request, _account_email, _unchanged_folder_etag| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
                     *captured.lock().unwrap() = Some(request.clone());
-                    Ok(LegacyMessageList {
+                    Ok(Some(LegacyMessageList {
                         folder: legacy_test_folder_information(),
                         total_emails: 1,
                         total_threads: None,
@@ -14910,7 +14999,7 @@ Subject: Empty body metadata\r\n\r\n"
                         limited: false,
                         thread_uid: request.thread_uid,
                         messages: Vec::new(),
-                    })
+                    }))
                 }
             },
         )
@@ -14921,6 +15010,89 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["Result"]["@Object"], "Collection/MessageCollection");
         assert_eq!(body["Result"]["totalThreads"], Value::Null);
         assert!(!captured.lock().unwrap().clone().unwrap().hide_deleted);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_invalid_payload_uses_legacy_error_envelope() {
+        let key = [52_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1828, 1829, &key).await;
+        let fetch_called = Arc::new(Mutex::new(false));
+        let fetch_called_for_fetch = Arc::clone(&fetch_called);
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({"account_id": 1829}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            move |_config, _password, _request, _account_email, _unchanged_folder_etag| {
+                let fetch_called = Arc::clone(&fetch_called_for_fetch);
+                async move {
+                    *fetch_called.lock().unwrap() = true;
+                    Ok(None)
+                }
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], super::CANT_GET_MESSAGE_LIST);
+        assert_eq!(body["message"], "folder required");
+        assert!(!*fetch_called.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_fetch_error_uses_legacy_error_envelope() {
+        let key = [53_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1830, 1831, &key).await;
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({"account_id": 1831, "folder": "INBOX"}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _request, _account_email, _unchanged_folder_etag| async move {
+                Err(FrickmailError::Upstream("IMAP list failed".to_string()))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], super::CANT_GET_MESSAGE_LIST);
+        assert_eq!(body["message"], "IMAP list failed");
+    }
+
+    #[tokio::test]
+    async fn native_legacy_message_list_timeout_uses_legacy_error_envelope() {
+        let key = [58_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1832, 1833, &key).await;
+
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({"account_id": 1833, "folder": "INBOX"}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_millis(1),
+            |_config, _password, _request, _account_email, _unchanged_folder_etag| async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(None)
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "MessageList");
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], super::CANT_GET_MESSAGE_LIST);
+        assert_eq!(body["message"], "Message list fetch timed out");
     }
 
     #[tokio::test]
@@ -14939,8 +15111,8 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            |_config, _password, request, _account_email| async move {
-                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            |_config, _password, request, _account_email, _unchanged_folder_etag| async move {
+                Ok(Some(legacy_test_message_list_for_request(&request, "etag")))
             },
         )
         .await;
@@ -14988,8 +15160,8 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            |_config, _password, request, _account_email| async move {
-                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            |_config, _password, request, _account_email, _unchanged_folder_etag| async move {
+                Ok(Some(legacy_test_message_list_for_request(&request, "etag")))
             },
         )
         .await;
@@ -15026,8 +15198,9 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &headers,
             Duration::from_secs(1),
-            |_config, _password, request, _account_email| async move {
-                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            |_config, _password, _request, _account_email, unchanged_folder_etag| async move {
+                assert_eq!(unchanged_folder_etag.as_deref(), Some("etag"));
+                Ok(None)
             },
         )
         .await;
@@ -15056,8 +15229,9 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &headers,
             Duration::from_secs(1),
-            |_config, _password, request, _account_email| async move {
-                Ok(legacy_test_message_list_for_request(&request, "etag"))
+            |_config, _password, _request, _account_email, unchanged_folder_etag| async move {
+                assert_eq!(unchanged_folder_etag.as_deref(), Some("etag"));
+                Ok(None)
             },
         )
         .await;

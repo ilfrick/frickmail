@@ -942,6 +942,20 @@ pub async fn fetch_legacy_message_list_with_uid_cache(
     request: LegacyMessageListRequest,
     uid_cache: Option<Arc<dyn LegacyMessageListUidCache>>,
 ) -> Result<LegacyMessageList> {
+    fetch_legacy_message_list_with_uid_cache_if_changed(config, password, request, uid_cache, None)
+        .await?
+        .ok_or_else(|| {
+            FrickmailError::Upstream("message list fetch was unexpectedly skipped".to_string())
+        })
+}
+
+pub async fn fetch_legacy_message_list_with_uid_cache_if_changed(
+    config: ImapConnectionConfig,
+    password: &str,
+    request: LegacyMessageListRequest,
+    uid_cache: Option<Arc<dyn LegacyMessageListUidCache>>,
+    unchanged_folder_etag: Option<String>,
+) -> Result<Option<LegacyMessageList>> {
     validate_mailbox(&request.mailbox)?;
 
     let client_hash = legacy_imap_client_hash(&config);
@@ -958,16 +972,17 @@ pub async fn fetch_legacy_message_list_with_uid_cache(
         .transpose()
         .ok()
         .flatten();
-    let result = legacy_message_list_in_session(
+    let result = legacy_message_list_in_session_if_changed(
         &mut session,
         request,
         &client_hash,
         capabilities,
         uid_cache.as_deref(),
+        unchanged_folder_etag.as_deref(),
     )
     .await;
     logout_quietly(session).await;
-    if let (Ok(list), Some(uid_cache), Some(warm_key)) = (&result, uid_cache, warm_key) {
+    if let (Ok(Some(list)), Some(uid_cache), Some(warm_key)) = (&result, uid_cache, warm_key) {
         let cacheable = legacy_message_list_cache_warm_cacheable(
             list.folder.total_emails,
             uid_cache.max_uid_entries(),
@@ -4364,6 +4379,7 @@ async fn legacy_message_list_optimized_in_session(
     })
 }
 
+#[cfg(test)]
 async fn legacy_message_list_in_session(
     session: &mut BoxedSession,
     request: LegacyMessageListRequest,
@@ -4381,6 +4397,68 @@ async fn legacy_message_list_in_session(
         client_hash,
     )
     .await?;
+    legacy_message_list_for_folder_in_session(
+        session,
+        request,
+        client_hash,
+        capabilities,
+        uid_cache,
+        folder,
+    )
+    .await
+}
+
+async fn legacy_message_list_in_session_if_changed(
+    session: &mut BoxedSession,
+    request: LegacyMessageListRequest,
+    client_hash: &str,
+    capabilities: ImapFetchMetadataCapabilities,
+    uid_cache: Option<&dyn LegacyMessageListUidCache>,
+    unchanged_folder_etag: Option<&str>,
+) -> Result<Option<LegacyMessageList>> {
+    let fetch_new_messages = legacy_message_list_fetches_new_messages(request.thread_uid);
+    let mut folder = legacy_folder_information_in_session(
+        session,
+        &request.mailbox,
+        request.prev_uid_next,
+        None,
+        false,
+        client_hash,
+    )
+    .await?;
+    if unchanged_folder_etag.is_some_and(|etag| etag == folder.etag) {
+        return Ok(None);
+    }
+    if fetch_new_messages {
+        folder.new_messages = fetch_legacy_new_messages(
+            session,
+            &request.mailbox,
+            request.prev_uid_next,
+            folder.uid_next,
+        )
+        .await?;
+    }
+
+    legacy_message_list_for_folder_in_session(
+        session,
+        request,
+        client_hash,
+        capabilities,
+        uid_cache,
+        folder,
+    )
+    .await
+    .map(Some)
+}
+
+async fn legacy_message_list_for_folder_in_session(
+    session: &mut BoxedSession,
+    request: LegacyMessageListRequest,
+    client_hash: &str,
+    capabilities: ImapFetchMetadataCapabilities,
+    uid_cache: Option<&dyn LegacyMessageListUidCache>,
+    folder: LegacyFolderInformation,
+) -> Result<LegacyMessageList> {
     let folder_total = folder.total_emails.unwrap_or_default();
     let limit = legacy_message_list_limit(request.limit);
     let uses_multisearch = capabilities.supports_multisearch
@@ -11826,6 +11904,110 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         let threads = fetch_legacy_message_threads_compat(&mut session, "REFERENCES").await;
         assert!(threads.is_empty());
         session.noop().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn conditional_message_list_stops_after_matching_folder_etag() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let capability = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(capability, "A0002 CAPABILITY\r\n");
+            server_stream
+                .write_all(b"* CAPABILITY IMAP4rev1\r\nA0002 OK capability\r\n")
+                .await
+                .unwrap();
+
+            let status = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                status,
+                "A0003 STATUS \"INBOX\" (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)\r\n"
+            );
+            server_stream
+                .write_all(
+                    b"* STATUS \"INBOX\" (MESSAGES 6 UNSEEN 3 UIDNEXT 13 UIDVALIDITY 1)\r\n\
+                      A0003 OK status\r\n",
+                )
+                .await
+                .unwrap();
+
+            let examine = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(examine, "A0004 EXAMINE \"INBOX\"\r\n");
+            server_stream
+                .write_all(
+                    b"* FLAGS (\\Seen \\Deleted)\r\n\
+                      * 6 EXISTS\r\n\
+                      * 0 RECENT\r\n\
+                      * OK [UIDVALIDITY 1] valid\r\n\
+                      * OK [UIDNEXT 13] next\r\n\
+                      * OK [PERMANENTFLAGS (\\Seen \\Deleted)] flags\r\n\
+                      A0004 OK [READ-ONLY] examined\r\n",
+                )
+                .await
+                .unwrap();
+
+            let logout = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(logout, "A0005 LOGOUT\r\n");
+            server_stream
+                .write_all(b"* BYE logout\r\nA0005 OK logout\r\n")
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let folder_etag =
+            legacy_folder_etag("INBOX", 6, Some(13), Some(1), Some(3), None, "client-hash");
+        let result = legacy_message_list_in_session_if_changed(
+            &mut session,
+            LegacyMessageListRequest {
+                mailbox: "INBOX".to_string(),
+                offset: 0,
+                limit: 50,
+                search: String::new(),
+                sort: String::new(),
+                prev_uid_next: Some(10),
+                hide_deleted: true,
+                fast_simple_search: true,
+                permanent_filter: String::new(),
+                message_list_limit: 10_000,
+                use_threads: false,
+                thread_uid: 0,
+                thread_algorithm: String::new(),
+            },
+            "client-hash",
+            ImapFetchMetadataCapabilities {
+                supports_gmail_id: false,
+                supports_preview: false,
+                supports_literal_plus: false,
+                uses_utf8_search: false,
+                supports_within: false,
+                supports_multisearch: false,
+                supports_sort: false,
+                supports_sort_display: false,
+                thread_algorithms: Vec::new(),
+            },
+            None,
+            Some(&folder_etag),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, None);
+        session.logout().await.unwrap();
         server.await.unwrap();
     }
 
