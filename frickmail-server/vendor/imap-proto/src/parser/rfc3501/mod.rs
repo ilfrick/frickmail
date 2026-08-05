@@ -11,7 +11,7 @@ use nom::{
     branch::alt,
     bytes::streaming::{tag, tag_no_case, take_while, take_while1},
     character::streaming::{char, one_of},
-    combinator::{map, map_res, opt, recognize, value},
+    combinator::{map, map_res, opt, recognize, value, verify},
     multi::{many0, many1},
     sequence::{delimited, pair, preceded, terminated, tuple},
     IResult,
@@ -575,6 +575,28 @@ fn msg_att_preview(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     )(i)
 }
 
+fn msg_att_email_id(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
+    map(
+        preceded(
+            tag_no_case("EMAILID "),
+            delimited(
+                char('('),
+                verify(
+                    map_res(
+                        take_while1(|byte: u8| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                        }),
+                        from_utf8,
+                    ),
+                    |value: &str| value.len() <= 255,
+                ),
+                char(')'),
+            ),
+        ),
+        |value| AttributeValue::EmailId(Cow::Borrowed(value)),
+    )(i)
+}
+
 fn preview_nstring(i: &[u8]) -> IResult<&[u8], Option<Cow<'_, [u8]>>> {
     alt((
         map(nil, |_| None),
@@ -641,6 +663,7 @@ fn msg_att(i: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
         msg_att_rfc822_size,
         msg_att_rfc822_text,
         msg_att_preview,
+        msg_att_email_id,
         msg_att_uid,
         gmail::msg_att_gmail_labels,
         gmail::msg_att_gmail_msgid,

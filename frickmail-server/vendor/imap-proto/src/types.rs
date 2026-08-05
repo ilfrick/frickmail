@@ -433,6 +433,8 @@ pub enum AttributeValue<'a> {
     Rfc822Text(Option<Cow<'a, [u8]>>),
     /// RFC 8970 server-generated UTF-8 message preview.
     Preview(Option<Cow<'a, [u8]>>),
+    /// RFC 8474 persistent identifier for identical message content.
+    EmailId(Cow<'a, str>),
     Uid(u32),
     /// https://developers.google.com/gmail/imap/imap-extensions#access_to_gmail_labels_x-gm-labels
     GmailLabels(Vec<Cow<'a, str>>),
@@ -464,6 +466,7 @@ impl<'a> AttributeValue<'a> {
             AttributeValue::Rfc822Size(v) => AttributeValue::Rfc822Size(v),
             AttributeValue::Rfc822Text(v) => AttributeValue::Rfc822Text(v.map(to_owned_cow)),
             AttributeValue::Preview(v) => AttributeValue::Preview(v.map(to_owned_cow)),
+            AttributeValue::EmailId(v) => AttributeValue::EmailId(to_owned_cow(v)),
             AttributeValue::Uid(v) => AttributeValue::Uid(v),
             AttributeValue::GmailLabels(v) => {
                 AttributeValue::GmailLabels(v.into_iter().map(to_owned_cow).collect())

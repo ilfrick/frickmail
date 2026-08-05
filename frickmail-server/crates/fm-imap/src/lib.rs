@@ -643,6 +643,7 @@ struct ImapRuleCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImapFetchMetadataCapabilities {
     supports_gmail_id: bool,
+    supports_object_id: bool,
     supports_preview: bool,
     supports_literal_plus: bool,
     uses_utf8_search: bool,
@@ -739,10 +740,15 @@ pub async fn fetch_message_body_preview(
     let mut session = login(config, password).await?;
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
-    let Some(specs) = fetch_body_part_specs(&mut session, mailbox, uid, capabilities).await? else {
+    let object_email_id = fetch_legacy_message_email_id(&mut session, uid, &capabilities).await?;
+    let Some(mut specs) = fetch_body_part_specs(&mut session, mailbox, uid, capabilities).await?
+    else {
         logout_quietly(session).await;
         return Ok(None);
     };
+    if object_email_id.is_some() {
+        specs.metadata.email_id = object_email_id;
+    }
     let parts = fetch_preview_parts(
         &mut session,
         uid,
@@ -754,6 +760,65 @@ pub async fn fetch_message_body_preview(
     .await?;
     logout_quietly(session).await;
     Ok(Some(parts))
+}
+
+async fn fetch_legacy_message_email_id(
+    session: &mut BoxedSession,
+    uid: u32,
+    capabilities: &ImapFetchMetadataCapabilities,
+) -> Result<Option<String>> {
+    if !capabilities.supports_object_id {
+        return Ok(None);
+    }
+
+    let operation = "fetch message EMAILID";
+    let command = format!("UID FETCH {uid} (UID EMAILID)");
+    timeout_result(
+        operation,
+        timeout(COMMAND_TIMEOUT, async {
+            let request_id = session
+                .run_command(&command)
+                .await
+                .map_err(|error| imap_error(operation, error))?;
+            let mut email_id = None;
+            loop {
+                let response = session
+                    .read_response()
+                    .await
+                    .map_err(|error| {
+                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP connection closed"
+                        ))
+                    })?;
+                if let Response::Fetch(_, attrs) = response.parsed() {
+                    let response_uid = attrs.iter().find_map(|attr| match attr {
+                        AttributeValue::Uid(value) => Some(*value),
+                        _ => None,
+                    });
+                    if response_uid == Some(uid) {
+                        if let Some(value) = attrs.iter().find_map(|attr| match attr {
+                            AttributeValue::EmailId(value) => Some(value.to_string()),
+                            _ => None,
+                        }) {
+                            email_id = Some(value);
+                        }
+                    }
+                }
+                if matches!(response.parsed(), Response::Continue { .. }) {
+                    return Err(FrickmailError::Upstream(format!(
+                        "{operation} failed: unexpected IMAP continuation"
+                    )));
+                }
+                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
+                    return Ok(email_id);
+                }
+            }
+        }),
+    )
+    .await?
 }
 
 pub async fn fetch_mailbox_status(
@@ -6395,6 +6460,7 @@ async fn imap_fetch_metadata_capabilities(
     let capabilities = timeout_imap("read IMAP capabilities", session.capabilities()).await?;
     Ok(ImapFetchMetadataCapabilities {
         supports_gmail_id: has_capability_ignore_ascii_case(&capabilities, "X-GM-EXT-1"),
+        supports_object_id: has_capability_ignore_ascii_case(&capabilities, "OBJECTID"),
         supports_preview: has_capability_ignore_ascii_case(&capabilities, "PREVIEW"),
         supports_literal_plus: has_capability_ignore_ascii_case(&capabilities, "LITERAL+"),
         uses_utf8_search: capabilities.iter().any(is_legacy_utf8_capability),
@@ -6709,7 +6775,10 @@ async fn fetch_body_part_specs(
         "fetch message body structure",
         session.uid_fetch(
             uid.to_string(),
-            uid_fetch_bodystructure_query_with_gmail_id(uid, capabilities.supports_gmail_id)?,
+            uid_fetch_bodystructure_query_with_gmail_id(
+                uid,
+                capabilities.supports_gmail_id && !capabilities.supports_object_id,
+            )?,
         ),
     )
     .await?;
@@ -11301,6 +11370,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         };
         let capabilities = ImapFetchMetadataCapabilities {
             supports_gmail_id: false,
+            supports_object_id: false,
             supports_preview: false,
             supports_literal_plus: false,
             uses_utf8_search: false,
@@ -11413,6 +11483,60 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             }
             stream.flush().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn detailed_message_fetch_reads_capability_gated_object_email_id() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(fetch, "A0002 UID FETCH 41 (UID EMAILID)\r\n");
+            server_stream
+                .write_all(
+                    b"* 6 FETCH (UID 40 EMAILID (Mwrongmessage))\r\n\
+                      * 7 FETCH (UID 41 EMAILID (M6d99ac3275bb4e))\r\n\
+                      * 7 FETCH (UID 41 FLAGS (\\Seen))\r\n\
+                      A0002 OK completed\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let email_id = fetch_legacy_message_email_id(
+            &mut session,
+            41,
+            &ImapFetchMetadataCapabilities {
+                supports_gmail_id: false,
+                supports_object_id: true,
+                supports_preview: false,
+                supports_literal_plus: false,
+                uses_utf8_search: false,
+                supports_within: false,
+                supports_multisearch: false,
+                supports_sort: false,
+                supports_sort_display: false,
+                thread_algorithms: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(email_id.as_deref(), Some("M6d99ac3275bb4e"));
     }
 
     async fn run_scripted_visible_uid_search(
@@ -11991,6 +12115,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             "client-hash",
             ImapFetchMetadataCapabilities {
                 supports_gmail_id: false,
+                supports_object_id: false,
                 supports_preview: false,
                 supports_literal_plus: false,
                 uses_utf8_search: false,
@@ -12288,6 +12413,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             },
             &ImapFetchMetadataCapabilities {
                 supports_gmail_id: false,
+                supports_object_id: false,
                 supports_preview: false,
                 supports_literal_plus: false,
                 uses_utf8_search: false,
@@ -12346,6 +12472,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             },
             &ImapFetchMetadataCapabilities {
                 supports_gmail_id: false,
+                supports_object_id: false,
                 supports_preview: false,
                 supports_literal_plus: false,
                 uses_utf8_search: false,
@@ -13462,6 +13589,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         let cache = StatefulUidCache::default();
         let capabilities = ImapFetchMetadataCapabilities {
             supports_gmail_id: false,
+            supports_object_id: false,
             supports_preview: false,
             supports_literal_plus: false,
             uses_utf8_search: false,

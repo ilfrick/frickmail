@@ -450,6 +450,27 @@ fn test_preview() {
 }
 
 #[test]
+fn test_email_id() {
+    match parse_response(b"* 2 FETCH (UID 9 EMAILID (M6d99ac3275bb4e))\r\n") {
+        Ok((_, Response::Fetch(_, attrs))) => {
+            assert_eq!(
+                attrs.get(1),
+                Some(&AttributeValue::EmailId(Cow::Borrowed(
+                    "M6d99ac3275bb4e"
+                )))
+            );
+        }
+        rsp => panic!("unexpected response {rsp:?}"),
+    }
+
+    assert!(parse_response(b"* 2 FETCH (UID 9 EMAILID (bad.id))\r\n").is_err());
+    let maximum = format!("* 2 FETCH (UID 9 EMAILID (M{}))\r\n", "a".repeat(254));
+    assert!(parse_response(maximum.as_bytes()).is_ok());
+    let oversized = format!("* 2 FETCH (UID 9 EMAILID (M{}))\r\n", "a".repeat(255));
+    assert!(parse_response(oversized.as_bytes()).is_err());
+}
+
+#[test]
 fn test_body_structure() {
     const RESPONSE: &[u8] = b"* 15 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"iso-8859-1\") NIL NIL \"QUOTED-PRINTABLE\" 1315 42 NIL NIL NIL NIL))\r\n";
     match parse_response(RESPONSE) {
