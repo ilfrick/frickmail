@@ -19,6 +19,7 @@ fm-plugin-compat = { path = "../fm-plugin-compat" }
 fm-session = { path = "../fm-session" }
 fm-smtp = { path = "../fm-smtp" }
 fm-user = { path = "../fm-user" }
+idna.workspace = true
 md-5.workspace = true
 p256.workspace = true
 reqwest.workspace = true

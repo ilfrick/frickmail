@@ -7553,7 +7553,7 @@ fn legacy_apply_dkim_status_to_emails(emails: &mut [Value], auth_statuses: &Pars
         let Some(address) = email
             .get("email")
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
+            .map(legacy_email_ascii_address)
         else {
             continue;
         };
@@ -7571,7 +7571,7 @@ fn legacy_apply_dkim_status_to_emails(emails: &mut [Value], auth_statuses: &Pars
 fn legacy_email_collection_from_strings(addresses: &[String]) -> Vec<Value> {
     addresses
         .iter()
-        .filter_map(|item| legacy_email_json(item.trim()))
+        .filter_map(|item| legacy_email_json(legacy_mailso_trim(item)))
         .take(LEGACY_EMAIL_COLLECTION_JSON_LIMIT)
         .collect()
 }
@@ -7621,7 +7621,7 @@ fn legacy_address_items(raw: &str) -> Vec<&str> {
             '<' => angle_depth = angle_depth.saturating_add(1),
             '>' if angle_depth > 0 => angle_depth -= 1,
             ',' | ';' if angle_depth == 0 => {
-                let item = raw[start..index].trim();
+                let item = legacy_mailso_trim(&raw[start..index]);
                 if !item.is_empty() {
                     items.push(item);
                 }
@@ -7631,7 +7631,7 @@ fn legacy_address_items(raw: &str) -> Vec<&str> {
         }
     }
 
-    let item = raw[start..].trim();
+    let item = legacy_mailso_trim(&raw[start..]);
     if !item.is_empty() {
         items.push(item);
     }
@@ -7645,18 +7645,14 @@ fn legacy_encoded_email_json(raw: &str) -> Option<Value> {
 }
 
 fn legacy_email_json(raw: &str) -> Option<Value> {
+    let raw = legacy_mailso_trim(raw);
     if raw.is_empty() {
         return None;
     }
-    let (name, email) = if let (Some(start), Some(end)) = (raw.find('<'), raw.rfind('>')) {
-        let name = raw[..start].trim().trim_matches('"').to_string();
-        let email = raw[start + 1..end].trim().to_string();
-        (name, email)
-    } else if raw.contains('@') {
-        (String::new(), raw.trim().trim_matches('"').to_string())
-    } else {
-        (raw.trim().trim_matches('"').to_string(), String::new())
-    };
+
+    let parsed = legacy_email_components(raw);
+    let name = legacy_email_display_name(&parsed.name);
+    let email = legacy_email_utf8_address(&parsed.email);
     if name.is_empty() && email.is_empty() {
         return None;
     }
@@ -7666,6 +7662,235 @@ fn legacy_email_json(raw: &str) -> Option<Value> {
         "email": email,
         "dkimStatus": "none"
     }))
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LegacyEmailComponents {
+    name: String,
+    email: String,
+}
+
+fn legacy_email_components(raw: &str) -> LegacyEmailComponents {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Outside,
+        Name,
+        Address,
+        Comment,
+    }
+
+    enum DeferredName {
+        Empty,
+        Captured(String),
+        WorkingPrefix(usize),
+    }
+
+    let name_is_empty = |name: &DeferredName| match name {
+        DeferredName::Empty => true,
+        DeferredName::Captured(value) => value.is_empty(),
+        DeferredName::WorkingPrefix(end) => *end == 0,
+    };
+
+    let mut working = String::with_capacity(raw.len());
+    let mut pending = String::new();
+    let mut name = DeferredName::Empty;
+    let mut email = String::new();
+    let mut comment = String::new();
+    let mut state = State::Outside;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            if state == State::Outside {
+                working.push(ch);
+            } else {
+                pending.push(ch);
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            if state == State::Outside {
+                working.push(ch);
+            } else {
+                pending.push(ch);
+            }
+            escaped = true;
+            continue;
+        }
+
+        match state {
+            State::Outside => match ch {
+                '"' => {
+                    pending.clear();
+                    pending.push(ch);
+                    state = State::Name;
+                }
+                '<' => {
+                    if !working.is_empty() && name_is_empty(&name) {
+                        name = DeferredName::WorkingPrefix(working.len());
+                    }
+                    pending.clear();
+                    pending.push(ch);
+                    state = State::Address;
+                }
+                '(' => {
+                    pending.clear();
+                    pending.push(ch);
+                    state = State::Comment;
+                }
+                _ => working.push(ch),
+            },
+            State::Name if ch == '"' => {
+                name = DeferredName::Captured(pending.chars().skip(1).collect());
+                pending.clear();
+                state = State::Outside;
+            }
+            State::Address if ch == '>' => {
+                email = pending.chars().skip(1).collect();
+                pending.clear();
+                state = State::Outside;
+            }
+            State::Comment if ch == ')' => {
+                comment = pending.chars().skip(1).collect();
+                pending.clear();
+                state = State::Outside;
+            }
+            _ => pending.push(ch),
+        }
+    }
+
+    if state != State::Outside {
+        working.push_str(&pending);
+    }
+    if email.is_empty() {
+        if let Some((start, end)) = legacy_unbracketed_email_range(&working) {
+            email = working[start..end].to_string();
+            if name_is_empty(&name) && comment.is_empty() {
+                name = DeferredName::Captured(working.replace(&email, ""));
+            }
+        } else {
+            name = DeferredName::Captured(working.clone());
+        }
+    }
+
+    let name = match name {
+        DeferredName::Empty => String::new(),
+        DeferredName::Captured(value) => value,
+        DeferredName::WorkingPrefix(end) => working[..end].to_string(),
+    };
+
+    LegacyEmailComponents { name, email }
+}
+
+fn legacy_unbracketed_email_range(value: &str) -> Option<(usize, usize)> {
+    let mut start = None;
+    for (index, ch) in value
+        .char_indices()
+        .chain(std::iter::once((value.len(), ' ')))
+    {
+        if legacy_email_regex_whitespace(ch) {
+            if let Some(token_start) = start.take() {
+                let token = &value[token_start..index];
+                let mut candidate_start = 0;
+                for (at, token_ch) in token.char_indices() {
+                    if token_ch != '@' {
+                        continue;
+                    }
+                    if at > candidate_start && at + 1 < token.len() {
+                        return Some((token_start + candidate_start, index));
+                    }
+                    candidate_start = at + 1;
+                }
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    None
+}
+
+fn legacy_email_regex_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{0b}' | '\u{0c}')
+}
+
+fn legacy_mailso_trim(value: &str) -> &str {
+    value.trim_matches(|ch| ch == ' ' || ch <= '\u{1f}')
+}
+
+fn legacy_email_display_name(value: &str) -> String {
+    let value = legacy_mailso_trim(value)
+        .trim_matches('"')
+        .trim_matches('\'');
+    let mut result = String::with_capacity(value.len());
+    let mut escaped = false;
+    for ch in value.chars() {
+        if escaped {
+            result.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            result.push(ch);
+        }
+    }
+    if escaped {
+        result.push('\\');
+    }
+    legacy_mailso_trim(&result).to_string()
+}
+
+fn legacy_email_utf8_address(value: &str) -> String {
+    let email = legacy_mailso_trim(value);
+    let email = email.trim_matches(|ch| ch == '<' || ch == '>');
+    let email = legacy_mailso_trim(email);
+    let email = email.trim_end_matches('.');
+    let email = legacy_mailso_trim(email);
+    let Some((local, domain)) = email.rsplit_once('@') else {
+        return email.to_string();
+    };
+    if domain.starts_with('[') && domain.ends_with(']') {
+        return format!("{local}@{}", domain.to_ascii_lowercase());
+    }
+    if domain.split('.').any(str::is_empty) {
+        return format!("{local}@");
+    }
+    let ascii = idna::uts46::Uts46::new()
+        .to_ascii(
+            domain.as_bytes(),
+            idna::uts46::AsciiDenyList::EMPTY,
+            idna::uts46::Hyphens::Check,
+            idna::uts46::DnsLength::Ignore,
+        )
+        .unwrap_or_default();
+    let (unicode, result) = idna::domain_to_unicode(&ascii);
+    let domain = if result.is_ok() {
+        unicode
+    } else {
+        String::new()
+    };
+    format!("{local}@{domain}")
+}
+
+fn legacy_email_ascii_address(value: &str) -> String {
+    let Some((local, domain)) = value.rsplit_once('@') else {
+        return value.to_string();
+    };
+    if domain.starts_with('[') && domain.ends_with(']') {
+        return format!("{local}@{}", domain.to_ascii_lowercase());
+    }
+    if domain.split('.').any(str::is_empty) {
+        return format!("{local}@");
+    }
+    let domain = idna::uts46::Uts46::new()
+        .to_ascii(
+            domain.as_bytes(),
+            idna::uts46::AsciiDenyList::EMPTY,
+            idna::uts46::Hyphens::Check,
+            idna::uts46::DnsLength::Ignore,
+        )
+        .unwrap_or_default();
+    format!("{local}@{domain}")
 }
 
 async fn imap_action_auth(
@@ -15299,6 +15524,92 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(value.len(), super::LEGACY_EMAIL_COLLECTION_JSON_LIMIT);
         assert_eq!(value[0]["email"], "user0@example.com");
         assert_eq!(value[99]["email"], "user99@example.com");
+    }
+
+    #[test]
+    fn legacy_email_parser_matches_mailso_comments_names_and_idn() {
+        let cases = [
+            ("alice@example.com (Alice)", "", "alice@example.com"),
+            ("John Doe john@example.com", "John Doe", "john@example.com"),
+            (
+                "\"Doe, John\" <john@example.com>",
+                "Doe, John",
+                "john@example.com",
+            ),
+            ("dot@example.com.", "", "dot@example.com"),
+            (
+                "User <hello@xn--bcher-kva.example>",
+                "User",
+                "hello@b\u{fc}cher.example",
+            ),
+            ("foo@-bad.example", "", "foo@"),
+            ("foo@bad_domain", "", "foo@bad_domain"),
+            ("foo@xn--", "", "foo@"),
+            ("foo@example..com", "", "foo@"),
+            ("foo@ab--cd.example", "", "foo@"),
+            ("foo@[127.0.0.1]", "", "foo@[127.0.0.1]"),
+            ("foo@B\u{dc}CHER.Example", "", "foo@b\u{fc}cher.example"),
+            (
+                "\u{a0}Name\u{a0} <x@example.com>",
+                "\u{a0}Name\u{a0}",
+                "x@example.com",
+            ),
+            (
+                "Name\u{1} <\u{2}x@example.com\u{3}>",
+                "Name",
+                "x@example.com",
+            ),
+            ("@foo@bar", "@", "foo@bar"),
+            ("foo@[IPv6:ABCD::1]", "", "foo@[ipv6:abcd::1]"),
+            ("Name Only", "Name Only", ""),
+        ];
+
+        for (raw, name, email) in cases {
+            let value = super::legacy_email_json(raw).unwrap();
+            assert_eq!(value["name"], name, "name for {raw}");
+            assert_eq!(value["email"], email, "email for {raw}");
+        }
+
+        let empty_comment = super::legacy_email_json("John john@example.com ()").unwrap();
+        assert_eq!(empty_comment["name"], "John");
+        let named_comment = super::legacy_email_json("John john@example.com (work)").unwrap();
+        assert_eq!(named_comment["name"], "");
+
+        let unclosed_quote = super::legacy_email_json("\"John <john@example.com>").unwrap();
+        assert_eq!(unclosed_quote["name"], "John");
+        assert_eq!(unclosed_quote["email"], "john@example.com");
+        let unclosed_angle = super::legacy_email_json("John <john@example.com").unwrap();
+        assert_eq!(unclosed_angle["name"], "John");
+        assert_eq!(unclosed_angle["email"], "john@example.com");
+
+        assert!(super::legacy_email_json("(comment)").is_none());
+
+        let adversarial = "\"\"".repeat(50_000);
+        assert!(super::legacy_email_json(&adversarial).is_none());
+
+        let growing_prefix_adversarial = "x<a>\"\"".repeat(50_000);
+        let value = super::legacy_email_json(&growing_prefix_adversarial).unwrap();
+        assert_eq!(value["name"], "");
+        assert_eq!(value["email"], "a");
+    }
+
+    #[test]
+    fn legacy_email_dkim_matches_ascii_idn_before_unicode_serialization() {
+        let addresses = vec!["Sender <sender@xn--bcher-kva.example>".to_string()];
+        let mut emails = super::legacy_email_collection_from_strings(&addresses);
+        let statuses = fm_mime::ParsedAuthStatuses {
+            dkim: vec![[
+                "pass".to_string(),
+                "xn--bcher-kva.example".to_string(),
+                "dkim=pass header.d=xn--bcher-kva.example".to_string(),
+            ]],
+            ..Default::default()
+        };
+
+        super::legacy_apply_dkim_status_to_emails(&mut emails, &statuses);
+
+        assert_eq!(emails[0]["email"], "sender@b\u{fc}cher.example");
+        assert_eq!(emails[0]["dkimStatus"], "pass");
     }
 
     #[test]
