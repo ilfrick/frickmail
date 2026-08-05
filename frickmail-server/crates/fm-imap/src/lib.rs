@@ -3863,7 +3863,8 @@ fn legacy_unique_flag_strings(flags: impl IntoIterator<Item = String>) -> Vec<St
 }
 
 fn header_value(raw: &[u8], name: &str) -> Option<String> {
-    let mut matched = false;
+    let mut collecting = false;
+    let mut found = false;
     let mut value = String::new();
     let wanted = name.to_ascii_lowercase();
 
@@ -3872,19 +3873,20 @@ fn header_value(raw: &[u8], name: &str) -> Option<String> {
             break;
         }
         if line.starts_with(' ') || line.starts_with('\t') {
-            if matched {
+            if collecting {
                 value.push(' ');
                 value.push_str(legacy_php_trim(line));
             }
             continue;
         }
-        matched = false;
+        collecting = false;
         let Some((key, next)) = line.split_once(':') else {
             continue;
         };
-        if legacy_php_trim(key).eq_ignore_ascii_case(&wanted) {
+        if !found && legacy_php_trim(key).eq_ignore_ascii_case(&wanted) {
             value = legacy_php_trim(next).to_string();
-            matched = true;
+            collecting = true;
+            found = true;
         }
     }
 
@@ -13606,6 +13608,18 @@ mod tests {
             header_value(raw, "subject"),
             Some("\u{00a0}first\u{00a0} \u{00a0}continued\u{00a0}".to_string())
         );
+    }
+
+    #[test]
+    fn header_value_uses_first_duplicate_like_mailso() {
+        let raw = b"Subject: first\r\n\tcontinued\r\nsUbJeCt: second\r\n\tignored\r\n\r\n";
+        assert_eq!(
+            header_value(raw, "subject"),
+            Some("first continued".to_string())
+        );
+
+        let empty_first = b"Subject:\r\nSubject: second\r\n\r\n";
+        assert_eq!(header_value(empty_first, "subject"), None);
     }
 
     #[test]
