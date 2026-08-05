@@ -7,15 +7,21 @@ on:
       - rust-full-migration
     paths:
       - ".docker/dev/rust/**"
+      - ".docker/release/rust/**"
       - ".github/workflows/rust.yml"
+      - "docker-compose.rust-production.yml"
       - "docker-compose.rust.yml"
       - "frickmail-server/**"
+      - "package.json"
   pull_request:
     paths:
       - ".docker/dev/rust/**"
+      - ".docker/release/rust/**"
       - ".github/workflows/rust.yml"
+      - "docker-compose.rust-production.yml"
       - "docker-compose.rust.yml"
       - "frickmail-server/**"
+      - "package.json"
 
 permissions:
   contents: read
@@ -59,4 +65,47 @@ jobs:
         run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo test --workspace
 
       - name: Lint workspace
-        run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo clippy --workspace -- -D warnings
+        run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build Rust production image
+        run: docker build -f .docker/release/rust/Dockerfile -t "frickmail-rust:${GITHUB_SHA}" .
+
+      - name: Smoke test Rust production image
+        run: |
+          set -eu
+          docker compose -f docker-compose.rust-production.yml config --quiet
+          image_tag="frickmail-rust:${GITHUB_SHA}"
+          image_id="$(docker image inspect "$image_tag" --format '{{.Id}}')"
+          cleanup() {
+            docker logs frickmail-rust-production-smoke || true
+            docker rm -f frickmail-rust-production-smoke || true
+          }
+          trap cleanup EXIT
+          docker run -d --name frickmail-rust-production-smoke \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -p 127.0.0.1:18088:8888 \
+            "$image_tag"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18088/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --show-error http://127.0.0.1:18088/health
+          for attempt in $(seq 1 60); do
+            if test "$(docker inspect frickmail-rust-production-smoke --format '{{.State.Health.Status}}')" = "healthy"; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker inspect frickmail-rust-production-smoke --format '{{.State.Health.Status}}')" = "healthy"
+          test "$(docker inspect frickmail-rust-production-smoke --format '{{.Image}}')" = "$image_id"
+          test "$(docker inspect frickmail-rust-production-smoke --format '{{.Config.User}}')" = "frickmail:frickmail"
+          test "$(docker inspect frickmail-rust-production-smoke --format '{{.HostConfig.ReadonlyRootfs}}')" = "true"
+          test "$(docker inspect frickmail-rust-production-smoke --format '{{.State.OOMKilled}}')" = "false"
+          test "$(docker inspect frickmail-rust-production-smoke --format '{{.RestartCount}}')" = "0"
+          docker exec frickmail-rust-production-smoke curl --fail --silent --output /dev/null \
+            https://accounts.google.com/.well-known/openid-configuration

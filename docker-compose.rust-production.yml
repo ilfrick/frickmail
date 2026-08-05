@@ -1,0 +1,85 @@
+name: frickmail-rust
+
+services:
+  frickmail-rust:
+    image: ${FRICKMAIL_RUST_IMAGE:-frickmail-rust:latest}
+    build:
+      context: .
+      dockerfile: .docker/release/rust/Dockerfile
+    container_name: frickmail-rust
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    environment:
+      FRICKMAIL__BIND_ADDR: "0.0.0.0:8888"
+      FRICKMAIL__BASE_URL: ${FRICKMAIL_RUST_BASE_URL:-http://localhost:18088}
+      FRICKMAIL__STATIC_ROOT: /usr/share/frickmail/static
+      FRICKMAIL__REDIS_URL: redis://redis:6379/0
+      FRICKMAIL__OIDC__ISSUER: ${FRICKMAIL__OIDC__ISSUER:-}
+      FRICKMAIL__OIDC__CLIENT_ID: ${FRICKMAIL__OIDC__CLIENT_ID:-}
+      FRICKMAIL__OIDC__CLIENT_SECRET: ${FRICKMAIL__OIDC__CLIENT_SECRET:-}
+      FRICKMAIL__OIDC__PROVIDER_NAME: ${FRICKMAIL__OIDC__PROVIDER_NAME:-SSO}
+      FRICKMAIL__MAIL__IMAP_HOST: ${FRICKMAIL__MAIL__IMAP_HOST:-imap.example.com}
+      FRICKMAIL__MAIL__IMAP_PORT: ${FRICKMAIL__MAIL__IMAP_PORT:-993}
+      FRICKMAIL__MAIL__SMTP_HOST: ${FRICKMAIL__MAIL__SMTP_HOST:-smtp.example.com}
+      FRICKMAIL__MAIL__SMTP_PORT: ${FRICKMAIL__MAIL__SMTP_PORT:-587}
+      FRICKMAIL__MAIL__FETCH_NEW_MESSAGES: ${FRICKMAIL__MAIL__FETCH_NEW_MESSAGES:-true}
+      FRICKMAIL__MAIL__MESSAGE_LIST_FAST_SIMPLE_SEARCH: ${FRICKMAIL__MAIL__MESSAGE_LIST_FAST_SIMPLE_SEARCH:-true}
+      FRICKMAIL__MAIL__MESSAGE_LIST_PERMANENT_FILTER: ${FRICKMAIL__MAIL__MESSAGE_LIST_PERMANENT_FILTER:-}
+      FRICKMAIL__MAIL__MESSAGE_LIST_LIMIT: ${FRICKMAIL__MAIL__MESSAGE_LIST_LIMIT:-10000}
+      FRICKMAIL__MAIL__MESSAGE_LIST_DOMAIN_OVERRIDES: ${FRICKMAIL__MAIL__MESSAGE_LIST_DOMAIN_OVERRIDES:-{}}
+      FRICKMAIL__CACHE__ENABLE: ${FRICKMAIL__CACHE__ENABLE:-true}
+      FRICKMAIL__CACHE__INDEX: ${FRICKMAIL__CACHE__INDEX:-v1}
+      FRICKMAIL__CACHE__FAST_CACHE_INDEX: ${FRICKMAIL__CACHE__FAST_CACHE_INDEX:-v1}
+      FRICKMAIL__CACHE__HTTP_EXPIRES: ${FRICKMAIL__CACHE__HTTP_EXPIRES:-3600}
+      FRICKMAIL__CACHE__SERVER_UIDS: ${FRICKMAIL__CACHE__SERVER_UIDS:-true}
+      FRICKMAIL__FRICKMAIL_USER__ALLOW_EXPORT: ${FRICKMAIL__FRICKMAIL_USER__ALLOW_EXPORT:-true}
+      FRICKMAIL__FRICKMAIL_USER__ALLOW_MESSAGE_APPEND: ${FRICKMAIL__FRICKMAIL_USER__ALLOW_MESSAGE_APPEND:-false}
+      FRICKMAIL__FRICKMAIL_USER__SMIME_ENABLED: ${FRICKMAIL__FRICKMAIL_USER__SMIME_ENABLED:-true}
+      FRICKMAIL__FRICKMAIL_USER__EXPORT_FOLDER_MAX_MESSAGES: ${FRICKMAIL__FRICKMAIL_USER__EXPORT_FOLDER_MAX_MESSAGES:-5000}
+      FRICKMAIL__FRICKMAIL_USER__EXPORT_FOLDER_MAX_BYTES: ${FRICKMAIL__FRICKMAIL_USER__EXPORT_FOLDER_MAX_BYTES:-26214400}
+      FRICKMAIL_DB_HOST: db
+      FRICKMAIL_DB_PORT: "5432"
+      FRICKMAIL_DB_NAME: frickmail
+      FRICKMAIL_DB_USER: frickmail
+      FRICKMAIL_DB_PASSWORD: ${POSTGRES_PASSWORD:-frickmail}
+      FRICKMAIL_OPEN_SIGNUP: ${FRICKMAIL_OPEN_SIGNUP:-false}
+      FRICKMAIL_GMAIL_CLIENT_ID: ${FRICKMAIL_GMAIL_CLIENT_ID:-}
+      FRICKMAIL_GMAIL_CLIENT_SECRET: ${FRICKMAIL_GMAIL_CLIENT_SECRET:-}
+      FRICKMAIL_O365_CLIENT_ID: ${FRICKMAIL_O365_CLIENT_ID:-}
+      FRICKMAIL_O365_CLIENT_SECRET: ${FRICKMAIL_O365_CLIENT_SECRET:-}
+      FRICKMAIL_SMTP_HOST: ${FRICKMAIL_SMTP_HOST:-}
+      FRICKMAIL_SMTP_PORT: ${FRICKMAIL_SMTP_PORT:-587}
+      FRICKMAIL_SMTP_SECURE: ${FRICKMAIL_SMTP_SECURE:-starttls}
+      FRICKMAIL_SMTP_USER: ${FRICKMAIL_SMTP_USER:-}
+      FRICKMAIL_SMTP_PASSWORD: ${FRICKMAIL_SMTP_PASSWORD:-}
+      FRICKMAIL_SMTP_FROM: ${FRICKMAIL_SMTP_FROM:-Frickmail Admin <frickmail@localhost>}
+      RUST_LOG: ${FRICKMAIL_RUST_LOG:-frickmail_server=info,fm_http=info,tower_http=info}
+    networks:
+      - egress
+      - db-network
+      - redis-network
+    ports:
+      - "127.0.0.1:${FRICKMAIL_RUST_PORT:-18088}:8888"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8888/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  egress:
+  db-network:
+    external: true
+    name: ${FRICKMAIL_DB_NETWORK:-frickmail_db-network}
+  redis-network:
+    external: true
+    name: ${FRICKMAIL_REDIS_NETWORK:-frickmail_redis-network}

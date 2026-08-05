@@ -515,21 +515,21 @@ Every migration slice must follow this loop:
 
 ## Immediate Next Work
 
-1. Keep `docs/LEGACY_ACTION_INVENTORY.md` current as the route/hook/frontend
+1. Maintain the production Rust Dockerfile and Compose service now, ahead of
+   final cutover, so every migration slice can be exercised in the real release
+   container. Keep it canary-only until the UI, session/CSRF, schema migration,
+   and action-parity gates in `docs/DEPLOYMENT.md` pass.
+2. Keep `docs/LEGACY_ACTION_INVENTORY.md` current as the route/hook/frontend
    source of truth for each migration slice.
-2. Complete native parity for legacy `MessageList`, `Message`, and folder status
-   routes. `Message` plus folder status POST paths are partial-native; folder
-   status now covers PHP-compatible ETags, `flagsUids`, and INBOX new-message
-   payloads. `MessageList` dispatch stays on compatibility fallback until RFC
-   7377 folder scopes and server-side UID/cache behavior match the PHP runtime;
-   native search, hidden-deleted filtering, date criteria and client-side date
-   grouping data, application/domain-specific search settings, capability-gated
-   RFC 5256 sorting/threading, and RFC 8970 previews are staged.
-3. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
+3. Complete native parity for legacy `Message` and the remaining mail actions.
+   `MessageList`, `FolderInformation`, and `FolderInformationMultiply` dispatch
+   are native; `Message` remains partial-native while exact PHP message-model
+   parity is completed.
+4. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
    compatibility.
-4. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user
+5. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user
    theming.
-5. Add CI allowlists for temporary legacy names so naming cleanup is measurable.
-6. Track the Frickmail-user usable release gate and do not continue into full
+6. Add CI allowlists for temporary legacy names so naming cleanup is measurable.
+7. Track the Frickmail-user usable release gate and do not continue into full
    legacy runtime removal until that release is available and operator input is
    received.

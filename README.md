@@ -6,7 +6,8 @@
     <a href="docs/OAUTH2.md">OAuth2 setup</a> •
     <a href="docs/DEPLOYMENT.md">Build and deployment</a> •
     <a href="SECURITY.md">Security policy</a> •
-    <a href="docker-compose.frickmail.yml">Docker compose</a>
+    <a href="docker-compose.frickmail.yml">Compatibility Compose</a> •
+    <a href="docker-compose.rust-production.yml">Rust production Compose</a>
   </p>
 </div>
 
@@ -66,7 +67,7 @@ docker compose -f docker-compose.rust.yml run --rm rust-dev cargo check --worksp
 docker compose -f docker-compose.rust.yml run --rm rust-dev cargo test --workspace
 ```
 
-## Building the current compatibility image
+## Building the production images
 
 The current Docker image is still the compatibility runtime used while the Rust
 rewrite progresses:
@@ -74,6 +75,19 @@ rewrite progresses:
 ```bash
 docker build -f .docker/release/Dockerfile -t frickmail:latest .
 ```
+
+The production Rust server image and its canary-safe Compose service are built
+with:
+
+```bash
+docker build -f .docker/release/rust/Dockerfile -t frickmail-rust:latest .
+docker compose -f docker-compose.rust-production.yml up -d --no-build
+```
+
+The Rust image is suitable for production validation and an eventual traffic
+cutover, but the current Rust browser root is still a migration shell and not
+the complete webmail UI. Do not replace the compatibility container until the
+readiness gates in the deployment guide pass.
 
 See **[Build and deployment](docs/DEPLOYMENT.md)** for backup, isolated smoke
 test, rollout, verification, and rollback instructions.

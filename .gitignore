@@ -34,4 +34,5 @@ docker-compose*yml
 docker-compose*yaml
 docker-compose.frickmail.yml
 !docker-compose.rust.yml
+!docker-compose.rust-production.yml
 .claude/
