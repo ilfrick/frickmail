@@ -37,6 +37,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
 data-encoding = "2"
 deadpool-redis = "0.18"
+hex = "0.4"
 hmac = "0.12"
 http = "1"
 idna = "1"
@@ -69,3 +70,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 webpki-roots = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }

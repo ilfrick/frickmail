@@ -13,6 +13,8 @@ pub struct FrickmailConfig {
     pub base_url: String,
     #[serde(default = "default_static_root")]
     pub static_root: String,
+    #[serde(default = "default_tmp_dir")]
+    pub tmp_dir: String,
     #[serde(default)]
     pub php_bridge_url: Option<String>,
     #[serde(default = "default_database_url")]
@@ -366,6 +368,10 @@ fn default_base_url() -> String {
 
 fn default_static_root() -> String {
     "/workspace/frickmail-static".to_string()
+}
+
+fn default_tmp_dir() -> String {
+    "/tmp/frickmail".to_string()
 }
 
 fn default_database_url() -> Option<String> {

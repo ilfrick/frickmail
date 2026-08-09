@@ -31,7 +31,7 @@ use fm_imap::{
     copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
     fetch_legacy_folder_information, fetch_legacy_folders,
     fetch_legacy_message_list_with_uid_cache_if_changed, fetch_mailbox_acl, fetch_mailbox_status,
-    fetch_message_body_preview, fetch_raw_folder_messages, fetch_raw_message,
+    fetch_message_body_preview, fetch_mime_part, fetch_raw_folder_messages, fetch_raw_message,
     legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
     legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_acl,
     set_mailbox_metadata, set_mailbox_subscription, store_message_flag, store_message_keyword,
@@ -63,6 +63,7 @@ use p256::{
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use sha1::Sha1;
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
 use tracing::warn;
@@ -884,6 +885,13 @@ async fn native_compat_response(
         "MessageDelete" => {
             Some(native_legacy_message_delete(state, original_action, payload, session).await)
         }
+        "AttachmentsActions" => {
+            Some(native_legacy_attachments_actions(state, original_action, payload, session).await)
+        }
+        "MessageUploadAttachments" => Some(
+            native_legacy_message_upload_attachments(state, original_action, payload, session)
+                .await,
+        ),
         _ => None,
     }
 }
@@ -4780,6 +4788,421 @@ async fn legacy_folder_append_account_id(
     Ok(selected.account_id)
 }
 
+async fn native_legacy_attachments_actions(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_attachments_actions_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_BODY_FETCH_DEADLINE,
+        |config, password, folder, uid, mime_index| async move {
+            fetch_mime_part(config, &password, &folder, uid, &mime_index).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_attachments_actions_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+
+    let target = payload_optional_string(payload, "target").unwrap_or_default();
+    if target != "zip" {
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+    }
+
+    let filename =
+        payload_optional_string(payload, "filename").unwrap_or_else(|| "attachments".to_string());
+    let folder = payload_optional_string(payload, "folder").unwrap_or_default();
+    let hashes = match payload.get("hashes") {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => {
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+        }
+    };
+
+    let mut attachment_data: Vec<(String, Vec<u8>)> = Vec::new();
+    for hash in &hashes {
+        let hash_str = hash.as_str().unwrap_or_default();
+        let Some(raw_values) = legacy_raw_key_json(hash_str) else {
+            continue;
+        };
+
+        let file_name = raw_values
+            .get("fileName")
+            .and_then(Value::as_str)
+            .unwrap_or("file.dat")
+            .to_string();
+
+        let data = if let Some(data_b64) = raw_values.get("data").and_then(Value::as_str) {
+            match URL_SAFE_NO_PAD
+                .decode(data_b64.as_bytes())
+                .or_else(|_| URL_SAFE.decode(data_b64.as_bytes()))
+            {
+                Ok(decoded) => decoded,
+                Err(_) => continue,
+            }
+        } else {
+            let item_folder = raw_values
+                .get("folder")
+                .and_then(Value::as_str)
+                .unwrap_or(&folder);
+            let item_uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let mime_index = raw_values
+                .get("mimeIndex")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+
+            if item_uid == 0 || item_folder.is_empty() {
+                continue;
+            }
+
+            match tokio::time::timeout(
+                fetch_deadline,
+                fetcher(
+                    config.clone(),
+                    password.clone(),
+                    item_folder.to_string(),
+                    item_uid,
+                    mime_index,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(Some(data))) => data,
+                Ok(Ok(None)) => continue,
+                Ok(Err(err)) => {
+                    tracing::warn!("Failed to fetch attachment: {err}");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!("Attachment fetch timed out");
+                    continue;
+                }
+            }
+        };
+
+        attachment_data.push((file_name, data));
+    }
+
+    if attachment_data.is_empty() {
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+    }
+
+    let zip_bytes = match create_zip_archive(&attachment_data) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::error!("Failed to create ZIP archive: {err}");
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+        }
+    };
+
+    let file_hash = hex::encode(Sha1::digest(&zip_bytes));
+    let tmp_dir = state.config().tmp_dir.clone();
+    if let Err(err) = tokio::fs::create_dir_all(&tmp_dir).await {
+        tracing::error!("Failed to create temp directory {tmp_dir}: {err}");
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+    }
+    cleanup_temp_files(&tmp_dir, Duration::from_secs(3600)).await;
+    let zip_path = format!("{tmp_dir}/{file_hash}.zip");
+    if let Err(err) = tokio::fs::write(&zip_path, &zip_bytes).await {
+        tracing::error!("Failed to write ZIP file {zip_path}: {err}");
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+    }
+
+    let zip_filename = if !filename.is_empty() {
+        format!("{filename}.zip")
+    } else if !folder.is_empty() {
+        "messages.zip".to_string()
+    } else {
+        "attachments.zip".to_string()
+    };
+
+    let raw_key_value = json!({
+        "fileName": zip_filename,
+        "mimeType": "application/zip",
+        "fileHash": file_hash,
+    });
+
+    let json_str = serde_json::to_string(&raw_key_value)
+        .map_err(|err| {
+            tracing::error!("Failed to serialize attachment raw key: {err}");
+        })
+        .unwrap_or_default();
+    let encoded = URL_SAFE_NO_PAD.encode(json_str);
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": {
+                "fileHash": encoded
+            }
+        }),
+    )
+}
+
+fn create_zip_archive(
+    files: &[(String, Vec<u8>)],
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for (name, data) in files {
+        // Strip any directory components so the entry name cannot escape the
+        // extraction directory (prevents zip-slip / path-traversal writes).
+        let safe_name = std::path::Path::new(name.as_str())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.dat");
+        zip.start_file(safe_name, options)?;
+        std::io::Write::write_all(&mut zip, data)?;
+    }
+
+    Ok(zip.finish()?.into_inner())
+}
+
+/// Removes temp files in `tmp_dir` older than `max_age` to prevent unbounded
+/// disk growth from attachment ZIP downloads and upload staging files.
+/// Logs a warning on directory read errors but never returns an error.
+async fn cleanup_temp_files(tmp_dir: &str, max_age: Duration) {
+    let mut entries = match tokio::fs::read_dir(tmp_dir).await {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!("Failed to read temp dir for cleanup {tmp_dir}: {err}");
+            return;
+        }
+    };
+
+    let cutoff = SystemTime::now() - max_age;
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                if let Ok(modified) = entry.metadata().await.map(|m| m.modified()) {
+                    if modified.is_ok_and(|m| m < cutoff) {
+                        let path = entry.path();
+                        if tokio::fs::remove_file(&path).await.is_err() {
+                            tracing::warn!("Failed to remove stale temp file: {}", path.display());
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+}
+
+async fn native_legacy_message_upload_attachments(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_legacy_message_upload_attachments_with_fetcher(
+        state,
+        original_action,
+        payload,
+        session,
+        MESSAGE_BODY_FETCH_DEADLINE,
+        |config, password, folder, uid, mime_index| async move {
+            fetch_mime_part(config, &password, &folder, uid, &mime_index).await
+        },
+    )
+    .await
+}
+
+async fn native_legacy_message_upload_attachments_with_fetcher<F, Fut>(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    fetch_deadline: Duration,
+    fetcher: F,
+) -> Response
+where
+    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>>,
+{
+    let (config, password) =
+        match legacy_imap_connection_context(state, original_action, payload, session).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
+
+    let attachments = match payload.get("attachments") {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => {
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": []}));
+        }
+    };
+
+    let tmp_dir = state.config().tmp_dir.clone();
+    if let Err(err) = tokio::fs::create_dir_all(&tmp_dir).await {
+        tracing::error!("Failed to create temp directory {tmp_dir}: {err}");
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": []}));
+    }
+    cleanup_temp_files(&tmp_dir, Duration::from_secs(3600)).await;
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    for attachment in &attachments {
+        let raw_key_str = attachment.as_str().unwrap_or_default();
+        let Some(raw_values) = legacy_raw_key_json(raw_key_str) else {
+            results.push(json!(false));
+            continue;
+        };
+
+        let folder = raw_values
+            .get("folder")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let mime_index = raw_values
+            .get("mimeIndex")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let mime_type_hint = raw_values
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let file_name = raw_values
+            .get("fileName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        if uid == 0 || folder.is_empty() {
+            results.push(json!(false));
+            continue;
+        }
+
+        // tempName = sha1(raw_key_string)
+        let temp_name = hex::encode(Sha1::digest(raw_key_str.as_bytes()));
+        let file_path = format!("{tmp_dir}/{temp_name}");
+
+        // Check if file already cached
+        if tokio::fs::metadata(&file_path).await.is_ok() {
+            let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
+            results.push(json!({
+                "tempName": temp_name,
+                "mimeType": mime_type,
+            }));
+            continue;
+        }
+
+        // Fetch via IMAP
+        let data = match tokio::time::timeout(
+            fetch_deadline,
+            fetcher(config.clone(), password.clone(), folder, uid, mime_index),
+        )
+        .await
+        {
+            Ok(Ok(Some(data))) => data,
+            Ok(Ok(None)) => {
+                results.push(json!(false));
+                continue;
+            }
+            Ok(Err(err)) => {
+                tracing::warn!("Failed to fetch attachment for upload: {err}");
+                results.push(json!(false));
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!("Attachment upload fetch timed out");
+                results.push(json!(false));
+                continue;
+            }
+        };
+
+        if let Err(err) = tokio::fs::write(&file_path, &data).await {
+            tracing::error!("Failed to write attachment temp file {file_path}: {err}");
+            results.push(json!(false));
+            continue;
+        }
+
+        let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
+        results.push(json!({
+            "tempName": temp_name,
+            "mimeType": mime_type,
+        }));
+    }
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": results
+        }),
+    )
+}
+
+fn mime_type_from_hint(mime_type_hint: &str, file_name: &str) -> String {
+    if !mime_type_hint.is_empty() {
+        return mime_type_hint.to_string();
+    }
+    if let Some(ext) = std::path::Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        match ext.to_lowercase().as_str() {
+            "pdf" => "application/pdf".to_string(),
+            "jpg" | "jpeg" => "image/jpeg".to_string(),
+            "png" => "image/png".to_string(),
+            "gif" => "image/gif".to_string(),
+            "webp" => "image/webp".to_string(),
+            "svg" => "image/svg+xml".to_string(),
+            "txt" => "text/plain".to_string(),
+            "html" | "htm" => "text/html".to_string(),
+            "xml" => "application/xml".to_string(),
+            "json" => "application/json".to_string(),
+            "zip" => "application/zip".to_string(),
+            "eml" => "message/rfc822".to_string(),
+            "doc" => "application/msword".to_string(),
+            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .to_string(),
+            "xls" => "application/vnd.ms-excel".to_string(),
+            "xlsx" => {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
+            }
+            "ppt" => "application/vnd.ms-powerpoint".to_string(),
+            "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                .to_string(),
+            "mp3" => "audio/mpeg".to_string(),
+            "mp4" => "video/mp4".to_string(),
+            "wav" => "audio/wav".to_string(),
+            _ => "application/octet-stream".to_string(),
+        }
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
 async fn native_legacy_message(
     state: &AppState,
     original_action: &str,
@@ -7346,6 +7769,7 @@ fn legacy_message_body_response(
     let mut date_timestamp_source = "internal";
     let mut size = 0;
     let mut email_id = None;
+    let mut preview = None;
     let mut attachments = None;
     let mut metadata_attachments = None;
     let mut headers = None;
@@ -7368,6 +7792,7 @@ fn legacy_message_body_response(
     {
         size = metadata.size;
         email_id = metadata.email_id.as_deref();
+        preview = metadata.preview.as_deref();
         if !metadata.attachments.is_empty() {
             metadata_attachments = Some(metadata.attachments.clone());
         }
@@ -7609,7 +8034,7 @@ fn legacy_message_body_response(
                 size,
                 flags,
                 email_id,
-                None,
+                preview,
             )
         }),
     )
@@ -13924,6 +14349,7 @@ Subject: Preview metadata\r\n\r\n"
                         internal_timestamp: Some(1_700_000_000),
                         size: 4096,
                         email_id: Some("gmail-message-id".to_string()),
+                        preview: Some("Server-generated preview".to_string()),
                         attachments: vec![fm_imap::LegacyAttachmentSummary {
                             object: "Object/Attachment".to_string(),
                             folder: "INBOX".to_string(),
@@ -13959,6 +14385,7 @@ Subject: Preview metadata\r\n\r\n"
         assert_eq!(result["dateTimestampSource"], "internal");
         assert_eq!(result["size"], 4096);
         assert_eq!(result["id"], "gmail-message-id");
+        assert_eq!(result["preview"], "Server-generated preview");
         assert_eq!(result["flags"][0], "\\Seen");
         assert_eq!(result["from"][0]["name"], "Sender, Example");
         assert_eq!(result["from"][0]["email"], "sender@example.com");
@@ -13996,6 +14423,7 @@ Subject: Preview metadata\r\n\r\n"
                         internal_timestamp: Some(1_700_000_456),
                         size: 2048,
                         email_id: Some("gmail-envelope-id".to_string()),
+                        preview: None,
                         attachments: Vec::new(),
                         envelope: fm_imap::LegacyMessageEnvelope {
                             subject: "Envelope subject".to_string(),
@@ -14064,6 +14492,7 @@ In-Reply-To: <header-parent@example.com>\r\n\r\n"
                         internal_timestamp: Some(1_700_000_789),
                         size: 2048,
                         email_id: None,
+                        preview: None,
                         attachments: Vec::new(),
                         envelope: fm_imap::LegacyMessageEnvelope {
                             subject: "Envelope subject".to_string(),
@@ -19216,6 +19645,7 @@ Subject: Empty body metadata\r\n\r\n"
             bind_addr: "127.0.0.1:0".to_string(),
             base_url: "http://localhost:8888".to_string(),
             static_root: "/workspace/frickmail-static".to_string(),
+            tmp_dir: "/tmp/frickmail".to_string(),
             php_bridge_url,
             database_url: None,
             redis_url: "redis://redis:6379/0".to_string(),
@@ -20473,5 +20903,180 @@ Subject: Empty body metadata\r\n\r\n"
     async fn read_json(response: axum::response::Response) -> Value {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    // --- create_zip_archive path-sanitization tests ---
+
+    #[test]
+    fn create_zip_archive_strips_path_components_from_entry_names() {
+        let files = vec![
+            ("report.pdf".to_string(), b"PDF-1".to_vec()),
+            ("../evil.sh".to_string(), b"SCRIPT".to_vec()),
+            ("../../../../etc/passwd".to_string(), b"root:x:0:0".to_vec()),
+            ("subdir/doc.txt".to_string(), b"hello".to_vec()),
+        ];
+
+        let zip_bytes = super::create_zip_archive(&files).unwrap();
+
+        // Verify the zip was created successfully
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+
+        // Every entry name must be a bare file name — no directory traversal
+        for name in &names {
+            assert!(
+                !name.contains('/') && !name.contains(".."),
+                "zip entry name escaped sanitization: {name}"
+            );
+        }
+        assert_eq!(names.len(), 4);
+        assert!(names.contains(&"report.pdf".to_string()));
+        assert!(names.contains(&"evil.sh".to_string()));
+        assert!(names.contains(&"passwd".to_string()));
+        assert!(names.contains(&"doc.txt".to_string()));
+    }
+
+    // --- native_legacy_attachments_actions tests ---
+
+    #[tokio::test]
+    async fn attachments_actions_downloads_zip_with_sanitized_names() {
+        let key = [53_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let config = test_config(None);
+        let (state, session) = message_body_test_state_with_config(1940, 1941, &key, config).await;
+
+        // Build a raw key that references a folder/uid/mimeIndex (no inline data)
+        let raw_key_json = json!({
+            "folder": "INBOX",
+            "uid": 57,
+            "mimeIndex": "2",
+            "fileName": "../report.pdf",
+            "mimeType": "application/pdf",
+        });
+        let raw_key = URL_SAFE_NO_PAD.encode(raw_key_json.to_string());
+
+        let response = super::native_legacy_attachments_actions_with_fetcher(
+            &state,
+            "AttachmentsActions",
+            &json!({
+                "account_id": 1941,
+                "target": "zip",
+                "filename": "downloads",
+                "folder": "INBOX",
+                "hashes": [raw_key],
+            }),
+            &session,
+            Duration::from_secs(5),
+            |_config, _password, _folder, _uid, _mime_index| async move {
+                Ok(Some(b"PDF-CONTENT".to_vec()))
+            },
+        )
+        .await;
+
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "AttachmentsActions");
+        let result = &body["Result"];
+        assert!(result["fileHash"].is_string());
+    }
+
+    #[tokio::test]
+    async fn attachments_actions_returns_false_for_non_zip_target() {
+        let key = [53_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1940, 1941, &key).await;
+
+        let response = super::native_legacy_attachments_actions_with_fetcher(
+            &state,
+            "AttachmentsActions",
+            &json!({
+                "account_id": 1941,
+                "target": "download",
+                "hashes": [],
+            }),
+            &session,
+            Duration::from_secs(5),
+            |_config, _password, _folder, _uid, _mime_index| async move { Ok(None) },
+        )
+        .await;
+
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+    }
+
+    // --- native_legacy_message_upload_attachments tests ---
+
+    #[tokio::test]
+    async fn upload_attachments_caches_fetched_mime_parts() {
+        let key = [54_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let config = test_config(None);
+        let (state, session) = message_body_test_state_with_config(1942, 1943, &key, config).await;
+
+        let raw_key_json = json!({
+            "folder": "INBOX",
+            "uid": 57,
+            "mimeIndex": "2",
+            "fileName": "test.pdf",
+            "mimeType": "application/pdf",
+        });
+        let raw_key = URL_SAFE_NO_PAD.encode(raw_key_json.to_string());
+
+        let response = super::native_legacy_message_upload_attachments_with_fetcher(
+            &state,
+            "MessageUploadAttachments",
+            &json!({
+                "account_id": 1943,
+                "attachments": [raw_key],
+            }),
+            &session,
+            Duration::from_secs(5),
+            |_config, _password, _folder, uid, _mime_index| async move {
+                // Verify uid is passed through
+                assert_eq!(uid, 57);
+                Ok(Some(b"UPLOAD-CONTENT".to_vec()))
+            },
+        )
+        .await;
+
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "MessageUploadAttachments");
+        let results = body["Result"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        let entry = &results[0];
+        assert!(entry["tempName"].is_string());
+        assert_eq!(entry["mimeType"], "application/pdf");
+        assert_ne!(entry["tempName"].as_str().unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn upload_attachments_skips_missing_attachments() {
+        let key = [54_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1942, 1943, &key).await;
+
+        let raw_key_json = json!({
+            "folder": "INBOX",
+            "uid": 57,
+            "mimeIndex": "1",
+            "fileName": "missing.pdf",
+            "mimeType": "application/pdf",
+        });
+        let raw_key = URL_SAFE_NO_PAD.encode(raw_key_json.to_string());
+
+        let response = super::native_legacy_message_upload_attachments_with_fetcher(
+            &state,
+            "MessageUploadAttachments",
+            &json!({
+                "account_id": 1943,
+                "attachments": [raw_key],
+            }),
+            &session,
+            Duration::from_secs(5),
+            |_config, _password, _folder, _uid, _mime_index| async move { Ok(None) },
+        )
+        .await;
+
+        let body = read_json(response).await;
+        let results = body["Result"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], false);
     }
 }

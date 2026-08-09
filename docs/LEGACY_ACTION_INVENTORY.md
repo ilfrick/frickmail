@@ -124,7 +124,11 @@ part of the full webmail core migration.
 | `FolderACL` | `dev/View/Popup/Folder.js` | native | Uses the selected Frickmail mail account, reads `MYRIGHTS`, and conditionally reads administrator-visible ACL entries into the legacy folder-rights collection shape. |
 | `FolderSetACL`, `FolderDeleteACL` | `dev/View/Popup/FolderAcl.js`, `dev/View/Popup/Folder.js` | native | Use the selected Frickmail mail account and safely quote capability-gated IMAP ACL mutations. |
 | `FolderIdentifierRights` | dormant code in `dev/View/Popup/FolderAcl.js` | compat-known | The only frontend call is commented out and the legacy PHP actions expose no matching handler; retained as a compatibility-known name pending removal or historical verification. |
-| `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | compat-known | Attachment actions remain on the compatibility roadmap. |
+| `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | native | Handles attachment download with zip-slip-safe filename sanitization, TTL-based temp-file cleanup, and native fetch of individual MIME parts. Upload attachments caches fetched MIME parts into the configured `tmp_dir` with the same TTL-based cleanup. |
+
+Detailed native `Message` responses also populate the nullable RFC 8970
+`preview` field through a capability-gated, UID-correlated `PREVIEW` fetch;
+unsolicited responses and `NIL` values cannot populate another message.
 
 ## Other Bundled Plugin JSON Hooks
 

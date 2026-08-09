@@ -206,6 +206,7 @@ pub struct LegacyMessageFetchMetadata {
     pub internal_timestamp: Option<i64>,
     pub size: u32,
     pub email_id: Option<String>,
+    pub preview: Option<String>,
     pub attachments: Vec<LegacyAttachmentSummary>,
     pub envelope: LegacyMessageEnvelope,
 }
@@ -216,6 +217,7 @@ impl LegacyMessageFetchMetadata {
             && self.internal_timestamp.is_none()
             && self.size == 0
             && self.email_id.is_none()
+            && self.preview.is_none()
             && self.attachments.is_empty()
             && self.envelope.is_empty()
     }
@@ -745,7 +747,7 @@ pub async fn fetch_message_body_preview(
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
     let object_email_id = fetch_legacy_message_email_id(&mut session, uid, &capabilities).await?;
-    let Some(mut specs) = fetch_body_part_specs(&mut session, mailbox, uid, capabilities).await?
+    let Some(mut specs) = fetch_body_part_specs(&mut session, mailbox, uid, &capabilities).await?
     else {
         logout_quietly(session).await;
         return Ok(None);
@@ -753,6 +755,7 @@ pub async fn fetch_message_body_preview(
     if object_email_id.is_some() {
         specs.metadata.email_id = object_email_id;
     }
+    specs.metadata.preview = fetch_legacy_message_preview(&mut session, uid, &capabilities).await?;
     let parts = fetch_preview_parts(
         &mut session,
         uid,
@@ -840,6 +843,20 @@ async fn fetch_legacy_message_email_ids(
         }),
     )
     .await?
+}
+
+async fn fetch_legacy_message_preview(
+    session: &mut BoxedSession,
+    uid: u32,
+    capabilities: &ImapFetchMetadataCapabilities,
+) -> Result<Option<String>> {
+    if !capabilities.supports_preview {
+        return Ok(None);
+    }
+
+    let mut previews =
+        fetch_legacy_message_previews(session, &[uid], "fetch message PREVIEW").await?;
+    Ok(previews.remove(&uid))
 }
 
 pub async fn fetch_mailbox_status(
@@ -1112,6 +1129,90 @@ pub async fn fetch_raw_message(
     let raw = fetch_raw_message_in_session(&mut session, uid).await?;
     logout_quietly(session).await;
     Ok(raw)
+}
+
+/// Fetches a single MIME part from a message via IMAP.
+///
+/// Opens a connection, EXAMINEs the given mailbox, and issues a
+/// `UID FETCH <uid> BODY.PEEK[<mime_index>]` command. Returns the
+/// raw bytes of the requested part, or `None` if the UID was not found.
+///
+/// When `mime_index` is empty, fetches the entire raw message body
+/// (equivalent to `BODY.PEEK[]`).
+pub async fn fetch_mime_part(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid: u32,
+    mime_index: &str,
+) -> Result<Option<Vec<u8>>> {
+    validate_mailbox(mailbox)?;
+    if uid == 0 {
+        return Err(FrickmailError::BadRequest("uid required".to_string()));
+    }
+    if !mime_index.is_empty() && !is_valid_mime_index(mime_index) {
+        return Err(FrickmailError::BadRequest("invalid mimeIndex".to_string()));
+    }
+
+    let mut session = login(config, password).await?;
+    timeout_imap("examine mailbox", session.examine(mailbox)).await?;
+
+    let query = if mime_index.is_empty() {
+        "(UID BODY.PEEK[])".to_string()
+    } else {
+        format!("(UID BODY.PEEK[{mime_index}])")
+    };
+
+    let result = {
+        let mut fetches =
+            timeout_imap("fetch mime part", session.uid_fetch(uid.to_string(), query)).await?;
+
+        let mut result = None;
+        while let Some(fetch) = timeout_imap("read mime part", fetches.try_next()).await? {
+            if fetch.uid != Some(uid) {
+                continue;
+            }
+            if mime_index.is_empty() {
+                result = fetch.body().map(ToOwned::to_owned);
+            } else if let Some(path) = parse_mime_index_path(mime_index) {
+                result = fetch
+                    .section(&SectionPath::Part(path, None))
+                    .map(ToOwned::to_owned);
+                if result.as_deref() == Some(&[]) {
+                    result = None;
+                }
+            }
+            break;
+        }
+
+        result
+    };
+
+    logout_quietly(session).await;
+    Ok(result)
+}
+
+/// Validates a MIME part index (e.g. `"1"`, `"1.2"`, `"1.2.3"`) so it cannot
+/// inject IMAP command separators into the `BODY.PEEK[…]` fetch argument.
+/// Only digits and dots are permitted; an empty or all-dot index is rejected.
+fn is_valid_mime_index(mime_index: &str) -> bool {
+    if mime_index.is_empty() {
+        return false;
+    }
+    mime_index.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+}
+
+fn parse_mime_index_path(mime_index: &str) -> Option<Vec<u32>> {
+    let mut path = Vec::new();
+    for part in mime_index.split('.') {
+        let n: u32 = part.parse().ok()?;
+        path.push(n);
+    }
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
 }
 
 pub async fn fetch_raw_folder_messages(
@@ -3464,11 +3565,18 @@ fn legacy_message_thread_metadata(
     (thread.clone(), thread_unseen)
 }
 
-async fn fetch_legacy_message_list_previews(
+async fn fetch_legacy_message_previews(
     session: &mut BoxedSession,
-    uid_set: &str,
+    uids: &[u32],
+    operation: &'static str,
 ) -> Result<HashMap<u32, String>> {
-    let operation = "fetch legacy message-list previews";
+    let requested_uids = uids
+        .iter()
+        .copied()
+        .filter(|uid| *uid > 0)
+        .collect::<HashSet<_>>();
+    let uid_set = legacy_uid_sequence_set(uids)
+        .ok_or_else(|| FrickmailError::BadRequest("uid required".to_string()))?;
     let command = format!("UID FETCH {uid_set} (UID PREVIEW)");
     timeout_result(
         operation,
@@ -3500,6 +3608,9 @@ async fn fetch_legacy_message_list_previews(
                         _ => None,
                     });
                     if let (Some(uid), Some(preview)) = (uid, preview) {
+                        if !requested_uids.contains(&uid) {
+                            continue;
+                        }
                         let preview = std::str::from_utf8(preview).map_err(|_| {
                             FrickmailError::Upstream(
                                 "IMAP PREVIEW response was not valid UTF-8".to_string(),
@@ -3629,8 +3740,14 @@ async fn fetch_legacy_message_list_summaries(
             .values()
             .map(|message| message.uid)
             .collect::<Vec<_>>();
-        if let Some(uid_set) = legacy_uid_sequence_set(&fetched_uids) {
-            for (uid, preview) in fetch_legacy_message_list_previews(session, &uid_set).await? {
+        if !fetched_uids.is_empty() {
+            for (uid, preview) in fetch_legacy_message_previews(
+                session,
+                &fetched_uids,
+                "fetch legacy message-list previews",
+            )
+            .await?
+            {
                 if let Some(message) = messages_by_id
                     .values_mut()
                     .find(|message| message.uid == uid)
@@ -3770,7 +3887,13 @@ async fn fetch_legacy_message_list_multisearch_page(
             }
         }
         if capabilities.supports_preview {
-            for (uid, preview) in fetch_legacy_message_list_previews(session, &uid_set).await? {
+            for (uid, preview) in fetch_legacy_message_previews(
+                session,
+                &page_uids,
+                "fetch multisearch legacy message-list previews",
+            )
+            .await?
+            {
                 if let Some(message) = messages_by_uid.get_mut(&uid) {
                     message.preview = Some(preview);
                 }
@@ -6841,7 +6964,7 @@ async fn fetch_body_part_specs(
     session: &mut BoxedSession,
     folder: &str,
     uid: u32,
-    capabilities: ImapFetchMetadataCapabilities,
+    capabilities: &ImapFetchMetadataCapabilities,
 ) -> Result<Option<BodyPreviewFetchSpec>> {
     let mut fetches = timeout_imap(
         "fetch message body structure",
@@ -6849,7 +6972,7 @@ async fn fetch_body_part_specs(
             uid.to_string(),
             uid_fetch_bodystructure_query_with_gmail_id(
                 uid,
-                legacy_message_fetches_gmail_id(&capabilities),
+                legacy_message_fetches_gmail_id(capabilities),
             )?,
         ),
     )
@@ -6887,6 +7010,7 @@ async fn fetch_body_part_specs(
                     internal_timestamp,
                     size,
                     email_id,
+                    preview: None,
                     attachments: Vec::new(),
                     envelope,
                 },
@@ -6900,6 +7024,7 @@ async fn fetch_body_part_specs(
             internal_timestamp,
             size,
             email_id,
+            preview: None,
             attachments,
             envelope,
         };
@@ -11612,6 +11737,60 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
     }
 
     #[tokio::test]
+    async fn detailed_message_fetch_reads_capability_gated_uid_correlated_preview() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(fetch, "A0002 UID FETCH 41 (UID PREVIEW)\r\n");
+            server_stream
+                .write_all(
+                    b"* 6 FETCH (UID 40 PREVIEW \"Wrong message\")\r\n\
+                      * 7 FETCH (UID 41 PREVIEW \"Requested preview\")\r\n\
+                      * 7 FETCH (UID 41 FLAGS (\\Seen))\r\n\
+                      A0002 OK completed\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let preview = fetch_legacy_message_preview(
+            &mut session,
+            41,
+            &ImapFetchMetadataCapabilities {
+                supports_gmail_id: false,
+                supports_object_id: false,
+                supports_preview: true,
+                supports_literal_plus: false,
+                uses_utf8_search: false,
+                supports_within: false,
+                supports_multisearch: false,
+                supports_sort: false,
+                supports_sort_display: false,
+                thread_algorithms: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(preview.as_deref(), Some("Requested preview"));
+    }
+
+    #[tokio::test]
     async fn message_list_fetch_prefers_correlated_object_email_ids_over_gmail_ids() {
         use tokio::io::AsyncWriteExt as _;
 
@@ -12163,7 +12342,8 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             assert_eq!(query, "A0002 UID FETCH 9,11 (UID PREVIEW)\r\n");
             server_stream
                 .write_all(
-                    "* 2 FETCH (UID 9 PREVIEW \"Café preview\")\r\n\
+                    "* 1 FETCH (UID 8 PREVIEW \"Unsolicited preview\")\r\n\
+                     * 2 FETCH (UID 9 PREVIEW \"Café preview\")\r\n\
                      * 3 FETCH (UID 11 PREVIEW NIL)\r\n\
                      A0002 OK fetched\r\n"
                         .as_bytes(),
@@ -12178,12 +12358,17 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let previews = fetch_legacy_message_list_previews(&mut session, "9,11")
-            .await
-            .unwrap();
+        let previews = fetch_legacy_message_previews(
+            &mut session,
+            &[9, 11],
+            "fetch legacy message-list previews",
+        )
+        .await
+        .unwrap();
         server.await.unwrap();
         assert_eq!(previews.get(&9).map(String::as_str), Some("Café preview"));
         assert!(!previews.contains_key(&11));
+        assert!(!previews.contains_key(&8));
     }
 
     #[tokio::test]
@@ -15814,5 +15999,18 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         let failed = b"A1 NO mailbox unavailable\r\n";
         let err = parse_uid_fetch_body_preview(failed, 41).unwrap_err();
         assert!(err.public_message().contains("mailbox unavailable"));
+    }
+
+    #[test]
+    fn is_valid_mime_index_accepts_only_digits_and_dots() {
+        assert!(is_valid_mime_index("1"));
+        assert!(is_valid_mime_index("1.2"));
+        assert!(is_valid_mime_index("1.2.3"));
+        assert!(!is_valid_mime_index(""));
+        assert!(!is_valid_mime_index("1]"));
+        assert!(!is_valid_mime_index("1\r\n"));
+        assert!(!is_valid_mime_index("../etc"));
+        assert!(!is_valid_mime_index("a.b"));
+        assert!(!is_valid_mime_index("1; RENAME"));
     }
 }
