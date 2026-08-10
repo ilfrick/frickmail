@@ -746,18 +746,25 @@ pub async fn fetch_message_body_preview(
     let mut session = login(config, password).await?;
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
-    let object_email_id = fetch_legacy_message_email_id(&mut session, uid, &capabilities)
-        .await
-        .unwrap_or(None);
     let Some(mut specs) = fetch_body_part_specs(&mut session, mailbox, uid, &capabilities).await?
     else {
         logout_quietly(session).await;
         return Ok(None);
     };
-    if object_email_id.is_some() {
-        specs.metadata.email_id = object_email_id;
+    // Fetch EMAILID and PREVIEW in a single IMAP round trip rather than two
+    // separate commands. Both are simple FetchAttributes that can be combined.
+    let (mut email_ids, mut previews) = fetch_legacy_message_email_ids_and_previews(
+        &mut session,
+        &[uid],
+        capabilities.supports_object_id,
+        capabilities.supports_preview,
+        "fetch message EMAILID and PREVIEW",
+    )
+    .await?;
+    if let Some(email_id) = email_ids.remove(&uid) {
+        specs.metadata.email_id = Some(email_id);
     }
-    specs.metadata.preview = fetch_legacy_message_preview(&mut session, uid, &capabilities).await?;
+    specs.metadata.preview = previews.remove(&uid);
     let parts = fetch_preview_parts(
         &mut session,
         uid,
@@ -771,6 +778,7 @@ pub async fn fetch_message_body_preview(
     Ok(Some(parts))
 }
 
+#[cfg(test)]
 async fn fetch_legacy_message_email_id(
     session: &mut BoxedSession,
     uid: u32,
@@ -890,6 +898,7 @@ async fn fetch_legacy_message_email_ids_and_previews(
     .await?
 }
 
+#[cfg(test)]
 async fn fetch_legacy_message_preview(
     session: &mut BoxedSession,
     uid: u32,
