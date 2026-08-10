@@ -33,6 +33,8 @@ pub struct FrickmailConfig {
     pub frickmail_user: FrickmailUserConfig,
     #[serde(default)]
     pub transactional_smtp: TransactionalSmtpConfig,
+    #[serde(default)]
+    pub hibp: HibpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -104,6 +106,12 @@ pub struct TransactionalSmtpConfig {
     pub password: String,
     #[serde(default = "default_transactional_smtp_from")]
     pub from: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HibpConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

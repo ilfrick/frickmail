@@ -893,6 +893,7 @@ async fn native_compat_response(
             native_legacy_message_upload_attachments(state, original_action, payload, session)
                 .await,
         ),
+        "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
         _ => None,
     }
 }
@@ -915,6 +916,160 @@ async fn native_frickmail_me(
             "Result": result
         }),
     )
+}
+
+async fn native_hibp_check(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let credential_key = match load_session_credential_key(original_action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let selected = match session
+        .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+        .await
+    {
+        Ok(Some(selected)) if selected.account_id > 0 => selected,
+        Ok(_) => return json_result_error(original_action, "No account selected"),
+        Err(err) => {
+            return json_result_error(
+                original_action,
+                &format!("Frickmail session read failed: {err}"),
+            )
+        }
+    };
+
+    let secret = match fm_user::SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        selected.account_id,
+    )
+    .await
+    {
+        Ok(Some(secret)) => secret,
+        Ok(None) => return json_result_error(original_action, "Account not found"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    let password = match secret.encrypted_password.as_deref() {
+        Some(blob) => match fm_user::decrypt_account_secret(blob, &credential_key) {
+            Ok(Some(password)) => password,
+            Ok(None) => {
+                return json_result_error(original_action, "Account password not available")
+            }
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        },
+        None => return json_result_error(original_action, "Account password not available"),
+    };
+
+    let pwned = hibp_check_password(&password).await;
+
+    let api_key = state.config().hibp.api_key.as_deref().unwrap_or("");
+    let breaches = if api_key.is_empty() {
+        None
+    } else {
+        hibp_check_account(api_key, &secret.email).await
+    };
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": {
+                "pwned": pwned,
+                "breaches": breaches
+            }
+        }),
+    )
+}
+
+/// Check a password against the Have I Been Pwned Pwned Passwords API (k-anonymity model).
+/// Returns the breach count, or 0 if not found.
+async fn hibp_check_password(password: &str) -> i64 {
+    let hash = hex::encode(Sha1::digest(password.as_bytes())).to_uppercase();
+    let prefix = &hash[..5];
+    let suffix = &hash[5..];
+
+    let url = format!("https://api.pwnedpasswords.com/range/{prefix}");
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("frickmail-hibp")
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return 0,
+    };
+
+    let body = match client.get(&url).send().await {
+        Ok(response) => match response.text().await {
+            Ok(text) => text,
+            Err(_) => return 0,
+        },
+        Err(_) => return 0,
+    };
+
+    for line in body.lines() {
+        if let Some((hash_suffix, count)) = line.split_once(':') {
+            if hash_suffix.eq_ignore_ascii_case(suffix) {
+                return count.trim().parse::<i64>().unwrap_or(1);
+            }
+        }
+    }
+
+    0
+}
+
+/// Check an email address against the Have I Been Pwned Breached Account API.
+/// Returns the list of breaches, or None if the request fails.
+async fn hibp_check_account(api_key: &str, email: &str) -> Option<Vec<serde_json::Value>> {
+    let encoded_email = percent_encode_email(email);
+    let url = format!(
+        "https://haveibeenpwned.com/api/v3/breachedaccount/{}",
+        encoded_email
+    );
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("frickmail-hibp")
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return None,
+    };
+
+    let response = match client
+        .get(&url)
+        .header("hibp-api-key", api_key)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return None,
+    };
+
+    if response.status().as_u16() == 404 {
+        return Some(Vec::new());
+    }
+
+    if !response.status().is_success() {
+        return None;
+    }
+
+    response.json::<Vec<serde_json::Value>>().await.ok()
 }
 
 async fn native_frickmail_get_totp_status(
@@ -9010,6 +9165,23 @@ async fn load_session_credential_key(
     }
 
     Ok(key)
+}
+
+fn percent_encode_email(email: &str) -> String {
+    let mut encoded = String::with_capacity(email.len());
+    for byte in email.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char);
+            }
+            _ => {
+                // Percent-encode the byte
+                use std::fmt::Write;
+                let _ = write!(encoded, "%{:02X}", byte);
+            }
+        }
+    }
+    encoded
 }
 
 fn json_result_error(action: &str, error: &str) -> Response {
@@ -19696,6 +19868,7 @@ Subject: Empty body metadata\r\n\r\n"
             cache: Default::default(),
             frickmail_user: Default::default(),
             transactional_smtp: Default::default(),
+            hibp: Default::default(),
         }
     }
 
