@@ -746,7 +746,9 @@ pub async fn fetch_message_body_preview(
     let mut session = login(config, password).await?;
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
-    let object_email_id = fetch_legacy_message_email_id(&mut session, uid, &capabilities).await?;
+    let object_email_id = fetch_legacy_message_email_id(&mut session, uid, &capabilities)
+        .await
+        .unwrap_or(None);
     let Some(mut specs) = fetch_body_part_specs(&mut session, mailbox, uid, &capabilities).await?
     else {
         logout_quietly(session).await;
@@ -778,24 +780,49 @@ async fn fetch_legacy_message_email_id(
         return Ok(None);
     }
 
-    let mut email_ids =
-        fetch_legacy_message_email_ids(session, &[uid], "fetch message EMAILID").await?;
+    let (mut email_ids, _) = fetch_legacy_message_email_ids_and_previews(
+        session,
+        &[uid],
+        true,
+        false,
+        "fetch message EMAILID",
+    )
+    .await?;
     Ok(email_ids.remove(&uid))
 }
 
-async fn fetch_legacy_message_email_ids(
+/// Fetches EMAILID and/or PREVIEW for a set of UIDs in a single IMAP
+/// `UID FETCH` round trip, reducing what was previously two separate commands
+/// (one for EMAILID, one for PREVIEW) into one.
+async fn fetch_legacy_message_email_ids_and_previews(
     session: &mut BoxedSession,
     uids: &[u32],
+    include_email_id: bool,
+    include_preview: bool,
     operation: &'static str,
-) -> Result<HashMap<u32, String>> {
+) -> Result<(HashMap<u32, String>, HashMap<u32, String>)> {
+    if !include_email_id && !include_preview {
+        return Ok((HashMap::new(), HashMap::new()));
+    }
+
     let requested_uids = uids
         .iter()
         .copied()
         .filter(|uid| *uid > 0)
         .collect::<HashSet<_>>();
-    let uid_set = legacy_uid_sequence_set(uids)
-        .ok_or_else(|| FrickmailError::BadRequest("uid required".to_string()))?;
-    let command = format!("UID FETCH {uid_set} (UID EMAILID)");
+    let Some(uid_set) = legacy_uid_sequence_set(uids) else {
+        return Ok((HashMap::new(), HashMap::new()));
+    };
+
+    let mut attrs: Vec<&str> = vec!["UID"];
+    if include_email_id {
+        attrs.push("EMAILID");
+    }
+    if include_preview {
+        attrs.push("PREVIEW");
+    }
+    let command = format!("UID FETCH {uid_set} ({})", attrs.join(" "));
+
     timeout_result(
         operation,
         timeout(COMMAND_TIMEOUT, async {
@@ -804,6 +831,7 @@ async fn fetch_legacy_message_email_ids(
                 .await
                 .map_err(|error| imap_error(operation, error))?;
             let mut email_ids = HashMap::new();
+            let mut previews = HashMap::new();
             loop {
                 let response = session
                     .read_response()
@@ -816,18 +844,35 @@ async fn fetch_legacy_message_email_ids(
                             "{operation} failed: IMAP connection closed"
                         ))
                     })?;
-                if let Response::Fetch(_, attrs) = response.parsed() {
-                    let response_uid = attrs.iter().find_map(|attr| match attr {
+                if let Response::Fetch(_, fetch_attrs) = response.parsed() {
+                    let response_uid = fetch_attrs.iter().find_map(|attr| match attr {
                         AttributeValue::Uid(value) => Some(*value),
                         _ => None,
                     });
-                    let email_id = attrs.iter().find_map(|attr| match attr {
-                        AttributeValue::EmailId(value) => Some(value.to_string()),
-                        _ => None,
-                    });
-                    if let (Some(response_uid), Some(email_id)) = (response_uid, email_id) {
-                        if requested_uids.contains(&response_uid) {
-                            email_ids.insert(response_uid, email_id);
+                    if let Some(response_uid) = response_uid {
+                        if !requested_uids.contains(&response_uid) {
+                            continue;
+                        }
+                        if include_email_id {
+                            if let Some(email_id) = fetch_attrs.iter().find_map(|attr| match attr {
+                                AttributeValue::EmailId(value) => Some(value.to_string()),
+                                _ => None,
+                            }) {
+                                email_ids.insert(response_uid, email_id);
+                            }
+                        }
+                        if include_preview {
+                            if let Some(preview) = fetch_attrs.iter().find_map(|attr| match attr {
+                                AttributeValue::Preview(Some(preview)) => Some(preview.as_ref()),
+                                _ => None,
+                            }) {
+                                let preview = std::str::from_utf8(preview).map_err(|_| {
+                                    FrickmailError::Upstream(
+                                        "IMAP PREVIEW response was not valid UTF-8".to_string(),
+                                    )
+                                })?;
+                                previews.insert(response_uid, preview.to_string());
+                            }
                         }
                     }
                 }
@@ -837,7 +882,7 @@ async fn fetch_legacy_message_email_ids(
                     )));
                 }
                 if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
-                    return Ok(email_ids);
+                    return Ok((email_ids, previews));
                 }
             }
         }),
@@ -854,8 +899,14 @@ async fn fetch_legacy_message_preview(
         return Ok(None);
     }
 
-    let mut previews =
-        fetch_legacy_message_previews(session, &[uid], "fetch message PREVIEW").await?;
+    let (_, mut previews) = fetch_legacy_message_email_ids_and_previews(
+        session,
+        &[uid],
+        false,
+        true,
+        "fetch message PREVIEW",
+    )
+    .await?;
     Ok(previews.remove(&uid))
 }
 
@@ -1197,6 +1248,9 @@ pub async fn fetch_mime_part(
 /// Only digits and dots are permitted; an empty or all-dot index is rejected.
 fn is_valid_mime_index(mime_index: &str) -> bool {
     if mime_index.is_empty() {
+        return false;
+    }
+    if mime_index.bytes().all(|b| b == b'.') {
         return false;
     }
     mime_index.bytes().all(|b| b.is_ascii_digit() || b == b'.')
@@ -3565,74 +3619,6 @@ fn legacy_message_thread_metadata(
     (thread.clone(), thread_unseen)
 }
 
-async fn fetch_legacy_message_previews(
-    session: &mut BoxedSession,
-    uids: &[u32],
-    operation: &'static str,
-) -> Result<HashMap<u32, String>> {
-    let requested_uids = uids
-        .iter()
-        .copied()
-        .filter(|uid| *uid > 0)
-        .collect::<HashSet<_>>();
-    let uid_set = legacy_uid_sequence_set(uids)
-        .ok_or_else(|| FrickmailError::BadRequest("uid required".to_string()))?;
-    let command = format!("UID FETCH {uid_set} (UID PREVIEW)");
-    timeout_result(
-        operation,
-        timeout(COMMAND_TIMEOUT, async {
-            let request_id = session
-                .run_command(&command)
-                .await
-                .map_err(|error| imap_error(operation, error))?;
-            let mut previews = HashMap::new();
-            loop {
-                let response = session
-                    .read_response()
-                    .await
-                    .map_err(|error| {
-                        FrickmailError::Upstream(format!("{operation} failed: {error}"))
-                    })?
-                    .ok_or_else(|| {
-                        FrickmailError::Upstream(format!(
-                            "{operation} failed: IMAP connection closed"
-                        ))
-                    })?;
-                if let Response::Fetch(_, attrs) = response.parsed() {
-                    let uid = attrs.iter().find_map(|attr| match attr {
-                        AttributeValue::Uid(uid) => Some(*uid),
-                        _ => None,
-                    });
-                    let preview = attrs.iter().find_map(|attr| match attr {
-                        AttributeValue::Preview(Some(preview)) => Some(preview.as_ref()),
-                        _ => None,
-                    });
-                    if let (Some(uid), Some(preview)) = (uid, preview) {
-                        if !requested_uids.contains(&uid) {
-                            continue;
-                        }
-                        let preview = std::str::from_utf8(preview).map_err(|_| {
-                            FrickmailError::Upstream(
-                                "IMAP PREVIEW response was not valid UTF-8".to_string(),
-                            )
-                        })?;
-                        previews.insert(uid, preview.to_string());
-                    }
-                }
-                if matches!(response.parsed(), Response::Continue { .. }) {
-                    return Err(FrickmailError::Upstream(format!(
-                        "{operation} failed: unexpected IMAP continuation"
-                    )));
-                }
-                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
-                    return Ok(previews);
-                }
-            }
-        }),
-    )
-    .await?
-}
-
 #[derive(Clone, Copy)]
 enum LegacyMessageListFetchMode {
     Uids,
@@ -3688,9 +3674,7 @@ async fn fetch_legacy_message_list_summaries(
         let Some(uid) = fetch.uid else {
             continue;
         };
-        let Some(bodystructure) = fetch.bodystructure() else {
-            continue;
-        };
+        let bodystructure = fetch.bodystructure();
         let id = match mode {
             LegacyMessageListFetchMode::Uids => uid,
             LegacyMessageListFetchMode::Sequences => fetch.message,
@@ -3705,55 +3689,48 @@ async fn fetch_legacy_message_list_summaries(
             fetch.internal_date().map(|value| value.timestamp()),
             fetch.size.unwrap_or_default(),
             fetch.flags(),
-            Some(bodystructure),
+            bodystructure,
             header,
             fetch.gmail_msg_id().map(u64::to_string),
         );
         (summary.threads, summary.thread_unseen) =
             legacy_message_thread_metadata(uid, message_threads, unseen_uids);
-        messages_by_id.insert(id, summary);
+        // Prefer the most complete response: if an earlier FETCH for this UID
+        // already yielded a bodystructure, keep it instead of overwriting with
+        // a later response that only has flags/size. New summaries with a
+        // bodystructure always replace prior ones that lacked one.
+        let should_replace =
+            messages_by_id
+                .get(&id)
+                .is_none_or(|existing: &LegacyMessageSummary| {
+                    bodystructure.is_some() && existing.attachments.is_empty()
+                });
+        if should_replace {
+            messages_by_id.insert(id, summary);
+        }
     }
     drop(fetches);
 
-    if capabilities.supports_object_id {
-        let fetched_uids = messages_by_id
-            .values()
-            .map(|message| message.uid)
-            .collect::<Vec<_>>();
-        if !fetched_uids.is_empty() {
-            let mut email_ids = fetch_legacy_message_email_ids(
-                session,
-                &fetched_uids,
-                "fetch legacy message-list EMAILIDs",
-            )
-            .await?;
-            for message in messages_by_id.values_mut() {
-                if let Some(email_id) = email_ids.remove(&message.uid) {
-                    message.email_id = Some(email_id);
-                }
+    let fetched_uids = messages_by_id
+        .values()
+        .map(|message| message.uid)
+        .filter(|uid| *uid > 0)
+        .collect::<Vec<_>>();
+    if !fetched_uids.is_empty() {
+        let (email_ids, previews) = fetch_legacy_message_email_ids_and_previews(
+            session,
+            &fetched_uids,
+            capabilities.supports_object_id,
+            capabilities.supports_preview,
+            "fetch legacy message-list EMAILIDs and previews",
+        )
+        .await?;
+        for message in messages_by_id.values_mut() {
+            if let Some(email_id) = email_ids.get(&message.uid) {
+                message.email_id = Some(email_id.clone());
             }
-        }
-    }
-
-    if capabilities.supports_preview {
-        let fetched_uids = messages_by_id
-            .values()
-            .map(|message| message.uid)
-            .collect::<Vec<_>>();
-        if !fetched_uids.is_empty() {
-            for (uid, preview) in fetch_legacy_message_previews(
-                session,
-                &fetched_uids,
-                "fetch legacy message-list previews",
-            )
-            .await?
-            {
-                if let Some(message) = messages_by_id
-                    .values_mut()
-                    .find(|message| message.uid == uid)
-                {
-                    message.preview = Some(preview);
-                }
+            if let Some(preview) = previews.iter().find(|(uid, _)| *uid == &message.uid) {
+                message.preview = Some(preview.1.clone());
             }
         }
     }
@@ -3844,9 +3821,7 @@ async fn fetch_legacy_message_list_multisearch_page(
             let Some(uid) = fetch.uid else {
                 continue;
             };
-            let Some(bodystructure) = fetch.bodystructure() else {
-                continue;
-            };
+            let bodystructure = fetch.bodystructure();
             if !requested_uids.contains(&uid) {
                 continue;
             }
@@ -3857,11 +3832,19 @@ async fn fetch_legacy_message_list_multisearch_page(
                 fetch.internal_date().map(|value| value.timestamp()),
                 fetch.size.unwrap_or_default(),
                 fetch.flags(),
-                Some(bodystructure),
+                bodystructure,
                 header,
                 fetch.gmail_msg_id().map(u64::to_string),
             );
-            messages_by_uid.insert(uid, summary);
+            let should_replace =
+                messages_by_uid
+                    .get(&uid)
+                    .is_none_or(|existing: &LegacyMessageSummary| {
+                        bodystructure.is_some() && existing.attachments.is_empty()
+                    });
+            if should_replace {
+                messages_by_uid.insert(uid, summary);
+            }
         }
         drop(fetches);
 
@@ -3873,27 +3856,21 @@ async fn fetch_legacy_message_list_multisearch_page(
                 "multisearch legacy message list changed while fetching {mailbox}"
             )));
         }
-        if capabilities.supports_object_id {
-            for (uid, email_id) in fetch_legacy_message_email_ids(
+        if capabilities.supports_object_id || capabilities.supports_preview {
+            let (email_ids, previews) = fetch_legacy_message_email_ids_and_previews(
                 session,
                 &page_uids,
-                "fetch multisearch legacy message-list EMAILIDs",
+                capabilities.supports_object_id,
+                capabilities.supports_preview,
+                "fetch multisearch legacy message-list EMAILIDs and previews",
             )
-            .await?
-            {
+            .await?;
+            for (uid, email_id) in email_ids {
                 if let Some(message) = messages_by_uid.get_mut(&uid) {
                     message.email_id = Some(email_id);
                 }
             }
-        }
-        if capabilities.supports_preview {
-            for (uid, preview) in fetch_legacy_message_previews(
-                session,
-                &page_uids,
-                "fetch multisearch legacy message-list previews",
-            )
-            .await?
-            {
+            for (uid, preview) in previews {
                 if let Some(message) = messages_by_uid.get_mut(&uid) {
                     message.preview = Some(preview);
                 }
@@ -12358,9 +12335,11 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             Ok(session) => session,
             Err((error, _client)) => panic!("scripted login failed: {error}"),
         };
-        let previews = fetch_legacy_message_previews(
+        let (_, previews) = fetch_legacy_message_email_ids_and_previews(
             &mut session,
             &[9, 11],
+            false,
+            true,
             "fetch legacy message-list previews",
         )
         .await
@@ -16012,5 +15991,9 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         assert!(!is_valid_mime_index("../etc"));
         assert!(!is_valid_mime_index("a.b"));
         assert!(!is_valid_mime_index("1; RENAME"));
+        // An all-dot index (no digits at all) is rejected — it would
+        // produce a malformed BODY.PEEK[.] IMAP command.
+        assert!(!is_valid_mime_index("."));
+        assert!(!is_valid_mime_index(".."));
     }
 }

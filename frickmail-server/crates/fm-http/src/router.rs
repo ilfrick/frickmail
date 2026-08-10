@@ -4909,10 +4909,16 @@ where
         return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
     }
 
-    let zip_bytes = match create_zip_archive(&attachment_data) {
-        Ok(bytes) => bytes,
-        Err(err) => {
+    let zip_bytes = match tokio::task::spawn_blocking(move || create_zip_archive(&attachment_data))
+        .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(err)) => {
             tracing::error!("Failed to create ZIP archive: {err}");
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+        }
+        Err(join_err) => {
+            tracing::error!("ZIP compression task panicked: {join_err}");
             return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
         }
     };
@@ -4970,6 +4976,7 @@ fn create_zip_archive(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
+    let mut seen_names: HashMap<String, u32> = HashMap::new();
     for (name, data) in files {
         // Strip any directory components so the entry name cannot escape the
         // extraction directory (prevents zip-slip / path-traversal writes).
@@ -4977,7 +4984,28 @@ fn create_zip_archive(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file.dat");
-        zip.start_file(safe_name, options)?;
+        // Disambiguate duplicate basenames by appending a numeric suffix,
+        // preventing `zip::ZipWriter::start_file` from erroring on
+        // collisions when two attachments share the same filename.
+        let final_name = match seen_names.get(safe_name) {
+            Some(&count) => {
+                let (stem, extension) = match safe_name.rsplit_once('.') {
+                    Some((s, ext)) if !s.is_empty() && !ext.is_empty() => (s, Some(ext)),
+                    _ => (safe_name, None),
+                };
+                let suffixed = match extension {
+                    Some(ext) => format!("{stem}_{count}.{ext}"),
+                    None => format!("{stem}_{count}"),
+                };
+                seen_names.insert(safe_name.to_string(), count + 1);
+                suffixed
+            }
+            None => {
+                seen_names.insert(safe_name.to_string(), 1);
+                safe_name.to_string()
+            }
+        };
+        zip.start_file(final_name, options)?;
         std::io::Write::write_all(&mut zip, data)?;
     }
 
@@ -5140,8 +5168,18 @@ where
             }
         };
 
-        if let Err(err) = tokio::fs::write(&file_path, &data).await {
-            tracing::error!("Failed to write attachment temp file {file_path}: {err}");
+        // Write to a .partial file first, then rename atomically so the
+        // cache path only ever holds a complete file — preventing a
+        // previously interrupted fetch from serving a truncated result.
+        let partial_path = format!("{file_path}.partial");
+        if let Err(err) = tokio::fs::write(&partial_path, &data).await {
+            tracing::error!("Failed to write attachment temp file {partial_path}: {err}");
+            results.push(json!(false));
+            continue;
+        }
+        if let Err(err) = tokio::fs::rename(&partial_path, &file_path).await {
+            tracing::error!("Failed to finalize attachment temp file {file_path}: {err}");
+            let _ = tokio::fs::remove_file(&partial_path).await;
             results.push(json!(false));
             continue;
         }
@@ -20936,6 +20974,33 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(names.contains(&"evil.sh".to_string()));
         assert!(names.contains(&"passwd".to_string()));
         assert!(names.contains(&"doc.txt".to_string()));
+    }
+
+    #[test]
+    fn create_zip_archive_disambiguates_duplicate_basenames() {
+        let files = vec![
+            ("INBOX/report.pdf".to_string(), b"PDF-1".to_vec()),
+            ("Archive/report.pdf".to_string(), b"PDF-2".to_vec()),
+            ("Drafts/report.pdf".to_string(), b"PDF-3".to_vec()),
+        ];
+
+        let zip_bytes = super::create_zip_archive(&files).unwrap();
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+
+        // No duplicates and no directory paths
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(sorted, names);
+        let unique: HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len());
+        // The first occurrence keeps the bare name; subsequent ones get a suffix
+        assert!(names.contains(&"report.pdf".to_string()));
+        assert!(names.contains(&"report_1.pdf".to_string()));
+        assert!(names.contains(&"report_2.pdf".to_string()));
     }
 
     // --- native_legacy_attachments_actions tests ---
