@@ -56,6 +56,7 @@ use fm_user::{
     NewSmimeCert, NewSmimeP12, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailAccount,
     UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES,
 };
+use futures::future::join_all;
 use md5::{Digest, Md5};
 use p256::{
     ecdsa::{signature::Signer, Signature, SigningKey},
@@ -5071,8 +5072,8 @@ async fn native_legacy_message_upload_attachments_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut,
-    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>>,
+    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut + Sync,
+    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>> + Send,
 {
     let (config, password) =
         match legacy_imap_connection_context(state, original_action, payload, session).await {
@@ -5094,102 +5095,104 @@ where
     }
     cleanup_temp_files(&tmp_dir, Duration::from_secs(3600)).await;
 
-    let mut results: Vec<serde_json::Value> = Vec::new();
+    // Process attachments in parallel — each is an independent IMAP fetch
+    // with its own connection (cloned config + password). Results are
+    // collected in input order via join_all.
+    let futures = attachments.iter().map(|attachment| {
+        let raw_key_str = attachment.as_str().unwrap_or_default().to_string();
+        let tmp_dir = tmp_dir.clone();
+        let config = config.clone();
+        let password = password.clone();
+        let fetcher = &fetcher;
 
-    for attachment in &attachments {
-        let raw_key_str = attachment.as_str().unwrap_or_default();
-        let Some(raw_values) = legacy_raw_key_json(raw_key_str) else {
-            results.push(json!(false));
-            continue;
-        };
+        async move {
+            let Some(raw_values) = legacy_raw_key_json(&raw_key_str) else {
+                return json!(false);
+            };
 
-        let folder = raw_values
-            .get("folder")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let mime_index = raw_values
-            .get("mimeIndex")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let mime_type_hint = raw_values
-            .get("mimeType")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let file_name = raw_values
-            .get("fileName")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+            let folder = raw_values
+                .get("folder")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let mime_index = raw_values
+                .get("mimeIndex")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mime_type_hint = raw_values
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let file_name = raw_values
+                .get("fileName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
 
-        if uid == 0 || folder.is_empty() {
-            results.push(json!(false));
-            continue;
-        }
+            if uid == 0 || folder.is_empty() {
+                return json!(false);
+            }
 
-        // tempName = sha1(raw_key_string)
-        let temp_name = hex::encode(Sha1::digest(raw_key_str.as_bytes()));
-        let file_path = format!("{tmp_dir}/{temp_name}");
+            // tempName = sha1(raw_key_string)
+            let temp_name = hex::encode(Sha1::digest(raw_key_str.as_bytes()));
+            let file_path = format!("{tmp_dir}/{temp_name}");
 
-        // Check if file already cached
-        if tokio::fs::metadata(&file_path).await.is_ok() {
+            // Check if file already cached
+            if tokio::fs::metadata(&file_path).await.is_ok() {
+                let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
+                return json!({
+                    "tempName": temp_name,
+                    "mimeType": mime_type,
+                });
+            }
+
+            // Fetch via IMAP
+            let data = match tokio::time::timeout(
+                fetch_deadline,
+                fetcher(config, password, folder, uid, mime_index),
+            )
+            .await
+            {
+                Ok(Ok(Some(data))) => data,
+                Ok(Ok(None)) => {
+                    return json!(false);
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!("Failed to fetch attachment for upload: {err}");
+                    return json!(false);
+                }
+                Err(_) => {
+                    tracing::warn!("Attachment upload fetch timed out");
+                    return json!(false);
+                }
+            };
+
+            // Write to a .partial file first, then rename atomically so the
+            // cache path only ever holds a complete file — preventing a
+            // previously interrupted fetch from serving a truncated result.
+            let partial_path = format!("{file_path}.partial");
+            if let Err(err) = tokio::fs::write(&partial_path, &data).await {
+                tracing::error!("Failed to write attachment temp file {partial_path}: {err}");
+                return json!(false);
+            }
+            if let Err(err) = tokio::fs::rename(&partial_path, &file_path).await {
+                tracing::error!("Failed to finalize attachment temp file {file_path}: {err}");
+                let _ = tokio::fs::remove_file(&partial_path).await;
+                return json!(false);
+            }
+
             let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
-            results.push(json!({
+            json!({
                 "tempName": temp_name,
                 "mimeType": mime_type,
-            }));
-            continue;
+            })
         }
+    });
 
-        // Fetch via IMAP
-        let data = match tokio::time::timeout(
-            fetch_deadline,
-            fetcher(config.clone(), password.clone(), folder, uid, mime_index),
-        )
-        .await
-        {
-            Ok(Ok(Some(data))) => data,
-            Ok(Ok(None)) => {
-                results.push(json!(false));
-                continue;
-            }
-            Ok(Err(err)) => {
-                tracing::warn!("Failed to fetch attachment for upload: {err}");
-                results.push(json!(false));
-                continue;
-            }
-            Err(_) => {
-                tracing::warn!("Attachment upload fetch timed out");
-                results.push(json!(false));
-                continue;
-            }
-        };
-
-        // Write to a .partial file first, then rename atomically so the
-        // cache path only ever holds a complete file — preventing a
-        // previously interrupted fetch from serving a truncated result.
-        let partial_path = format!("{file_path}.partial");
-        if let Err(err) = tokio::fs::write(&partial_path, &data).await {
-            tracing::error!("Failed to write attachment temp file {partial_path}: {err}");
-            results.push(json!(false));
-            continue;
-        }
-        if let Err(err) = tokio::fs::rename(&partial_path, &file_path).await {
-            tracing::error!("Failed to finalize attachment temp file {file_path}: {err}");
-            let _ = tokio::fs::remove_file(&partial_path).await;
-            results.push(json!(false));
-            continue;
-        }
-
-        let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
-        results.push(json!({
-            "tempName": temp_name,
-            "mimeType": mime_type,
-        }));
-    }
+    let results = join_all(futures).await;
 
     json_value_envelope(
         StatusCode::OK,

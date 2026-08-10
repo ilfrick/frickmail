@@ -989,6 +989,7 @@ dependencies = [
  "fm-session",
  "fm-smtp",
  "fm-user",
+ "futures",
  "hex",
  "hmac",
  "idna",

@@ -12,6 +12,7 @@ axum.workspace = true
 base64.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 deadpool-redis.workspace = true
+futures.workspace = true
 fm-core = { path = "../fm-core" }
 hex.workspace = true
 fm-imap = { path = "../fm-imap" }
