@@ -51,6 +51,7 @@ md-5 = "0.10"
 openidconnect = "4"
 openssl = "0.10"
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+pgp = { version = "0.20", default-features = false }
 qrcode = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 regex = "1"

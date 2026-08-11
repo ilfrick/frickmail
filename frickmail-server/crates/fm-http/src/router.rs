@@ -89,6 +89,12 @@ const COMPOSE_HTML_RAW_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const COMPOSE_HTML_TAG_MARKER_LIMIT: usize = 10_000;
 const COMPOSE_HEADER_LIMIT_BYTES: usize = 256 * 1024;
 const COMPOSE_RECIPIENT_LIMIT: usize = 500;
+const COMPOSE_AUTOCRYPT_HEADER_LIMIT: usize = 1;
+const COMPOSE_AUTOCRYPT_WIRE_LIMIT_BYTES: usize = 10 * 1024;
+const COMPOSE_AUTOCRYPT_ADDRESS_LIMIT_BYTES: usize = 320;
+const COMPOSE_AUTOCRYPT_RAW_KEY_LIMIT_BYTES: usize = 16 * 1024;
+const COMPOSE_AUTOCRYPT_VERIFY_CONCURRENCY: usize = 2;
+const COMPOSE_AUTOCRYPT_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
 const COMPOSE_OPERATION_CONCURRENCY: usize = 8;
 const COMPOSE_SANITIZE_CONCURRENCY: usize = 2;
 const COMPOSE_SANITIZE_DEADLINE: Duration = Duration::from_secs(10);
@@ -1122,6 +1128,11 @@ fn compose_sanitize_semaphore() -> &'static Semaphore {
     SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_SANITIZE_CONCURRENCY))
 }
 
+fn compose_autocrypt_verify_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_AUTOCRYPT_VERIFY_CONCURRENCY))
+}
+
 /// Legacy `SendMessage` compose payload after validation.
 #[derive(Debug)]
 struct LegacySendMessageRequest {
@@ -1142,10 +1153,20 @@ struct LegacySendMessageRequest {
     read_receipt_request: bool,
     mark_as_important: bool,
     require_tls: bool,
+    autocrypt: Option<LegacyAutocryptHeader>,
     save_folder: String,
     draft_folder: String,
     draft_uid: u32,
     draft_info: Option<LegacyDraftInfoRequest>,
+}
+
+/// Validated legacy Autocrypt header values. Key material is stored as
+/// canonical padded Base64 so serialization never copies caller
+/// supplied whitespace or control characters into an RFC 5322 header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyAutocryptHeader {
+    addr: String,
+    keydata: String,
 }
 
 /// Final compose body after HTML sanitation and optional PHP-compatible plain
@@ -1272,6 +1293,15 @@ async fn native_send_message_inner(
         }
     };
 
+    let envelope_from = match legacy_compose_sender(payload, &account.email) {
+        Ok((_, envelope_from)) => envelope_from,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+    let autocrypt = match legacy_validated_autocrypt_header_async(payload, &envelope_from).await {
+        Ok(autocrypt) => autocrypt,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
     let normalized_body = match legacy_normalize_compose_body_async(payload).await {
         Ok(body) => body,
         Err(message) => return json_result_error(original_action, &message),
@@ -1280,6 +1310,7 @@ async fn native_send_message_inner(
         payload,
         &account.email,
         normalized_body,
+        autocrypt,
     ) {
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, &message),
@@ -1719,6 +1750,15 @@ async fn native_save_message(
         }
     };
 
+    let envelope_from = match legacy_compose_sender(payload, &account.email) {
+        Ok((_, envelope_from)) => envelope_from,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+    let autocrypt = match legacy_validated_autocrypt_header_async(payload, &envelope_from).await {
+        Ok(autocrypt) => autocrypt,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
     // Drafts are still being composed, so unlike SendMessage they may legitimately
     // have no recipients yet.
     let normalized_body = match legacy_normalize_compose_body_async(payload).await {
@@ -1730,6 +1770,7 @@ async fn native_save_message(
         &account.email,
         &save_folder,
         normalized_body,
+        autocrypt,
     ) {
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, &message),
@@ -1824,11 +1865,14 @@ fn legacy_save_message_request_from_payload(
     save_folder: &str,
 ) -> Result<LegacySendMessageRequest, String> {
     let normalized_body = legacy_normalize_compose_body(payload)?;
+    let (_, envelope_from) = legacy_compose_sender(payload, account_email)?;
+    let autocrypt = legacy_verified_autocrypt_header_for_test(payload, &envelope_from)?;
     legacy_save_message_request_from_payload_with_html(
         payload,
         account_email,
         save_folder,
         normalized_body,
+        autocrypt,
     )
 }
 
@@ -1837,13 +1881,9 @@ fn legacy_save_message_request_from_payload_with_html(
     account_email: &str,
     save_folder: &str,
     normalized_body: LegacyNormalizedComposeBody,
+    autocrypt: Option<LegacyAutocryptHeader>,
 ) -> Result<LegacySendMessageRequest, String> {
-    let from = payload_string(payload, "from")
-        .map(|from| from.trim().to_string())
-        .filter(|from| !from.is_empty())
-        .unwrap_or_else(|| account_email.to_string());
-    let (from, envelope_from) = legacy_normalize_compose_mailbox(&from)
-        .ok_or_else(|| format!("Invalid sender address: {from}"))?;
+    let (from, envelope_from) = legacy_compose_sender(payload, account_email)?;
 
     Ok(LegacySendMessageRequest {
         from,
@@ -1867,6 +1907,7 @@ fn legacy_save_message_request_from_payload_with_html(
         mark_as_important: payload_bool(payload, "markAsImportant"),
         // PHP's shared buildMessage() includes this header in saved drafts too.
         require_tls: payload_bool(payload, "requireTLS"),
+        autocrypt,
         save_folder: save_folder.to_string(),
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid: u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0),
@@ -1879,7 +1920,6 @@ fn legacy_unsupported_compose_feature(payload: &Value, sending: bool) -> Option<
         ("attachments", "attachments"),
         ("signed", "OpenPGP signed content"),
         ("encrypted", "OpenPGP encrypted content"),
-        ("autocrypt", "Autocrypt headers"),
         ("sign", "S/MIME signing"),
         ("signFingerprint", "GnuPG signing"),
         ("encryptFingerprints", "GnuPG encryption"),
@@ -1966,7 +2006,14 @@ fn legacy_validate_compose_headers_and_recipients(payload: &Value) -> Result<(),
         .filter_map(|field| payload.get(field).and_then(Value::as_str))
         .map(str::len)
         .sum::<usize>();
-    if header_bytes > COMPOSE_HEADER_LIMIT_BYTES {
+    let autocrypt_bytes = legacy_autocrypt_header_from_payload(payload, None)?
+        .as_ref()
+        .map(legacy_autocrypt_wire_len)
+        .unwrap_or_default();
+    if header_bytes
+        .checked_add(autocrypt_bytes)
+        .is_none_or(|total| total > COMPOSE_HEADER_LIMIT_BYTES)
+    {
         return Err("Compose headers are too large".to_string());
     }
 
@@ -1982,6 +2029,259 @@ fn legacy_validate_compose_headers_and_recipients(payload: &Value) -> Result<(),
         ));
     }
     Ok(())
+}
+
+fn legacy_autocrypt_header_from_payload(
+    payload: &Value,
+    expected_from: Option<&str>,
+) -> Result<Option<LegacyAutocryptHeader>, String> {
+    let Some(value) = payload.get("autocrypt") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let entries = value
+        .as_array()
+        .ok_or_else(|| "Autocrypt headers must be an array".to_string())?;
+    if entries.len() > COMPOSE_AUTOCRYPT_HEADER_LIMIT {
+        return Err(format!(
+            "Compose request exceeds the {COMPOSE_AUTOCRYPT_HEADER_LIMIT} Autocrypt header limit"
+        ));
+    }
+
+    let Some(entry) = entries.first() else {
+        return Ok(None);
+    };
+    let index = 0;
+    {
+        let object = entry
+            .as_object()
+            .ok_or_else(|| format!("Autocrypt header {} must be an object", index + 1))?;
+        let addr = object
+            .get("addr")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .ok_or_else(|| format!("Autocrypt header {} has no address", index + 1))?;
+        if addr.is_empty()
+            || addr.len() > COMPOSE_AUTOCRYPT_ADDRESS_LIMIT_BYTES
+            || !addr.is_ascii()
+            || addr.parse::<lettre::Address>().is_err()
+        {
+            return Err(format!(
+                "Autocrypt header {} has an invalid address",
+                index + 1
+            ));
+        }
+        if expected_from.is_some_and(|from| !addr.eq_ignore_ascii_case(from)) {
+            return Err("Autocrypt address must match the From address".to_string());
+        }
+
+        let raw_keydata = object
+            .get("keydata")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("Autocrypt header {} has no keydata", index + 1))?;
+        if raw_keydata.len() > COMPOSE_AUTOCRYPT_RAW_KEY_LIMIT_BYTES {
+            return Err("Autocrypt keydata is too large".to_string());
+        }
+        let mut compact_keydata = String::with_capacity(raw_keydata.len());
+        for byte in raw_keydata.bytes() {
+            if byte.is_ascii_whitespace() {
+                continue;
+            }
+            if !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'/' | b'=') {
+                return Err(format!(
+                    "Autocrypt header {} contains invalid Base64 keydata",
+                    index + 1
+                ));
+            }
+            compact_keydata.push(char::from(byte));
+        }
+        let decoded = STANDARD.decode(compact_keydata.as_bytes()).map_err(|_| {
+            format!(
+                "Autocrypt header {} contains invalid Base64 keydata",
+                index + 1
+            )
+        })?;
+        if legacy_openpgp_packet_tags(&decoded).as_deref() != Some(&[6, 13, 2, 14, 2]) {
+            return Err(format!(
+                "Autocrypt header {} does not contain a valid transferable public key",
+                index + 1
+            ));
+        }
+
+        let header = LegacyAutocryptHeader {
+            addr: addr.to_string(),
+            keydata: STANDARD.encode(decoded),
+        };
+        if legacy_autocrypt_wire_len(&header) > COMPOSE_AUTOCRYPT_WIRE_LIMIT_BYTES {
+            return Err(format!(
+                "Autocrypt header exceeds the {} KiB wire limit",
+                COMPOSE_AUTOCRYPT_WIRE_LIMIT_BYTES / 1024
+            ));
+        }
+        Ok(Some(header))
+    }
+}
+
+async fn legacy_validated_autocrypt_header_async(
+    payload: &Value,
+    expected_from: &str,
+) -> Result<Option<LegacyAutocryptHeader>, String> {
+    let Some(header) = legacy_autocrypt_header_from_payload(payload, Some(expected_from))? else {
+        return Ok(None);
+    };
+    let decoded = STANDARD
+        .decode(header.keydata.as_bytes())
+        .map_err(|_| "Autocrypt keydata could not be decoded".to_string())?;
+    if !legacy_run_autocrypt_verification(move || legacy_autocrypt_public_key_is_valid(&decoded))
+        .await?
+    {
+        return Err(
+            "Autocrypt header does not contain a valid transferable public key".to_string(),
+        );
+    }
+    Ok(Some(header))
+}
+
+async fn legacy_run_autocrypt_verification<F>(verify: F) -> Result<bool, String>
+where
+    F: FnOnce() -> bool + Send + 'static,
+{
+    let permit = tokio::time::timeout(
+        COMPOSE_AUTOCRYPT_VERIFY_DEADLINE,
+        compose_autocrypt_verify_semaphore().acquire(),
+    )
+    .await
+    .map_err(|_| "Autocrypt verification is busy; retry later".to_string())?
+    .map_err(|_| "Autocrypt verification is unavailable".to_string())?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify()
+    });
+    match tokio::time::timeout(COMPOSE_AUTOCRYPT_VERIFY_DEADLINE, task).await {
+        Ok(Ok(valid)) => Ok(valid),
+        Ok(Err(_)) => Err("Autocrypt verification task failed".to_string()),
+        Err(_) => Err("Autocrypt verification timed out".to_string()),
+    }
+}
+
+#[cfg(test)]
+fn legacy_verified_autocrypt_header_for_test(
+    payload: &Value,
+    expected_from: &str,
+) -> Result<Option<LegacyAutocryptHeader>, String> {
+    let Some(header) = legacy_autocrypt_header_from_payload(payload, Some(expected_from))? else {
+        return Ok(None);
+    };
+    let decoded = STANDARD
+        .decode(header.keydata.as_bytes())
+        .map_err(|_| "Autocrypt keydata could not be decoded".to_string())?;
+    if !legacy_autocrypt_public_key_is_valid(&decoded) {
+        return Err(
+            "Autocrypt header does not contain a valid transferable public key".to_string(),
+        );
+    }
+    Ok(Some(header))
+}
+
+fn legacy_autocrypt_wire_len(header: &LegacyAutocryptHeader) -> usize {
+    let mut bytes = Vec::with_capacity(header.addr.len() + header.keydata.len() + 64);
+    legacy_write_autocrypt_header(&mut bytes, header);
+    bytes.len()
+}
+
+fn legacy_autocrypt_public_key_is_valid(decoded: &[u8]) -> bool {
+    use pgp::composed::{Deserializable, SignedPublicKey};
+    use pgp::packet::SignatureType;
+    use pgp::types::KeyDetails;
+
+    if legacy_openpgp_packet_tags(decoded).as_deref() != Some(&[6, 13, 2, 14, 2]) {
+        return false;
+    }
+    let mut cursor = std::io::Cursor::new(decoded);
+    let Ok(public_key) = SignedPublicKey::from_bytes(&mut cursor) else {
+        return false;
+    };
+    let Some(user_signature) = public_key
+        .details
+        .users
+        .first()
+        .and_then(|user| user.signatures.first())
+    else {
+        return false;
+    };
+    let Some(subkey) = public_key.public_subkeys.first() else {
+        return false;
+    };
+    let Some(subkey_signature) = subkey.signatures.first() else {
+        return false;
+    };
+    let subkey_flags = subkey_signature.key_flags();
+
+    cursor.position() == decoded.len() as u64
+        && public_key.algorithm().can_sign()
+        && user_signature.key_flags().sign()
+        && subkey_signature.typ() == Some(SignatureType::SubkeyBinding)
+        && subkey.algorithm().can_encrypt()
+        && (subkey_flags.encrypt_comms() || subkey_flags.encrypt_storage())
+        && public_key.verify_bindings().is_ok()
+}
+
+/// Returns the packet tags for a definite-length binary OpenPGP stream. The
+/// full packet bodies and signatures are parsed and verified by rPGP after
+/// this shape check; this helper enforces Autocrypt Level 1's exact five-packet
+/// transferable-public-key profile and rejects secret/armored/partial data.
+fn legacy_openpgp_packet_tags(mut bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut tags = Vec::new();
+    while !bytes.is_empty() {
+        let header = *bytes.first()?;
+        if header & 0x80 == 0 {
+            return None;
+        }
+        bytes = &bytes[1..];
+        let (tag, body_len) = if header & 0x40 != 0 {
+            let tag = header & 0x3f;
+            let first = *bytes.first()?;
+            bytes = &bytes[1..];
+            let body_len = match first {
+                0..=191 => usize::from(first),
+                192..=223 => {
+                    let second = usize::from(*bytes.first()?);
+                    bytes = &bytes[1..];
+                    (usize::from(first) - 192) * 256 + second + 192
+                }
+                255 => {
+                    let encoded = bytes.get(..4)?;
+                    bytes = &bytes[4..];
+                    usize::try_from(u32::from_be_bytes(encoded.try_into().ok()?)).ok()?
+                }
+                224..=254 => return None,
+            };
+            (tag, body_len)
+        } else {
+            let tag = (header >> 2) & 0x0f;
+            let length_type = header & 0x03;
+            let octets = match length_type {
+                0 => 1,
+                1 => 2,
+                2 => 4,
+                _ => return None,
+            };
+            let encoded = bytes.get(..octets)?;
+            bytes = &bytes[octets..];
+            let body_len = encoded
+                .iter()
+                .fold(0usize, |length, byte| (length << 8) | usize::from(*byte));
+            (tag, body_len)
+        };
+        if body_len == 0 || body_len > bytes.len() {
+            return None;
+        }
+        tags.push(tag);
+        bytes = &bytes[body_len..];
+    }
+    Some(tags)
 }
 
 struct BoundedEscapedJsonCounter {
@@ -2428,22 +2728,25 @@ fn legacy_send_message_request_from_payload(
     account_email: &str,
 ) -> Result<LegacySendMessageRequest, String> {
     let normalized_body = legacy_normalize_compose_body(payload)?;
-    legacy_send_message_request_from_payload_with_html(payload, account_email, normalized_body)
+    let (_, envelope_from) = legacy_compose_sender(payload, account_email)?;
+    let autocrypt = legacy_verified_autocrypt_header_for_test(payload, &envelope_from)?;
+    legacy_send_message_request_from_payload_with_html(
+        payload,
+        account_email,
+        normalized_body,
+        autocrypt,
+    )
 }
 
 fn legacy_send_message_request_from_payload_with_html(
     payload: &Value,
     account_email: &str,
     normalized_body: LegacyNormalizedComposeBody,
+    autocrypt: Option<LegacyAutocryptHeader>,
 ) -> Result<LegacySendMessageRequest, String> {
     // The display name is preserved in the `From:` header like legacy PHP; only
     // the bare address is validated and used for the SMTP envelope.
-    let from = payload_string(payload, "from")
-        .map(|from| from.trim().to_string())
-        .filter(|from| !from.is_empty())
-        .unwrap_or_else(|| account_email.to_string());
-    let (from, envelope_from) = legacy_normalize_compose_mailbox(&from)
-        .ok_or_else(|| format!("Invalid sender address: {from}"))?;
+    let (from, envelope_from) = legacy_compose_sender(payload, account_email)?;
 
     let to = legacy_parse_address_list(payload_string(payload, "to").unwrap_or_default().as_str())?;
     let cc = legacy_parse_address_list(payload_string(payload, "cc").unwrap_or_default().as_str())?;
@@ -2476,6 +2779,7 @@ fn legacy_send_message_request_from_payload_with_html(
         read_receipt_request: payload_bool(payload, "readReceiptRequest"),
         mark_as_important: payload_bool(payload, "markAsImportant"),
         require_tls: payload_bool(payload, "requireTLS"),
+        autocrypt,
         save_folder: payload_string(payload, "saveFolder").unwrap_or_default(),
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid,
@@ -2578,17 +2882,73 @@ fn legacy_normalize_compose_mailbox(raw: &str) -> Option<(String, String)> {
     Some((mailbox.to_string(), envelope))
 }
 
+fn legacy_compose_sender(payload: &Value, account_email: &str) -> Result<(String, String), String> {
+    let from = payload_string(payload, "from")
+        .map(|from| from.trim().to_string())
+        .filter(|from| !from.is_empty())
+        .unwrap_or_else(|| account_email.to_string());
+    legacy_normalize_compose_mailbox(&from).ok_or_else(|| format!("Invalid sender address: {from}"))
+}
+
 /// Builds the RFC 5322 message.
 ///
 /// `keep_bcc_header` mirrors legacy PHP's `ToStream($bWithoutBcc)`: the transport
 /// copy omits the `Bcc` header (the SMTP envelope carries those recipients), while
 /// the copy appended to the Sent folder keeps it so the sender can see who was
 /// blind-copied.
+struct LegacyBuiltMessage {
+    message: lettre::Message,
+    autocrypt: Option<LegacyAutocryptHeader>,
+}
+
+impl LegacyBuiltMessage {
+    fn formatted(&self) -> Vec<u8> {
+        let Some(header) = self.autocrypt.as_ref() else {
+            return self.message.formatted();
+        };
+
+        // Lettre has no typed Autocrypt header. Format the MIME message once,
+        // then reserve and shift it in place for the small validated prefix;
+        // this avoids retaining a second full-body allocation.
+        let mut prefix = Vec::with_capacity(legacy_autocrypt_wire_len(header));
+        legacy_write_autocrypt_header(&mut prefix, header);
+        let mut bytes = self.message.formatted();
+        let message_len = bytes.len();
+        bytes.reserve(prefix.len());
+        bytes.resize(message_len + prefix.len(), 0);
+        bytes.copy_within(..message_len, prefix.len());
+        bytes[..prefix.len()].copy_from_slice(&prefix);
+        bytes
+    }
+}
+
+fn legacy_write_autocrypt_header(bytes: &mut Vec<u8>, header: &LegacyAutocryptHeader) {
+    bytes.extend_from_slice(b"Autocrypt: addr=");
+    bytes.extend_from_slice(header.addr.as_bytes());
+    bytes.extend_from_slice(b";\r\n keydata=");
+
+    // Keep generated lines at the RFC 5322 recommendation of 78 characters.
+    // The first continuation already contains one WSP plus `keydata=`.
+    let keydata = header.keydata.as_bytes();
+    let mut offset = 0;
+    let mut available = 69;
+    while offset < keydata.len() {
+        let end = offset.saturating_add(available).min(keydata.len());
+        bytes.extend_from_slice(&keydata[offset..end]);
+        offset = end;
+        if offset < keydata.len() {
+            bytes.extend_from_slice(b"\r\n ");
+            available = 77;
+        }
+    }
+    bytes.extend_from_slice(b"\r\n");
+}
+
 #[cfg(test)]
 fn build_legacy_send_message(
     request: &LegacySendMessageRequest,
     keep_bcc_header: bool,
-) -> Result<lettre::Message, String> {
+) -> Result<LegacyBuiltMessage, String> {
     build_legacy_send_message_with_metadata(request, keep_bcc_header, None, None)
 }
 
@@ -2598,7 +2958,7 @@ fn build_legacy_send_message_with_id(
     request: &LegacySendMessageRequest,
     keep_bcc_header: bool,
     message_id: Option<&str>,
-) -> Result<lettre::Message, String> {
+) -> Result<LegacyBuiltMessage, String> {
     build_legacy_send_message_with_metadata(request, keep_bcc_header, message_id, None)
 }
 
@@ -2607,7 +2967,7 @@ fn build_legacy_send_message_with_metadata(
     keep_bcc_header: bool,
     message_id: Option<&str>,
     message_date: Option<SystemTime>,
-) -> Result<lettre::Message, String> {
+) -> Result<LegacyBuiltMessage, String> {
     use lettre::message::{header, Mailbox, MultiPart, SinglePart};
 
     let parse_mailbox = |address: &str| -> Result<Mailbox, String> {
@@ -2693,7 +3053,7 @@ fn build_legacy_send_message_with_metadata(
 
     // MailSo always emits multipart/alternative for an HTML compose. When the
     // client omits `plain`, normalization derives it from the sanitized HTML.
-    if !request.html.is_empty() {
+    let message = if !request.html.is_empty() {
         builder
             .multipart(
                 MultiPart::alternative()
@@ -2714,7 +3074,12 @@ fn build_legacy_send_message_with_metadata(
             .header(header::ContentType::TEXT_PLAIN)
             .body(request.plain.clone())
             .map_err(|err| format!("Message build failed: {err}"))
-    }
+    }?;
+
+    Ok(LegacyBuiltMessage {
+        message,
+        autocrypt: request.autocrypt.clone(),
+    })
 }
 
 fn legacy_raw_header(
@@ -12463,6 +12828,72 @@ mod tests {
     type RuleExecutionCapture =
         Arc<Mutex<Option<(ImapConnectionConfig, String, Vec<RuleExecutionPlan>)>>>;
 
+    // Autocrypt 1.1 Ed25519/Cv25519 example transferable public key from the
+    // specification's example header.
+    const AUTOCRYPT_TEST_KEYDATA: &str = concat!(
+        "mDMEXEcE6RYJKwYBBAHaRw8BAQdArjWwk3FAqyiFbFBKT4TzXcVBqPTB3gmzlC/Ub7O1u120F2F",
+        "saWNlQGF1dG9jcnlwdC5leGFtcGxliJYEExYIAD4WIQTrhbtfozp14V6UTmPyMVUMT0fjjgUCXE",
+        "cE6QIbAwUJA8JnAAULCQgHAgYVCgkICwIEFgIDAQIeAQIXgAAKCRDyMVUMT0fjjkqLAP9frlijw",
+        "BJvA+HFnqCZcYIVxlyXzS5Gi5gMTpp37K73jgD/VbKYhkwk9iu689OYH4K7q7LbmdeaJ+RX88Y/",
+        "ad9hZwy4OARcRwTpEgorBgEEAZdVAQUBAQdAQv8GIa2rSTzgqbXCpDDYMiKRVitCsy203x3sE9+",
+        "eviIDAQgHiHgEGBYIACAWIQTrhbtfozp14V6UTmPyMVUMT0fjjgUCXEcE6QIbDAAKCRDyMVUMT0",
+        "fjjlnQAQDFHUs6TIcxrNTtEZFjUFm1M0PJ1Dng/cDW4xN80fsn0QEA22Kr7VkCjeAEC08VSTeV+",
+        "QFsmz55/lntWkwYWhmvOgE="
+    );
+
+    fn autocrypt_revoked_subkey_fixture() -> Vec<u8> {
+        use pgp::{
+            composed::{
+                EncryptionCaps, KeyType, SecretKeyParamsBuilder, SignedPublicKey,
+                SubkeyParamsBuilder,
+            },
+            crypto::ecc_curve::ECCCurve,
+            packet::{KeyFlags, SignatureConfig, SignatureType, Subpacket, SubpacketData},
+            ser::Serialize,
+            types::Password,
+        };
+        use rand_core::OsRng;
+
+        let mut subkey = SubkeyParamsBuilder::default();
+        subkey
+            .key_type(KeyType::ECDH(ECCCurve::Curve25519Legacy))
+            .can_sign(false)
+            .can_encrypt(EncryptionCaps::All)
+            .can_authenticate(false);
+        let params = SecretKeyParamsBuilder::default()
+            .key_type(KeyType::Ed25519Legacy)
+            .can_certify(true)
+            .can_sign(true)
+            .primary_user_id("sender@example.com".to_string())
+            .subkeys(vec![subkey.build().expect("encryption subkey")])
+            .build()
+            .expect("Autocrypt test key parameters");
+        let secret = params.generate(OsRng).expect("Autocrypt test key");
+
+        let mut encryption_flags = KeyFlags::default();
+        encryption_flags.set_encrypt_comms(true);
+        encryption_flags.set_encrypt_storage(true);
+        let mut revocation =
+            SignatureConfig::from_key(OsRng, &secret.primary_key, SignatureType::SubkeyRevocation)
+                .expect("revocation config");
+        revocation.hashed_subpackets =
+            vec![Subpacket::regular(SubpacketData::KeyFlags(encryption_flags)).expect("key flags")];
+        let revocation = revocation
+            .sign_subkey_binding(
+                &secret.primary_key,
+                secret.primary_key.public_key(),
+                &Password::empty(),
+                secret.secret_subkeys[0].key.public_key(),
+            )
+            .expect("valid subkey revocation");
+
+        let mut public = SignedPublicKey::from(secret);
+        public.public_subkeys[0].signatures = vec![revocation];
+        let mut bytes = Vec::new();
+        public.to_writer(&mut bytes).expect("serialize public key");
+        bytes
+    }
+
     #[derive(Debug, Clone, Default)]
     struct BridgeCapture {
         method: String,
@@ -16834,6 +17265,7 @@ Subject: Empty body metadata\r\n\r\n"
             "markAsImportant": 1,
             "readReceiptRequest": 1,
             "requireTLS": 0,
+            "autocrypt": [{"addr": "sender@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA}],
             "draftInfo": ["reply", 17, "INBOX"],
         });
 
@@ -16856,6 +17288,13 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(request.mark_as_important);
         assert!(request.read_receipt_request);
         assert!(!request.require_tls);
+        assert_eq!(
+            request.autocrypt,
+            Some(super::LegacyAutocryptHeader {
+                addr: "sender@example.com".to_string(),
+                keydata: AUTOCRYPT_TEST_KEYDATA.to_string(),
+            })
+        );
 
         let draft_info = request.draft_info.as_ref().expect("draftInfo present");
         assert_eq!(draft_info.info_type, "reply");
@@ -17420,6 +17859,198 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn legacy_compose_serializes_a_sender_bound_folded_autocrypt_header() {
+        let spaced_keydata = format!(
+            "{}\n {}",
+            &AUTOCRYPT_TEST_KEYDATA[..80],
+            &AUTOCRYPT_TEST_KEYDATA[80..]
+        );
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": "encrypted payload",
+            "autocrypt": [{"addr": "sender@example.com", "keydata": spaced_keydata}]
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("valid Autocrypt payload");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert_eq!(raw.matches("Autocrypt: addr=").count(), 1);
+        assert!(raw.starts_with("Autocrypt: addr=sender@example.com;\r\n keydata="));
+        assert!(raw
+            .replace("\r\n ", "")
+            .contains(&format!("keydata={AUTOCRYPT_TEST_KEYDATA}")));
+        let generated_headers = raw.split("From:").next().expect("generated headers");
+        assert!(generated_headers
+            .split("\r\n")
+            .filter(|line| line.starts_with(" keydata=") || line.starts_with(' '))
+            .all(|line| line.len() <= 78));
+    }
+
+    #[test]
+    fn legacy_compose_rejects_malformed_or_oversized_autocrypt_headers() {
+        for payload in [
+            json!({"autocrypt": {"addr": "a@example.com", "keydata": "YQ=="}}),
+            json!({"autocrypt": [{"addr": "a@example.com\r\nBcc: victim@example.com", "keydata": "YQ=="}]}),
+            json!({"autocrypt": [{"addr": "a@example.com", "keydata": "not base64!"}]}),
+            json!({"autocrypt": [{"addr": "a@example.com", "keydata": ""}]}),
+            json!({"autocrypt": [{"addr": "a@example.com", "keydata": "YQ=="}]}),
+            json!({
+                "autocrypt": (0..=super::COMPOSE_AUTOCRYPT_HEADER_LIMIT)
+                    .map(|_| json!({"addr": "a@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA}))
+                    .collect::<Vec<_>>()
+            }),
+            json!({
+                "autocrypt": [{
+                    "addr": "a@example.com",
+                    "keydata": "A".repeat(super::COMPOSE_AUTOCRYPT_RAW_KEY_LIMIT_BYTES + 1)
+                }]
+            }),
+        ] {
+            assert!(
+                super::legacy_validate_compose_limits(&payload).is_err(),
+                "payload unexpectedly passed: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_compose_rejects_autocrypt_addr_mismatch_and_multiple_headers() {
+        let mismatch = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "autocrypt": [{"addr": "other@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA}]
+        });
+        assert!(
+            super::legacy_send_message_request_from_payload(&mismatch, "acct@example.com")
+                .unwrap_err()
+                .contains("must match")
+        );
+
+        let multiple = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "autocrypt": [
+                {"addr": "sender@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA},
+                {"addr": "sender@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA}
+            ]
+        });
+        assert!(super::legacy_validate_compose_limits(&multiple)
+            .unwrap_err()
+            .contains("header limit"));
+    }
+
+    #[test]
+    fn legacy_autocrypt_rejects_a_validly_signed_subkey_revocation() {
+        let revoked = autocrypt_revoked_subkey_fixture();
+
+        assert_eq!(
+            super::legacy_openpgp_packet_tags(&revoked).as_deref(),
+            Some(&[6, 13, 2, 14, 2][..])
+        );
+        assert!(!super::legacy_autocrypt_public_key_is_valid(&revoked));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_autocrypt_verification_keeps_async_workers_responsive() {
+        let mut tasks = Vec::new();
+        for _ in 0..super::COMPOSE_AUTOCRYPT_VERIFY_CONCURRENCY {
+            tasks.push(tokio::spawn(async {
+                super::legacy_run_autocrypt_verification(|| {
+                    std::thread::sleep(Duration::from_millis(100));
+                    true
+                })
+                .await
+            }));
+        }
+        tokio::task::yield_now().await;
+
+        let heartbeat = tokio::time::timeout(Duration::from_millis(50), async {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            heartbeat.is_ok(),
+            "OpenPGP verification starved Tokio workers"
+        );
+
+        for task in tasks {
+            assert!(task
+                .await
+                .expect("verification task")
+                .expect("verification"));
+        }
+    }
+
+    #[test]
+    fn legacy_autocrypt_wire_accounting_enforces_the_exact_ten_kib_boundary() {
+        let mut within = super::LegacyAutocryptHeader {
+            addr: "sender@example.com".to_string(),
+            keydata: String::new(),
+        };
+        while super::legacy_autocrypt_wire_len(&within) <= super::COMPOSE_AUTOCRYPT_WIRE_LIMIT_BYTES
+        {
+            within.keydata.push('A');
+        }
+        let over = within.clone();
+        within.keydata.pop();
+
+        assert!(
+            super::legacy_autocrypt_wire_len(&within) <= super::COMPOSE_AUTOCRYPT_WIRE_LIMIT_BYTES
+        );
+        assert!(
+            super::legacy_autocrypt_wire_len(&over) > super::COMPOSE_AUTOCRYPT_WIRE_LIMIT_BYTES
+        );
+    }
+
+    #[test]
+    fn legacy_save_message_preserves_autocrypt_headers() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "plain": "draft",
+            "autocrypt": [{"addr": "sender@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA}]
+        });
+        let request =
+            super::legacy_save_message_request_from_payload(&payload, "acct@example.com", "Drafts")
+                .expect("draft Autocrypt payload");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, true)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert!(raw.starts_with("Autocrypt: addr=sender@example.com;\r\n keydata="));
+        assert!(raw.contains("\r\nFrom: sender@example.com"));
+    }
+
+    #[test]
+    fn legacy_autocrypt_prefixes_a_large_body_without_losing_content() {
+        let body = "x".repeat(1024 * 1024);
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": body,
+            "autocrypt": [{"addr": "sender@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA}]
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("large bounded payload");
+        let message = super::build_legacy_send_message(&request, false).expect("build");
+        let baseline = message.message.formatted();
+        let raw = message.formatted();
+
+        assert!(raw.starts_with(b"Autocrypt: addr=sender@example.com;\r\n keydata="));
+        assert!(raw.ends_with(&baseline));
+    }
+
+    #[test]
     fn legacy_parse_single_address_extracts_bare_address() {
         assert_eq!(
             super::legacy_parse_single_address("\"Doe, John\" <john@example.com>").as_deref(),
@@ -17698,6 +18329,13 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(
             super::legacy_unsupported_compose_feature(&json!({"requireTLS": 1}), true),
             Some("SMTP REQUIRETLS")
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(
+                &json!({"autocrypt": [{"addr": "a@example.com", "keydata": "YQ=="}]}),
+                true
+            ),
+            None
         );
         assert_eq!(
             super::legacy_unsupported_compose_feature(

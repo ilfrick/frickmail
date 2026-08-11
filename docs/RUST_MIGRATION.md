@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-11 16:36:55 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-11 17:35:15 CEST (UTC+02:00)
 
 ### Completed And Pushed Today
 
@@ -37,45 +37,56 @@ The following commits are present on both `master` and
    parser-sanitized, canonical, output-bounded HTML and JSON-LD `linkedData`
    handling for native send and draft compose, including safe script escaping,
    blocking-work admission controls, and recipient-less draft serialization.
+7. `671c98398` (`rust: derive plain fallback for html compose`) restored
+   MailSo-compatible text/plain derivation for HTML compose while retaining
+   bounded normalization and multipart/alternative behavior.
 
 The completed code passed independent senior review, strict workspace Clippy,
 the full Rust workspace test suite, and production-image smoke testing. The
-image from the reviewed worktree immediately committed as `46f1965d2`
-(`frickmail-rust:linkeddata-final`, immutable digest
-`sha256:054464db1232f5a791d4f8dd349280b67bbc7d7fb7cf05061538cabfb58e5b0e`)
+HTML/plain slice's reviewed image (`frickmail-rust:html-plain-final`, immutable
+digest
+`sha256:168e7b202c32d751a4b81233aa796dfac2e49313efba8c0a3450e94dbe26362e`)
 ran as a healthy, non-root, read-only canary, served HTTP successfully,
 connected to the database, logged no startup errors, and recorded zero
-restarts. All four GitHub/Gitea branch tips were verified at that commit and
-GitHub `rust-ci` run `31500050039` passed. Future release images still need a
-revision OCI label and immutable revision tag so provenance is directly
-auditable from the image.
+restarts. All four GitHub/Gitea branch tips were verified at `671c98398`, and
+GitHub `rust-ci` run `31502829531` passed in 7 minutes 10 seconds. Future
+release images still need a revision OCI label and immutable revision tag so
+provenance is directly auditable from the image.
 
 ### Current Slice Included In This Pending Commit
 
-This slice restores MailSo's HTML-compose fallback for native `SendMessage` and
-`SaveMessage`. Every compose with PHP-truthy HTML now emits
-`multipart/alternative`; when the client omits `plain` or supplies PHP-falsey
-`"0"`, Rust derives text/plain from the already sanitized canonical HTML using
-the same ordered heading, paragraph, break, emphasis, list, link, rule, table,
-tag-removal, whitespace, and HTML-entity transformations as
-`HtmlUtils::ConvertHtmlToPlain`. Explicit PHP-truthy client plain text remains
-authoritative.
+This slice adds native Autocrypt Level 1 header support to both `SendMessage`
+and `SaveMessage`. Rust accepts at most one header, requires its `addr` to match
+the normalized envelope From address case-insensitively, strips only safe
+Base64 whitespace, and emits a canonical folded header. Exact generated wire
+bytes, including folding, must not exceed 10 KiB and are also charged to the
+aggregate compose-header limit.
 
-Derivation runs inside the existing two-permit `spawn_blocking` admission
-boundary. Its regular expressions are linear-time, whitespace collapse is a
-single-pass input-capacity-bounded build, and regex passes reuse the existing
-String when no match exists. The final sanitized HTML and selected/derived
-plain parts are charged together against the 8 MiB normalized compose limit
-before MIME assembly. Independent review found and then verified fixes for a
-temporary token-vector allocation amplification and two PHP replacement-order
-and empty-capture mismatches. Re-review approved the corrected implementation
-with no remaining actionable finding.
+Decoded key material must have the exact public-key, user-ID,
+self-certification, public-subkey, binding-signature packet profile. rPGP then
+parses the entire stream, verifies the self-signatures, explicitly requires a
+subkey binding rather than a revocation, and checks primary signing and subkey
+encryption algorithms and flags. Cheap size, Base64, and packet-profile checks
+remain before authentication; attacker-controlled parsing and public-key
+cryptography run only after account authentication in a dedicated two-slot
+`spawn_blocking` boundary with 10-second admission and execution deadlines.
+Timed-out work retains its permit until it exits. The verified canonical header
+is passed into MIME construction and inserted by shifting Lettre's single
+formatted message buffer in place, avoiding a second full-message allocation.
 
-Docker validation passed `fmt`, workspace `check`, all 520 workspace tests,
+The first senior review rejected four issues: multiple/mismatched addresses,
+an incorrect oversized limit, missing real OpenPGP validation, and a duplicate
+full-message allocation. After those fixes, re-review found a valid subkey
+revocation acceptance gap and synchronous crypto on Tokio workers. The final
+implementation includes cryptographically valid revocation and async-worker
+responsiveness regressions; the senior reviewer approved it with no remaining
+actionable findings.
+
+Docker validation passed `fmt`, workspace `check`, all 528 workspace tests,
 and strict all-target workspace Clippy. The exact production image was built
-as `frickmail-rust:html-plain-final`, digest
-`sha256:168e7b202c32d751a4b81233aa796dfac2e49313efba8c0a3450e94dbe26362e`.
-That digest now runs as the local canary: it is healthy, non-root, read-only,
+as `frickmail-rust:autocrypt-final`, immutable image ID
+`sha256:9d4bd753d5a4fa5f131d8bd013b1b8038beff26d9698cb8491a2073ed189e07c`.
+That image now runs as the local canary: it is healthy, non-root, read-only,
 capability-dropped, and protected by `no-new-privileges`; `/health` and `/`
 return HTTP 200, PostgreSQL connection verification succeeded, logs contain no
 startup errors, and Docker reports zero restarts and no OOM kill. The final
@@ -86,7 +97,7 @@ snapshot.
 ### In Progress But Not Committed
 
 There is no separate rejected or partially implemented work outside the
-reviewed HTML-to-plain slice described above. It remains uncommitted only until
+reviewed Autocrypt slice described above. It remains uncommitted only until
 this timestamped snapshot receives its final staged review and the publication
 workflow completes.
 
@@ -97,9 +108,8 @@ routes, but it is not yet a safe drop-in replacement for the PHP production
 container. The major remaining gates are:
 
 1. Finish compose parity: safe account-scoped attachment staging and MIME
-   assembly, inline/data attachments, PGP and S/MIME signing/encryption,
-   Autocrypt, DSN, SMTP REQUIRETLS, OAuth-backed SMTP, and the related draft
-   behavior.
+   assembly, inline/data attachments, PGP and S/MIME signing/encryption, DSN,
+   SMTP REQUIRETLS, OAuth-backed SMTP, and the related draft behavior.
 2. Finish exact legacy `Message` response/header/body parity and migrate every
    remaining mail action still routed through the compatibility bridge.
 3. Complete the Rust-only connection-token/CSRF/session contract, then remove
