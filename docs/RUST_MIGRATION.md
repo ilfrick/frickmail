@@ -5,6 +5,89 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-08-11 15:03:58 CEST (UTC+02:00)
+
+### Completed And Pushed Today
+
+The following commits are present on both `master` and
+`rust-full-migration` on the GitHub and Gitea remotes:
+
+1. `ba678f07f` (`rust: implement native SendMessage compose and SMTP send`)
+   added the first native basic-message compose and SMTP delivery path.
+2. `46aa26f74` (`rust: migrate basic message compose and save`) completed the
+   basic native `SaveMessage` path and hardened compose/send behavior. This
+   includes bounded compose input/concurrency, async SMTP, public-address DNS
+   validation and pinning, hostname-preserving TLS validation, stable
+   Message-ID/Date values across transport and Sent copies, required Sent-copy
+   error handling, uncertain APPEND outcome recovery, split IMAP FETCH response
+   accumulation, safer optional IMAP extension fallback, and production HIBP
+   configuration forwarding.
+3. `c23cbb3ba` (`rust: preserve compose recipient display names`) brought
+   From/To/Cc/Bcc/Reply-To display-name and legacy RFC comment handling closer
+   to PHP parity while keeping SMTP envelope addresses bare, de-duplicated, and
+   protected against control-character injection and panic paths.
+
+The completed code passed independent senior review, strict workspace Clippy,
+the full Rust workspace test suite, and production-image smoke testing. The
+image built from the reviewed worktree immediately committed as `c23cbb3ba`
+(`frickmail-rust:recipient-final`, immutable digest
+`sha256:2dc5c77a922c68e276ba69a67c41d0ec8efc29c59e676ea9228f01684c580271`)
+ran as a healthy, non-root, read-only canary, served HTTP successfully,
+connected to the database, logged no startup errors, and recorded zero
+restarts. Future release images still need a revision OCI label and immutable
+revision tag so provenance is directly auditable from the image.
+
+### In Progress But Not Committed
+
+Native compose support for structured-email JSON-LD `linkedData` was
+implemented locally and all 510 workspace tests passed, but the independent
+review rejected the first version. It must not be merged until both high-level
+findings are fixed and re-reviewed:
+
+1. Count the exact escaped JSON-LD size with a bounded, non-allocating writer
+   before authentication so slash-heavy input cannot expand past the 8 MiB
+   compose limit.
+2. Parse, sanitize, and canonicalize compose HTML like PHP `BuildHtml` before
+   inserting JSON-LD into the real document head; raw script/iframe/style
+   content and fake `</head>` text must not survive or redirect insertion.
+
+### Still Missing Before The Final Rust-Only Goal
+
+The current Rust release is useful as a canary and for the migrated native
+routes, but it is not yet a safe drop-in replacement for the PHP production
+container. The major remaining gates are:
+
+1. Finish compose parity: safe account-scoped attachment staging and MIME
+   assembly, inline/data attachments, PGP and S/MIME signing/encryption,
+   Autocrypt, DSN, SMTP REQUIRETLS, OAuth-backed SMTP, and the related draft
+   behavior.
+2. Finish exact legacy `Message` response/header/body parity and migrate every
+   remaining mail action still routed through the compatibility bridge.
+3. Complete the Rust-only connection-token/CSRF/session contract, then remove
+   all production PHP bridge dependencies.
+4. Port or explicitly retire the remaining plugin JSON hooks, part hooks,
+   admin/domain/settings APIs, and enabled-plugin compatibility paths.
+5. Replace the legacy Knockout/SnappyMail frontend and bundle-generation path
+   with the Frickmail UI, and complete the Frickmail-only theme transition.
+6. Add Docker integration coverage for existing PostgreSQL, MySQL, and SQLite
+   schemas and complete cutover/rollback validation against real deployments.
+7. Only after those gates pass, remove PHP-FPM, nginx, supervisor, MailSo,
+   SnappyMail/RainLoop runtime code, and other legacy artifacts from the final
+   production image.
+8. Pass the complete release-acceptance gate: the end-to-end login, account
+   switching, mail view/send/draft/search/settings, OAuth/OIDC, contacts,
+   calendar, notifications, and S/MIME canary matrix; persistent restart and
+   multi-instance session tests; metrics and graceful-shutdown checks; existing
+   `/var/lib/frickmail` data migration and upgrade scripts; rollback rehearsal;
+   and CI verification of the exact immutable production image.
+
+The production Rust Dockerfile, Compose service, deployment guide, healthcheck,
+and canary workflow already exist. Operators should continue to use the canary
+procedure in `docs/DEPLOYMENT.md`; promoting the Rust service as the sole
+production container remains intentionally blocked by the gates above. This
+snapshot is a high-level summary; `docs/DEPLOYMENT.md` is the authoritative,
+exhaustive readiness and cutover checklist.
+
 The PHP backend and legacy JavaScript application are temporary compatibility
 layers only. They must shrink continuously until no production request depends
 on PHP, nginx, PHP-FPM, supervisor, Knockout screens, legacy bundle generation,
