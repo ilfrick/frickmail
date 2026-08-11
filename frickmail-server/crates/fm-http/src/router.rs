@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     net::{IpAddr, SocketAddr},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU8, Ordering},
         Arc, OnceLock,
@@ -34,16 +35,17 @@ use fm_imap::{
     copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
     fetch_legacy_folder_information, fetch_legacy_folders,
     fetch_legacy_message_list_with_uid_cache_if_changed, fetch_mailbox_acl, fetch_mailbox_status,
-    fetch_message_body_preview, fetch_mime_part, fetch_raw_folder_messages, fetch_raw_message,
-    legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
-    legacy_message_list_params_hash, move_messages, rename_mailbox, set_mailbox_acl,
-    set_mailbox_metadata, set_mailbox_subscription, store_message_flag, store_message_keyword,
-    store_seen_to_all, update_mailbox_settings, validate_eml, BodyPreviewPart,
-    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
-    LegacyFolder, LegacyFolderCollection, LegacyFolderInformation, LegacyMessageList,
-    LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry, MailboxMetadata, MailboxStatus,
-    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
-    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+    fetch_message_body_preview, fetch_mime_part, fetch_mime_part_bounded,
+    fetch_raw_folder_messages, fetch_raw_message, legacy_message_cache_key, legacy_message_hash,
+    legacy_message_list_cache_key, legacy_message_list_params_hash, move_messages, rename_mailbox,
+    set_mailbox_acl, set_mailbox_metadata, set_mailbox_subscription, store_message_flag,
+    store_message_keyword, store_seen_to_all, update_mailbox_settings, validate_eml,
+    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
+    ImapMoveOptions, LegacyFolder, LegacyFolderCollection, LegacyFolderInformation,
+    LegacyMessageList, LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry,
+    MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
+    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    RuleExecutionReport,
 };
 use fm_mime::{
     parse_body, parse_body_part_text, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment,
@@ -59,16 +61,18 @@ use fm_user::{
     NewSmimeCert, NewSmimeP12, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailAccount,
     UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES,
 };
-use futures::future::join_all;
+use futures::StreamExt;
 use md5::{Digest, Md5};
 use p256::{
     ecdsa::{signature::Signer, Signature, SigningKey},
     pkcs8::DecodePrivateKey,
 };
+use rand_core::{OsRng, RngCore};
 use regex::{Captures, Regex};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
@@ -95,6 +99,32 @@ const COMPOSE_AUTOCRYPT_ADDRESS_LIMIT_BYTES: usize = 320;
 const COMPOSE_AUTOCRYPT_RAW_KEY_LIMIT_BYTES: usize = 16 * 1024;
 const COMPOSE_AUTOCRYPT_VERIFY_CONCURRENCY: usize = 2;
 const COMPOSE_AUTOCRYPT_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
+const COMPOSE_ATTACHMENT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+const COMPOSE_UPLOAD_REQUEST_OVERHEAD_BYTES: usize = 64 * 1024;
+const COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES: usize = 20 * 1024 * 1024;
+const COMPOSE_ATTACHMENT_USER_LIMIT_BYTES: usize = 20 * 1024 * 1024;
+const COMPOSE_ATTACHMENT_USER_FILE_LIMIT: usize = 100;
+const COMPOSE_ATTACHMENT_GLOBAL_LIMIT_BYTES: usize = 60 * 1024 * 1024;
+const COMPOSE_ATTACHMENT_GLOBAL_FILE_LIMIT: usize = 300;
+const COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT: usize = 1_024;
+const COMPOSE_ATTACHMENT_DIRECTORY_RECOVERY_SCAN_LIMIT: usize = 4_096;
+const COMPOSE_ATTACHMENT_MEMORY_BUDGET_MIB: usize = 64;
+const COMPOSE_MIME_BUILD_CONCURRENCY: usize = 2;
+const COMPOSE_MIME_BUILD_DEADLINE: Duration = Duration::from_secs(30);
+const COMPOSE_ATTACHMENT_LIMIT: usize = 100;
+const COMPOSE_ATTACHMENT_FILENAME_LIMIT_BYTES: usize = 255;
+const COMPOSE_ATTACHMENT_MIME_TYPE_LIMIT_BYTES: usize = 255;
+const COMPOSE_ATTACHMENT_CONTENT_ID_LIMIT_BYTES: usize = 998;
+const COMPOSE_ATTACHMENT_LOCATION_LIMIT_BYTES: usize = 2 * 1024;
+const COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES: usize = 16 * 1024;
+const COMPOSE_ATTACHMENT_RAW_KEY_TOTAL_LIMIT_BYTES: usize = 256 * 1024;
+const COMPOSE_UPLOAD_MEMORY_PERMIT_UNITS: u32 = 21;
+const COMPOSE_UPLOAD_BODY_DEADLINE: Duration = Duration::from_secs(120);
+const MESSAGE_UPLOAD_ATTACHMENTS_ACTION_DEADLINE: Duration = Duration::from_secs(240);
+const RFC5322_HEADER_LINE_LIMIT_BYTES: usize = 998;
+const MULTIPART_PART_LIMIT: usize = 128;
+const MULTIPART_HEADER_TOTAL_LIMIT_BYTES: usize = 64 * 1024;
+const COMPOSE_ATTACHMENT_MAX_AGE: Duration = Duration::from_secs(3600);
 const COMPOSE_OPERATION_CONCURRENCY: usize = 8;
 const COMPOSE_SANITIZE_CONCURRENCY: usize = 2;
 const COMPOSE_SANITIZE_DEADLINE: Duration = Duration::from_secs(10);
@@ -352,22 +382,56 @@ async fn json_api_request(
     let method = parts.method;
     let headers = parts.headers;
     let query = query_map(&uri);
-    let body = match to_bytes(body, JSON_BODY_LIMIT_BYTES).await {
-        Ok(body) => body,
-        Err(err) => {
-            return json_value_envelope(
-                StatusCode::OK,
-                "",
-                compat_error(
-                    INVALID_INPUT_ARGUMENT,
-                    format!("Invalid or oversized request body: {err}"),
-                ),
-            )
+    let route_action = legacy_route_action(&uri);
+    let native_upload =
+        legacy_upload_service_route(&uri) && state.config().php_bridge_url.is_none();
+    if native_upload {
+        match load_session_user(&state, "Upload", &session).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return legacy_upload_error("Upload", 1, "Not authenticated"),
+            Err(response) => return response,
         }
+    }
+    let body_limit = if native_upload {
+        COMPOSE_ATTACHMENT_LIMIT_BYTES + COMPOSE_UPLOAD_REQUEST_OVERHEAD_BYTES
+    } else {
+        JSON_BODY_LIMIT_BYTES
+    };
+    // Multipart parsing materializes a selected file alongside the collected
+    // request body. Admit that worst-case pair before reading the body and keep
+    // the permit through quota inspection and atomic staging. The body deadline
+    // ensures slow clients cannot retain shared compose memory indefinitely.
+    let (body, _native_upload_memory_permit) = if native_upload {
+        match legacy_collect_native_upload_body(
+            body,
+            body_limit,
+            Arc::clone(compose_attachment_memory_semaphore()),
+            Duration::from_secs(10),
+            COMPOSE_UPLOAD_BODY_DEADLINE,
+        )
+        .await
+        {
+            Ok((body, permit)) => (body, Some(permit)),
+            Err(message) => return legacy_upload_error("Upload", 1, message),
+        }
+    } else {
+        let body = match to_bytes(body, body_limit).await {
+            Ok(body) => body,
+            Err(err) => {
+                return json_value_envelope(
+                    StatusCode::OK,
+                    "",
+                    compat_error(
+                        INVALID_INPUT_ARGUMENT,
+                        format!("Invalid or oversized request body: {err}"),
+                    ),
+                );
+            }
+        };
+        (body, None)
     };
 
-    let request = match plugin_request_from_http(&query, &headers, &body, legacy_json_action(&uri))
-    {
+    let request = match plugin_request_from_http(&query, &headers, &body, route_action) {
         Ok(request) => {
             let request = attach_legacy_json_raw_key(request, &uri);
             if let Some(response) = bridge_json_request(
@@ -397,6 +461,25 @@ async fn json_api_request(
             )
         }
     };
+
+    if action == "Upload" {
+        if !native_upload {
+            return legacy_upload_error(
+                &request.action,
+                1,
+                "Native uploads require the /?/Upload/ service route",
+            );
+        }
+        return native_legacy_upload(
+            &state,
+            &request.action,
+            &request.payload,
+            &headers,
+            &body,
+            &session,
+        )
+        .await;
+    }
 
     if action == "FolderAppend" {
         return native_legacy_folder_append_multipart(
@@ -440,6 +523,27 @@ async fn json_api_request(
     )
 }
 
+async fn legacy_collect_native_upload_body(
+    body: Body,
+    body_limit: usize,
+    memory_semaphore: Arc<Semaphore>,
+    admission_deadline: Duration,
+    body_deadline: Duration,
+) -> Result<(Bytes, tokio::sync::OwnedSemaphorePermit), String> {
+    let permit = tokio::time::timeout(
+        admission_deadline,
+        memory_semaphore.acquire_many_owned(COMPOSE_UPLOAD_MEMORY_PERMIT_UNITS),
+    )
+    .await
+    .map_err(|_| "Attachment memory budget is busy; retry later".to_string())?
+    .map_err(|_| "Attachment memory budget is unavailable".to_string())?;
+    let bytes = tokio::time::timeout(body_deadline, to_bytes(body, body_limit))
+        .await
+        .map_err(|_| "Upload body timed out".to_string())?
+        .map_err(|err| format!("Invalid or oversized upload request: {err}"))?;
+    Ok((bytes, permit))
+}
+
 fn is_legacy_json_request(uri: &Uri) -> bool {
     uri.query()
         .is_some_and(|query| query.starts_with("/Json/") || query.starts_with("?/Json/"))
@@ -469,6 +573,26 @@ fn legacy_json_action(uri: &Uri) -> Option<String> {
     } else {
         Some(action.to_string())
     }
+}
+
+fn legacy_route_action(uri: &Uri) -> Option<String> {
+    if let Some(action) = legacy_json_action(uri) {
+        return Some(action);
+    }
+
+    if legacy_upload_service_route(uri) {
+        Some("Upload".to_string())
+    } else {
+        None
+    }
+}
+
+fn legacy_upload_service_route(uri: &Uri) -> bool {
+    if is_legacy_json_request(uri) {
+        return false;
+    }
+    uri.query()
+        .is_some_and(|query| query.starts_with("/Upload/"))
 }
 
 async fn fallback() -> Response {
@@ -907,6 +1031,10 @@ async fn native_compat_response(
         "MessageDelete" => {
             Some(native_legacy_message_delete(state, original_action, payload, session).await)
         }
+        "MessageUploadAttachments" => Some(
+            native_legacy_message_upload_attachments(state, original_action, payload, session)
+                .await,
+        ),
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
         "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
         "SaveMessage" => Some(native_save_message(state, original_action, payload, session).await),
@@ -1133,6 +1261,236 @@ fn compose_autocrypt_verify_semaphore() -> &'static Semaphore {
     SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_AUTOCRYPT_VERIFY_CONCURRENCY))
 }
 
+fn compose_attachment_staging_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(1))
+}
+
+fn compose_attachment_fetch_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(2))
+}
+
+fn compose_attachment_memory_semaphore() -> &'static Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(COMPOSE_ATTACHMENT_MEMORY_BUDGET_MIB)))
+}
+
+fn compose_attachment_fetch_memory_permit_units() -> u32 {
+    u32::try_from(
+        fm_imap::bounded_mime_part_peak_bytes(COMPOSE_ATTACHMENT_LIMIT_BYTES)
+            .unwrap_or(usize::MAX)
+            .div_ceil(1024 * 1024),
+    )
+    .unwrap_or(u32::MAX)
+}
+
+fn compose_mime_build_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_MIME_BUILD_CONCURRENCY))
+}
+
+#[derive(Debug, Clone)]
+struct LegacyComposeStagingScope {
+    root: PathBuf,
+    user_directory: PathBuf,
+    directory: PathBuf,
+}
+
+impl LegacyComposeStagingScope {
+    fn new(tmp_dir: &str, user_id: i64, account_id: i64) -> Self {
+        let root = Path::new(tmp_dir).join("compose-attachments");
+        let user_directory = root.join(format!("user-{user_id:x}"));
+        let directory = user_directory.join(format!("account-{account_id:x}"));
+        Self {
+            root,
+            user_directory,
+            directory,
+        }
+    }
+
+    fn path(&self, token: &str) -> Option<PathBuf> {
+        legacy_compose_attachment_token_is_valid(token).then(|| self.directory.join(token))
+    }
+}
+
+async fn legacy_prepare_compose_staging_scope(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<()> {
+    let scope = scope.clone();
+    tokio::task::spawn_blocking(move || legacy_prepare_compose_staging_scope_sync(&scope))
+        .await
+        .map_err(|err| std::io::Error::other(format!("staging directory task failed: {err}")))?
+}
+
+async fn legacy_validate_compose_staging_scope(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<bool> {
+    let scope = scope.clone();
+    tokio::task::spawn_blocking(move || legacy_validate_compose_staging_scope_sync(&scope))
+        .await
+        .map_err(|err| std::io::Error::other(format!("staging validation task failed: {err}")))?
+}
+
+#[cfg(unix)]
+fn legacy_prepare_compose_staging_scope_sync(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    let current_uid = unsafe { libc::geteuid() };
+    let base = scope
+        .root
+        .parent()
+        .ok_or_else(|| std::io::Error::other("attachment staging root has no parent"))?;
+
+    let ensure_created = |path: &Path| -> std::io::Result<()> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(err) => Err(err),
+        }
+    };
+
+    if std::fs::symlink_metadata(base).is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+    {
+        ensure_created(base)?;
+    }
+    let base_metadata = std::fs::symlink_metadata(base)?;
+    if base_metadata.file_type().is_symlink() || !base_metadata.is_dir() {
+        return Err(std::io::Error::other(
+            "attachment staging base must be a real directory",
+        ));
+    }
+    let base_mode = base_metadata.mode();
+    let trusted_system_base =
+        base_metadata.uid() == 0 && (base_mode & 0o022 == 0 || base_mode & 0o1000 != 0);
+    if base_metadata.uid() != current_uid && !trusted_system_base {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "attachment staging base has an untrusted owner or permissions",
+        ));
+    }
+    if legacy_should_tighten_staging_base(current_uid, base_metadata.uid(), base_mode) {
+        std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    for directory in [&scope.root, &scope.user_directory, &scope.directory] {
+        ensure_created(directory)?;
+        let metadata = std::fs::symlink_metadata(directory)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.uid() != current_uid
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "attachment staging directory is not private and owned: {}",
+                    directory.display()
+                ),
+            ));
+        }
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn legacy_should_tighten_staging_base(current_uid: u32, owner_uid: u32, mode: u32) -> bool {
+    owner_uid == current_uid && !(current_uid == 0 && (mode & 0o022 == 0 || mode & 0o1000 != 0))
+}
+
+#[cfg(unix)]
+fn legacy_validate_compose_staging_scope_sync(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<bool> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    let current_uid = unsafe { libc::geteuid() };
+    let base = scope
+        .root
+        .parent()
+        .ok_or_else(|| std::io::Error::other("attachment staging root has no parent"))?;
+    let base_metadata = match std::fs::symlink_metadata(base) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    if base_metadata.file_type().is_symlink() || !base_metadata.is_dir() {
+        return Err(std::io::Error::other(
+            "attachment staging base must be a real directory",
+        ));
+    }
+    let base_mode = base_metadata.permissions().mode();
+    let trusted_system_base =
+        base_metadata.uid() == 0 && (base_mode & 0o022 == 0 || base_mode & 0o1000 != 0);
+    if base_metadata.uid() != current_uid && !trusted_system_base {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "attachment staging base has an untrusted owner or permissions",
+        ));
+    }
+
+    for directory in [&scope.root, &scope.user_directory, &scope.directory] {
+        let metadata = match std::fs::symlink_metadata(directory) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != current_uid
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "attachment staging directory is not private and owned: {}",
+                    directory.display()
+                ),
+            ));
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn legacy_prepare_compose_staging_scope_sync(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(&scope.directory)
+}
+
+#[cfg(not(unix))]
+fn legacy_validate_compose_staging_scope_sync(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(&scope.directory) {
+        Ok(metadata) => Ok(metadata.is_dir() && !metadata.file_type().is_symlink()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyComposeAttachmentSpec {
+    token: String,
+    file_name: String,
+    is_inline: bool,
+    content_id: String,
+    content_location: String,
+    mime_type: String,
+    is_linked: bool,
+}
+
+#[derive(Debug)]
+struct LegacyComposeAttachment {
+    spec: LegacyComposeAttachmentSpec,
+    data: Vec<u8>,
+}
+
 /// Legacy `SendMessage` compose payload after validation.
 #[derive(Debug)]
 struct LegacySendMessageRequest {
@@ -1155,6 +1513,8 @@ struct LegacySendMessageRequest {
     dsn: bool,
     require_tls: bool,
     autocrypt: Option<LegacyAutocryptHeader>,
+    attachments: Vec<LegacyComposeAttachment>,
+    _attachment_memory_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     save_folder: String,
     draft_folder: String,
     draft_uid: u32,
@@ -1185,6 +1545,32 @@ struct LegacyDraftInfoRequest {
     info_type: String,
     uid: u32,
     folder: String,
+}
+
+#[async_trait::async_trait]
+trait LegacySmtpSender: Sync {
+    async fn send(
+        &self,
+        settings: &fm_smtp::SmtpSendSettings,
+        envelope: &lettre::address::Envelope,
+        message: &[u8],
+        options: fm_smtp::SmtpDeliveryOptions,
+    ) -> fm_core::Result<bool>;
+}
+
+struct ProductionLegacySmtpSender;
+
+#[async_trait::async_trait]
+impl LegacySmtpSender for ProductionLegacySmtpSender {
+    async fn send(
+        &self,
+        settings: &fm_smtp::SmtpSendSettings,
+        envelope: &lettre::address::Envelope,
+        message: &[u8],
+        options: fm_smtp::SmtpDeliveryOptions,
+    ) -> fm_core::Result<bool> {
+        fm_smtp::send_raw_message_async(settings, envelope, message, options).await
+    }
 }
 
 async fn native_send_message(
@@ -1238,6 +1624,25 @@ async fn native_send_message_inner(
     payload: &Value,
     session: &fm_session::Session,
     delivery_phase: Arc<AtomicU8>,
+) -> Response {
+    native_send_message_inner_with_sender(
+        state,
+        original_action,
+        payload,
+        session,
+        delivery_phase,
+        &ProductionLegacySmtpSender,
+    )
+    .await
+}
+
+async fn native_send_message_inner_with_sender(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    delivery_phase: Arc<AtomicU8>,
+    smtp_sender: &dyn LegacySmtpSender,
 ) -> Response {
     if let Some(feature) = legacy_unsupported_compose_feature(payload, true) {
         return json_result_error(
@@ -1307,7 +1712,7 @@ async fn native_send_message_inner(
         Ok(body) => body,
         Err(message) => return json_result_error(original_action, &message),
     };
-    let request = match legacy_send_message_request_from_payload_with_html(
+    let mut request = match legacy_send_message_request_from_payload_with_html(
         payload,
         &account.email,
         normalized_body,
@@ -1316,6 +1721,15 @@ async fn native_send_message_inner(
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, &message),
     };
+    let staging_scope =
+        LegacyComposeStagingScope::new(&state.config().tmp_dir, user.user_id, account_id);
+    let (attachments, memory_permit) =
+        match legacy_load_compose_attachments(&staging_scope, payload).await {
+            Ok(attachments) => attachments,
+            Err(message) => return json_result_error(original_action, &message),
+        };
+    request.attachments = attachments;
+    request._attachment_memory_permit = memory_permit;
 
     let smtp_settings =
         match legacy_smtp_send_settings(state, pool, user.user_id, account_id, &account, &password)
@@ -1329,27 +1743,35 @@ async fn native_send_message_inner(
     // same message object for SMTP and Sent, so Message-ID and Date must match.
     let message_id = legacy_generate_draft_message_id(&request.envelope_from);
     let message_date = SystemTime::now();
-    let transport_message = match build_legacy_send_message_with_metadata(
-        &request,
-        false,
-        Some(&message_id),
-        Some(message_date),
-    ) {
-        Ok(message) => message,
-        Err(message) => return json_result_error(original_action, &message),
-    };
-    let stored_message = if request.save_folder.is_empty() {
-        None
-    } else {
-        match build_legacy_send_message_with_metadata(
+    let keep_stored_copy = !request.save_folder.is_empty();
+    let (request, transport_bytes, stored_bytes) = match legacy_run_mime_build(move || {
+        legacy_mark_linked_compose_attachments(&mut request.attachments, &request.html);
+        let transport = build_legacy_send_message_with_metadata(
             &request,
-            true,
+            false,
             Some(&message_id),
             Some(message_date),
-        ) {
-            Ok(message) => Some(message),
-            Err(message) => return json_result_error(original_action, &message),
-        }
+        )?
+        .formatted();
+        let stored = if keep_stored_copy {
+            Some(
+                build_legacy_send_message_with_metadata(
+                    &request,
+                    true,
+                    Some(&message_id),
+                    Some(message_date),
+                )?
+                .formatted(),
+            )
+        } else {
+            None
+        };
+        Ok((request, transport, stored))
+    })
+    .await
+    {
+        Ok(messages) => messages,
+        Err(message) => return json_result_error(original_action, &message),
     };
 
     let envelope = match fm_smtp::build_envelope(&request.envelope_from, &request.all_recipients())
@@ -1358,11 +1780,10 @@ async fn native_send_message_inner(
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
 
-    let transport_bytes = transport_message.formatted();
     delivery_phase.store(SEND_PHASE_SMTP_IN_FLIGHT, Ordering::Release);
     let send_result = tokio::time::timeout(
         SEND_MESSAGE_SMTP_DEADLINE,
-        fm_smtp::send_raw_message_async(
+        smtp_sender.send(
             &smtp_settings,
             &envelope,
             &transport_bytes,
@@ -1394,9 +1815,12 @@ async fn native_send_message_inner(
             )
         }
     }
+    // SMTP accepted the message. The staged capabilities must no longer be
+    // retryable even if mandatory Sent-copy work fails afterward.
+    legacy_delete_staged_compose_attachments(&staging_scope, &request.attachments).await;
     // Delivery succeeded. A requested Sent copy is mandatory; draft flagging and
     // cleanup remain best-effort because SMTP delivery cannot be rolled back.
-    let post_send_imap_requested = stored_message.is_some()
+    let post_send_imap_requested = stored_bytes.is_some()
         || request.draft_info.is_some()
         || (!request.draft_folder.is_empty() && request.draft_uid > 0);
     let imap_config = match imap_config_from_account_secret(&account) {
@@ -1420,7 +1844,7 @@ async fn native_send_message_inner(
         }
     };
 
-    if let Some(stored_message) = stored_message {
+    if let Some(stored_bytes) = stored_bytes {
         if let Err(message) = legacy_send_message_append_to_sent(
             state,
             pool,
@@ -1429,7 +1853,7 @@ async fn native_send_message_inner(
             &imap_config,
             &password,
             &request.save_folder,
-            &stored_message.formatted(),
+            &stored_bytes,
         )
         .await
         {
@@ -1687,11 +2111,56 @@ async fn legacy_smtp_send_settings(
     })
 }
 
+#[async_trait::async_trait]
+trait LegacyDraftAppender: Sync {
+    async fn append(
+        &self,
+        config: ImapConnectionConfig,
+        password: &str,
+        folder: &str,
+        raw: &[u8],
+        message_id: &str,
+    ) -> fm_core::Result<Option<u32>>;
+}
+
+struct ProductionLegacyDraftAppender;
+
+#[async_trait::async_trait]
+impl LegacyDraftAppender for ProductionLegacyDraftAppender {
+    async fn append(
+        &self,
+        config: ImapConnectionConfig,
+        password: &str,
+        folder: &str,
+        raw: &[u8],
+        message_id: &str,
+    ) -> fm_core::Result<Option<u32>> {
+        fm_imap::append_draft_message(config, password, folder, raw, Some(message_id)).await
+    }
+}
+
 async fn native_save_message(
     state: &AppState,
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+) -> Response {
+    native_save_message_with_appender(
+        state,
+        original_action,
+        payload,
+        session,
+        &ProductionLegacyDraftAppender,
+    )
+    .await
+}
+
+async fn native_save_message_with_appender(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    appender: &dyn LegacyDraftAppender,
 ) -> Response {
     if let Some(feature) = legacy_unsupported_compose_feature(payload, false) {
         return json_result_error(
@@ -1774,7 +2243,7 @@ async fn native_save_message(
         Ok(body) => body,
         Err(message) => return json_result_error(original_action, &message),
     };
-    let request = match legacy_save_message_request_from_payload_with_html(
+    let mut request = match legacy_save_message_request_from_payload_with_html(
         payload,
         &account.email,
         &save_folder,
@@ -1784,22 +2253,38 @@ async fn native_save_message(
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, &message),
     };
+    let staging_scope =
+        LegacyComposeStagingScope::new(&state.config().tmp_dir, user.user_id, account_id);
+    let (attachments, memory_permit) =
+        match legacy_load_compose_attachments(&staging_scope, payload).await {
+            Ok(attachments) => attachments,
+            Err(message) => return json_result_error(original_action, &message),
+        };
+    request.attachments = attachments;
+    request._attachment_memory_permit = memory_permit;
 
     // The Message-ID is pinned so the appended draft can be located afterwards.
     let message_id = legacy_generate_draft_message_id(&request.envelope_from);
-    let draft_message = match build_legacy_send_message_with_id(&request, true, Some(&message_id)) {
+    let (_request, draft_bytes, message_id) = match legacy_run_mime_build(move || {
+        legacy_mark_linked_compose_attachments(&mut request.attachments, &request.html);
+        let draft = build_legacy_send_message_with_id(&request, true, Some(&message_id))?;
+        Ok((request, draft.formatted(), message_id))
+    })
+    .await
+    {
         Ok(message) => message,
         Err(message) => return json_result_error(original_action, &message),
     };
 
-    let new_uid = match fm_imap::append_draft_message(
-        imap_config.clone(),
-        &password,
-        &save_folder,
-        &draft_message.formatted(),
-        Some(&message_id),
-    )
-    .await
+    let new_uid = match appender
+        .append(
+            imap_config.clone(),
+            &password,
+            &save_folder,
+            &draft_bytes,
+            &message_id,
+        )
+        .await
     {
         Ok(uid) => uid,
         Err(err) => return json_result_error(original_action, &err.public_message()),
@@ -1918,6 +2403,8 @@ fn legacy_save_message_request_from_payload_with_html(
         // PHP's shared buildMessage() includes this header in saved drafts too.
         require_tls: payload_bool(payload, "requireTLS"),
         autocrypt,
+        attachments: Vec::new(),
+        _attachment_memory_permit: None,
         save_folder: save_folder.to_string(),
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid: u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0),
@@ -1927,7 +2414,6 @@ fn legacy_save_message_request_from_payload_with_html(
 
 fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
     const MIME_FEATURES: &[(&str, &str)] = &[
-        ("attachments", "attachments"),
         ("signed", "OpenPGP signed content"),
         ("encrypted", "OpenPGP encrypted content"),
         ("sign", "S/MIME signing"),
@@ -1944,7 +2430,266 @@ fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option
     None
 }
 
+fn legacy_validate_attachment_text(
+    value: &str,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<(), String> {
+    if (!allow_empty && value.is_empty())
+        || value.len() > max_bytes
+        || value.chars().any(char::is_control)
+    {
+        Err("Invalid attachment metadata".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn legacy_compose_attachment_specs(
+    payload: &Value,
+) -> Result<Vec<LegacyComposeAttachmentSpec>, String> {
+    let Some(value) = payload.get("attachments") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Attachments must be an object".to_string())?;
+    if object.len() > COMPOSE_ATTACHMENT_LIMIT {
+        return Err(format!(
+            "Compose request exceeds the {COMPOSE_ATTACHMENT_LIMIT} attachment limit"
+        ));
+    }
+
+    let mut tokens = HashSet::with_capacity(object.len());
+    let mut attachments = Vec::with_capacity(object.len());
+    for (token, metadata) in object {
+        if !legacy_compose_attachment_token_is_valid(token) || !tokens.insert(token.clone()) {
+            return Err("Attachment token is invalid or duplicated".to_string());
+        }
+        let metadata = metadata
+            .as_object()
+            .ok_or_else(|| "Attachment metadata must be an object".to_string())?;
+        let file_name = metadata
+            .get("name")
+            .map(value_to_php_string)
+            .unwrap_or_default();
+        legacy_validate_attachment_text(&file_name, COMPOSE_ATTACHMENT_FILENAME_LIMIT_BYTES, false)
+            .map_err(|_| "Attachment filename is invalid".to_string())?;
+
+        let content_id = metadata
+            .get("cId")
+            .map(value_to_php_string)
+            .unwrap_or_default();
+        legacy_validate_attachment_text(
+            &content_id,
+            COMPOSE_ATTACHMENT_CONTENT_ID_LIMIT_BYTES,
+            true,
+        )
+        .map_err(|_| "Attachment content ID is invalid".to_string())?;
+        let normalized_content_id = legacy_strip_angle_brackets(&content_id);
+        if !normalized_content_id.is_empty()
+            && !legacy_mime_header_wire_is_valid(lettre::message::header::ContentId::from(format!(
+                "<{normalized_content_id}>"
+            )))
+        {
+            return Err("Attachment content ID exceeds the MIME line limit".to_string());
+        }
+        let content_location = metadata
+            .get("location")
+            .map(value_to_php_string)
+            .unwrap_or_default();
+        legacy_validate_attachment_text(
+            &content_location,
+            COMPOSE_ATTACHMENT_LOCATION_LIMIT_BYTES,
+            true,
+        )
+        .map_err(|_| "Attachment content location is invalid".to_string())?;
+        if !content_location.is_empty()
+            && !legacy_mime_header_wire_is_valid(lettre::message::header::ContentLocation::from(
+                content_location.clone(),
+            ))
+        {
+            return Err("Attachment content location exceeds the MIME line limit".to_string());
+        }
+
+        let mime_hint = metadata
+            .get("type")
+            .map(value_to_php_string)
+            .unwrap_or_default();
+        legacy_validate_attachment_text(&mime_hint, COMPOSE_ATTACHMENT_MIME_TYPE_LIMIT_BYTES, true)
+            .map_err(|_| "Attachment MIME type is invalid".to_string())?;
+        let inferred = mime_type_from_hint(&mime_hint, &file_name);
+        let mime_type = if lettre::message::header::ContentType::parse(&inferred).is_ok() {
+            inferred
+        } else {
+            "application/octet-stream".to_string()
+        };
+        let is_inline = metadata.get("inline").is_some_and(legacy_payload_has_value);
+
+        attachments.push(LegacyComposeAttachmentSpec {
+            token: token.clone(),
+            file_name,
+            is_inline,
+            content_id,
+            content_location,
+            mime_type,
+            is_linked: false,
+        });
+    }
+    Ok(attachments)
+}
+
+async fn legacy_load_compose_attachments(
+    scope: &LegacyComposeStagingScope,
+    payload: &Value,
+) -> Result<
+    (
+        Vec<LegacyComposeAttachment>,
+        Option<tokio::sync::OwnedSemaphorePermit>,
+    ),
+    String,
+> {
+    let specs = legacy_compose_attachment_specs(payload)?;
+    if specs.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+
+    // All compose paths take memory admission before the staging mutex.  A
+    // worst-case reservation avoids reading mutable file sizes before that
+    // mutex and keeps the same lock order as MessageUploadAttachments.
+    let permit_units = u32::try_from(COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES / (1024 * 1024))
+        .map_err(|_| "Attachment memory admission overflow".to_string())?;
+    let memory_permit = tokio::time::timeout(
+        Duration::from_secs(10),
+        Arc::clone(compose_attachment_memory_semaphore()).acquire_many_owned(permit_units),
+    )
+    .await
+    .map_err(|_| "Attachment memory budget is busy; retry later".to_string())?
+    .map_err(|_| "Attachment memory budget is unavailable".to_string())?;
+
+    let _permit = tokio::time::timeout(
+        Duration::from_secs(10),
+        compose_attachment_staging_semaphore().acquire(),
+    )
+    .await
+    .map_err(|_| "Attachment staging is busy; retry later".to_string())?
+    .map_err(|_| "Attachment staging is unavailable".to_string())?;
+    match legacy_validate_compose_staging_scope(scope).await {
+        Ok(true) => {}
+        Ok(false) => return Err("Attachment staging scope is missing or expired".to_string()),
+        Err(err) => {
+            return Err(format!(
+                "Could not secure attachment staging directory: {err}"
+            ))
+        }
+    }
+    let mut total = 0_usize;
+    let mut pending = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let path = scope
+            .path(&spec.token)
+            .ok_or_else(|| "Attachment token is invalid".to_string())?;
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|_| format!("Attachment '{}' is missing or expired", spec.file_name))?;
+        let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+        if !metadata.file_type().is_file() || size > COMPOSE_ATTACHMENT_LIMIT_BYTES {
+            return Err(format!("Attachment '{}' is invalid", spec.file_name));
+        }
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| "Attachment size overflow".to_string())?;
+        if total > COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES {
+            return Err(format!(
+                "Attachments exceed the {} MiB aggregate limit",
+                COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES / 1024 / 1024
+            ));
+        }
+        pending.push((spec, path, size));
+    }
+    let mut attachments = Vec::with_capacity(pending.len());
+    for (spec, path, size) in pending {
+        let data = tokio::fs::read(&path)
+            .await
+            .map_err(|_| format!("Attachment '{}' could not be read", spec.file_name))?;
+        if data.len() != size {
+            return Err(format!(
+                "Attachment '{}' changed while reading",
+                spec.file_name
+            ));
+        }
+        attachments.push(LegacyComposeAttachment { spec, data });
+    }
+    Ok((attachments, Some(memory_permit)))
+}
+
+fn legacy_mark_linked_compose_attachments(attachments: &mut [LegacyComposeAttachment], html: &str) {
+    let normalized_ids = attachments
+        .iter()
+        .map(|attachment| {
+            legacy_strip_angle_brackets(&attachment.spec.content_id)
+                .bytes()
+                .map(|byte| byte.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let wanted = normalized_ids
+        .iter()
+        .filter(|content_id| !content_id.is_empty())
+        .cloned()
+        .collect::<HashSet<_>>();
+    let referenced = legacy_html_content_ids(html, &wanted);
+
+    for (attachment, content_id) in attachments.iter_mut().zip(normalized_ids) {
+        attachment.spec.is_linked = referenced.contains(content_id.as_slice());
+    }
+}
+
+fn legacy_html_content_ids(html: &str, wanted: &HashSet<Vec<u8>>) -> HashSet<Vec<u8>> {
+    let bytes = html.as_bytes();
+    let mut referenced = HashSet::with_capacity(wanted.len());
+    let mut normalized = Vec::with_capacity(COMPOSE_ATTACHMENT_CONTENT_ID_LIMIT_BYTES);
+    let mut offset = 0_usize;
+
+    while offset.saturating_add(4) <= bytes.len() && referenced.len() < wanted.len() {
+        if !bytes[offset..offset + 4].eq_ignore_ascii_case(b"cid:") {
+            offset += 1;
+            continue;
+        }
+        let before = offset.checked_sub(1).and_then(|index| bytes.get(index));
+        if !before.is_none_or(|byte| {
+            byte.is_ascii_whitespace() || matches!(byte, b'\'' | b'"' | b'=' | b'(')
+        }) {
+            offset += 4;
+            continue;
+        }
+
+        let content_id_start = offset + 4;
+        let mut end = content_id_start;
+        while end < bytes.len()
+            && !bytes[end].is_ascii_whitespace()
+            && !matches!(bytes[end], b'\'' | b'"' | b'>' | b')' | b';')
+        {
+            end += 1;
+        }
+        let content_id = &bytes[content_id_start..end];
+        if !content_id.is_empty() && content_id.len() <= COMPOSE_ATTACHMENT_CONTENT_ID_LIMIT_BYTES {
+            normalized.clear();
+            normalized.extend(content_id.iter().map(|byte| byte.to_ascii_lowercase()));
+            if wanted.contains(normalized.as_slice()) {
+                referenced.insert(normalized.clone());
+            }
+        }
+        offset = end.max(content_id_start);
+    }
+    referenced
+}
+
 fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
+    legacy_compose_attachment_specs(payload)?;
     if let Some(html) = payload.get("html").and_then(Value::as_str) {
         legacy_validate_raw_compose_html(html)?;
     }
@@ -2785,6 +3530,8 @@ fn legacy_send_message_request_from_payload_with_html(
         dsn: payload_bool(payload, "dsn"),
         require_tls: payload_bool(payload, "requireTLS"),
         autocrypt,
+        attachments: Vec::new(),
+        _attachment_memory_permit: None,
         save_folder: payload_string(payload, "saveFolder").unwrap_or_default(),
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid,
@@ -2927,6 +3674,29 @@ impl LegacyBuiltMessage {
     }
 }
 
+async fn legacy_run_mime_build<F, T>(build: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = tokio::time::timeout(
+        Duration::from_secs(10),
+        compose_mime_build_semaphore().acquire(),
+    )
+    .await
+    .map_err(|_| "MIME builder is busy; retry later".to_string())?
+    .map_err(|_| "MIME builder is unavailable".to_string())?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        build()
+    });
+    match tokio::time::timeout(COMPOSE_MIME_BUILD_DEADLINE, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("MIME builder task failed".to_string()),
+        Err(_) => Err("MIME builder timed out".to_string()),
+    }
+}
+
 fn legacy_write_autocrypt_header(bytes: &mut Vec<u8>, header: &LegacyAutocryptHeader) {
     bytes.extend_from_slice(b"Autocrypt: addr=");
     bytes.extend_from_slice(header.addr.as_bytes());
@@ -2973,7 +3743,7 @@ fn build_legacy_send_message_with_metadata(
     message_id: Option<&str>,
     message_date: Option<SystemTime>,
 ) -> Result<LegacyBuiltMessage, String> {
-    use lettre::message::{header, Mailbox, MultiPart, SinglePart};
+    use lettre::message::{header, Mailbox, MultiPart, MultiPartBuilder, SinglePart};
 
     let parse_mailbox = |address: &str| -> Result<Mailbox, String> {
         address
@@ -3056,35 +3826,201 @@ fn build_legacy_send_message_with_metadata(
         builder = builder.raw_header(legacy_raw_header("TLS-Required", "No")?);
     }
 
-    // MailSo always emits multipart/alternative for an HTML compose. When the
-    // client omits `plain`, normalization derives it from the sanitized HTML.
-    let message = if !request.html.is_empty() {
-        builder
-            .multipart(
-                MultiPart::alternative()
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(header::ContentType::TEXT_PLAIN)
-                            .body(request.plain.clone()),
-                    )
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(header::ContentType::TEXT_HTML)
-                            .body(request.html.clone()),
-                    ),
+    let alternative = || {
+        MultiPart::alternative()
+            .singlepart(
+                SinglePart::builder()
+                    .header(header::ContentType::TEXT_PLAIN)
+                    .body(request.plain.clone()),
             )
-            .map_err(|err| format!("Message build failed: {err}"))
+            .singlepart(
+                SinglePart::builder()
+                    .header(header::ContentType::TEXT_HTML)
+                    .body(request.html.clone()),
+            )
+    };
+
+    enum LegacyMimeRoot {
+        Single(SinglePart),
+        Multi(MultiPart),
+    }
+
+    let add_root = |multipart: MultiPartBuilder, root: LegacyMimeRoot| match root {
+        LegacyMimeRoot::Single(part) => multipart.singlepart(part),
+        LegacyMimeRoot::Multi(part) => multipart.multipart(part),
+    };
+
+    // MailSo groups the body and every CID-referenced attachment under
+    // multipart/related. Non-linked attachments are siblings of that related
+    // body under an outer multipart/mixed container.
+    let message = if request.attachments.is_empty() {
+        if !request.html.is_empty() {
+            builder.multipart(alternative())
+        } else {
+            builder
+                .header(header::ContentType::TEXT_PLAIN)
+                .body(request.plain.clone())
+        }
     } else {
-        builder
-            .header(header::ContentType::TEXT_PLAIN)
-            .body(request.plain.clone())
-            .map_err(|err| format!("Message build failed: {err}"))
-    }?;
+        let mut root = if request.html.is_empty() {
+            LegacyMimeRoot::Single(
+                SinglePart::builder()
+                    .header(header::ContentType::TEXT_PLAIN)
+                    .body(request.plain.clone()),
+            )
+        } else {
+            LegacyMimeRoot::Multi(alternative())
+        };
+
+        if request
+            .attachments
+            .iter()
+            .any(|attachment| attachment.spec.is_linked)
+        {
+            let mut related = add_root(MultiPart::related(), root);
+            for attachment in request
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.spec.is_linked)
+            {
+                related = related.singlepart(legacy_compose_attachment_part(attachment)?);
+            }
+            root = LegacyMimeRoot::Multi(related);
+        }
+
+        if request
+            .attachments
+            .iter()
+            .any(|attachment| !attachment.spec.is_linked)
+        {
+            let mut mixed = add_root(MultiPart::mixed(), root);
+            for attachment in request
+                .attachments
+                .iter()
+                .filter(|attachment| !attachment.spec.is_linked)
+            {
+                mixed = mixed.singlepart(legacy_compose_attachment_part(attachment)?);
+            }
+            root = LegacyMimeRoot::Multi(mixed);
+        }
+
+        match root {
+            LegacyMimeRoot::Single(part) => builder.singlepart(part),
+            LegacyMimeRoot::Multi(part) => builder.multipart(part),
+        }
+    }
+    .map_err(|err| format!("Message build failed: {err}"))?;
 
     Ok(LegacyBuiltMessage {
         message,
         autocrypt: request.autocrypt.clone(),
     })
+}
+
+fn legacy_compose_attachment_part(
+    attachment: &LegacyComposeAttachment,
+) -> Result<lettre::message::SinglePart, String> {
+    use lettre::message::{header, SinglePart};
+
+    let content_type = legacy_attachment_content_type_header(
+        &attachment.spec.mime_type,
+        &attachment.spec.file_name,
+    )?;
+    let mut builder = SinglePart::builder().header(content_type);
+    if attachment.spec.is_inline {
+        builder = builder.header(header::ContentDisposition::inline_with_name(
+            &attachment.spec.file_name,
+        ));
+    } else {
+        builder = builder.header(header::ContentDisposition::attachment(
+            &attachment.spec.file_name,
+        ));
+    }
+    if !attachment.spec.content_location.is_empty() {
+        let content_location =
+            header::ContentLocation::from(attachment.spec.content_location.clone());
+        if !legacy_mime_header_wire_is_valid(content_location.clone()) {
+            return Err("Attachment content location exceeds the MIME line limit".to_string());
+        }
+        builder = builder.header(content_location);
+    }
+    let content_id = legacy_strip_angle_brackets(&attachment.spec.content_id);
+    if !content_id.is_empty() {
+        let content_id = header::ContentId::from(format!("<{content_id}>"));
+        if !legacy_mime_header_wire_is_valid(content_id.clone()) {
+            return Err("Attachment content ID exceeds the MIME line limit".to_string());
+        }
+        builder = builder.header(content_id);
+    }
+    let is_message = attachment
+        .spec
+        .mime_type
+        .split(';')
+        .next()
+        .is_some_and(|mime_type| mime_type.trim().eq_ignore_ascii_case("message/rfc822"));
+    if !is_message {
+        builder = builder.header(header::ContentTransferEncoding::Base64);
+        Ok(builder.body(attachment.data.clone()))
+    } else {
+        Ok(builder.body(lettre::message::Body::dangerous_pre_encoded(
+            attachment.data.clone(),
+            header::ContentTransferEncoding::EightBit,
+        )))
+    }
+}
+
+fn legacy_attachment_content_type_header(
+    mime_type: &str,
+    file_name: &str,
+) -> Result<lettre::message::header::ContentType, String> {
+    legacy_validate_attachment_text(file_name, COMPOSE_ATTACHMENT_FILENAME_LIMIT_BYTES, false)
+        .map_err(|_| "Attachment filename is invalid".to_string())?;
+    let parameter = if file_name.is_ascii() {
+        let escaped = file_name.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("name=\"{escaped}\"")
+    } else {
+        let mut encoded = String::with_capacity(file_name.len().saturating_mul(3));
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        for byte in file_name.bytes() {
+            if byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'&'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+            {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push('%');
+                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+        }
+        format!("name*=utf-8''{encoded}")
+    };
+    let value = format!("{mime_type}; {parameter}");
+    if "Content-Type: ".len().saturating_add(value.len()) > RFC5322_HEADER_LINE_LIMIT_BYTES {
+        return Err("Attachment Content-Type metadata exceeds the MIME line limit".to_string());
+    }
+    lettre::message::header::ContentType::parse(&value)
+        .map_err(|_| "Attachment MIME type or filename is invalid".to_string())
+}
+
+fn legacy_mime_header_wire_is_valid<H: lettre::message::header::Header>(header: H) -> bool {
+    let mut headers = lettre::message::header::Headers::new();
+    headers.set(header);
+    format!("{headers}")
+        .split("\r\n")
+        .all(|line| line.len() <= RFC5322_HEADER_LINE_LIMIT_BYTES)
 }
 
 fn legacy_raw_header(
@@ -7016,7 +7952,6 @@ where
             Ok(connection) => connection,
             Err(response) => return response,
         };
-
     let target = payload_optional_string(payload, "target").unwrap_or_default();
     if target != "zip" {
         return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
@@ -7204,8 +8139,475 @@ fn create_zip_archive(
     Ok(zip.finish()?.into_inner())
 }
 
-/// Removes temp files in `tmp_dir` older than `max_age` to prevent unbounded
-/// disk growth from attachment ZIP downloads and upload staging files.
+fn legacy_compose_attachment_token_is_valid(token: &str) -> bool {
+    token.len() == 40
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn legacy_random_compose_attachment_token() -> String {
+    let mut bytes = [0_u8; 20];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+async fn legacy_compose_staging_scope_for_payload(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Result<LegacyComposeStagingScope, Response> {
+    let (user, _) = imap_action_auth(state, original_action, session).await?;
+    let Some(pool) = state.db_pool() else {
+        return Err(json_result_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+    let account_id = resolve_message_body_account_id(payload, session, original_action).await?;
+    match SqlxUserRepository::get_mail_account_connection_secret(pool, user.user_id, account_id)
+        .await
+    {
+        Ok(Some(_)) => Ok(LegacyComposeStagingScope::new(
+            &state.config().tmp_dir,
+            user.user_id,
+            account_id,
+        )),
+        Ok(None) => Err(json_result_error(original_action, "Account not found")),
+        Err(err) => Err(json_result_error(original_action, &err.public_message())),
+    }
+}
+
+async fn legacy_compose_imap_staging_context(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Result<(LegacyComposeStagingScope, ImapConnectionConfig, String), Response> {
+    let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
+    let Some(pool) = state.db_pool() else {
+        return Err(json_result_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+    // Resolve the selected account once.  Reading it again after an IMAP
+    // connection is prepared would allow a concurrent account switch to fetch
+    // from one account and stage the bytes under another account's capability
+    // directory.
+    let account_id = resolve_message_body_account_id(payload, session, original_action).await?;
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return Err(json_result_error(original_action, "Account not found")),
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+    let config = imap_config_from_account_secret(&account)
+        .map_err(|err| json_result_error(original_action, &err.public_message()))?;
+    let password = account_password(&account, &credential_key)
+        .map_err(|_| json_result_error(original_action, "Missing account password"))?;
+    let scope = LegacyComposeStagingScope::new(&state.config().tmp_dir, user.user_id, account_id);
+    Ok((scope, config, password))
+}
+
+#[derive(Debug, Default)]
+struct LegacyComposeStagingUsage {
+    global_bytes: usize,
+    global_files: usize,
+    user_bytes: usize,
+    user_files: usize,
+    scope_bytes: usize,
+    scope_files: usize,
+    global_directories: usize,
+}
+
+async fn legacy_compose_staging_usage(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<LegacyComposeStagingUsage> {
+    legacy_compose_staging_usage_with_max_age(scope, COMPOSE_ATTACHMENT_MAX_AGE).await
+}
+
+async fn legacy_compose_staging_usage_with_max_age(
+    scope: &LegacyComposeStagingScope,
+    max_age: Duration,
+) -> std::io::Result<LegacyComposeStagingUsage> {
+    legacy_prune_empty_compose_directories(scope).await?;
+    let mut usage = LegacyComposeStagingUsage::default();
+    let mut pending = vec![scope.root.clone()];
+    let mut directories = vec![scope.root.clone()];
+    usage.global_directories = 1;
+    let cutoff = SystemTime::now() - max_age;
+
+    while let Some(directory) = pending.pop() {
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                usage.global_directories = usage.global_directories.saturating_add(1);
+                if usage.global_directories > COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT {
+                    return Err(std::io::Error::other(
+                        "attachment staging directory limit exceeded",
+                    ));
+                }
+                let path = entry.path();
+                directories.push(path.clone());
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let metadata = entry.metadata().await?;
+            if metadata.modified().is_ok_and(|modified| modified < cutoff) {
+                match tokio::fs::remove_file(entry.path()).await {
+                    Ok(()) => continue,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to remove stale compose attachment {}: {err}",
+                            entry.path().display()
+                        );
+                    }
+                }
+            }
+            let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+            usage.global_bytes = usage.global_bytes.saturating_add(size);
+            usage.global_files = usage.global_files.saturating_add(1);
+            if entry.path().starts_with(&scope.user_directory) {
+                usage.user_bytes = usage.user_bytes.saturating_add(size);
+                usage.user_files = usage.user_files.saturating_add(1);
+            }
+            if entry.path().starts_with(&scope.directory) {
+                usage.scope_bytes = usage.scope_bytes.saturating_add(size);
+                usage.scope_files = usage.scope_files.saturating_add(1);
+            }
+        }
+    }
+
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        if directory == scope.root
+            || directory == scope.user_directory
+            || directory == scope.directory
+        {
+            continue;
+        }
+        match tokio::fs::remove_dir(&directory).await {
+            Ok(()) => usage.global_directories = usage.global_directories.saturating_sub(1),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(err) => tracing::warn!(
+                "Failed to prune empty compose staging directory {}: {err}",
+                directory.display()
+            ),
+        }
+    }
+    Ok(usage)
+}
+
+async fn legacy_prune_empty_compose_directories(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<()> {
+    let mut root_entries = match tokio::fs::read_dir(&scope.root).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let mut scanned = 0_usize;
+    while scanned < COMPOSE_ATTACHMENT_DIRECTORY_RECOVERY_SCAN_LIMIT {
+        let Some(entry) = root_entries.next_entry().await? else {
+            break;
+        };
+        scanned += 1;
+        if !entry.file_type().await?.is_dir() {
+            continue;
+        }
+        let directory = entry.path();
+        if directory != scope.user_directory && tokio::fs::remove_dir(&directory).await.is_ok() {
+            continue;
+        }
+        let mut children = match tokio::fs::read_dir(&directory).await {
+            Ok(children) => children,
+            Err(_) => continue,
+        };
+        while scanned < COMPOSE_ATTACHMENT_DIRECTORY_RECOVERY_SCAN_LIMIT {
+            let Some(child) = children.next_entry().await? else {
+                break;
+            };
+            scanned += 1;
+            if child.file_type().await?.is_dir() {
+                let child = child.path();
+                if child != scope.directory {
+                    let _ = tokio::fs::remove_dir(child).await;
+                }
+            }
+        }
+        drop(children);
+        if directory != scope.user_directory {
+            let _ = tokio::fs::remove_dir(&directory).await;
+        }
+    }
+    Ok(())
+}
+
+async fn legacy_remove_empty_compose_scope(scope: &LegacyComposeStagingScope) {
+    for directory in [&scope.directory, &scope.user_directory] {
+        if let Err(err) = tokio::fs::remove_dir(directory).await {
+            if !matches!(
+                err.kind(),
+                std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+            ) {
+                tracing::warn!(
+                    "Failed to prune empty compose staging directory {}: {err}",
+                    directory.display()
+                );
+            }
+        }
+    }
+}
+
+async fn legacy_stage_compose_attachment(
+    scope: &LegacyComposeStagingScope,
+    token: &str,
+    data: &[u8],
+    allow_existing: bool,
+) -> Result<(), String> {
+    if !legacy_compose_attachment_token_is_valid(token) {
+        return Err("Invalid attachment token".to_string());
+    }
+    if data.len() > COMPOSE_ATTACHMENT_LIMIT_BYTES {
+        return Err(format!(
+            "Attachment exceeds the {} MiB per-file limit",
+            COMPOSE_ATTACHMENT_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let _permit = tokio::time::timeout(
+        Duration::from_secs(10),
+        compose_attachment_staging_semaphore().acquire(),
+    )
+    .await
+    .map_err(|_| "Attachment staging is busy; retry later".to_string())?
+    .map_err(|_| "Attachment staging is unavailable".to_string())?;
+    legacy_prepare_compose_staging_scope(scope)
+        .await
+        .map_err(|err| format!("Could not secure attachment staging directory: {err}"))?;
+
+    let target = scope
+        .path(token)
+        .ok_or_else(|| "Invalid attachment token".to_string())?;
+    if allow_existing {
+        if let Ok(metadata) = tokio::fs::symlink_metadata(&target).await {
+            if metadata.file_type().is_file()
+                && usize::try_from(metadata.len()).unwrap_or(usize::MAX)
+                    <= COMPOSE_ATTACHMENT_LIMIT_BYTES
+            {
+                return Ok(());
+            }
+            return Err("Cached attachment is invalid".to_string());
+        }
+    } else if tokio::fs::symlink_metadata(&target).await.is_ok() {
+        return Err("Attachment token collision".to_string());
+    }
+
+    let usage = match legacy_compose_staging_usage(scope).await {
+        Ok(usage) => usage,
+        Err(err) => {
+            legacy_remove_empty_compose_scope(scope).await;
+            return Err(format!("Could not inspect attachment staging quota: {err}"));
+        }
+    };
+    if usage.scope_files >= COMPOSE_ATTACHMENT_LIMIT
+        || usage.user_files >= COMPOSE_ATTACHMENT_USER_FILE_LIMIT
+        || usage.global_files >= COMPOSE_ATTACHMENT_GLOBAL_FILE_LIMIT
+        || usage.global_directories >= COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT
+        || data.len() > COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES.saturating_sub(usage.scope_bytes)
+        || data.len() > COMPOSE_ATTACHMENT_USER_LIMIT_BYTES.saturating_sub(usage.user_bytes)
+        || data.len() > COMPOSE_ATTACHMENT_GLOBAL_LIMIT_BYTES.saturating_sub(usage.global_bytes)
+    {
+        legacy_remove_empty_compose_scope(scope).await;
+        return Err(format!(
+            "Attachment staging exceeds the per-account {} MiB/{} file, per-user {} MiB/{} file, or global {} MiB/{} file/{} directory quota",
+            COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES / 1024 / 1024,
+            COMPOSE_ATTACHMENT_LIMIT,
+            COMPOSE_ATTACHMENT_USER_LIMIT_BYTES / 1024 / 1024,
+            COMPOSE_ATTACHMENT_USER_FILE_LIMIT,
+            COMPOSE_ATTACHMENT_GLOBAL_LIMIT_BYTES / 1024 / 1024,
+            COMPOSE_ATTACHMENT_GLOBAL_FILE_LIMIT,
+            COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT,
+        ));
+    }
+
+    let partial = scope.directory.join(format!(
+        ".{token}.{}.partial",
+        legacy_random_compose_attachment_token()
+    ));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&partial)
+        .await
+        .map_err(|err| format!("Could not create staged attachment: {err}"))?;
+    if let Err(err) = file.write_all(data).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(format!("Could not write staged attachment: {err}"));
+    }
+    if let Err(err) = file.flush().await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(format!("Could not flush staged attachment: {err}"));
+    }
+    drop(file);
+    if let Err(err) = tokio::fs::rename(&partial, &target).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(format!("Could not finalize staged attachment: {err}"));
+    }
+    Ok(())
+}
+
+async fn legacy_delete_staged_compose_attachments(
+    scope: &LegacyComposeStagingScope,
+    attachments: &[LegacyComposeAttachment],
+) {
+    let _permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        compose_attachment_staging_semaphore().acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            tracing::warn!("Could not acquire attachment staging cleanup admission");
+            return;
+        }
+    };
+    for attachment in attachments {
+        if let Some(path) = scope.path(&attachment.spec.token) {
+            if let Err(err) = tokio::fs::remove_file(&path).await {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        "Could not remove sent compose attachment {}: {err}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    legacy_remove_empty_compose_scope(scope).await;
+}
+
+struct LegacyUploadPart {
+    file_name: String,
+    mime_type: String,
+    data: Vec<u8>,
+}
+
+fn legacy_upload_part(content_type: &str, body: &[u8]) -> Option<LegacyUploadPart> {
+    multipart_parts(content_type, body)?
+        .into_iter()
+        .find(|part| multipart_field_name(&part.headers) == Some("uploader"))
+        .map(|part| LegacyUploadPart {
+            file_name: multipart_disposition_parameter(&part.headers, "filename")
+                .unwrap_or_default(),
+            mime_type: multipart_header_value(&part.headers, "content-type").unwrap_or_default(),
+            data: part.value,
+        })
+}
+
+async fn native_legacy_upload(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    headers: &HeaderMap,
+    body: &[u8],
+    session: &fm_session::Session,
+) -> Response {
+    let scope =
+        match legacy_compose_staging_scope_for_payload(state, original_action, payload, session)
+            .await
+        {
+            Ok(scope) => scope,
+            Err(response) => return response,
+        };
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let Some(upload) = legacy_upload_part(&content_type, body) else {
+        return legacy_upload_error(original_action, 4, "No file uploaded");
+    };
+    if upload.data.len() > COMPOSE_ATTACHMENT_LIMIT_BYTES {
+        return legacy_upload_error(
+            original_action,
+            1,
+            format!(
+                "File exceeds the {} MiB attachment limit",
+                COMPOSE_ATTACHMENT_LIMIT_BYTES / 1024 / 1024
+            ),
+        );
+    }
+    if legacy_validate_attachment_text(
+        &upload.file_name,
+        COMPOSE_ATTACHMENT_FILENAME_LIMIT_BYTES,
+        false,
+    )
+    .is_err()
+    {
+        return legacy_upload_error(original_action, 99, "Invalid attachment filename");
+    }
+
+    let token = legacy_random_compose_attachment_token();
+    if let Err(message) = legacy_stage_compose_attachment(&scope, &token, &upload.data, false).await
+    {
+        return legacy_upload_error(original_action, 7, message);
+    }
+    let mime_type = mime_type_from_hint(&upload.mime_type, &upload.file_name);
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": {
+                "Attachment": {
+                    "name": upload.file_name,
+                    "tempName": token,
+                    "mimeType": mime_type,
+                    "size": upload.data.len(),
+                }
+            }
+        }),
+    )
+}
+
+fn legacy_upload_error(original_action: &str, code: u16, message: impl Into<String>) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": {
+                "code": code,
+                "message": message.into(),
+            }
+        }),
+    )
+}
+
+/// Removes top-level temp files in `tmp_dir` older than `max_age` to prevent
+/// unbounded disk growth from attachment ZIP downloads. Compose staging has a
+/// separate recursive, quota-aware cleanup path.
 /// Logs a warning on directory read errors but never returns an error.
 async fn cleanup_temp_files(tmp_dir: &str, max_age: Duration) {
     let mut entries = match tokio::fs::read_dir(tmp_dir).await {
@@ -7220,12 +8622,16 @@ async fn cleanup_temp_files(tmp_dir: &str, max_age: Duration) {
     loop {
         match entries.next_entry().await {
             Ok(Some(entry)) => {
-                if let Ok(modified) = entry.metadata().await.map(|m| m.modified()) {
-                    if modified.is_ok_and(|m| m < cutoff) {
-                        let path = entry.path();
-                        if tokio::fs::remove_file(&path).await.is_err() {
-                            tracing::warn!("Failed to remove stale temp file: {}", path.display());
-                        }
+                if entry.file_type().await.is_ok_and(|kind| kind.is_file())
+                    && entry
+                        .metadata()
+                        .await
+                        .and_then(|metadata| metadata.modified())
+                        .is_ok_and(|modified| modified < cutoff)
+                {
+                    let path = entry.path();
+                    if tokio::fs::remove_file(&path).await.is_err() {
+                        tracing::warn!("Failed to remove stale temp file: {}", path.display());
                     }
                 }
             }
@@ -7242,17 +8648,32 @@ async fn native_legacy_message_upload_attachments(
     payload: &Value,
     session: &fm_session::Session,
 ) -> Response {
-    native_legacy_message_upload_attachments_with_fetcher(
-        state,
-        original_action,
-        payload,
-        session,
-        MESSAGE_BODY_FETCH_DEADLINE,
-        |config, password, folder, uid, mime_index| async move {
-            fetch_mime_part(config, &password, &folder, uid, &mime_index).await
-        },
+    match tokio::time::timeout(
+        MESSAGE_UPLOAD_ATTACHMENTS_ACTION_DEADLINE,
+        native_legacy_message_upload_attachments_with_fetcher(
+            state,
+            original_action,
+            payload,
+            session,
+            MESSAGE_BODY_FETCH_DEADLINE,
+            |config, password, folder, uid, mime_index| async move {
+                fetch_mime_part_bounded(
+                    config,
+                    &password,
+                    &folder,
+                    uid,
+                    &mime_index,
+                    COMPOSE_ATTACHMENT_LIMIT_BYTES,
+                )
+                .await
+            },
+        ),
     )
     .await
+    {
+        Ok(response) => response,
+        Err(_) => json_result_error(original_action, "Attachment upload request timed out"),
+    }
 }
 
 async fn native_legacy_message_upload_attachments_with_fetcher<F, Fut>(
@@ -7264,127 +8685,156 @@ async fn native_legacy_message_upload_attachments_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut + Sync,
+    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>> + Send,
 {
-    let (config, password) =
-        match legacy_imap_connection_context(state, original_action, payload, session).await {
-            Ok(connection) => connection,
+    let (scope, config, password) =
+        match legacy_compose_imap_staging_context(state, original_action, payload, session).await {
+            Ok(context) => context,
             Err(response) => return response,
         };
-
-    let attachments = match payload.get("attachments") {
-        Some(Value::Array(arr)) => arr.clone(),
-        _ => {
-            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": []}));
-        }
+    let attachments = match legacy_message_upload_raw_keys(payload) {
+        Ok(attachments) => attachments,
+        Err(message) => return json_result_error(original_action, &message),
     };
-
-    let tmp_dir = state.config().tmp_dir.clone();
-    if let Err(err) = tokio::fs::create_dir_all(&tmp_dir).await {
-        tracing::error!("Failed to create temp directory {tmp_dir}: {err}");
+    if attachments.is_empty() {
         return json_value_envelope(StatusCode::OK, original_action, json!({"Result": []}));
     }
-    cleanup_temp_files(&tmp_dir, Duration::from_secs(3600)).await;
 
-    // Process attachments in parallel — each is an independent IMAP fetch
-    // with its own connection (cloned config + password). Results are
-    // collected in input order via join_all.
-    let futures = attachments.iter().map(|attachment| {
-        let raw_key_str = attachment.as_str().unwrap_or_default().to_string();
-        let tmp_dir = tmp_dir.clone();
-        let config = config.clone();
-        let password = password.clone();
-        let fetcher = &fetcher;
+    // The 52 MiB worst-case fetch reservation makes one item the intentional
+    // per-request concurrency. Schedule lazily so later items do not spend
+    // their admission/fetch deadlines waiting behind earlier items, and so a
+    // single request cannot enqueue 100 global-semaphore waiters at once.
+    let results = futures::stream::iter(attachments.iter())
+        .then(|attachment| {
+            let raw_key_str = attachment.as_str().unwrap_or_default().to_string();
+            let scope = scope.clone();
+            let config = config.clone();
+            let password = password.clone();
+            let fetcher = &fetcher;
 
-        async move {
-            let Some(raw_values) = legacy_raw_key_json(&raw_key_str) else {
-                return json!(false);
-            };
+            async move {
+                let Some(raw_values) = legacy_raw_key_json(&raw_key_str) else {
+                    return json!(false);
+                };
 
-            let folder = raw_values
-                .get("folder")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let mime_index = raw_values
-                .get("mimeIndex")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let mime_type_hint = raw_values
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let file_name = raw_values
-                .get("fileName")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+                let folder = raw_values
+                    .get("folder")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let mime_index = raw_values
+                    .get("mimeIndex")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let mime_type_hint = raw_values
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let file_name = raw_values
+                    .get("fileName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
 
-            if uid == 0 || folder.is_empty() {
-                return json!(false);
-            }
+                if uid == 0 || folder.is_empty() {
+                    return json!(false);
+                }
 
-            // tempName = sha1(raw_key_string)
-            let temp_name = hex::encode(Sha1::digest(raw_key_str.as_bytes()));
-            let file_path = format!("{tmp_dir}/{temp_name}");
+                // tempName = sha1(raw_key_string)
+                let temp_name = hex::encode(Sha1::digest(raw_key_str.as_bytes()));
+                let Some(file_path) = scope.path(&temp_name) else {
+                    return json!(false);
+                };
 
-            // Check if file already cached
-            if tokio::fs::metadata(&file_path).await.is_ok() {
+                // Validate without creating on cache reads. A miss proceeds to
+                // the write path, which creates and revalidates private dirs.
+                match legacy_validate_compose_staging_scope(&scope).await {
+                    Ok(true) => {
+                        if let Ok(metadata) = tokio::fs::symlink_metadata(&file_path).await {
+                            if metadata.file_type().is_file()
+                                && usize::try_from(metadata.len()).unwrap_or(usize::MAX)
+                                    <= COMPOSE_ATTACHMENT_LIMIT_BYTES
+                            {
+                                let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
+                                return json!({
+                                    "tempName": temp_name,
+                                    "mimeType": mime_type,
+                                });
+                            }
+                            return json!(false);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!("Rejected untrusted attachment cache tree: {err}");
+                        return json!(false);
+                    }
+                }
+
+                // Fetch via IMAP
+                let _fetch_permit = match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    compose_attachment_fetch_semaphore().acquire(),
+                )
+                .await
+                {
+                    Ok(Ok(permit)) => permit,
+                    _ => return json!(false),
+                };
+                // Hold admission for the four-times decoded quoted-printable wire
+                // ceiling (including soft line breaks) plus the decoded staging
+                // Vec until the fetch result is written.
+                let fetch_memory_units = compose_attachment_fetch_memory_permit_units();
+                let _fetch_memory_permit = match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    Arc::clone(compose_attachment_memory_semaphore())
+                        .acquire_many_owned(fetch_memory_units),
+                )
+                .await
+                {
+                    Ok(Ok(permit)) => permit,
+                    _ => return json!(false),
+                };
+                let data = match tokio::time::timeout(
+                    fetch_deadline,
+                    fetcher(config, password, folder, uid, mime_index),
+                )
+                .await
+                {
+                    Ok(Ok(Some(data))) => data,
+                    Ok(Ok(None)) => {
+                        return json!(false);
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!("Failed to fetch attachment for upload: {err}");
+                        return json!(false);
+                    }
+                    Err(_) => {
+                        tracing::warn!("Attachment upload fetch timed out");
+                        return json!(false);
+                    }
+                };
+
+                if let Err(err) =
+                    legacy_stage_compose_attachment(&scope, &temp_name, &data, true).await
+                {
+                    tracing::warn!("Failed to stage fetched attachment: {err}");
+                    return json!(false);
+                }
+
                 let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
-                return json!({
+                json!({
                     "tempName": temp_name,
                     "mimeType": mime_type,
-                });
+                })
             }
-
-            // Fetch via IMAP
-            let data = match tokio::time::timeout(
-                fetch_deadline,
-                fetcher(config, password, folder, uid, mime_index),
-            )
-            .await
-            {
-                Ok(Ok(Some(data))) => data,
-                Ok(Ok(None)) => {
-                    return json!(false);
-                }
-                Ok(Err(err)) => {
-                    tracing::warn!("Failed to fetch attachment for upload: {err}");
-                    return json!(false);
-                }
-                Err(_) => {
-                    tracing::warn!("Attachment upload fetch timed out");
-                    return json!(false);
-                }
-            };
-
-            // Write to a .partial file first, then rename atomically so the
-            // cache path only ever holds a complete file — preventing a
-            // previously interrupted fetch from serving a truncated result.
-            let partial_path = format!("{file_path}.partial");
-            if let Err(err) = tokio::fs::write(&partial_path, &data).await {
-                tracing::error!("Failed to write attachment temp file {partial_path}: {err}");
-                return json!(false);
-            }
-            if let Err(err) = tokio::fs::rename(&partial_path, &file_path).await {
-                tracing::error!("Failed to finalize attachment temp file {file_path}: {err}");
-                let _ = tokio::fs::remove_file(&partial_path).await;
-                return json!(false);
-            }
-
-            let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
-            json!({
-                "tempName": temp_name,
-                "mimeType": mime_type,
-            })
-        }
-    });
-
-    let results = join_all(futures).await;
+        })
+        .collect::<Vec<_>>()
+        .await;
 
     json_value_envelope(
         StatusCode::OK,
@@ -7393,6 +8843,36 @@ where
             "Result": results
         }),
     )
+}
+
+fn legacy_message_upload_raw_keys(payload: &Value) -> Result<&[Value], String> {
+    let Some(Value::Array(attachments)) = payload.get("attachments") else {
+        return Ok(&[]);
+    };
+    if attachments.len() > COMPOSE_ATTACHMENT_LIMIT {
+        return Err(format!(
+            "Attachment request exceeds the {COMPOSE_ATTACHMENT_LIMIT} file limit"
+        ));
+    }
+    let mut total = 0_usize;
+    for raw_key in attachments.iter().filter_map(Value::as_str) {
+        if raw_key.len() > COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES {
+            return Err(format!(
+                "Attachment key exceeds the {} KiB limit",
+                COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES / 1024
+            ));
+        }
+        total = total
+            .checked_add(raw_key.len())
+            .ok_or_else(|| "Attachment key size overflow".to_string())?;
+        if total > COMPOSE_ATTACHMENT_RAW_KEY_TOTAL_LIMIT_BYTES {
+            return Err(format!(
+                "Attachment keys exceed the {} KiB aggregate limit",
+                COMPOSE_ATTACHMENT_RAW_KEY_TOTAL_LIMIT_BYTES / 1024
+            ));
+        }
+    }
+    Ok(attachments)
 }
 
 fn mime_type_from_hint(mime_type_hint: &str, file_name: &str) -> String {
@@ -11274,6 +12754,7 @@ fn plugin_request_from_http(
         .get("_action")
         .or_else(|| query.get("Action"))
         .cloned()
+        .or_else(|| legacy_action.clone())
         .unwrap_or_default();
 
     if !body.is_empty() {
@@ -11394,12 +12875,25 @@ fn multipart_parts(content_type: &str, body: &[u8]) -> Option<Vec<MultipartPart>
     let first = find_multipart_delimiter(body, &delimiter, 0)?;
     let mut cursor = multipart_delimiter_after(body, first, &delimiter)?;
     let mut parts = Vec::new();
+    let mut delimiter_count = 0_usize;
+    let mut header_bytes = 0_usize;
 
     while let MultipartCursor::PartStart(start) = cursor {
+        delimiter_count = delimiter_count.checked_add(1)?;
+        if delimiter_count > MULTIPART_PART_LIMIT {
+            return None;
+        }
         let next = find_multipart_delimiter(body, &delimiter, start)?;
         let part = trim_multipart_part_end(&body[start..next]);
         if let Some((headers, value)) = split_multipart_part_bytes(part) {
-            parts.push(MultipartPart { headers, value });
+            header_bytes = header_bytes.checked_add(headers.len())?;
+            if header_bytes > MULTIPART_HEADER_TOTAL_LIMIT_BYTES {
+                return None;
+            }
+            parts.push(MultipartPart {
+                headers: String::from_utf8_lossy(headers).to_string(),
+                value: value.to_vec(),
+            });
         }
         cursor = multipart_delimiter_after(body, next, &delimiter)?;
     }
@@ -11413,14 +12907,19 @@ enum MultipartCursor {
 }
 
 fn find_multipart_delimiter(body: &[u8], delimiter: &[u8], start: usize) -> Option<usize> {
-    let mut search_start = start;
-    while search_start <= body.len() {
-        let offset = find_bytes(&body[search_start..], delimiter)?;
-        let index = search_start + offset;
+    let mut index = start.min(body.len());
+    if index > 0 && body.get(index - 1) != Some(&b'\n') {
+        index += body[index..].iter().position(|byte| *byte == b'\n')? + 1;
+    }
+
+    // MIME boundaries can only begin a line. Advancing from newline to
+    // newline makes every input byte participate in at most one candidate
+    // comparison, even for long repetitive boundaries and invalid trailers.
+    while index <= body.len() {
         if multipart_delimiter_after(body, index, delimiter).is_some() {
             return Some(index);
         }
-        search_start = index + 1;
+        index += body[index..].iter().position(|byte| *byte == b'\n')? + 1;
     }
     None
 }
@@ -11458,9 +12957,37 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
-    haystack
-        .windows(needle.len())
-        .position(|value| value == needle)
+    if needle.len() > haystack.len() {
+        return None;
+    }
+
+    // KMP keeps multipart scanning linear even for an RFC-valid boundary made
+    // of long, repetitive near-matches.
+    let mut prefix = vec![0_usize; needle.len()];
+    let mut matched = 0;
+    for index in 1..needle.len() {
+        while matched > 0 && needle[index] != needle[matched] {
+            matched = prefix[matched - 1];
+        }
+        if needle[index] == needle[matched] {
+            matched += 1;
+            prefix[index] = matched;
+        }
+    }
+
+    matched = 0;
+    for (index, byte) in haystack.iter().enumerate() {
+        while matched > 0 && *byte != needle[matched] {
+            matched = prefix[matched - 1];
+        }
+        if *byte == needle[matched] {
+            matched += 1;
+            if matched == needle.len() {
+                return Some(index + 1 - needle.len());
+            }
+        }
+    }
+    None
 }
 
 fn trim_multipart_part_end(mut value: &[u8]) -> &[u8] {
@@ -11472,18 +12999,12 @@ fn trim_multipart_part_end(mut value: &[u8]) -> &[u8] {
     value
 }
 
-fn split_multipart_part_bytes(part: &[u8]) -> Option<(String, Vec<u8>)> {
+fn split_multipart_part_bytes(part: &[u8]) -> Option<(&[u8], &[u8])> {
     if let Some(index) = find_bytes(part, b"\r\n\r\n") {
-        return Some((
-            String::from_utf8_lossy(&part[..index]).to_string(),
-            part[index + 4..].to_vec(),
-        ));
+        return Some((&part[..index], &part[index + 4..]));
     }
     let index = find_bytes(part, b"\n\n")?;
-    Some((
-        String::from_utf8_lossy(&part[..index]).to_string(),
-        part[index + 2..].to_vec(),
-    ))
+    Some((&part[..index], &part[index + 2..]))
 }
 
 fn multipart_action(content_type: &str, body: &[u8]) -> Option<String> {
@@ -11504,8 +13025,37 @@ fn multipart_action(content_type: &str, body: &[u8]) -> Option<String> {
 fn multipart_boundary(content_type: &str) -> Option<String> {
     content_type.split(';').find_map(|segment| {
         let segment = segment.trim();
-        let boundary = segment.strip_prefix("boundary=")?;
-        Some(boundary.trim_matches('"').to_string())
+        let (name, raw_value) = segment.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            return None;
+        }
+        let raw_value = raw_value.trim();
+        let boundary = raw_value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(raw_value);
+        let valid = (1..=70).contains(&boundary.len())
+            && !boundary.ends_with(' ')
+            && boundary.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'\''
+                            | b'('
+                            | b')'
+                            | b'+'
+                            | b'_'
+                            | b','
+                            | b'-'
+                            | b'.'
+                            | b'/'
+                            | b':'
+                            | b'='
+                            | b'?'
+                            | b' '
+                    )
+            });
+        valid.then(|| boundary.to_string())
     })
 }
 
@@ -11523,6 +13073,48 @@ fn multipart_field_name(headers: &str) -> Option<&str> {
                 Some(name.trim_matches('"'))
             })
         })
+}
+
+fn multipart_disposition_parameter(headers: &str, parameter_name: &str) -> Option<String> {
+    let line = headers.lines().find(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("content-disposition"))
+    })?;
+    let (_, value) = line.split_once(':')?;
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+        } else if quoted && character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else if character == ';' && !quoted {
+            segments.push(std::mem::take(&mut current));
+        } else {
+            current.push(character);
+        }
+    }
+    segments.push(current);
+    segments.into_iter().find_map(|segment| {
+        let (name, value) = segment.split_once('=')?;
+        name.trim()
+            .eq_ignore_ascii_case(parameter_name)
+            .then(|| value.trim().trim_matches('"').to_string())
+    })
+}
+
+fn multipart_header_value(headers: &str, header_name: &str) -> Option<String> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(header_name)
+            .then(|| value.trim().to_string())
+    })
 }
 
 fn map_to_value(map: &HashMap<String, String>) -> Value {
@@ -12774,8 +14366,11 @@ fn message_body_parts_response(action: &str, parts: Vec<BodyPreviewPart>) -> Res
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        sync::{Arc, Mutex},
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use axum::{
@@ -13821,6 +15416,147 @@ mod tests {
         assert_eq!(body["Action"], "FrickmailMe");
     }
 
+    #[tokio::test]
+    async fn native_upload_rejects_query_and_body_action_aliases() {
+        for request in [
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?_action=Upload")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("Action=Upload"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?/Json/&q[]=/0/Upload/")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let body = read_json(app().oneshot(request).await.unwrap()).await;
+            assert_eq!(body["Action"], "Upload");
+            assert_eq!(body["Result"]["code"], 1);
+            assert!(body["Result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("service route"));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_upload_rejects_unauthenticated_request_before_polling_body() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stream_polls = Arc::clone(&polls);
+        let body = Body::from_stream(futures::stream::poll_fn(move |_| {
+            stream_polls.fetch_add(1, Ordering::SeqCst);
+            std::task::Poll::<Option<Result<axum::body::Bytes, std::io::Error>>>::Pending
+        }));
+        let response = tokio::time::timeout(
+            Duration::from_millis(200),
+            app().oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/?/Upload/&q[]=/0/")
+                    .header("content-type", "multipart/form-data; boundary=upload-test")
+                    .body(body)
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("unauthenticated upload should not wait for its body")
+        .unwrap();
+        let response = read_json(response).await;
+
+        assert_eq!(response["Result"]["message"], "Not authenticated");
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn native_upload_slow_bodies_release_weighted_memory_admission() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(
+            2 * super::COMPOSE_UPLOAD_MEMORY_PERMIT_UNITS as usize,
+        ));
+        let spawn_slow_upload = |semaphore: Arc<tokio::sync::Semaphore>| {
+            tokio::spawn(async move {
+                let body = Body::from_stream(futures::stream::pending::<
+                    Result<axum::body::Bytes, std::io::Error>,
+                >());
+                super::legacy_collect_native_upload_body(
+                    body,
+                    super::COMPOSE_ATTACHMENT_LIMIT_BYTES,
+                    semaphore,
+                    Duration::from_millis(200),
+                    Duration::from_millis(50),
+                )
+                .await
+            })
+        };
+        let first = spawn_slow_upload(Arc::clone(&semaphore));
+        let second = spawn_slow_upload(Arc::clone(&semaphore));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(semaphore.available_permits(), 0);
+
+        for result in [first.await.unwrap(), second.await.unwrap()] {
+            assert_eq!(result.unwrap_err(), "Upload body timed out");
+        }
+        assert_eq!(
+            semaphore.available_permits(),
+            2 * super::COMPOSE_UPLOAD_MEMORY_PERMIT_UNITS as usize
+        );
+    }
+
+    #[test]
+    fn multipart_boundary_enforces_rfc_length_and_character_bounds() {
+        assert_eq!(
+            super::multipart_boundary("multipart/form-data; boundary=valid boundary"),
+            Some("valid boundary".to_string())
+        );
+        for content_type in [
+            "multipart/form-data; boundary=",
+            "multipart/form-data; boundary=\"\"",
+            "multipart/form-data; boundary=\"trailing \"",
+            "multipart/form-data; boundary=bad@boundary",
+            "multipart/form-data; boundary=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert_eq!(super::multipart_boundary(content_type), None);
+        }
+    }
+
+    #[test]
+    fn multipart_delimiter_scan_is_linear_for_repetitive_invalid_candidates() {
+        let boundary = "-".repeat(70);
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        let body = vec![b'-'; super::COMPOSE_ATTACHMENT_LIMIT_BYTES];
+        let started = Instant::now();
+
+        assert!(super::multipart_parts(&content_type, &body).is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "multipart delimiter scanning should make one pass over line starts"
+        );
+    }
+
+    #[test]
+    fn multipart_parser_rejects_max_body_with_excessive_tiny_parts_promptly() {
+        let unit = b"--x\r\nX:y\r\n\r\n\r\n";
+        let closing = b"--x--\r\n";
+        let mut body = Vec::with_capacity(super::COMPOSE_ATTACHMENT_LIMIT_BYTES);
+        while body.len() + unit.len() + closing.len() <= super::COMPOSE_ATTACHMENT_LIMIT_BYTES {
+            body.extend_from_slice(unit);
+        }
+        body.extend_from_slice(closing);
+        let started = Instant::now();
+
+        assert!(super::multipart_parts("multipart/form-data; boundary=x", &body).is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "multipart part-count rejection should stop after the fixed cap"
+        );
+    }
+
     #[test]
     fn legacy_get_plugin_request_includes_raw_key_payload() {
         let uri: Uri = "/?/Json/&q[]=/0/MessageList/&q[]=/encoded-key"
@@ -13852,6 +15588,33 @@ mod tests {
 
         assert_eq!(request.action, "Message");
         assert_eq!(request.payload["RawKey"], "message-key");
+    }
+
+    #[test]
+    fn legacy_upload_service_url_resolves_native_action_without_parsing_the_file_body() {
+        let uri: Uri = "/?/Upload/&q[]=/0/".parse().unwrap();
+        assert_eq!(super::legacy_route_action(&uri).as_deref(), Some("Upload"));
+        assert!(super::legacy_upload_service_route(&uri));
+        for alias in ["/?Upload", "/?/Upload", "/?////Upload/", "/?/upload/"] {
+            let alias: Uri = alias.parse().unwrap();
+            assert!(!super::legacy_upload_service_route(&alias), "{alias}");
+            assert_eq!(super::legacy_route_action(&alias), None, "{alias}");
+        }
+
+        let query = super::query_map(&uri);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "multipart/form-data; boundary=upload-test".parse().unwrap(),
+        );
+        let request = super::plugin_request_from_http(
+            &query,
+            &headers,
+            b"this is intentionally not a parsed multipart body",
+            super::legacy_route_action(&uri),
+        )
+        .unwrap();
+        assert_eq!(request.action, "Upload");
     }
 
     #[tokio::test]
@@ -18314,10 +20077,6 @@ Subject: Empty body metadata\r\n\r\n"
     fn native_compose_rejects_unsupported_content_instead_of_silently_dropping_it() {
         for (payload, expected) in [
             (
-                json!({"attachments": {"tmp": {"name": "report.pdf"}}}),
-                "attachments",
-            ),
-            (
                 json!({"encrypted": "ciphertext"}),
                 "OpenPGP encrypted content",
             ),
@@ -18339,6 +20098,23 @@ Subject: Empty body metadata\r\n\r\n"
         );
         assert_eq!(
             super::legacy_unsupported_compose_feature(
+                &json!({
+                    "attachments": {
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                            "name": "report.pdf",
+                            "inline": false,
+                            "cId": "",
+                            "location": "",
+                            "type": "application/pdf"
+                        }
+                    }
+                }),
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(
                 &json!({"autocrypt": [{"addr": "a@example.com", "keydata": "YQ=="}]}),
                 true
             ),
@@ -18356,6 +20132,318 @@ Subject: Empty body metadata\r\n\r\n"
             ),
             None
         );
+    }
+
+    #[test]
+    fn legacy_compose_builds_regular_and_inline_staged_attachments() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "html": "<p>Report <img src=\"cid:chart@example.com\"></p>",
+            "plain": "Report"
+        });
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .unwrap();
+        request.attachments = vec![
+            super::LegacyComposeAttachment {
+                spec: super::LegacyComposeAttachmentSpec {
+                    token: "a".repeat(40),
+                    file_name: "report.pdf".to_string(),
+                    is_inline: false,
+                    content_id: "report@example.com".to_string(),
+                    content_location: String::new(),
+                    mime_type: "application/pdf".to_string(),
+                    is_linked: false,
+                },
+                data: b"PDF-DATA".to_vec(),
+            },
+            super::LegacyComposeAttachment {
+                spec: super::LegacyComposeAttachmentSpec {
+                    token: "b".repeat(40),
+                    file_name: "chart.png".to_string(),
+                    is_inline: true,
+                    content_id: "<chart@example.com>".to_string(),
+                    content_location: "cid:chart@example.com".to_string(),
+                    mime_type: "image/png".to_string(),
+                    is_linked: true,
+                },
+                data: b"PNG-DATA".to_vec(),
+            },
+        ];
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .unwrap()
+                .formatted(),
+        )
+        .unwrap();
+        assert!(raw.contains("Content-Type: multipart/mixed"));
+        assert!(raw.contains("Content-Type: multipart/related"));
+        assert!(raw.contains("Content-Type: multipart/alternative"));
+        assert!(raw.contains("filename=\"report.pdf\""));
+        assert!(raw.contains("Content-Type: application/pdf; name=\"report.pdf\""));
+        assert!(raw.contains("Content-ID: <report@example.com>"));
+        assert!(raw.contains("Content-Disposition: inline; filename=\"chart.png\""));
+        assert!(raw.contains("Content-Type: image/png; name=\"chart.png\""));
+        assert!(raw.contains("Content-ID: <chart@example.com>"));
+        assert!(raw.contains("Content-Location: cid:chart@example.com"));
+        assert!(raw.contains("UERGLURBVEE="));
+        assert!(raw.contains("UE5HLURBVEE="));
+    }
+
+    #[test]
+    fn legacy_compose_attachment_content_type_encodes_non_ascii_name() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "plain": "attachment"
+        });
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .unwrap();
+        request.attachments = vec![super::LegacyComposeAttachment {
+            spec: super::LegacyComposeAttachmentSpec {
+                token: "d".repeat(40),
+                file_name: "café.pdf".to_string(),
+                is_inline: false,
+                content_id: String::new(),
+                content_location: String::new(),
+                mime_type: "application/pdf".to_string(),
+                is_linked: false,
+            },
+            data: b"PDF".to_vec(),
+        }];
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .unwrap()
+                .formatted(),
+        )
+        .unwrap();
+        assert!(raw.contains("Content-Type: application/pdf; name*=utf-8''caf%C3%A9.pdf"));
+
+        let max_non_ascii_name = format!("{}a", "é".repeat(127));
+        assert_eq!(
+            max_non_ascii_name.len(),
+            super::COMPOSE_ATTACHMENT_FILENAME_LIMIT_BYTES
+        );
+        assert!(super::legacy_attachment_content_type_header(
+            "application/octet-stream",
+            &max_non_ascii_name,
+        )
+        .is_ok());
+        let max_mime_type = format!("application/{}", "x".repeat(243));
+        let error =
+            super::legacy_attachment_content_type_header(&max_mime_type, &max_non_ascii_name)
+                .unwrap_err();
+        assert!(error.contains("line limit"));
+        assert!(raw
+            .split("\r\n")
+            .all(|line| line.len() <= super::RFC5322_HEADER_LINE_LIMIT_BYTES));
+    }
+
+    #[test]
+    fn legacy_compose_attachment_id_and_location_obey_mime_line_limit() {
+        let safe_content_id = "i".repeat(984);
+        let safe_location = "l".repeat(980);
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "plain": "attachment",
+            "attachments": {
+                ("e".repeat(40)): {
+                    "name": "safe.bin",
+                    "inline": true,
+                    "cId": safe_content_id,
+                    "location": safe_location,
+                    "type": "application/octet-stream"
+                }
+            }
+        });
+        assert!(super::legacy_compose_attachment_specs(&payload).is_ok());
+
+        let oversized_id = json!({
+            "attachments": {
+                ("f".repeat(40)): {
+                    "name": "id.bin",
+                    "cId": "i".repeat(super::COMPOSE_ATTACHMENT_CONTENT_ID_LIMIT_BYTES),
+                    "type": "application/octet-stream"
+                }
+            }
+        });
+        assert!(super::legacy_compose_attachment_specs(&oversized_id)
+            .unwrap_err()
+            .contains("MIME line limit"));
+        let oversized_location = json!({
+            "attachments": {
+                ("a".repeat(40)): {
+                    "name": "location.bin",
+                    "location": "l".repeat(super::COMPOSE_ATTACHMENT_LOCATION_LIMIT_BYTES),
+                    "type": "application/octet-stream"
+                }
+            }
+        });
+        assert!(super::legacy_compose_attachment_specs(&oversized_location)
+            .unwrap_err()
+            .contains("MIME line limit"));
+
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .unwrap();
+        request.attachments = vec![super::LegacyComposeAttachment {
+            spec: super::legacy_compose_attachment_specs(&payload)
+                .unwrap()
+                .remove(0),
+            data: b"safe".to_vec(),
+        }];
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .unwrap()
+                .formatted(),
+        )
+        .unwrap();
+        assert!(raw
+            .split("\r\n")
+            .all(|line| line.len() <= super::RFC5322_HEADER_LINE_LIMIT_BYTES));
+    }
+
+    #[test]
+    fn legacy_compose_linked_only_attachment_uses_related_root() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "html": "<img src=\"cid:chart@example.com\">",
+            "plain": "chart"
+        });
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .unwrap();
+        request.attachments = vec![super::LegacyComposeAttachment {
+            spec: super::LegacyComposeAttachmentSpec {
+                token: "c".repeat(40),
+                file_name: "chart.png".to_string(),
+                is_inline: true,
+                content_id: "chart@example.com".to_string(),
+                content_location: String::new(),
+                mime_type: "image/png".to_string(),
+                is_linked: false,
+            },
+            data: b"PNG".to_vec(),
+        }];
+        super::legacy_mark_linked_compose_attachments(&mut request.attachments, &request.html);
+        assert!(request.attachments[0].spec.is_linked);
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .unwrap()
+                .formatted(),
+        )
+        .unwrap();
+        assert!(raw.contains("Content-Type: multipart/related"));
+        assert!(!raw.contains("Content-Type: multipart/mixed"));
+    }
+
+    #[test]
+    fn legacy_compose_cid_linking_is_linear_for_periodic_input() {
+        let periodic = "a".repeat(super::COMPOSE_ATTACHMENT_CONTENT_ID_LIMIT_BYTES - 1);
+        let occurrence = format!("<img src=\"cid:{periodic}x\">");
+        let html = occurrence.repeat(
+            super::COMPOSE_HTML_RAW_LIMIT_BYTES
+                .checked_div(occurrence.len())
+                .unwrap_or_default(),
+        );
+        let mut attachments = (0..super::COMPOSE_ATTACHMENT_LIMIT)
+            .map(|index| super::LegacyComposeAttachment {
+                spec: super::LegacyComposeAttachmentSpec {
+                    token: format!("{index:040x}"),
+                    file_name: format!("part-{index}.bin"),
+                    is_inline: true,
+                    content_id: format!("{periodic}y"),
+                    content_location: String::new(),
+                    mime_type: "application/octet-stream".to_string(),
+                    is_linked: false,
+                },
+                data: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        let started = std::time::Instant::now();
+        super::legacy_mark_linked_compose_attachments(&mut attachments, &html);
+
+        assert!(attachments
+            .iter()
+            .all(|attachment| !attachment.spec.is_linked));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "CID extraction should make one bounded pass over the HTML"
+        );
+    }
+
+    #[test]
+    fn legacy_compose_rfc822_attachment_preserves_raw_bytes_with_eight_bit_cte() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "plain": "Forwarded message"
+        });
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .unwrap();
+        let eml = format!("Subject: café\r\n\r\n{}\r\n", "x".repeat(120));
+        request.attachments = vec![super::LegacyComposeAttachment {
+            spec: super::LegacyComposeAttachmentSpec {
+                token: "d".repeat(40),
+                file_name: "forwarded.eml".to_string(),
+                is_inline: false,
+                content_id: String::new(),
+                content_location: String::new(),
+                mime_type: "message/rfc822".to_string(),
+                is_linked: false,
+            },
+            data: eml.as_bytes().to_vec(),
+        }];
+
+        let raw = super::build_legacy_send_message(&request, false)
+            .unwrap()
+            .formatted();
+        let raw = String::from_utf8(raw).unwrap();
+        assert!(raw.contains("Content-Type: message/rfc822"));
+        assert!(raw.contains("Content-Transfer-Encoding: 8bit"));
+        assert!(raw.contains(&eml));
+        assert!(!raw.contains("Content-Transfer-Encoding: quoted-printable"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn legacy_mime_build_keeps_the_async_runtime_responsive() {
+        let started = Instant::now();
+        let heartbeat = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            started.elapsed()
+        });
+        let build = super::legacy_run_mime_build(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            Ok(())
+        });
+        let (build, heartbeat) = tokio::join!(build, heartbeat);
+
+        build.unwrap();
+        assert!(heartbeat.unwrap() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn legacy_compose_attachment_metadata_rejects_capability_escape_and_header_injection() {
+        for payload in [
+            json!({"attachments": {"../outside": {"name": "report.pdf"}}}),
+            json!({"attachments": {("a".repeat(40)): {"name": "report.pdf\r\nBcc: victim@example.com"}}}),
+            json!({"attachments": {("a".repeat(40)): {"name": "report.pdf", "cId": "ok\r\nX-Evil: yes"}}}),
+            json!({"attachments": []}),
+        ] {
+            assert!(
+                super::legacy_validate_compose_limits(&payload).is_err(),
+                "payload unexpectedly passed: {payload}"
+            );
+        }
     }
 
     #[test]
@@ -24454,9 +26542,627 @@ Subject: Empty body metadata\r\n\r\n"
     // --- native_legacy_message_upload_attachments tests ---
 
     #[tokio::test]
+    async fn native_upload_stages_an_account_isolated_compose_capability() {
+        let key = [54_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-native-upload-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) = message_body_test_state_with_config(2942, 2943, &key, config).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "multipart/form-data; boundary=upload-boundary"
+                .parse()
+                .unwrap(),
+        );
+        let body = b"--upload-boundary\r\nContent-Disposition: form-data; name=\"uploader\"; filename=\"quarter; report.pdf\"\r\nContent-Type: application/pdf\r\n\r\nPDF-CONTENT\r\n--upload-boundary--\r\n";
+
+        let response = super::native_legacy_upload(
+            &state,
+            "Upload",
+            &json!({"account_id": 2943}),
+            &headers,
+            body,
+            &session,
+        )
+        .await;
+        let response = read_json(response).await;
+        let attachment = &response["Result"]["Attachment"];
+        assert_eq!(attachment["name"], "quarter; report.pdf");
+        assert_eq!(attachment["mimeType"], "application/pdf");
+        assert_eq!(attachment["size"], 11);
+        let token = attachment["tempName"].as_str().unwrap();
+        assert!(super::legacy_compose_attachment_token_is_valid(token));
+
+        let scope = super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 2942, 2943);
+        let staged_path = scope.path(token).unwrap();
+        assert_eq!(tokio::fs::read(&staged_path).await.unwrap(), b"PDF-CONTENT");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                tokio::fs::metadata(&staged_path)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                tokio::fs::metadata(&scope.directory)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        let other_account =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 2942, 2944);
+        let attachment_payload = json!({
+            "attachments": {
+                (token): {
+                    "name": "quarter; report.pdf",
+                    "inline": false,
+                    "type": "application/pdf"
+                }
+            }
+        });
+        assert!(
+            super::legacy_load_compose_attachments(&other_account, &attachment_payload)
+                .await
+                .unwrap_err()
+                .contains("missing or expired")
+        );
+        let (loaded, _memory_permit) =
+            super::legacy_load_compose_attachments(&scope, &attachment_payload)
+                .await
+                .unwrap();
+        assert_eq!(loaded[0].data, b"PDF-CONTENT");
+
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compose_staging_rejects_writes_beyond_the_aggregate_disk_quota() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-staging-quota-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let scope = super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 3942, 3943);
+        tokio::fs::create_dir_all(&scope.directory).await.unwrap();
+        for token in ["a".repeat(40), "b".repeat(40)] {
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(scope.path(&token).unwrap())
+                .await
+                .unwrap();
+            file.set_len(super::COMPOSE_ATTACHMENT_LIMIT_BYTES as u64)
+                .await
+                .unwrap();
+        }
+
+        let error = super::legacy_stage_compose_attachment(
+            &scope,
+            &"c".repeat(40),
+            b"one byte over aggregate quota",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("quota"));
+
+        let same_user_other_account =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 3942, 3999);
+        assert!(super::legacy_stage_compose_attachment(
+            &same_user_other_account,
+            &"d".repeat(40),
+            b"user quota",
+            false,
+        )
+        .await
+        .unwrap_err()
+        .contains("quota"));
+
+        let other_user =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 4942, 4999);
+        super::legacy_stage_compose_attachment(
+            &other_user,
+            &"e".repeat(40),
+            b"another tenant retains a fair reservation",
+            false,
+        )
+        .await
+        .unwrap();
+
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compose_staging_rejects_symlinked_root_without_touching_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let suffix = super::legacy_random_compose_attachment_token();
+        let temp_root = std::env::temp_dir().join(format!("frickmail-symlink-root-{suffix}"));
+        let victim = std::env::temp_dir().join(format!("frickmail-symlink-victim-{suffix}"));
+        tokio::fs::create_dir(&temp_root).await.unwrap();
+        tokio::fs::create_dir(&victim).await.unwrap();
+        tokio::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+        let victim_file = victim.join("must-survive.txt");
+        tokio::fs::write(&victim_file, b"do not delete")
+            .await
+            .unwrap();
+        symlink(&victim, temp_root.join("compose-attachments")).unwrap();
+        let scope =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 7_942, 7_943);
+        let token = "a".repeat(40);
+        tokio::fs::write(victim.join(&token), b"attacker-controlled")
+            .await
+            .unwrap();
+
+        let load_error = super::legacy_load_compose_attachments(
+            &scope,
+            &json!({
+                "attachments": {
+                    (token.clone()): {
+                        "name": "victim.txt",
+                        "inline": false,
+                        "type": "text/plain"
+                    }
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(load_error.contains("secure attachment staging"));
+
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let key = [71_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(7_942, 7_943, &key, config).await;
+        let raw_key = URL_SAFE_NO_PAD.encode(
+            json!({
+                "folder": "INBOX",
+                "uid": 1,
+                "mimeIndex": "2",
+                "fileName": "victim.txt",
+                "mimeType": "text/plain"
+            })
+            .to_string(),
+        );
+        let response = super::native_legacy_message_upload_attachments_with_fetcher(
+            &state,
+            "MessageUploadAttachments",
+            &json!({"account_id": 7_943, "attachments": [raw_key]}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid, _mime_index| async move {
+                panic!("an untrusted cache tree must be rejected before fetch")
+            },
+        )
+        .await;
+        let response = read_json(response).await;
+        assert_eq!(response["Result"][0], false);
+
+        let error = super::legacy_stage_compose_attachment(&scope, &token, b"blocked", false)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("secure attachment staging"));
+        assert_eq!(
+            tokio::fs::read(&victim_file).await.unwrap(),
+            b"do not delete"
+        );
+        assert_eq!(
+            tokio::fs::metadata(&victim)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+        tokio::fs::remove_dir_all(&victim).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_staging_never_chmods_root_owned_shared_system_base() {
+        assert!(!super::legacy_should_tighten_staging_base(0, 0, 0o41777));
+        assert!(!super::legacy_should_tighten_staging_base(0, 0, 0o40755));
+        assert!(super::legacy_should_tighten_staging_base(
+            10_001, 10_001, 0o40755
+        ));
+        assert!(super::legacy_should_tighten_staging_base(0, 0, 0o40777));
+        assert!(!super::legacy_should_tighten_staging_base(
+            10_001, 10_002, 0o40777
+        ));
+    }
+
+    #[tokio::test]
+    async fn compose_cache_misses_and_empty_message_upload_leave_no_directories() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-staging-read-miss-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let scope =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 10_942, 10_943);
+        let token = "f".repeat(40);
+        let error = super::legacy_load_compose_attachments(
+            &scope,
+            &json!({
+                "attachments": {
+                    (token): {
+                        "name": "missing.txt",
+                        "inline": false,
+                        "type": "text/plain"
+                    }
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("missing or expired"));
+        assert!(!temp_root.exists());
+
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let key = [72_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(10_942, 10_943, &key, config).await;
+        let response = super::native_legacy_message_upload_attachments_with_fetcher(
+            &state,
+            "MessageUploadAttachments",
+            &json!({"account_id": 10_943, "attachments": []}),
+            &session,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid, _mime_index| async move {
+                panic!("empty attachment request must not fetch")
+            },
+        )
+        .await;
+        let response = read_json(response).await;
+        assert_eq!(response["Result"].as_array().unwrap().len(), 0);
+        assert!(!temp_root.exists());
+    }
+
+    #[tokio::test]
+    async fn compose_staging_prunes_stale_scopes_and_recovers_over_directory_cap() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-staging-directories-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let old_scope =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 8_942, 8_943);
+        super::legacy_stage_compose_attachment(&old_scope, &"b".repeat(40), b"stale", false)
+            .await
+            .unwrap();
+        let current_scope =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 9_942, 9_943);
+        super::legacy_prepare_compose_staging_scope(&current_scope)
+            .await
+            .unwrap();
+
+        super::legacy_compose_staging_usage_with_max_age(&current_scope, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(!old_scope.directory.exists());
+        assert!(!old_scope.user_directory.exists());
+
+        let historical_scope_count = super::COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT / 2 + 2;
+        for index in 0..historical_scope_count {
+            tokio::fs::create_dir_all(
+                current_scope
+                    .root
+                    .join(format!("historical-user-{index}"))
+                    .join("account-old"),
+            )
+            .await
+            .unwrap();
+        }
+        let usage = super::legacy_compose_staging_usage(&current_scope)
+            .await
+            .unwrap();
+        assert!(usage.global_directories < super::COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT);
+        assert!(!current_scope.root.join("historical-user-0").exists());
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compose_send_cleanup_waits_for_inflight_staging_before_pruning_scope() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-staging-cleanup-race-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let scope =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 11_942, 11_943);
+        let token = "c".repeat(40);
+        super::legacy_stage_compose_attachment(&scope, &token, b"old", false)
+            .await
+            .unwrap();
+        let staging = super::compose_attachment_staging_semaphore()
+            .acquire()
+            .await
+            .unwrap();
+        let cleanup_scope = scope.clone();
+        let cleanup_token = token.clone();
+        let cleanup = tokio::spawn(async move {
+            super::legacy_delete_staged_compose_attachments(
+                &cleanup_scope,
+                &[super::LegacyComposeAttachment {
+                    spec: super::LegacyComposeAttachmentSpec {
+                        token: cleanup_token,
+                        file_name: "old.bin".to_string(),
+                        is_inline: false,
+                        content_id: String::new(),
+                        content_location: String::new(),
+                        mime_type: "application/octet-stream".to_string(),
+                        is_linked: false,
+                    },
+                    data: Vec::new(),
+                }],
+            )
+            .await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!cleanup.is_finished());
+        assert!(scope.path(&token).unwrap().exists());
+
+        drop(staging);
+        cleanup.await.unwrap();
+        assert!(!scope.directory.exists());
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[test]
+    fn message_upload_memory_admission_tracks_imap_wire_and_decode_peak() {
+        let units = super::compose_attachment_fetch_memory_permit_units();
+        assert_eq!(units, 52);
+        assert!(units as usize <= super::COMPOSE_ATTACHMENT_MEMORY_BUDGET_MIB);
+    }
+
+    struct RecordingSmtpSender {
+        succeed: bool,
+        message: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::LegacySmtpSender for RecordingSmtpSender {
+        async fn send(
+            &self,
+            _settings: &fm_smtp::SmtpSendSettings,
+            _envelope: &lettre::address::Envelope,
+            message: &[u8],
+            _options: fm_smtp::SmtpDeliveryOptions,
+        ) -> fm_core::Result<bool> {
+            *self.message.lock().unwrap() = Some(message.to_vec());
+            if self.succeed {
+                Ok(true)
+            } else {
+                Err(FrickmailError::Upstream(
+                    "scripted SMTP failure".to_string(),
+                ))
+            }
+        }
+    }
+
+    struct RecordingDraftAppender {
+        message: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::LegacyDraftAppender for RecordingDraftAppender {
+        async fn append(
+            &self,
+            _config: ImapConnectionConfig,
+            _password: &str,
+            _folder: &str,
+            raw: &[u8],
+            _message_id: &str,
+        ) -> fm_core::Result<Option<u32>> {
+            *self.message.lock().unwrap() = Some(raw.to_vec());
+            Ok(Some(77))
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_attachment_wire_and_success_failure_lifecycle() {
+        let key = [61_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-send-attachment-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) = message_body_test_state_with_config(5942, 5943, &key, config).await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET smtp_host = ?, smtp_port = ?, smtp_secure = ?
+             WHERE id = ?",
+        )
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(5943_i64)
+        .execute(state.db_pool().unwrap())
+        .await
+        .unwrap();
+        let scope = super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 5942, 5943);
+
+        for (token, succeed) in [("a".repeat(40), true), ("b".repeat(40), false)] {
+            super::legacy_stage_compose_attachment(
+                &scope,
+                &token,
+                b"ACTION-BOUNDARY-ATTACHMENT",
+                false,
+            )
+            .await
+            .unwrap();
+            let captured = Arc::new(Mutex::new(None));
+            let sender = RecordingSmtpSender {
+                succeed,
+                message: Arc::clone(&captured),
+            };
+            let response = super::native_send_message_inner_with_sender(
+                &state,
+                "SendMessage",
+                &json!({
+                    "account_id": 5943,
+                    "from": "work@example.com",
+                    "to": "recipient@example.net",
+                    "plain": "Attached",
+                    "attachments": {
+                        (token.clone()): {
+                            "name": "boundary.txt",
+                            "inline": false,
+                            "type": "text/plain"
+                        }
+                    }
+                }),
+                &session,
+                Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+                &sender,
+            )
+            .await;
+            let body = read_json(response).await;
+            let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+            assert!(wire.contains("filename=\"boundary.txt\""));
+            assert!(wire.contains("QUNUSU9OLUJPVU5EQVJZLUFUVEFDSE1FTlQ="));
+            assert_eq!(scope.path(&token).unwrap().exists(), !succeed);
+            if succeed {
+                assert_eq!(body["Result"], true);
+            } else {
+                assert_eq!(body["code"], super::CANT_SEND_MESSAGE);
+            }
+        }
+
+        let sent_failure_token = "c".repeat(40);
+        super::legacy_stage_compose_attachment(
+            &scope,
+            &sent_failure_token,
+            b"DELIVERED-BUT-SENT-APPEND-FAILS",
+            false,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET imap_host = ?, imap_port = ?, imap_secure = ?
+             WHERE id = ?",
+        )
+        .bind("127.0.0.1")
+        .bind(1_i64)
+        .bind("none")
+        .bind(5943_i64)
+        .execute(state.db_pool().unwrap())
+        .await
+        .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&captured),
+        };
+        let response = super::native_send_message_inner_with_sender(
+            &state,
+            "SendMessage",
+            &json!({
+                "account_id": 5943,
+                "from": "work@example.com",
+                "to": "recipient@example.net",
+                "plain": "Attached",
+                "saveFolder": "Sent",
+                "attachments": {
+                    (sent_failure_token.clone()): {
+                        "name": "sent-failure.txt",
+                        "inline": false,
+                        "type": "text/plain"
+                    }
+                }
+            }),
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["code"], super::CANT_SAVE_MESSAGE);
+        assert!(!scope.path(&sent_failure_token).unwrap().exists());
+
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_message_append_contains_and_retains_staged_attachment() {
+        let key = [62_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-save-attachment-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) = message_body_test_state_with_config(6942, 6943, &key, config).await;
+        let scope = super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 6942, 6943);
+        let token = "c".repeat(40);
+        super::legacy_stage_compose_attachment(&scope, &token, b"DRAFT-ACTION-BOUNDARY", false)
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let appender = RecordingDraftAppender {
+            message: Arc::clone(&captured),
+        };
+        let response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &json!({
+                "account_id": 6943,
+                "from": "work@example.com",
+                "plain": "Draft",
+                "saveFolder": "Drafts",
+                "attachments": {
+                    (token.clone()): {
+                        "name": "draft.txt",
+                        "inline": false,
+                        "type": "text/plain"
+                    }
+                }
+            }),
+            &session,
+            &appender,
+        )
+        .await;
+
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["folder"], "Drafts");
+        assert_eq!(body["Result"]["uid"], 77);
+        let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(wire.contains("filename=\"draft.txt\""));
+        assert!(wire.contains("RFJBRlQtQUNUSU9OLUJPVU5EQVJZ"));
+        assert!(scope.path(&token).unwrap().exists());
+
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn upload_attachments_caches_fetched_mime_parts() {
         let key = [54_u8; fm_user::CREDENTIAL_KEY_BYTES];
-        let config = test_config(None);
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-upload-cache-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
         let (state, session) = message_body_test_state_with_config(1942, 1943, &key, config).await;
 
         let raw_key_json = json!({
@@ -24468,19 +27174,27 @@ Subject: Empty body metadata\r\n\r\n"
         });
         let raw_key = URL_SAFE_NO_PAD.encode(raw_key_json.to_string());
 
+        let fetch_calls = Arc::new(AtomicUsize::new(0));
         let response = super::native_legacy_message_upload_attachments_with_fetcher(
             &state,
             "MessageUploadAttachments",
             &json!({
                 "account_id": 1943,
-                "attachments": [raw_key],
+                "attachments": [raw_key.clone()],
             }),
             &session,
             Duration::from_secs(5),
-            |_config, _password, _folder, uid, _mime_index| async move {
-                // Verify uid is passed through
-                assert_eq!(uid, 57);
-                Ok(Some(b"UPLOAD-CONTENT".to_vec()))
+            {
+                let fetch_calls = Arc::clone(&fetch_calls);
+                move |_config, _password, _folder, uid, _mime_index| {
+                    let fetch_calls = Arc::clone(&fetch_calls);
+                    async move {
+                        // Verify uid is passed through
+                        assert_eq!(uid, 57);
+                        fetch_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(Some(b"UPLOAD-CONTENT".to_vec()))
+                    }
+                }
             },
         )
         .await;
@@ -24493,12 +27207,102 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(entry["tempName"].is_string());
         assert_eq!(entry["mimeType"], "application/pdf");
         assert_ne!(entry["tempName"].as_str().unwrap(), "");
+        assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+
+        let cached_response = super::native_legacy_message_upload_attachments_with_fetcher(
+            &state,
+            "MessageUploadAttachments",
+            &json!({
+                "account_id": 1943,
+                "attachments": [raw_key],
+            }),
+            &session,
+            Duration::from_secs(5),
+            |_config, _password, _folder, _uid, _mime_index| async move {
+                panic!("cache hit must not refetch the MIME part")
+            },
+        )
+        .await;
+        let cached = read_json(cached_response).await;
+        assert_eq!(cached["Result"][0]["tempName"], entry["tempName"]);
+
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_attachments_schedule_multiple_slow_fetches_lazily_in_order() {
+        let key = [55_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-upload-sequential-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) = message_body_test_state_with_config(2942, 2943, &key, config).await;
+        let raw_keys = [57_u32, 58]
+            .into_iter()
+            .map(|uid| {
+                URL_SAFE_NO_PAD.encode(
+                    json!({
+                        "folder": "INBOX",
+                        "uid": uid,
+                        "mimeIndex": "2",
+                        "fileName": format!("part-{uid}.bin"),
+                        "mimeType": "application/octet-stream",
+                    })
+                    .to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(500),
+            super::native_legacy_message_upload_attachments_with_fetcher(
+                &state,
+                "MessageUploadAttachments",
+                &json!({
+                    "account_id": 2943,
+                    "attachments": raw_keys,
+                }),
+                &session,
+                Duration::from_millis(100),
+                {
+                    let calls = Arc::clone(&calls);
+                    move |_config, _password, _folder, uid, _mime_index| {
+                        let calls = Arc::clone(&calls);
+                        async move {
+                            calls.lock().unwrap().push(uid);
+                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            Ok(Some(format!("part-{uid}").into_bytes()))
+                        }
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("per-item deadlines must begin only when each fetch is scheduled");
+        let body = read_json(response).await;
+
+        assert_eq!(calls.lock().unwrap().as_slice(), &[57, 58]);
+        assert!(body["Result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(Value::is_object));
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
     }
 
     #[tokio::test]
     async fn upload_attachments_skips_missing_attachments() {
         let key = [54_u8; fm_user::CREDENTIAL_KEY_BYTES];
-        let (state, session) = message_body_test_state(1942, 1943, &key).await;
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-upload-missing-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) = message_body_test_state_with_config(1942, 1943, &key, config).await;
 
         let raw_key_json = json!({
             "folder": "INBOX",
@@ -24526,5 +27330,26 @@ Subject: Empty body metadata\r\n\r\n"
         let results = body["Result"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], false);
+        assert!(!temp_root.join("compose-attachments").exists());
+    }
+
+    #[test]
+    fn upload_attachment_raw_keys_are_tightly_bounded_before_decode() {
+        let oversized = "a".repeat(super::COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES + 1);
+        assert!(super::legacy_message_upload_raw_keys(&json!({
+            "attachments": [oversized]
+        }))
+        .unwrap_err()
+        .contains("key exceeds"));
+
+        let item = "a".repeat(super::COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES);
+        let count = super::COMPOSE_ATTACHMENT_RAW_KEY_TOTAL_LIMIT_BYTES
+            / super::COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES
+            + 1;
+        assert!(super::legacy_message_upload_raw_keys(&json!({
+            "attachments": vec![item; count]
+        }))
+        .unwrap_err()
+        .contains("aggregate"));
     }
 }

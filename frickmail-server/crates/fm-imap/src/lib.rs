@@ -21,7 +21,10 @@ use imap_proto::{
     Status, StatusAttribute,
 };
 use mail_parser::{
-    decoders::{base64::base64_decode, charsets::map::charset_decoder},
+    decoders::{
+        base64::{base64_decode, base64_decode_stream},
+        charsets::map::charset_decoder,
+    },
     MimeHeaders,
 };
 use md5::{Digest, Md5};
@@ -29,6 +32,7 @@ use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
     sync::{OwnedSemaphorePermit, Semaphore},
     time::{timeout, Instant},
@@ -55,18 +59,233 @@ pub const BODY_PREVIEW_PART_LIMIT_BYTES: usize = 256 * 1024;
 const BODY_PREVIEW_TEXT_PART_LIMIT: usize = 32;
 const BODY_PREVIEW_TOTAL_LIMIT_BYTES: usize = 1024 * 1024;
 const BODY_PREVIEW_HEADER_LIMIT_BYTES: usize = 64 * 1024;
+const MIME_PART_HEADER_LIMIT_BYTES: usize = 64 * 1024;
+const MIME_PART_RESPONSE_OVERHEAD_BYTES: usize = 1024 * 1024;
+const MIME_PART_ENCODED_WIRE_MULTIPLIER: usize = 4;
 
-trait ImapIo:
+/// Worst-case live bytes retained while a bounded MIME part is decoded: the
+/// encoded FETCH literal, bounded MIME header, response framing allowance, and
+/// decoded output.
+pub fn bounded_mime_part_peak_bytes(max_decoded_bytes: usize) -> Option<usize> {
+    max_decoded_bytes
+        .checked_mul(MIME_PART_ENCODED_WIRE_MULTIPLIER.saturating_add(1))?
+        .checked_add(MIME_PART_HEADER_LIMIT_BYTES.saturating_add(2))?
+        .checked_add(MIME_PART_RESPONSE_OVERHEAD_BYTES)
+}
+
+trait RawImapIo:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + fmt::Debug + 'static
 {
 }
 
-impl<T> ImapIo for T where
+impl<T> RawImapIo for T where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + fmt::Debug + 'static
 {
 }
 
-type BoxedImapIo = Box<dyn ImapIo>;
+/// Decrypted IMAP transport with an optional per-command read budget.  The
+/// budget sits below async-imap's response buffer, so a server cannot make the
+/// parser allocate an arbitrarily large literal after a bounded partial FETCH.
+struct BoxedImapIo {
+    inner: Box<dyn RawImapIo>,
+    read_remaining: Option<usize>,
+    max_literal_bytes: Option<usize>,
+    literal_declared_bytes: usize,
+    literal_scan: LiteralScan,
+    literal_body_remaining: usize,
+    response_line_prefix: Vec<u8>,
+    in_fetch_response: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum LiteralScan {
+    #[default]
+    Idle,
+    Open,
+    Digits(usize),
+    Plus(usize),
+    Close(usize),
+    CarriageReturn(usize),
+}
+
+impl fmt::Debug for BoxedImapIo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoxedImapIo")
+            .field("inner", &self.inner)
+            .field("read_remaining", &self.read_remaining)
+            .field("max_literal_bytes", &self.max_literal_bytes)
+            .finish()
+    }
+}
+
+impl BoxedImapIo {
+    fn new<T>(inner: T) -> Self
+    where
+        T: RawImapIo,
+    {
+        Self {
+            inner: Box::new(inner),
+            read_remaining: None,
+            max_literal_bytes: None,
+            literal_declared_bytes: 0,
+            literal_scan: LiteralScan::Idle,
+            literal_body_remaining: 0,
+            response_line_prefix: Vec::with_capacity(64),
+            in_fetch_response: false,
+        }
+    }
+
+    fn set_read_budget(&mut self, bytes: Option<usize>, max_literal_bytes: Option<usize>) {
+        self.read_remaining = bytes;
+        self.max_literal_bytes = max_literal_bytes;
+        self.literal_declared_bytes = 0;
+        self.literal_scan = LiteralScan::Idle;
+        self.literal_body_remaining = 0;
+        self.response_line_prefix.clear();
+        self.in_fetch_response = false;
+    }
+
+    fn inspect_literal_declarations(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let Some(max_literal_bytes) = self.max_literal_bytes else {
+            return Ok(());
+        };
+        for &byte in bytes {
+            if self.literal_body_remaining > 0 {
+                self.literal_body_remaining -= 1;
+                continue;
+            }
+            if self.response_line_prefix.len() < 64 {
+                self.response_line_prefix.push(byte);
+                self.in_fetch_response =
+                    response_prefix_is_untagged_fetch(&self.response_line_prefix);
+            }
+            let mut completed_literal = false;
+            self.literal_scan = match (self.literal_scan, byte) {
+                (LiteralScan::Idle, b'{') => LiteralScan::Open,
+                (LiteralScan::Open, byte) if byte.is_ascii_digit() => {
+                    LiteralScan::Digits(usize::from(byte - b'0'))
+                }
+                (LiteralScan::Digits(value), byte) if byte.is_ascii_digit() => {
+                    let value = value
+                        .checked_mul(10)
+                        .and_then(|value| value.checked_add(usize::from(byte - b'0')))
+                        .ok_or_else(|| std::io::Error::other("IMAP literal length overflow"))?;
+                    LiteralScan::Digits(value)
+                }
+                (LiteralScan::Digits(value), b'+') => LiteralScan::Plus(value),
+                (LiteralScan::Digits(value) | LiteralScan::Plus(value), b'}') => {
+                    LiteralScan::Close(value)
+                }
+                (LiteralScan::Close(value), b'\r') => LiteralScan::CarriageReturn(value),
+                (LiteralScan::CarriageReturn(value), b'\n') => {
+                    if !self.in_fetch_response {
+                        return Err(std::io::Error::other(
+                            "IMAP literal-like status text is not allowed on a bounded connection",
+                        ));
+                    }
+                    let declared_total = self
+                        .literal_declared_bytes
+                        .checked_add(value)
+                        .ok_or_else(|| std::io::Error::other("IMAP literal length overflow"))?;
+                    if declared_total > max_literal_bytes {
+                        return Err(std::io::Error::other(format!(
+                            "IMAP literal declarations exceed the {max_literal_bytes} byte aggregate limit"
+                        )));
+                    }
+                    self.literal_declared_bytes = declared_total;
+                    self.literal_body_remaining = value;
+                    completed_literal = true;
+                    LiteralScan::Idle
+                }
+                (_, b'{') => LiteralScan::Open,
+                _ => LiteralScan::Idle,
+            };
+            if byte == b'\n' && !completed_literal {
+                self.response_line_prefix.clear();
+                self.in_fetch_response = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn response_prefix_is_untagged_fetch(prefix: &[u8]) -> bool {
+    let Some(rest) = prefix.strip_prefix(b"* ") else {
+        return false;
+    };
+    let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    digits > 0
+        && rest
+            .get(digits..digits.saturating_add(7))
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b" FETCH "))
+}
+
+impl AsyncRead for BoxedImapIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let allowed = self
+            .read_remaining
+            .unwrap_or(buffer.remaining())
+            .min(buffer.remaining());
+        if allowed == 0 {
+            return std::task::Poll::Ready(Err(std::io::Error::other(
+                "IMAP response exceeded the configured read budget",
+            )));
+        }
+
+        let destination = buffer.initialize_unfilled_to(allowed);
+        let mut limited = ReadBuf::new(destination);
+        let result = Pin::new(&mut self.inner).poll_read(context, &mut limited);
+        if let std::task::Poll::Ready(Ok(())) = &result {
+            let read = limited.filled().len();
+            if let Err(error) = self.inspect_literal_declarations(limited.filled()) {
+                return std::task::Poll::Ready(Err(error));
+            }
+            if let Some(remaining) = self.read_remaining {
+                let remaining_after_read = remaining.saturating_sub(read);
+                if self.literal_body_remaining > remaining_after_read {
+                    return std::task::Poll::Ready(Err(std::io::Error::other(
+                        "IMAP literal declaration exceeds the remaining response budget",
+                    )));
+                }
+            }
+            buffer.advance(read);
+            if let Some(remaining) = &mut self.read_remaining {
+                *remaining = remaining.saturating_sub(read);
+            }
+        }
+        result
+    }
+}
+
+impl AsyncWrite for BoxedImapIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(context, bytes)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
+    }
+}
+
 type BoxedClient = Client<BoxedImapIo>;
 type BoxedSession = Session<BoxedImapIo>;
 
@@ -1322,6 +1541,30 @@ pub async fn fetch_mime_part(
     uid: u32,
     mime_index: &str,
 ) -> Result<Option<Vec<u8>>> {
+    fetch_mime_part_raw(config, password, mailbox, uid, mime_index).await
+}
+
+/// Fetches at most `max_bytes` from one MIME part. The IMAP partial-range
+/// request asks for one sentinel byte beyond the limit so an oversized part is
+/// rejected without cloning the response literal into a second allocation.
+pub async fn fetch_mime_part_bounded(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid: u32,
+    mime_index: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
+    fetch_mime_part_decoded_bounded(config, password, mailbox, uid, mime_index, max_bytes).await
+}
+
+async fn fetch_mime_part_raw(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid: u32,
+    mime_index: &str,
+) -> Result<Option<Vec<u8>>> {
     validate_mailbox(mailbox)?;
     if uid == 0 {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
@@ -1348,14 +1591,16 @@ pub async fn fetch_mime_part(
             if fetch.uid != Some(uid) {
                 continue;
             }
-            if mime_index.is_empty() {
-                result = fetch.body().map(ToOwned::to_owned);
+            let data = if mime_index.is_empty() {
+                fetch.body()
             } else if let Some(path) = parse_mime_index_path(mime_index) {
-                result = fetch
-                    .section(&SectionPath::Part(path, None))
-                    .map(ToOwned::to_owned);
-                if result.as_deref() == Some(&[]) {
-                    result = None;
+                fetch.section(&SectionPath::Part(path, None))
+            } else {
+                None
+            };
+            if let Some(data) = data {
+                if mime_index.is_empty() || !data.is_empty() {
+                    result = Some(data.to_vec());
                 }
             }
             break;
@@ -1366,6 +1611,237 @@ pub async fn fetch_mime_part(
 
     logout_quietly(session).await;
     Ok(result)
+}
+
+async fn fetch_mime_part_decoded_bounded(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    uid: u32,
+    mime_index: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
+    validate_mailbox(mailbox)?;
+    if uid == 0 {
+        return Err(FrickmailError::BadRequest("uid required".to_string()));
+    }
+    if !mime_index.is_empty() && !is_valid_mime_index(mime_index) {
+        return Err(FrickmailError::BadRequest("invalid mimeIndex".to_string()));
+    }
+
+    let (_, _, read_budget, max_literal_bytes) =
+        bounded_mime_part_wire_limits(mime_index, max_bytes)?;
+    let mut session =
+        login_with_read_guard(config, password, read_budget, max_literal_bytes).await?;
+    let result = fetch_mime_part_decoded_bounded_in_session(
+        &mut session,
+        mailbox,
+        uid,
+        mime_index,
+        max_bytes,
+    )
+    .await;
+    // A bounded fetch owns this connection; dropping it avoids spending a
+    // remaining read budget on a best-effort LOGOUT exchange.
+    drop(session);
+    result
+}
+
+async fn fetch_mime_part_decoded_bounded_in_session(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    uid: u32,
+    mime_index: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
+    // Quoted-printable can expand every decoded byte to three wire bytes.
+    // Fetch one sentinel byte beyond that maximum, and cap transport reads as
+    // well as the requested partial so a non-compliant server cannot make
+    // async-imap buffer an attacker-sized literal.
+    let (encoded_limit, requested_bytes, _, _) =
+        bounded_mime_part_wire_limits(mime_index, max_bytes)?;
+
+    timeout_imap("examine mailbox", session.examine(mailbox)).await?;
+
+    let query = if mime_index.is_empty() {
+        format!(
+            "(UID BODY.PEEK[HEADER]<0.{}> BODY.PEEK[]<0.{requested_bytes}>)",
+            MIME_PART_HEADER_LIMIT_BYTES.saturating_add(1)
+        )
+    } else {
+        format!(
+            "(UID BODY.PEEK[{mime_index}.MIME]<0.{}> BODY.PEEK[{mime_index}]<0.{requested_bytes}>)",
+            MIME_PART_HEADER_LIMIT_BYTES.saturating_add(1)
+        )
+    };
+
+    let result = {
+        let mut fetches = timeout_imap(
+            "fetch bounded MIME part",
+            session.uid_fetch(uid.to_string(), query),
+        )
+        .await?;
+        let mut result = None;
+        while let Some(fetch) = timeout_imap("read bounded MIME part", fetches.try_next()).await? {
+            if fetch.uid != Some(uid) {
+                continue;
+            }
+            let path = parse_mime_index_path(mime_index);
+            let header = if let Some(path) = path.as_ref() {
+                fetch.section(&SectionPath::Part(
+                    path.clone(),
+                    Some(imap_proto::MessageSection::Mime),
+                ))
+            } else {
+                fetch.header()
+            };
+            if header.is_some_and(|header| header.len() > MIME_PART_HEADER_LIMIT_BYTES) {
+                return Err(FrickmailError::BadRequest(
+                    "MIME part header exceeds the configured limit".to_string(),
+                ));
+            }
+            let data = if let Some(path) = path {
+                fetch.section(&SectionPath::Part(path, None))
+            } else {
+                fetch.body()
+            };
+            let Some(data) = data else {
+                break;
+            };
+            if data.len() > encoded_limit {
+                return Err(FrickmailError::BadRequest(format!(
+                    "MIME part exceeds the {max_bytes} byte limit"
+                )));
+            }
+
+            let encoding = header
+                .and_then(|header| mail_parser::MessageParser::default().parse_headers(header))
+                .and_then(|message| message.content_transfer_encoding().map(str::to_string))
+                .unwrap_or_default();
+            let decoded = if !mime_index.is_empty() && encoding.eq_ignore_ascii_case("base64") {
+                decode_base64_mime_part_bounded(data, max_bytes)?
+            } else if !mime_index.is_empty() && encoding.eq_ignore_ascii_case("quoted-printable") {
+                decode_quoted_printable_mime_part_bounded(data, max_bytes)?
+            } else {
+                if data.len() > max_bytes {
+                    return Err(FrickmailError::BadRequest(format!(
+                        "MIME part exceeds the {max_bytes} byte limit"
+                    )));
+                }
+                data.to_vec()
+            };
+            if decoded.len() > max_bytes {
+                return Err(FrickmailError::BadRequest(format!(
+                    "MIME part exceeds the {max_bytes} byte limit"
+                )));
+            }
+            result = Some(decoded);
+            break;
+        }
+        result
+    };
+
+    Ok(result)
+}
+
+fn bounded_mime_part_wire_limits(
+    mime_index: &str,
+    max_bytes: usize,
+) -> Result<(usize, usize, usize, usize)> {
+    let encoded_limit = if mime_index.is_empty() {
+        max_bytes
+    } else {
+        max_bytes
+            // Quoted-printable can require three bytes per decoded byte plus
+            // RFC soft line breaks. Four times the decoded limit is a simple,
+            // defensible ceiling that also bounds malformed wire input.
+            .checked_mul(MIME_PART_ENCODED_WIRE_MULTIPLIER)
+            .ok_or_else(|| FrickmailError::BadRequest("MIME part limit overflow".to_string()))?
+    };
+    let requested_bytes = encoded_limit.saturating_add(1);
+    let read_budget = requested_bytes
+        .checked_add(MIME_PART_HEADER_LIMIT_BYTES.saturating_add(1))
+        .and_then(|bytes| bytes.checked_add(MIME_PART_RESPONSE_OVERHEAD_BYTES))
+        .ok_or_else(|| FrickmailError::BadRequest("MIME part limit overflow".to_string()))?;
+    let max_literal_bytes = requested_bytes
+        .checked_add(MIME_PART_HEADER_LIMIT_BYTES.saturating_add(1))
+        .ok_or_else(|| FrickmailError::BadRequest("MIME part limit overflow".to_string()))?;
+    Ok((
+        encoded_limit,
+        requested_bytes,
+        read_budget,
+        max_literal_bytes,
+    ))
+}
+
+fn decode_base64_mime_part_bounded(data: &[u8], max_bytes: usize) -> Result<Vec<u8>> {
+    let encoded_symbols = data
+        .iter()
+        .filter(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .count();
+    let decoded_upper_bound = encoded_symbols
+        .div_ceil(4)
+        .checked_mul(3)
+        .ok_or_else(|| FrickmailError::BadRequest("MIME part size overflow".to_string()))?;
+    if decoded_upper_bound > max_bytes.saturating_add(2) {
+        return Err(FrickmailError::BadRequest(format!(
+            "MIME part exceeds the {max_bytes} byte limit"
+        )));
+    }
+    let decoded = base64_decode_stream(data.iter(), encoded_symbols, u8::MAX)
+        .ok_or_else(|| FrickmailError::BadRequest("Invalid base64 MIME part".to_string()))?;
+    if decoded.len() > max_bytes {
+        return Err(FrickmailError::BadRequest(format!(
+            "MIME part exceeds the {max_bytes} byte limit"
+        )));
+    }
+    Ok(decoded)
+}
+
+fn decode_quoted_printable_mime_part_bounded(data: &[u8], max_bytes: usize) -> Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(data.len().min(max_bytes));
+    let mut index = 0;
+    while index < data.len() {
+        if data[index] != b'=' {
+            output.push(data[index]);
+            index += 1;
+        } else if index + 1 == data.len() {
+            break;
+        } else if index + 2 < data.len() {
+            if let (Some(high), Some(low)) = (
+                legacy_hex_nibble(data[index + 1]),
+                legacy_hex_nibble(data[index + 2]),
+            ) {
+                output.push((high << 4) | low);
+                index += 3;
+            } else {
+                let mut newline = index + 1;
+                while newline < data.len() && matches!(data[newline], b' ' | b'\t') {
+                    newline += 1;
+                }
+                if newline < data.len() && data[newline] == b'\r' {
+                    index = newline + 1;
+                    if index < data.len() && data[index] == b'\n' {
+                        index += 1;
+                    }
+                } else if newline < data.len() && data[newline] == b'\n' {
+                    index = newline + 1;
+                } else {
+                    output.push(b'=');
+                    index += 1;
+                }
+            }
+        } else {
+            output.push(b'=');
+            index += 1;
+        }
+        if output.len() > max_bytes {
+            return Err(FrickmailError::BadRequest(format!(
+                "MIME part exceeds the {max_bytes} byte limit"
+            )));
+        }
+    }
+    Ok(output)
 }
 
 /// Validates a MIME part index (e.g. `"1"`, `"1.2"`, `"1.2.3"`) so it cannot
@@ -8257,9 +8733,24 @@ fn legacy_php_body_quoted_printable_decode(value: &[u8]) -> Vec<u8> {
 
 async fn login(config: ImapConnectionConfig, password: &str) -> Result<BoxedSession> {
     let client = connect_client(&config).await?;
+    login_client(client, &config.login, password).await
+}
+
+async fn login_with_read_guard(
+    config: ImapConnectionConfig,
+    password: &str,
+    read_budget: usize,
+    max_literal_bytes: usize,
+) -> Result<BoxedSession> {
+    let client =
+        connect_client_with_read_guard(&config, Some((read_budget, max_literal_bytes))).await?;
+    login_client(client, &config.login, password).await
+}
+
+async fn login_client(client: BoxedClient, login: &str, password: &str) -> Result<BoxedSession> {
     match timeout_result(
         "IMAP login",
-        timeout(COMMAND_TIMEOUT, client.login(&config.login, password)),
+        timeout(COMMAND_TIMEOUT, client.login(login, password)),
     )
     .await?
     {
@@ -8269,6 +8760,13 @@ async fn login(config: ImapConnectionConfig, password: &str) -> Result<BoxedSess
 }
 
 async fn connect_client(config: &ImapConnectionConfig) -> Result<BoxedClient> {
+    connect_client_with_read_guard(config, None).await
+}
+
+async fn connect_client_with_read_guard(
+    config: &ImapConnectionConfig,
+    read_guard: Option<(usize, usize)>,
+) -> Result<BoxedClient> {
     let tcp = timeout_result(
         "connect IMAP socket",
         timeout(
@@ -8278,16 +8776,22 @@ async fn connect_client(config: &ImapConnectionConfig) -> Result<BoxedClient> {
     )
     .await?
     .map_err(|err| FrickmailError::Upstream(format!("IMAP socket connect failed: {err}")))?;
-    let stream: BoxedImapIo = Box::new(tcp);
+    let mut stream: BoxedImapIo = BoxedImapIo::new(tcp);
 
     match config.security {
         ImapSecurity::Tls => {
-            let tls_stream = connect_tls(&config.host, stream).await?;
+            let mut tls_stream = connect_tls(&config.host, stream).await?;
+            if let Some((read_budget, max_literal_bytes)) = read_guard {
+                tls_stream.set_read_budget(Some(read_budget), Some(max_literal_bytes));
+            }
             let mut client = Client::new(tls_stream);
             read_greeting(&mut client).await?;
             Ok(client)
         }
         ImapSecurity::StartTls => {
+            if let Some((read_budget, max_literal_bytes)) = read_guard {
+                stream.set_read_budget(Some(read_budget), Some(max_literal_bytes));
+            }
             let mut client = Client::new(stream);
             read_greeting(&mut client).await?;
             timeout_imap(
@@ -8295,10 +8799,18 @@ async fn connect_client(config: &ImapConnectionConfig) -> Result<BoxedClient> {
                 client.run_command_and_check_ok("STARTTLS", None),
             )
             .await?;
-            let tls_stream = connect_tls(&config.host, client.into_inner()).await?;
+            let mut raw_stream = client.into_inner();
+            raw_stream.set_read_budget(None, None);
+            let mut tls_stream = connect_tls(&config.host, raw_stream).await?;
+            if let Some((read_budget, max_literal_bytes)) = read_guard {
+                tls_stream.set_read_budget(Some(read_budget), Some(max_literal_bytes));
+            }
             Ok(Client::new(tls_stream))
         }
         ImapSecurity::None => {
+            if let Some((read_budget, max_literal_bytes)) = read_guard {
+                stream.set_read_budget(Some(read_budget), Some(max_literal_bytes));
+            }
             let mut client = Client::new(stream);
             read_greeting(&mut client).await?;
             Ok(client)
@@ -8322,7 +8834,7 @@ async fn connect_tls(host: &str, stream: BoxedImapIo) -> Result<BoxedImapIo> {
     )
     .await?
     .map_err(|err| FrickmailError::Upstream(format!("IMAP TLS handshake failed: {err}")))?;
-    Ok(Box::new(tls_stream))
+    Ok(BoxedImapIo::new(tls_stream))
 }
 
 async fn read_greeting(client: &mut BoxedClient) -> Result<()> {
@@ -11317,7 +11829,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
             server.write_all(b"A1 OK completed\r\n").await.unwrap();
         });
-        let mut stream: BoxedImapIo = Box::new(client);
+        let mut stream: BoxedImapIo = BoxedImapIo::new(client);
 
         let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
             .await
@@ -11341,7 +11853,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         let writer = tokio::spawn(async move {
             server.write_all(response.as_bytes()).await.unwrap();
         });
-        let mut stream: BoxedImapIo = Box::new(client);
+        let mut stream: BoxedImapIo = BoxedImapIo::new(client);
 
         let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
             .await
@@ -11376,7 +11888,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         let writer = tokio::spawn(async move {
             server.write_all(&response).await.unwrap();
         });
-        let mut stream: BoxedImapIo = Box::new(client);
+        let mut stream: BoxedImapIo = BoxedImapIo::new(client);
 
         let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
             .await
@@ -11399,7 +11911,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         let writer = tokio::spawn(async move {
             server.write_all(response.as_bytes()).await.unwrap();
         });
-        let mut stream: BoxedImapIo = Box::new(client);
+        let mut stream: BoxedImapIo = BoxedImapIo::new(client);
 
         let namespaces = read_namespace_response(&mut stream, &RequestId("A1".to_string()))
             .await
@@ -11744,7 +12256,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -11807,7 +12319,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -11870,7 +12382,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -11927,7 +12439,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12020,7 +12532,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12091,7 +12603,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12169,7 +12681,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12216,7 +12728,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12256,7 +12768,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12325,7 +12837,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12403,7 +12915,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12545,7 +13057,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             server_stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12598,7 +13110,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             server_stream.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12697,7 +13209,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12847,7 +13359,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12892,7 +13404,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12930,7 +13442,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             server_stream.write_all(b"A0003 OK noop\r\n").await.unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -12998,7 +13510,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -13228,7 +13740,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -13335,7 +13847,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -13394,7 +13906,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .await
                 .unwrap();
         });
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -13531,7 +14043,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -13664,7 +14176,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -13784,7 +14296,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
                 .unwrap();
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -13901,7 +14413,7 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
             }
         });
 
-        let stream: BoxedImapIo = Box::new(client_stream);
+        let stream: BoxedImapIo = BoxedImapIo::new(client_stream);
         let client: BoxedClient = Client::new(stream);
         let mut session = match client.login("user", "password").await {
             Ok(session) => session,
@@ -16563,5 +17075,251 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         // produce a malformed BODY.PEEK[.] IMAP command.
         assert!(!is_valid_mime_index("."));
         assert!(!is_valid_mime_index(".."));
+    }
+
+    async fn run_bounded_mime_part_fixture(
+        transfer_encoding: &str,
+        encoded_body: &[u8],
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let header = format!("Content-Transfer-Encoding: {transfer_encoding}\r\n\r\n");
+        let (_, expected_requested_bytes, _, _) =
+            bounded_mime_part_wire_limits("2", max_bytes).unwrap();
+        let body = encoded_body[..encoded_body.len().min(expected_requested_bytes)].to_vec();
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let examine = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(examine, "A0002 EXAMINE \"INBOX\"\r\n");
+            server_stream
+                .write_all(b"* 1 EXISTS\r\nA0002 OK [READ-ONLY] examined\r\n")
+                .await
+                .unwrap();
+
+            let fetch = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                fetch,
+                format!(
+                    "A0003 UID FETCH 7 (UID BODY.PEEK[2.MIME]<0.{}> BODY.PEEK[2]<0.{expected_requested_bytes}>)\r\n",
+                    MIME_PART_HEADER_LIMIT_BYTES + 1
+                )
+            );
+            let mut response = format!(
+                "* 1 FETCH (UID 7 BODY[2.MIME]<0> {{{}}}\r\n{} BODY[2]<0> {{{}}}\r\n",
+                header.len(),
+                header,
+                body.len(),
+            )
+            .into_bytes();
+            response.extend_from_slice(&body);
+            response.extend_from_slice(b")\r\nA0003 OK fetched\r\n");
+            server_stream.write_all(&response).await.unwrap();
+        });
+
+        let (_, _, read_budget, max_literal_bytes) =
+            bounded_mime_part_wire_limits("2", max_bytes).unwrap();
+        let mut guarded_stream = BoxedImapIo::new(client_stream);
+        guarded_stream.set_read_budget(Some(read_budget), Some(max_literal_bytes));
+        let client: BoxedClient = Client::new(guarded_stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let result =
+            fetch_mime_part_decoded_bounded_in_session(&mut session, "INBOX", 7, "2", max_bytes)
+                .await;
+        drop(session);
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn bounded_mime_fetch_decodes_base64_and_quoted_printable() {
+        assert_eq!(
+            run_bounded_mime_part_fixture("base64", b"", 64)
+                .await
+                .unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            run_bounded_mime_part_fixture("base64", b"SGVsbG8gYXR0YWNobWVudCE=", 64)
+                .await
+                .unwrap(),
+            Some(b"Hello attachment!".to_vec())
+        );
+        assert_eq!(
+            run_bounded_mime_part_fixture(
+                "quoted-printable",
+                b"Hello=20quoted=2Dprintable=21",
+                64,
+            )
+            .await
+            .unwrap(),
+            Some(b"Hello quoted-printable!".to_vec())
+        );
+
+        let wrapped = (0..75)
+            .map(|index| {
+                if index > 0 && index % 25 == 0 {
+                    "=\r\n=41"
+                } else {
+                    "=41"
+                }
+            })
+            .collect::<String>();
+        assert!(wrapped.len() > 75 * 3);
+        assert_eq!(
+            run_bounded_mime_part_fixture("quoted-printable", wrapped.as_bytes(), 75)
+                .await
+                .unwrap(),
+            Some(vec![b'A'; 75])
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_mime_fetch_rejects_a_partial_sentinel_over_the_decoded_limit() {
+        let error = run_bounded_mime_part_fixture("quoted-printable", b"=41=42=43=44=45", 4)
+            .await
+            .unwrap_err();
+        assert!(
+            error.public_message().contains("4 byte limit"),
+            "unexpected error: {}",
+            error.public_message()
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_mime_fetch_rejects_hostile_declared_literal_before_parser_reserve() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+            let examine = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(examine, "A0002 EXAMINE \"INBOX\"\r\n");
+            // Prebuffer the hostile declaration in the same write as EXAMINE's
+            // completion. The guard is active from greeting/login onward, so
+            // async-imap never retains an uninspected declaration.
+            server_stream
+                .write_all(
+                    b"* 1 EXISTS\r\nA0002 OK [READ-ONLY] examined\r\n* 1 FETCH (UID 7 BODY[2.MIME]<0> {500000000}\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let (_, _, read_budget, max_literal_bytes) =
+            bounded_mime_part_wire_limits("2", 64).unwrap();
+        let mut guarded_stream = BoxedImapIo::new(client_stream);
+        guarded_stream.set_read_budget(Some(read_budget), Some(max_literal_bytes));
+        let client: BoxedClient = Client::new(guarded_stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            fetch_mime_part_decoded_bounded_in_session(&mut session, "INBOX", 7, "2", 64),
+        )
+        .await
+        .expect("hostile literal declaration must fail promptly")
+        .unwrap_err();
+        assert!(result.public_message().contains("literal declaration"));
+        drop(session);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guarded_transport_rejects_cumulative_literals_before_second_parser_reserve() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let writer = tokio::spawn(async move {
+            server_stream
+                .write_all(b"* 1 FETCH (BODY[1] {8}\r\n12345678 BODY[2] {8}\r\n12345678)\r\n")
+                .await
+                .unwrap();
+        });
+        let mut guarded_stream = BoxedImapIo::new(client_stream);
+        guarded_stream.set_read_budget(Some(1024), Some(12));
+        let mut client: BoxedClient = Client::new(guarded_stream);
+
+        let error = client.read_response().await.unwrap_err();
+        assert!(error.to_string().contains("aggregate limit"));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guarded_transport_accepts_expected_combined_header_and_body_literals() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let writer = tokio::spawn(async move {
+            server_stream
+                .write_all(b"* 1 FETCH (BODY[1.MIME] {8}\r\n12345678 BODY[1] {8}\r\nabcdefgh)\r\n")
+                .await
+                .unwrap();
+        });
+        let mut guarded_stream = BoxedImapIo::new(client_stream);
+        // Each literal is 8 bytes; their expected combined allowance is 16.
+        guarded_stream.set_read_budget(Some(1024), Some(16));
+        let mut client: BoxedClient = Client::new(guarded_stream);
+
+        assert!(client.read_response().await.unwrap().is_some());
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guarded_transport_charges_nonliteral_prefix_before_literal_reserve() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let writer = tokio::spawn(async move {
+            let response = format!(
+                "* 1 FETCH (FLAGS ({}) BODY[1] {{20}}\r\n",
+                "keyword".repeat(8)
+            );
+            server_stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut guarded_stream = BoxedImapIo::new(client_stream);
+        guarded_stream.set_read_budget(Some(100), Some(32));
+        let mut client: BoxedClient = Client::new(guarded_stream);
+
+        let error = client.read_response().await.unwrap_err();
+        assert!(error.to_string().contains("remaining response budget"));
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guarded_transport_rejects_literal_like_status_text_as_a_skip_bypass() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let writer = tokio::spawn(async move {
+            let mut response = b"* OK {100}\r\n".to_vec();
+            response.extend_from_slice(b"* 1 FETCH (BODY[1] {500000000}\r\n");
+            response.resize(response.len() + 64, b'x');
+            server_stream.write_all(&response).await.unwrap();
+        });
+        let mut guarded_stream = BoxedImapIo::new(client_stream);
+        guarded_stream.set_read_budget(Some(1024), Some(128));
+        let mut client: BoxedClient = Client::new(guarded_stream);
+
+        let error = client.read_response().await.unwrap_err();
+        assert!(error.to_string().contains("literal-like status text"));
+        writer.await.unwrap();
     }
 }

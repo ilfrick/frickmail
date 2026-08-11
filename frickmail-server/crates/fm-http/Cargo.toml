@@ -25,9 +25,11 @@ fm-smtp = { path = "../fm-smtp" }
 fm-user = { path = "../fm-user" }
 idna.workspace = true
 lettre.workspace = true
+libc.workspace = true
 md-5.workspace = true
 p256.workspace = true
 pgp.workspace = true
+rand_core.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -35,7 +37,7 @@ serde_json.workspace = true
 serde_urlencoded.workspace = true
 sha1.workspace = true
 sqlx.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
@@ -46,4 +48,3 @@ zip.workspace = true
 data-encoding.workspace = true
 hmac.workspace = true
 openssl.workspace = true
-rand_core.workspace = true
