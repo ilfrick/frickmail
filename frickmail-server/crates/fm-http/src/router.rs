@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU8, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1537,6 +1537,8 @@ struct LegacyAutocryptHeader {
 struct LegacyNormalizedComposeBody {
     html: String,
     plain: String,
+    inline_attachments: Vec<LegacyComposeAttachment>,
+    _attachment_memory_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// `draftInfo` triple: [type, uid, folder]. Drives the reply/forward flag update.
@@ -1723,11 +1725,19 @@ async fn native_send_message_inner_with_sender(
     };
     let staging_scope =
         LegacyComposeStagingScope::new(&state.config().tmp_dir, user.user_id, account_id);
-    let (attachments, memory_permit) =
-        match legacy_load_compose_attachments(&staging_scope, payload).await {
-            Ok(attachments) => attachments,
-            Err(message) => return json_result_error(original_action, &message),
-        };
+    let inline_attachments = std::mem::take(&mut request.attachments);
+    let inline_memory_permit = request._attachment_memory_permit.take();
+    let (attachments, memory_permit) = match legacy_load_compose_attachments_with_inline(
+        &staging_scope,
+        payload,
+        inline_attachments,
+        inline_memory_permit,
+    )
+    .await
+    {
+        Ok(attachments) => attachments,
+        Err(message) => return json_result_error(original_action, &message),
+    };
     request.attachments = attachments;
     request._attachment_memory_permit = memory_permit;
 
@@ -2255,11 +2265,19 @@ async fn native_save_message_with_appender(
     };
     let staging_scope =
         LegacyComposeStagingScope::new(&state.config().tmp_dir, user.user_id, account_id);
-    let (attachments, memory_permit) =
-        match legacy_load_compose_attachments(&staging_scope, payload).await {
-            Ok(attachments) => attachments,
-            Err(message) => return json_result_error(original_action, &message),
-        };
+    let inline_attachments = std::mem::take(&mut request.attachments);
+    let inline_memory_permit = request._attachment_memory_permit.take();
+    let (attachments, memory_permit) = match legacy_load_compose_attachments_with_inline(
+        &staging_scope,
+        payload,
+        inline_attachments,
+        inline_memory_permit,
+    )
+    .await
+    {
+        Ok(attachments) => attachments,
+        Err(message) => return json_result_error(original_action, &message),
+    };
     request.attachments = attachments;
     request._attachment_memory_permit = memory_permit;
 
@@ -2378,6 +2396,12 @@ fn legacy_save_message_request_from_payload_with_html(
     autocrypt: Option<LegacyAutocryptHeader>,
 ) -> Result<LegacySendMessageRequest, String> {
     let (from, envelope_from) = legacy_compose_sender(payload, account_email)?;
+    let LegacyNormalizedComposeBody {
+        html,
+        plain,
+        inline_attachments,
+        _attachment_memory_permit,
+    } = normalized_body;
 
     Ok(LegacySendMessageRequest {
         from,
@@ -2393,8 +2417,8 @@ fn legacy_save_message_request_from_payload_with_html(
                 .as_str(),
         )?,
         subject: payload_string(payload, "subject").unwrap_or_default(),
-        html: normalized_body.html,
-        plain: normalized_body.plain,
+        html,
+        plain,
         in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
         references: payload_string(payload, "references").unwrap_or_default(),
         read_receipt_request: payload_bool(payload, "readReceiptRequest"),
@@ -2403,8 +2427,8 @@ fn legacy_save_message_request_from_payload_with_html(
         // PHP's shared buildMessage() includes this header in saved drafts too.
         require_tls: payload_bool(payload, "requireTLS"),
         autocrypt,
-        attachments: Vec::new(),
-        _attachment_memory_permit: None,
+        attachments: inline_attachments,
+        _attachment_memory_permit,
         save_folder: save_folder.to_string(),
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid: u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0),
@@ -2542,6 +2566,7 @@ fn legacy_compose_attachment_specs(
     Ok(attachments)
 }
 
+#[cfg(test)]
 async fn legacy_load_compose_attachments(
     scope: &LegacyComposeStagingScope,
     payload: &Value,
@@ -2552,9 +2577,29 @@ async fn legacy_load_compose_attachments(
     ),
     String,
 > {
+    legacy_load_compose_attachments_with_inline(scope, payload, Vec::new(), None).await
+}
+
+async fn legacy_load_compose_attachments_with_inline(
+    scope: &LegacyComposeStagingScope,
+    payload: &Value,
+    mut attachments: Vec<LegacyComposeAttachment>,
+    memory_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<
+    (
+        Vec<LegacyComposeAttachment>,
+        Option<tokio::sync::OwnedSemaphorePermit>,
+    ),
+    String,
+> {
     let specs = legacy_compose_attachment_specs(payload)?;
+    if specs.len().saturating_add(attachments.len()) > COMPOSE_ATTACHMENT_LIMIT {
+        return Err(format!(
+            "Compose request exceeds the {COMPOSE_ATTACHMENT_LIMIT} attachment limit"
+        ));
+    }
     if specs.is_empty() {
-        return Ok((Vec::new(), None));
+        return Ok((attachments, memory_permit));
     }
 
     // All compose paths take memory admission before the staging mutex.  A
@@ -2562,13 +2607,16 @@ async fn legacy_load_compose_attachments(
     // mutex and keeps the same lock order as MessageUploadAttachments.
     let permit_units = u32::try_from(COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES / (1024 * 1024))
         .map_err(|_| "Attachment memory admission overflow".to_string())?;
-    let memory_permit = tokio::time::timeout(
-        Duration::from_secs(10),
-        Arc::clone(compose_attachment_memory_semaphore()).acquire_many_owned(permit_units),
-    )
-    .await
-    .map_err(|_| "Attachment memory budget is busy; retry later".to_string())?
-    .map_err(|_| "Attachment memory budget is unavailable".to_string())?;
+    let memory_permit = match memory_permit {
+        Some(permit) => permit,
+        None => tokio::time::timeout(
+            Duration::from_secs(10),
+            Arc::clone(compose_attachment_memory_semaphore()).acquire_many_owned(permit_units),
+        )
+        .await
+        .map_err(|_| "Attachment memory budget is busy; retry later".to_string())?
+        .map_err(|_| "Attachment memory budget is unavailable".to_string())?,
+    };
 
     let _permit = tokio::time::timeout(
         Duration::from_secs(10),
@@ -2586,7 +2634,17 @@ async fn legacy_load_compose_attachments(
             ))
         }
     }
-    let mut total = 0_usize;
+    let mut total = attachments.iter().try_fold(0_usize, |total, attachment| {
+        total
+            .checked_add(attachment.data.len())
+            .ok_or_else(|| "Attachment size overflow".to_string())
+    })?;
+    if total > COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES {
+        return Err(format!(
+            "Attachments exceed the {} MiB aggregate limit",
+            COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
     let mut pending = Vec::with_capacity(specs.len());
     for spec in specs {
         let path = scope
@@ -2610,7 +2668,7 @@ async fn legacy_load_compose_attachments(
         }
         pending.push((spec, path, size));
     }
-    let mut attachments = Vec::with_capacity(pending.len());
+    attachments.reserve(pending.len());
     for (spec, path, size) in pending {
         let data = tokio::fs::read(&path)
             .await
@@ -3114,11 +3172,143 @@ impl std::io::Write for BoundedHtmlBuffer {
     }
 }
 
-fn legacy_html_with_linked_data(
+struct LegacySanitizedHtml {
+    html: String,
+    inline_attachments: Vec<LegacyComposeAttachment>,
+}
+
+struct LegacyInlineDataState {
+    cid_suffix: String,
+    content_ids: HashMap<String, String>,
+    attachments: Vec<LegacyComposeAttachment>,
+    decoded_bytes: usize,
+    error: Option<String>,
+}
+
+fn legacy_ascii_prefix_eq_ignore_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+fn legacy_effective_url_uses_data_scheme(value: &str) -> bool {
+    url::Url::parse(value)
+        .ok()
+        .is_some_and(|url| url.scheme().eq_ignore_ascii_case("data"))
+}
+
+fn legacy_inline_data_image(
+    value: &str,
+    state: &mut LegacyInlineDataState,
+) -> Result<String, String> {
+    let mut digest = Md5::new();
+    digest.update(value.as_bytes());
+    let hash = hex::encode(digest.finalize());
+    if let Some(content_id) = state.content_ids.get(&hash) {
+        return Ok(content_id.clone());
+    }
+
+    let content_id = format!("{hash}@{}", state.cid_suffix);
+    state.content_ids.insert(hash, content_id.clone());
+
+    let Some((metadata, encoded)) = value.get(5..).and_then(|value| value.split_once(',')) else {
+        return Ok(content_id);
+    };
+    let Some((mime_type, encoding)) = metadata.split_once(';') else {
+        return Ok(content_id);
+    };
+    if !mime_type
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+        || mime_type.len() == 6
+        || !mime_type.as_bytes()[6..]
+            .iter()
+            .all(u8::is_ascii_alphanumeric)
+        || !encoding.eq_ignore_ascii_case("base64")
+        || encoded.is_empty()
+    {
+        return Ok(content_id);
+    }
+
+    // PHP accepts both padded and valid unpadded standard Base64. Preserve its
+    // whitespace compatibility, but deliberately do not salvage malformed
+    // trailing bytes as MailSo's permissive fallback does: an invalid embedded
+    // image is rewritten to an unresolved CID instead of attaching ambiguous
+    // attacker-controlled bytes.
+    let compact = encoded
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    let decoded = STANDARD
+        .decode(&compact)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&compact))
+        .unwrap_or_default();
+    if decoded.is_empty() {
+        return Ok(content_id);
+    }
+    if decoded.len() > COMPOSE_ATTACHMENT_LIMIT_BYTES {
+        return Err(format!(
+            "Embedded image exceeds the {} MiB attachment limit",
+            COMPOSE_ATTACHMENT_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+    if state.attachments.len() >= COMPOSE_ATTACHMENT_LIMIT {
+        return Err(format!(
+            "Compose request exceeds the {COMPOSE_ATTACHMENT_LIMIT} attachment limit"
+        ));
+    }
+    state.decoded_bytes = state
+        .decoded_bytes
+        .checked_add(decoded.len())
+        .ok_or_else(|| "Embedded image size overflow".to_string())?;
+    if state.decoded_bytes > COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES {
+        return Err(format!(
+            "Attachments exceed the {} MiB aggregate limit",
+            COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let file_name = mime_type
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>();
+    state.attachments.push(LegacyComposeAttachment {
+        spec: LegacyComposeAttachmentSpec {
+            token: String::new(),
+            file_name,
+            is_inline: true,
+            content_id: format!("<{content_id}>"),
+            content_location: String::new(),
+            mime_type: mime_type.to_ascii_lowercase(),
+            is_linked: true,
+        },
+        data: decoded,
+    });
+    Ok(content_id)
+}
+
+fn legacy_html_with_linked_data_and_inline(
     html: &str,
     linked_data_json: Option<&str>,
     limit: usize,
-) -> Result<String, String> {
+) -> Result<LegacySanitizedHtml, String> {
+    let mut random = [0_u8; 16];
+    OsRng.fill_bytes(&mut random);
+    let inline_state = Arc::new(Mutex::new(LegacyInlineDataState {
+        cid_suffix: hex::encode(random),
+        content_ids: HashMap::new(),
+        attachments: Vec::new(),
+        decoded_bytes: 0,
+        error: None,
+    }));
+    let inline_state_filter = Arc::clone(&inline_state);
     let mut sanitizer = ammonia::Builder::default();
     sanitizer
         .rm_tags(&["area", "map"])
@@ -3149,7 +3339,31 @@ fn legacy_html_with_linked_data(
             "valign",
         ])
         .generic_attribute_prefixes(HashSet::from(["aria-"]))
-        .add_url_schemes(&["cid"])
+        .add_url_schemes(&["cid", "data"])
+        .attribute_filter(move |element, attribute, value| {
+            // Ammonia validates URLs with the WHATWG parser, which trims C0
+            // controls/space and removes ASCII tabs/newlines from schemes. Use
+            // that same effective scheme here so an obfuscated data: URL can
+            // never survive merely because it lacks a literal byte prefix.
+            if legacy_effective_url_uses_data_scheme(value) {
+                if element == "img"
+                    && attribute == "src"
+                    && legacy_ascii_prefix_eq_ignore_case(value, "data:image/")
+                {
+                    let mut state = inline_state_filter
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match legacy_inline_data_image(value, &mut state) {
+                        Ok(content_id) => {
+                            return Some(std::borrow::Cow::Owned(format!("cid:{content_id}")));
+                        }
+                        Err(message) => state.error = Some(message),
+                    }
+                }
+                return None;
+            }
+            Some(std::borrow::Cow::Borrowed(value))
+        })
         .link_rel(None);
     let sanitized = sanitizer.clean(html);
     let mut output = BoundedHtmlBuffer {
@@ -3174,7 +3388,28 @@ fn legacy_html_with_linked_data(
         .write_to(&mut output)
         .map_err(|_| "Normalized HTML exceeds the compose body limit".to_string())?;
     write(&mut output, b"</body></html>")?;
-    String::from_utf8(output.bytes).map_err(|_| "Normalized HTML is not valid UTF-8".to_string())
+    let html = String::from_utf8(output.bytes)
+        .map_err(|_| "Normalized HTML is not valid UTF-8".to_string())?;
+    let mut state = inline_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(message) = state.error.take() {
+        return Err(message);
+    }
+    Ok(LegacySanitizedHtml {
+        html,
+        inline_attachments: std::mem::take(&mut state.attachments),
+    })
+}
+
+#[cfg(test)]
+fn legacy_html_with_linked_data(
+    html: &str,
+    linked_data_json: Option<&str>,
+    limit: usize,
+) -> Result<String, String> {
+    legacy_html_with_linked_data_and_inline(html, linked_data_json, limit)
+        .map(|sanitized| sanitized.html)
 }
 
 struct LegacyHtmlToPlainPatterns {
@@ -3338,6 +3573,8 @@ fn legacy_normalize_compose_body(payload: &Value) -> Result<LegacyNormalizedComp
         return Ok(LegacyNormalizedComposeBody {
             html: String::new(),
             plain,
+            inline_attachments: Vec::new(),
+            _attachment_memory_permit: None,
         });
     }
     let linked_data = payload
@@ -3360,8 +3597,9 @@ fn legacy_normalize_compose_body_parts(
         COMPOSE_BODY_LIMIT_BYTES
     };
     let linked_data_json = linked_data.as_ref().and_then(legacy_linked_data_json_value);
-    let normalized_html =
-        legacy_html_with_linked_data(&html, linked_data_json.as_deref(), html_limit)?;
+    let sanitized =
+        legacy_html_with_linked_data_and_inline(&html, linked_data_json.as_deref(), html_limit)?;
+    let normalized_html = sanitized.html;
     let normalized_plain = if has_explicit_plain {
         plain
     } else {
@@ -3380,6 +3618,8 @@ fn legacy_normalize_compose_body_parts(
     Ok(LegacyNormalizedComposeBody {
         html: normalized_html,
         plain: normalized_plain,
+        inline_attachments: sanitized.inline_attachments,
+        _attachment_memory_permit: None,
     })
 }
 
@@ -3395,6 +3635,8 @@ async fn legacy_normalize_compose_body_async(
         return Ok(LegacyNormalizedComposeBody {
             html: String::new(),
             plain,
+            inline_attachments: Vec::new(),
+            _attachment_memory_permit: None,
         });
     }
     let linked_data = payload
@@ -3402,6 +3644,20 @@ async fn legacy_normalize_compose_body_async(
         .filter(|value| legacy_payload_has_value(value))
         .cloned();
     legacy_validate_raw_compose_html(&html)?;
+
+    // Reserve the same aggregate attachment budget before parsing HTML. Entity
+    // decoding can reveal a data: image that is not visible to a raw byte scan,
+    // so every HTML compose takes admission until sanitation proves that no
+    // embedded attachment was produced.
+    let permit_units = u32::try_from(COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES / (1024 * 1024))
+        .map_err(|_| "Attachment memory admission overflow".to_string())?;
+    let inline_memory_permit = tokio::time::timeout(
+        Duration::from_secs(10),
+        Arc::clone(compose_attachment_memory_semaphore()).acquire_many_owned(permit_units),
+    )
+    .await
+    .map_err(|_| "Attachment memory budget is busy; retry later".to_string())?
+    .map_err(|_| "Attachment memory budget is unavailable".to_string())?;
 
     let permit = tokio::time::timeout(
         COMPOSE_SANITIZE_DEADLINE,
@@ -3412,10 +3668,19 @@ async fn legacy_normalize_compose_body_async(
     .map_err(|_| "HTML sanitizer is unavailable".to_string())?;
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        legacy_normalize_compose_body_parts(html, plain, linked_data)
+        (
+            legacy_normalize_compose_body_parts(html, plain, linked_data),
+            inline_memory_permit,
+        )
     });
     match tokio::time::timeout(COMPOSE_SANITIZE_DEADLINE, task).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok((Ok(mut result), inline_memory_permit))) => {
+            if !result.inline_attachments.is_empty() {
+                result._attachment_memory_permit = Some(inline_memory_permit);
+            }
+            Ok(result)
+        }
+        Ok(Ok((Err(message), _inline_memory_permit))) => Err(message),
         Ok(Err(_)) => Err("HTML sanitizer task failed".to_string()),
         Err(_) => Err("HTML sanitizer timed out".to_string()),
     }
@@ -3512,6 +3777,12 @@ fn legacy_send_message_request_from_payload_with_html(
     }
 
     let draft_uid = u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0);
+    let LegacyNormalizedComposeBody {
+        html,
+        plain,
+        inline_attachments,
+        _attachment_memory_permit,
+    } = normalized_body;
 
     Ok(LegacySendMessageRequest {
         from,
@@ -3521,8 +3792,8 @@ fn legacy_send_message_request_from_payload_with_html(
         bcc,
         reply_to,
         subject: payload_string(payload, "subject").unwrap_or_default(),
-        html: normalized_body.html,
-        plain: normalized_body.plain,
+        html,
+        plain,
         in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
         references: payload_string(payload, "references").unwrap_or_default(),
         read_receipt_request: payload_bool(payload, "readReceiptRequest"),
@@ -3530,8 +3801,8 @@ fn legacy_send_message_request_from_payload_with_html(
         dsn: payload_bool(payload, "dsn"),
         require_tls: payload_bool(payload, "requireTLS"),
         autocrypt,
-        attachments: Vec::new(),
-        _attachment_memory_permit: None,
+        attachments: inline_attachments,
+        _attachment_memory_permit,
         save_folder: payload_string(payload, "saveFolder").unwrap_or_default(),
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid,
@@ -19264,6 +19535,129 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn legacy_compose_converts_duplicate_data_images_to_one_linked_mime_part() {
+        let source = "data:image/png;base64,UE5H";
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": format!(r#"<p><img src="{source}"><img src="{source}"></p>"#),
+            "plain": "two images",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("valid embedded images should normalize");
+
+        assert_eq!(request.attachments.len(), 1);
+        let attachment = &request.attachments[0];
+        assert_eq!(attachment.data, b"PNG");
+        assert_eq!(attachment.spec.file_name, "image.png");
+        assert_eq!(attachment.spec.mime_type, "image/png");
+        assert!(attachment.spec.is_inline);
+        assert!(attachment.spec.is_linked);
+        let content_id = super::legacy_strip_angle_brackets(&attachment.spec.content_id);
+        assert_eq!(content_id.len(), 65);
+        assert_eq!(
+            request.html.matches(&format!("cid:{content_id}")).count(),
+            2
+        );
+        assert!(!request.html.contains("data:image"));
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("embedded image MIME should build")
+                .formatted(),
+        )
+        .expect("MIME should be UTF-8");
+        assert!(raw.contains("multipart/related"));
+        assert!(raw.contains("multipart/alternative"));
+        assert!(raw.contains("Content-Type: image/png; name=\"image.png\""));
+        assert!(raw.contains(&format!("Content-ID: <{content_id}>")));
+        assert!(raw.contains("Content-Disposition: inline; filename=\"image.png\""));
+        assert!(raw.contains("UE5H"));
+    }
+
+    #[test]
+    fn legacy_compose_removes_non_image_data_urls_and_does_not_attach_invalid_images() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": r#"<p>
+                <a href="data:text/html;base64,PHNjcmlwdD4=">bad</a>
+                <a href="&#x20;data:text/html;base64,PHNjcmlwdD4=">leading space</a>
+                <a href="da&#x09;ta:text/html;base64,PHNjcmlwdD4=">embedded tab</a>
+                <a href="&#x0a;DATA:text/html;base64,PHNjcmlwdD4=">leading newline</a>
+                <img src="data:image/png;base64,%%%">
+                <img src="&#x20;data:image/png;base64,UE5H">
+                <img src="da&#x0a;ta:image/png;base64,UE5H">
+            </p>"#,
+            "plain": "safe",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("invalid embedded data should be removed safely");
+
+        assert!(request.attachments.is_empty());
+        assert!(!request.html.to_ascii_lowercase().contains("data:"));
+        assert!(request.html.contains("src=\"cid:"));
+        assert!(!request.html.contains("href="));
+        assert_eq!(request.html.matches("src=").count(), 1);
+    }
+
+    #[test]
+    fn legacy_compose_accepts_valid_unpadded_and_whitespace_base64_images() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": r#"<p><img src="data:image/png;base64,YQ"><img src="data:image/gif;base64,Y W I ="></p>"#,
+            "plain": "images",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("valid PHP-compatible Base64 should normalize");
+
+        assert_eq!(request.attachments.len(), 2);
+        assert_eq!(request.attachments[0].data, b"a");
+        assert_eq!(request.attachments[1].data, b"ab");
+        assert!(!request.html.contains("data:image"));
+        assert_eq!(request.html.matches("src=\"cid:").count(), 2);
+    }
+
+    #[test]
+    fn legacy_compose_bounds_the_number_of_embedded_data_images() {
+        let html = (0..=super::COMPOSE_ATTACHMENT_LIMIT)
+            .map(|index| {
+                format!(
+                    r#"<img src="data:image/x{index};base64,{}">"#,
+                    STANDARD.encode(index.to_string())
+                )
+            })
+            .collect::<String>();
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": html,
+            "plain": "bounded",
+        });
+
+        assert!(
+            super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+                .unwrap_err()
+                .contains("attachment limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_async_data_image_normalization_retains_attachment_memory_admission() {
+        let payload = json!({
+            "html": "<img src=\"data:image/gif;base64,R0lG\">",
+            "plain": "image",
+        });
+        let normalized = super::legacy_normalize_compose_body_async(&payload)
+            .await
+            .expect("valid embedded image should normalize asynchronously");
+
+        assert_eq!(normalized.inline_attachments.len(), 1);
+        assert!(normalized._attachment_memory_permit.is_some());
+    }
+
+    #[test]
     fn build_legacy_send_message_derives_plain_fallback_from_html() {
         let payload = json!({
             "from": "sender@example.com",
@@ -27152,6 +27546,86 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(scope.path(&token).unwrap().exists());
 
         tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_and_save_actions_serialize_embedded_data_images_as_related_parts() {
+        let key = [63_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-data-image-actions-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) =
+            message_body_test_state_with_config(7_942, 7_943, &key, config).await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET smtp_host = ?, smtp_port = ?, smtp_secure = ?
+             WHERE id = ?",
+        )
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(7_943_i64)
+        .execute(state.db_pool().unwrap())
+        .await
+        .unwrap();
+        let html = "<p>Logo <img src=\"data:image/gif;base64,R0lG\"></p>";
+
+        let sent = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&sent),
+        };
+        let response = super::native_send_message_inner_with_sender(
+            &state,
+            "SendMessage",
+            &json!({
+                "account_id": 7_943,
+                "from": "work@example.com",
+                "to": "recipient@example.net",
+                "html": html,
+                "plain": "Logo"
+            }),
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+        let sent_wire = String::from_utf8(sent.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(sent_wire.contains("multipart/related"));
+        assert!(sent_wire.contains("Content-Type: image/gif; name=\"image.gif\""));
+        assert!(sent_wire.contains("Content-ID: <"));
+        assert!(sent_wire.contains("R0lG"));
+        assert!(!sent_wire.contains("data:image"));
+
+        let saved = Arc::new(Mutex::new(None));
+        let appender = RecordingDraftAppender {
+            message: Arc::clone(&saved),
+        };
+        let response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &json!({
+                "account_id": 7_943,
+                "from": "work@example.com",
+                "html": html,
+                "plain": "Logo",
+                "saveFolder": "Drafts"
+            }),
+            &session,
+            &appender,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"]["uid"], 77);
+        let saved_wire = String::from_utf8(saved.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(saved_wire.contains("multipart/related"));
+        assert!(saved_wire.contains("Content-Type: image/gif; name=\"image.gif\""));
+        assert!(saved_wire.contains("R0lG"));
+        assert!(!saved_wire.contains("data:image"));
+        assert!(!temp_root.join("compose-attachments").exists());
     }
 
     #[tokio::test]

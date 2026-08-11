@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-11 20:33:47 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-11 21:00:16 CEST (UTC+02:00)
 
 ### Completed And Pushed Today
 
@@ -45,70 +45,73 @@ The following commits are present on both `master` and
 9. `857ccfce1` (`rust: add DSN and REQUIRETLS delivery options`) completed
    capability-gated DSN/REQUIRETLS SMTP parity and removed QUIT from the
    confirmed-delivery result path.
+10. `afb345b20` (`rust: migrate compose attachment handling`) completed the
+    canonical native Upload route, private account-scoped staging,
+    transfer-decoded `MessageUploadAttachments`, bounded hostile-IMAP literal
+    handling, staged regular/inline/CID/raw-message MIME assembly, and exact
+    post-delivery capability cleanup.
 
 The completed code passed independent senior review, strict workspace Clippy,
 the full Rust workspace test suite, and production-image smoke testing. The
 latest published slice's reviewed image
-(`frickmail-rust:smtp-extensions-final`, immutable
+(`frickmail-rust:attachments-final`, immutable
 image ID
-`sha256:47df342c9fba336f07290af3ea34d597542fb62dc260160ea217e8020db16214`)
+`sha256:6a70e1074c7d1b15365dc8140906cbd6794b4a89ab46bc949eac44cf182ee610`)
 ran as a healthy, non-root, read-only canary, served HTTP successfully,
 connected to the database, logged no startup errors, and recorded zero
-restarts. All four GitHub/Gitea branch tips were verified at `857ccfce1`, and
-GitHub `rust-ci` run `31512696386` passed, including the production-image smoke
-test. Future
+restarts. All four GitHub/Gitea branch tips were verified at `afb345b20`.
+GitHub `rust-ci` runs `31523504776` and `31523505651`, triggered by the exact
+master and `rust-full-migration` pushes, both completed successfully. Future
 release images still need a revision OCI label and immutable revision tag so
 provenance is directly auditable from the image.
 
 ### Current Slice Included In This Pending Commit
 
-This slice migrates ordinary compose attachments. The native `/?/Upload/`
-service route now creates private, account-scoped staging capabilities;
-`MessageUploadAttachments` fetches and transfer-decodes forwarded MIME parts
-from one atomically resolved selected account. Send and Save load staged bytes
-under explicit per-file, per-request, per-account, per-user, global disk,
-memory, concurrency, and deadline bounds.
+This slice converts canonical
+`data:image/<alphanumeric>;base64,...` HTML images into generated CID-linked
+MIME parts for both native SendMessage and SaveMessage. Repeated identical data
+URLs share one attachment and Content-ID; the rewritten HTML and image part are
+serialized beneath MailSo-compatible `multipart/related` and
+`multipart/alternative` roots. The generated filename, MIME type, inline
+disposition, Content-ID, Base64 transfer encoding, and transport/draft action
+wiring have direct regressions.
 
-MIME serialization now supports regular, inline, CID-linked, and raw
-`message/rfc822` attachments. It reproduces MailSo's body-plus-linked
-`multipart/related` nesting inside outer `multipart/mixed`, emits supplied
-Content-ID independently of disposition, preserves raw attached-message bytes,
-and runs MIME construction in the bounded blocking pool. Successful SMTP
-delivery deletes exactly the consumed staged capabilities; SMTP failure and
-SaveMessage retain them for retry.
+Embedded image count and decoded bytes share the existing 100-file, 10 MiB
+per-file, and 20 MiB aggregate attachment contract. HTML sanitation reserves
+the aggregate 20 MiB memory admission before parsing; the permit is retained by
+non-cancellable blocking work after a caller timeout and, when an image exists,
+through staging load and MIME construction. Combined staged and embedded
+attachments are charged to one count and byte total.
 
-Forwarded base64 and quoted-printable parts are decoded before restaging. The
-bounded IMAP connection applies partial requests, decoded-output caps, weighted
-memory admission, and a response-context-aware transport guard before greeting
-and login. That guard rejects oversized, cumulative, prebuffered, status-text
-skip, nonliteral-prefix, and parser-reservation cases before async-imap can
-reserve beyond the admitted response budget. The ordinary ZIP-download
-prototype remains unchanged and undispatched.
+The sanitizer temporarily admits the `data` URL scheme only so its attribute
+filter can convert canonical image sources. Effective scheme detection uses the
+same WHATWG parser as Ammonia, so leading C0/space and embedded tab/newline
+obfuscations are removed, as are every non-image and noncanonical data URL.
+Valid padded and unpadded standard Base64 with ASCII whitespace is accepted;
+MailSo's ambiguous malformed-tail salvage is intentionally not reproduced.
 
-Senior review repeatedly rejected earlier revisions for MIME corruption,
-linked-part layout, tenant fairness, async-worker work, lock ordering, route
-aliases, multipart-boundary complexity, and hostile IMAP literal allocation.
-It also drove exact service-route matching, private owner/no-symlink staging
-trees, bounded and recoverable directory cleanup, MIME header wire limits,
-slow-body admission, lazy multi-part fetch scheduling, and serialized
-post-delivery cleanup. Those findings now have focused regressions, and final
-independent review approved the complete live diff with no actionable issue.
+Independent senior review first rejected literal-prefix scheme detection and
+padding-only Base64 compatibility. Both findings now have adversarial
+regressions, and the final exact live patch was approved with no actionable
+issue (reviewed patch SHA-256
+`3298fc78830eef696d3f0873671158e569985aa3062ff5e92d98204dd459a11a`).
 
-The full Docker gate passed formatting, locked workspace check, all 563
-workspace tests, and strict all-target workspace Clippy. The exact production
-image was built as `frickmail-rust:attachments-final`, immutable image ID
-`sha256:6a70e1074c7d1b15365dc8140906cbd6794b4a89ab46bc949eac44cf182ee610`.
+The full Docker gate passed formatting, locked workspace check, all 569
+workspace tests, doc-tests, and strict all-target workspace Clippy. The exact
+production image was built as `frickmail-rust:data-images-final`, immutable
+image ID
+`sha256:652b4768d3b0190f8c67b87418848de5a13ca426dac35017a6b22d12c1f7672d`.
 The recreated local canary is healthy, non-root, read-only, capability-dropped,
 and protected by `no-new-privileges`; Docker reports zero restarts and no OOM
 kill. `/health` and `/` return HTTP 200, PostgreSQL verification succeeded,
 and logs contain no startup error. Its general `/tmp` and private
-`/tmp/frickmail/compose-attachments` tmpfs mounts are independently bounded;
+`/tmp/frickmail/compose-attachments` tmpfs mounts remain independently bounded;
 the staging mount is owned by UID/GID 10001 and mode 0700. The resulting commit,
 four remote-tip SHAs, and exact-SHA GitHub CI remain pending in this workflow.
 
 ### In Progress But Not Committed
 
-The attachment slice above is the only tracked uncommitted work. It remains
+The embedded data-image slice above is the only tracked uncommitted work. It remains
 pending only for final staged review and publication to both branches on both
 remotes, followed by exact-SHA GitHub CI verification.
 
@@ -118,8 +121,9 @@ The current Rust release is useful as a canary and for the migrated native
 routes, but it is not yet a safe drop-in replacement for the PHP production
 container. The major remaining gates are:
 
-1. Finish compose parity: legacy data-URL/inline transformations, PGP and
-   S/MIME signing/encryption, OAuth-backed SMTP, and related draft behavior.
+1. Finish compose parity: remaining legacy `data-x-src*`/`data-x-style-url`
+   inline transformations, PGP and S/MIME signing/encryption, OAuth-backed
+   SMTP, and related draft behavior.
 2. Finish exact legacy `Message` response/header/body parity and migrate every
    remaining mail action still routed through the compatibility bridge.
 3. Complete the Rust-only connection-token/CSRF/session contract, then remove
