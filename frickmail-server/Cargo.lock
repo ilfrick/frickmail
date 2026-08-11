@@ -1404,6 +1404,7 @@ dependencies = [
  "fm-core",
  "lettre",
  "serde",
+ "tokio",
 ]
 
 [[package]]

@@ -1152,6 +1152,7 @@ struct LegacySendMessageRequest {
     references: String,
     read_receipt_request: bool,
     mark_as_important: bool,
+    dsn: bool,
     require_tls: bool,
     autocrypt: Option<LegacyAutocryptHeader>,
     save_folder: String,
@@ -1361,7 +1362,15 @@ async fn native_send_message_inner(
     delivery_phase.store(SEND_PHASE_SMTP_IN_FLIGHT, Ordering::Release);
     let send_result = tokio::time::timeout(
         SEND_MESSAGE_SMTP_DEADLINE,
-        fm_smtp::send_raw_message_async(&smtp_settings, &envelope, &transport_bytes),
+        fm_smtp::send_raw_message_async(
+            &smtp_settings,
+            &envelope,
+            &transport_bytes,
+            fm_smtp::SmtpDeliveryOptions {
+                dsn: request.dsn,
+                require_tls: request.require_tls,
+            },
+        ),
     )
     .await;
 
@@ -1905,6 +1914,7 @@ fn legacy_save_message_request_from_payload_with_html(
         references: payload_string(payload, "references").unwrap_or_default(),
         read_receipt_request: payload_bool(payload, "readReceiptRequest"),
         mark_as_important: payload_bool(payload, "markAsImportant"),
+        dsn: false,
         // PHP's shared buildMessage() includes this header in saved drafts too.
         require_tls: payload_bool(payload, "requireTLS"),
         autocrypt,
@@ -1915,7 +1925,7 @@ fn legacy_save_message_request_from_payload_with_html(
     })
 }
 
-fn legacy_unsupported_compose_feature(payload: &Value, sending: bool) -> Option<&'static str> {
+fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
     const MIME_FEATURES: &[(&str, &str)] = &[
         ("attachments", "attachments"),
         ("signed", "OpenPGP signed content"),
@@ -1930,12 +1940,6 @@ fn legacy_unsupported_compose_feature(payload: &Value, sending: bool) -> Option<
         if payload.get(*field).is_some_and(legacy_payload_has_value) {
             return Some(label);
         }
-    }
-    if sending && payload_bool(payload, "dsn") {
-        return Some("delivery status notifications");
-    }
-    if sending && payload_bool(payload, "requireTLS") {
-        return Some("SMTP REQUIRETLS");
     }
     None
 }
@@ -2778,6 +2782,7 @@ fn legacy_send_message_request_from_payload_with_html(
         references: payload_string(payload, "references").unwrap_or_default(),
         read_receipt_request: payload_bool(payload, "readReceiptRequest"),
         mark_as_important: payload_bool(payload, "markAsImportant"),
+        dsn: payload_bool(payload, "dsn"),
         require_tls: payload_bool(payload, "requireTLS"),
         autocrypt,
         save_folder: payload_string(payload, "saveFolder").unwrap_or_default(),
@@ -17264,6 +17269,7 @@ Subject: Empty body metadata\r\n\r\n"
             "messageUid": 42,
             "markAsImportant": 1,
             "readReceiptRequest": 1,
+            "dsn": 1,
             "requireTLS": 0,
             "autocrypt": [{"addr": "sender@example.com", "keydata": AUTOCRYPT_TEST_KEYDATA}],
             "draftInfo": ["reply", 17, "INBOX"],
@@ -17287,6 +17293,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(request.draft_uid, 42);
         assert!(request.mark_as_important);
         assert!(request.read_receipt_request);
+        assert!(request.dsn);
         assert!(!request.require_tls);
         assert_eq!(
             request.autocrypt,
@@ -18324,11 +18331,11 @@ Subject: Empty body metadata\r\n\r\n"
 
         assert_eq!(
             super::legacy_unsupported_compose_feature(&json!({"dsn": 1}), true),
-            Some("delivery status notifications")
+            None
         );
         assert_eq!(
             super::legacy_unsupported_compose_feature(&json!({"requireTLS": 1}), true),
-            Some("SMTP REQUIRETLS")
+            None
         );
         assert_eq!(
             super::legacy_unsupported_compose_feature(

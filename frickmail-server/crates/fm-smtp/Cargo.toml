@@ -10,3 +10,6 @@ repository.workspace = true
 fm-core = { path = "../fm-core" }
 lettre.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }
