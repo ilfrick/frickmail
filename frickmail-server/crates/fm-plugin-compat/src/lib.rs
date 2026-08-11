@@ -127,6 +127,7 @@ pub const FRICKMAIL_COMPAT_HOOKS: &[CompatHook] = &[
     json("FolderCheckable"),
     json("AttachmentsActions"),
     json("MessageUploadAttachments"),
+    json("SendMessage"),
     json("NextcloudSaveMsg"),
     json("NextcloudAttachFile"),
     json("JsonCalendarEvents"),
@@ -314,6 +315,7 @@ mod tests {
             "FolderCheckable",
             "AttachmentsActions",
             "MessageUploadAttachments",
+            "SendMessage",
         ];
 
         for action in required {

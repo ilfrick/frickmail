@@ -993,6 +993,7 @@ dependencies = [
  "hex",
  "hmac",
  "idna",
+ "lettre",
  "md-5",
  "openssl",
  "p256",

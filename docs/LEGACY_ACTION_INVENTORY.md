@@ -125,6 +125,7 @@ part of the full webmail core migration.
 | `FolderSetACL`, `FolderDeleteACL` | `dev/View/Popup/FolderAcl.js`, `dev/View/Popup/Folder.js` | native | Use the selected Frickmail mail account and safely quote capability-gated IMAP ACL mutations. |
 | `FolderIdentifierRights` | dormant code in `dev/View/Popup/FolderAcl.js` | compat-known | The only frontend call is commented out and the legacy PHP actions expose no matching handler; retained as a compatibility-known name pending removal or historical verification. |
 | `AttachmentsActions`, `MessageUploadAttachments` | `dev/Common/UtilsUser.js`, `dev/View/Popup/Compose.js` | native | Handles attachment download with zip-slip-safe filename sanitization, TTL-based temp-file cleanup, and native fetch of individual MIME parts. Upload attachments caches fetched MIME parts into the configured `tmp_dir` with the same TTL-based cleanup. |
+| `SendMessage` | `dev/View/Popup/Compose.js` | partial-native | Native compose and SMTP delivery for the selected account. Covers PHP-compatible `from`/`to`/`cc`/`bcc`/`replyTo` parsing with display-name preservation and bare-address envelope extraction, recipient de-duplication, `subject`, `text/plain`, `text/html`, and `multipart/alternative` bodies, `inReplyTo`/`references` threading headers, `markAsImportant` (`X-Priority`), `readReceiptRequest` (`Disposition-Notification-To`), and the legacy `TLS-Required: No` header when `requireTLS` is unset. Delivery uses an explicit SMTP envelope carrying Bcc recipients while the transport copy omits the `Bcc` header, matching PHP's `ToStream(true)`; the `saveFolder` APPEND keeps the `Bcc` header like `ToStream(false)` and falls back to the account's configured `SentFolder` when the requested folder rejects the APPEND. Post-send `draftInfo` reply/forward flagging (`\Answered`/`$Forwarded`) and draft cleanup are best-effort like legacy PHP. The blocking SMTP transport runs on a blocking task with an explicit deadline. Attachments, PGP/S-MIME signing and encryption (`signed`, `encrypted`, `autocrypt`), `linkedData`, `dsn`, and `identityID`-based identity selection are not yet migrated. |
 
 Detailed native `Message` responses also populate the nullable RFC 8970
 `preview` field through a capability-gated, UID-correlated `PREVIEW` fetch;
@@ -147,7 +148,7 @@ features unless noted elsewhere.
 | Change password | `ChangePassword` |
 | Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` |
 | Calendar | `JsonCalendarEvents`, `JsonCalendarList`, `JsonCalendarSave`, `JsonCalendarDelete` |
-| Have I Been Pwned | `HibpCheck` |
+| Have I Been Pwned | `HibpCheck` (native) |
 | Two-factor-auth legacy plugin | `GetTwoFactorInfo`, `CreateTwoFactorSecret`, `ShowTwoFactorSecret`, `EnableTwoFactor`, `VerifyTwoFactorCode`, `ClearTwoFactorInfo` |
 
 ## Part Hooks
@@ -185,7 +186,11 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Complete `Message` parity: remaining message/header details and detailed
+1. Complete `SendMessage` parity: attachment assembly from cached `tempName`
+   uploads, PGP/S-MIME `signed`/`encrypted`/`autocrypt` payloads, `dsn`,
+   `linkedData`, and `identityID`-based identity selection.
+2. Migrate `SaveMessage` so drafts are saved natively alongside `SendMessage`.
+3. Complete `Message` parity: remaining message/header details and detailed
    message payloads.
-2. Migrate the legacy connection-token/CSRF contract as part of the Rust-only
+4. Migrate the legacy connection-token/CSRF contract as part of the Rust-only
    session and runtime cutover.

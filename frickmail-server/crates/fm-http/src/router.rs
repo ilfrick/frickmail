@@ -894,6 +894,7 @@ async fn native_compat_response(
                 .await,
         ),
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
+        "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
         _ => None,
     }
 }
@@ -1070,6 +1071,638 @@ async fn hibp_check_account(api_key: &str, email: &str) -> Option<Vec<serde_json
     }
 
     response.json::<Vec<serde_json::Value>>().await.ok()
+}
+
+const SEND_MESSAGE_SMTP_DEADLINE: Duration = Duration::from_secs(120);
+const SEND_MESSAGE_APPEND_DEADLINE: Duration = Duration::from_secs(60);
+const SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Legacy `SendMessage` compose payload after validation.
+#[derive(Debug)]
+struct LegacySendMessageRequest {
+    /// Full `From:` header value, display name included.
+    from: String,
+    /// Bare address used as the SMTP envelope sender.
+    envelope_from: String,
+    to: Vec<String>,
+    cc: Vec<String>,
+    bcc: Vec<String>,
+    reply_to: Vec<String>,
+    subject: String,
+    html: String,
+    plain: String,
+    in_reply_to: String,
+    references: String,
+    read_receipt_request: bool,
+    mark_as_important: bool,
+    require_tls: bool,
+    save_folder: String,
+    draft_folder: String,
+    draft_uid: u32,
+    draft_info: Option<LegacyDraftInfoRequest>,
+}
+
+/// `draftInfo` triple: [type, uid, folder]. Drives the reply/forward flag update.
+#[derive(Debug)]
+struct LegacyDraftInfoRequest {
+    info_type: String,
+    uid: u32,
+    folder: String,
+}
+
+async fn native_send_message(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let account_id = match resolve_message_body_account_id(payload, session, original_action).await
+    {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
+
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return json_result_error(original_action, "Account not found"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    let password = match account_password(&account, &credential_key) {
+        Ok(password) => password,
+        Err(_) => return json_result_error(original_action, "Missing account password"),
+    };
+
+    let request = match legacy_send_message_request_from_payload(payload, &account.email) {
+        Ok(request) => request,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
+    let smtp_settings =
+        match legacy_smtp_send_settings(state, pool, user.user_id, account_id, &account, &password)
+            .await
+        {
+            Ok(settings) => settings,
+            Err(message) => return json_result_error(original_action, &message),
+        };
+
+    // Legacy parity: the transport copy omits the Bcc header because the SMTP
+    // envelope already carries those recipients; the Sent copy keeps it.
+    let transport_message = match build_legacy_send_message(&request, false) {
+        Ok(message) => message,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
+    let envelope = match fm_smtp::build_envelope(&request.envelope_from, &request.all_recipients())
+    {
+        Ok(envelope) => envelope,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    let transport_bytes = transport_message.formatted();
+    let send_settings = smtp_settings.clone();
+    let send_result = tokio::time::timeout(
+        SEND_MESSAGE_SMTP_DEADLINE,
+        tokio::task::spawn_blocking(move || {
+            fm_smtp::send_raw_message(&send_settings, &envelope, &transport_bytes)
+        }),
+    )
+    .await;
+
+    match send_result {
+        Ok(Ok(Ok(_))) => {}
+        Ok(Ok(Err(err))) => return json_result_error(original_action, &err.public_message()),
+        Ok(Err(err)) => {
+            return json_result_error(original_action, &format!("SMTP send task failed: {err}"))
+        }
+        Err(_) => return json_result_error(original_action, "SMTP send timed out"),
+    }
+
+    // Delivery succeeded. Everything below is best-effort: legacy PHP logs these
+    // failures and still reports success, because the mail is already sent.
+    let imap_config = match imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::warn!(
+                "SendMessage: skipping post-send IMAP work, no usable IMAP config: {}",
+                err.public_message()
+            );
+            return legacy_send_message_success(original_action);
+        }
+    };
+
+    if !request.save_folder.is_empty() {
+        let stored_message = match build_legacy_send_message(&request, true) {
+            Ok(message) => message,
+            Err(message) => {
+                tracing::warn!("SendMessage: could not rebuild message for append: {message}");
+                return legacy_send_message_success(original_action);
+            }
+        };
+        legacy_send_message_append_to_sent(
+            state,
+            pool,
+            user.user_id,
+            account_id,
+            &imap_config,
+            &password,
+            &request.save_folder,
+            &stored_message.formatted(),
+        )
+        .await;
+    }
+
+    if let Some(draft_info) = &request.draft_info {
+        legacy_send_message_flag_draft_source(&imap_config, &password, draft_info).await;
+    }
+
+    if !request.draft_folder.is_empty() && request.draft_uid > 0 {
+        let uid_set = request.draft_uid.to_string();
+        let cleanup = tokio::time::timeout(
+            SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
+            fm_imap::delete_messages(
+                imap_config.clone(),
+                &password,
+                &request.draft_folder,
+                &uid_set,
+            ),
+        )
+        .await;
+        match cleanup {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!(
+                "SendMessage: draft cleanup failed for {}:{}: {}",
+                request.draft_folder,
+                request.draft_uid,
+                err.public_message()
+            ),
+            Err(_) => tracing::warn!(
+                "SendMessage: draft cleanup timed out for {}:{}",
+                request.draft_folder,
+                request.draft_uid
+            ),
+        }
+    }
+
+    legacy_send_message_success(original_action)
+}
+
+fn legacy_send_message_success(original_action: &str) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": true
+        }),
+    )
+}
+
+/// Appends the sent copy, falling back to the account's configured `SentFolder`
+/// when the requested folder rejects the APPEND, exactly like legacy PHP.
+#[allow(clippy::too_many_arguments)]
+async fn legacy_send_message_append_to_sent(
+    state: &AppState,
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_id: i64,
+    imap_config: &ImapConnectionConfig,
+    password: &str,
+    save_folder: &str,
+    raw: &[u8],
+) {
+    let _ = state;
+    let first = tokio::time::timeout(
+        SEND_MESSAGE_APPEND_DEADLINE,
+        fm_imap::append_raw_message(imap_config.clone(), password, save_folder, raw),
+    )
+    .await;
+
+    let first_error = match first {
+        Ok(Ok(())) => return,
+        Ok(Err(err)) => err.public_message(),
+        Err(_) => "append timed out".to_string(),
+    };
+
+    let fallback_folder =
+        match SqlxUserRepository::get_mail_account_settings(pool, user_id, account_id).await {
+            Ok(Some(settings)) => settings
+                .get("SentFolder")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|folder| !folder.trim().is_empty() && folder != save_folder),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    "SendMessage: could not read SentFolder setting: {}",
+                    err.public_message()
+                );
+                None
+            }
+        };
+
+    let Some(fallback_folder) = fallback_folder else {
+        tracing::warn!("SendMessage: append to '{save_folder}' failed: {first_error}");
+        return;
+    };
+
+    let second = tokio::time::timeout(
+        SEND_MESSAGE_APPEND_DEADLINE,
+        fm_imap::append_raw_message(imap_config.clone(), password, &fallback_folder, raw),
+    )
+    .await;
+
+    match second {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::warn!(
+            "SendMessage: append to '{save_folder}' failed ({first_error}) and fallback '{fallback_folder}' failed: {}",
+            err.public_message()
+        ),
+        Err(_) => tracing::warn!(
+            "SendMessage: append to '{save_folder}' failed ({first_error}) and fallback '{fallback_folder}' timed out"
+        ),
+    }
+}
+
+/// Marks the source message answered/forwarded after a reply or forward is sent.
+async fn legacy_send_message_flag_draft_source(
+    imap_config: &ImapConnectionConfig,
+    password: &str,
+    draft_info: &LegacyDraftInfoRequest,
+) {
+    if draft_info.folder.trim().is_empty() || draft_info.uid == 0 {
+        return;
+    }
+
+    let uid_set = draft_info.uid.to_string();
+    let info_type = draft_info.info_type.to_ascii_lowercase();
+    let result = match info_type.as_str() {
+        "reply" | "reply-all" => {
+            tokio::time::timeout(
+                SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
+                fm_imap::store_message_keyword(
+                    imap_config.clone(),
+                    password,
+                    &draft_info.folder,
+                    &uid_set,
+                    "\\Answered",
+                    true,
+                ),
+            )
+            .await
+        }
+        "forward" => {
+            tokio::time::timeout(
+                SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
+                fm_imap::store_message_keyword(
+                    imap_config.clone(),
+                    password,
+                    &draft_info.folder,
+                    &uid_set,
+                    "$Forwarded",
+                    true,
+                ),
+            )
+            .await
+        }
+        _ => return,
+    };
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::warn!(
+            "SendMessage: draftInfo flag update failed for {}:{}: {}",
+            draft_info.folder,
+            draft_info.uid,
+            err.public_message()
+        ),
+        Err(_) => tracing::warn!(
+            "SendMessage: draftInfo flag update timed out for {}:{}",
+            draft_info.folder,
+            draft_info.uid
+        ),
+    }
+}
+
+/// Resolves the SMTP endpoint, preferring the per-account record and falling
+/// back to the server-wide mail defaults.
+async fn legacy_smtp_send_settings(
+    state: &AppState,
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_id: i64,
+    account: &MailAccountConnectionSecret,
+    password: &str,
+) -> Result<fm_smtp::SmtpSendSettings, String> {
+    let stored = SqlxUserRepository::get_mail_account(pool, user_id, account_id)
+        .await
+        .map_err(|err| err.public_message())?
+        .ok_or_else(|| "Account not found".to_string())?;
+
+    let defaults = &state.config().mail;
+    let host = stored
+        .smtp_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .unwrap_or(defaults.smtp_host.trim())
+        .to_string();
+    if host.is_empty() {
+        return Err("SMTP host is not configured".to_string());
+    }
+
+    let port = stored
+        .smtp_port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port > 0)
+        .unwrap_or(defaults.smtp_port);
+    if port == 0 {
+        return Err("SMTP port is not configured".to_string());
+    }
+
+    let secure = stored
+        .smtp_secure
+        .as_deref()
+        .map(str::trim)
+        .filter(|secure| !secure.is_empty())
+        .unwrap_or(match port {
+            465 => "ssl",
+            _ => "starttls",
+        })
+        .to_ascii_lowercase();
+
+    let login = stored
+        .login
+        .as_deref()
+        .map(str::trim)
+        .filter(|login| !login.is_empty())
+        .unwrap_or(account.email.as_str())
+        .to_string();
+
+    Ok(fm_smtp::SmtpSendSettings {
+        host,
+        port,
+        secure,
+        login,
+        password: password.to_string(),
+    })
+}
+
+impl LegacySendMessageRequest {
+    /// Envelope recipients: To + Cc + Bcc, deduplicated.
+    fn all_recipients(&self) -> Vec<String> {
+        let mut recipients = Vec::new();
+        for group in [&self.to, &self.cc, &self.bcc] {
+            for address in group {
+                if !recipients.contains(address) {
+                    recipients.push(address.clone());
+                }
+            }
+        }
+        recipients
+    }
+}
+
+fn legacy_send_message_request_from_payload(
+    payload: &Value,
+    account_email: &str,
+) -> Result<LegacySendMessageRequest, String> {
+    // The display name is preserved in the `From:` header like legacy PHP; only
+    // the bare address is validated and used for the SMTP envelope.
+    let from = payload_string(payload, "from")
+        .map(|from| from.trim().to_string())
+        .filter(|from| !from.is_empty())
+        .unwrap_or_else(|| account_email.to_string());
+    let envelope_from = legacy_parse_single_address(&from)
+        .ok_or_else(|| format!("Invalid sender address: {from}"))?;
+
+    let to = legacy_parse_address_list(payload_string(payload, "to").unwrap_or_default().as_str())?;
+    let cc = legacy_parse_address_list(payload_string(payload, "cc").unwrap_or_default().as_str())?;
+    let bcc =
+        legacy_parse_address_list(payload_string(payload, "bcc").unwrap_or_default().as_str())?;
+    let reply_to = legacy_parse_address_list(
+        payload_string(payload, "replyTo")
+            .unwrap_or_default()
+            .as_str(),
+    )?;
+
+    if to.is_empty() && cc.is_empty() && bcc.is_empty() {
+        return Err("No recipients".to_string());
+    }
+
+    let draft_uid = u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0);
+
+    Ok(LegacySendMessageRequest {
+        from,
+        envelope_from,
+        to,
+        cc,
+        bcc,
+        reply_to,
+        subject: payload_string(payload, "subject").unwrap_or_default(),
+        html: payload_string(payload, "html").unwrap_or_default(),
+        plain: payload_string(payload, "plain").unwrap_or_default(),
+        in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
+        references: payload_string(payload, "references").unwrap_or_default(),
+        read_receipt_request: payload_bool(payload, "readReceiptRequest"),
+        mark_as_important: payload_bool(payload, "markAsImportant"),
+        require_tls: payload_bool(payload, "requireTLS"),
+        save_folder: payload_string(payload, "saveFolder").unwrap_or_default(),
+        draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
+        draft_uid,
+        draft_info: legacy_draft_info_from_payload(payload),
+    })
+}
+
+fn legacy_draft_info_from_payload(payload: &Value) -> Option<LegacyDraftInfoRequest> {
+    let items = payload.get("draftInfo")?.as_array()?;
+    if items.len() < 3 {
+        return None;
+    }
+
+    let info_type = items[0].as_str()?.trim().to_string();
+    let uid = match &items[1] {
+        Value::Number(number) => u32::try_from(number.as_i64().unwrap_or_default().max(0)).ok()?,
+        Value::String(value) => value.trim().parse::<u32>().ok()?,
+        _ => return None,
+    };
+    let folder = items[2].as_str()?.trim().to_string();
+
+    if info_type.is_empty() || folder.is_empty() || uid == 0 {
+        return None;
+    }
+
+    Some(LegacyDraftInfoRequest {
+        info_type,
+        uid,
+        folder,
+    })
+}
+
+/// Splits a legacy comma-separated address header, respecting quoted display
+/// names and angle-bracketed addresses, then validates each entry.
+fn legacy_parse_address_list(raw: &str) -> Result<Vec<String>, String> {
+    let mut addresses = Vec::new();
+    for item in legacy_address_items(raw) {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let address = legacy_parse_single_address(trimmed)
+            .ok_or_else(|| format!("Invalid recipient address: {trimmed}"))?;
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
+    Ok(addresses)
+}
+
+/// Extracts the bare `local@domain` address from a legacy address entry that may
+/// carry a display name, comments, or angle brackets.
+fn legacy_parse_single_address(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = match (trimmed.rfind('<'), trimmed.rfind('>')) {
+        (Some(start), Some(end)) if end > start => trimmed[start + 1..end].trim(),
+        _ => trimmed,
+    };
+
+    let candidate = candidate.trim_matches(|ch: char| ch == '"' || ch.is_whitespace());
+    if candidate.is_empty() {
+        return None;
+    }
+
+    // Reject anything lettre would refuse later, so the failure is reported with
+    // the offending address rather than as a generic build error.
+    candidate.parse::<lettre::Address>().ok()?;
+    Some(candidate.to_string())
+}
+
+/// Builds the RFC 5322 message.
+///
+/// `keep_bcc_header` mirrors legacy PHP's `ToStream($bWithoutBcc)`: the transport
+/// copy omits the `Bcc` header (the SMTP envelope carries those recipients), while
+/// the copy appended to the Sent folder keeps it so the sender can see who was
+/// blind-copied.
+fn build_legacy_send_message(
+    request: &LegacySendMessageRequest,
+    keep_bcc_header: bool,
+) -> Result<lettre::Message, String> {
+    use lettre::message::{header, Mailbox, MultiPart, SinglePart};
+
+    let parse_mailbox = |address: &str| -> Result<Mailbox, String> {
+        address
+            .parse::<Mailbox>()
+            .map_err(|err| format!("Invalid address '{address}': {err}"))
+    };
+
+    let mut builder = lettre::Message::builder()
+        .from(parse_mailbox(&request.from)?)
+        .subject(request.subject.clone());
+
+    for address in &request.to {
+        builder = builder.to(parse_mailbox(address)?);
+    }
+    for address in &request.cc {
+        builder = builder.cc(parse_mailbox(address)?);
+    }
+    if keep_bcc_header {
+        // `keep_bcc` stops lettre from stripping the header during build.
+        builder = builder.keep_bcc();
+        for address in &request.bcc {
+            builder = builder.bcc(parse_mailbox(address)?);
+        }
+    }
+    for address in &request.reply_to {
+        builder = builder.reply_to(parse_mailbox(address)?);
+    }
+
+    if !request.in_reply_to.trim().is_empty() {
+        builder = builder.in_reply_to(legacy_strip_angle_brackets(&request.in_reply_to));
+    }
+    if !request.references.trim().is_empty() {
+        builder = builder.references(request.references.trim().to_string());
+    }
+    if request.read_receipt_request {
+        builder = builder.raw_header(legacy_raw_header(
+            "Disposition-Notification-To",
+            &request.envelope_from,
+        )?);
+    }
+    if request.mark_as_important {
+        builder = builder.raw_header(legacy_raw_header("X-Priority", "1")?);
+    }
+    if !request.require_tls {
+        builder = builder.raw_header(legacy_raw_header("TLS-Required", "No")?);
+    }
+
+    let html = request.html.trim();
+    let plain = request.plain.trim();
+
+    if !html.is_empty() && !plain.is_empty() {
+        builder
+            .multipart(
+                MultiPart::alternative()
+                    .singlepart(
+                        SinglePart::builder()
+                            .header(header::ContentType::TEXT_PLAIN)
+                            .body(request.plain.clone()),
+                    )
+                    .singlepart(
+                        SinglePart::builder()
+                            .header(header::ContentType::TEXT_HTML)
+                            .body(request.html.clone()),
+                    ),
+            )
+            .map_err(|err| format!("Message build failed: {err}"))
+    } else if !html.is_empty() {
+        builder
+            .header(header::ContentType::TEXT_HTML)
+            .body(request.html.clone())
+            .map_err(|err| format!("Message build failed: {err}"))
+    } else {
+        builder
+            .header(header::ContentType::TEXT_PLAIN)
+            .body(request.plain.clone())
+            .map_err(|err| format!("Message build failed: {err}"))
+    }
+}
+
+fn legacy_raw_header(
+    name: &'static str,
+    value: &str,
+) -> Result<lettre::message::header::HeaderValue, String> {
+    let header_name = lettre::message::header::HeaderName::new_from_ascii(name.to_string())
+        .map_err(|err| format!("Invalid header name '{name}': {err}"))?;
+    Ok(lettre::message::header::HeaderValue::new(
+        header_name,
+        value.to_string(),
+    ))
+}
+
+fn legacy_strip_angle_brackets(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_string()
 }
 
 async fn native_frickmail_get_totp_status(
@@ -15149,6 +15782,241 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(body["Result"].get("references").is_none());
         assert!(body["Result"].get("threads").is_none());
         assert!(body["Result"].get("threadUnseen").is_none());
+    }
+
+    #[test]
+    fn legacy_send_message_request_parses_recipients_and_flags() {
+        let payload = json!({
+            "from": "Sender <sender@example.com>",
+            "to": "\"Doe, John\" <john@example.com>, jane@example.com",
+            "cc": "cc@example.com",
+            "bcc": "hidden@example.com",
+            "replyTo": "reply@example.com",
+            "subject": "Hello",
+            "plain": "Body text",
+            "saveFolder": "Sent",
+            "messageFolder": "Drafts",
+            "messageUid": 42,
+            "markAsImportant": 1,
+            "readReceiptRequest": 1,
+            "requireTLS": 0,
+            "draftInfo": ["reply", 17, "INBOX"],
+        });
+
+        let request =
+            super::legacy_send_message_request_from_payload(&payload, "fallback@example.com")
+                .expect("payload should parse");
+
+        assert_eq!(request.from, "Sender <sender@example.com>");
+        assert_eq!(request.envelope_from, "sender@example.com");
+        assert_eq!(request.to, vec!["john@example.com", "jane@example.com"]);
+        assert_eq!(request.cc, vec!["cc@example.com"]);
+        assert_eq!(request.bcc, vec!["hidden@example.com"]);
+        assert_eq!(request.reply_to, vec!["reply@example.com"]);
+        assert_eq!(request.save_folder, "Sent");
+        assert_eq!(request.draft_folder, "Drafts");
+        assert_eq!(request.draft_uid, 42);
+        assert!(request.mark_as_important);
+        assert!(request.read_receipt_request);
+        assert!(!request.require_tls);
+
+        let draft_info = request.draft_info.as_ref().expect("draftInfo present");
+        assert_eq!(draft_info.info_type, "reply");
+        assert_eq!(draft_info.uid, 17);
+        assert_eq!(draft_info.folder, "INBOX");
+    }
+
+    #[test]
+    fn legacy_send_message_request_falls_back_to_account_email_and_dedupes() {
+        let payload = json!({
+            "to": "dup@example.com, Dup <dup@example.com>",
+            "plain": "hi",
+        });
+
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+
+        assert_eq!(request.from, "acct@example.com");
+        assert_eq!(request.to, vec!["dup@example.com"]);
+        assert_eq!(request.all_recipients(), vec!["dup@example.com"]);
+    }
+
+    #[test]
+    fn legacy_send_message_request_rejects_missing_and_invalid_recipients() {
+        let empty = json!({ "from": "sender@example.com", "plain": "hi" });
+        assert_eq!(
+            super::legacy_send_message_request_from_payload(&empty, "acct@example.com")
+                .unwrap_err(),
+            "No recipients"
+        );
+
+        let invalid = json!({ "from": "sender@example.com", "to": "not-an-address" });
+        assert!(
+            super::legacy_send_message_request_from_payload(&invalid, "acct@example.com")
+                .unwrap_err()
+                .starts_with("Invalid recipient address")
+        );
+    }
+
+    #[test]
+    fn legacy_send_message_all_recipients_covers_to_cc_and_bcc() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "cc": "cc@example.com",
+            "bcc": "bcc@example.com",
+            "plain": "hi",
+        });
+
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+
+        assert_eq!(
+            request.all_recipients(),
+            vec!["to@example.com", "cc@example.com", "bcc@example.com"]
+        );
+    }
+
+    #[test]
+    fn build_legacy_send_message_keeps_bcc_header_only_in_stored_copy() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "bcc": "hidden@example.com",
+            "subject": "Subject line",
+            "plain": "Body text",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+
+        // Transport copy: Bcc recipients travel in the SMTP envelope, not headers.
+        let transport = super::build_legacy_send_message(&request, false).expect("transport build");
+        let transport_raw = String::from_utf8(transport.formatted()).expect("utf8");
+        assert!(!transport_raw.contains("hidden@example.com"));
+        assert!(transport_raw.contains("to@example.com"));
+
+        // Stored copy: keeps Bcc so the sender can see who was blind-copied.
+        let stored = super::build_legacy_send_message(&request, true).expect("stored build");
+        let stored_raw = String::from_utf8(stored.formatted()).expect("utf8");
+        assert!(stored_raw.contains("Bcc: hidden@example.com"));
+        assert!(stored_raw.contains("Subject line"));
+    }
+
+    #[test]
+    fn build_legacy_send_message_preserves_display_name_in_from_header() {
+        let payload = json!({
+            "from": "Sender Name <sender@example.com>",
+            "to": "to@example.com",
+            "plain": "hi",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert!(raw.contains("Sender Name"));
+        assert_eq!(request.envelope_from, "sender@example.com");
+    }
+
+    #[test]
+    fn build_legacy_send_message_uses_alternative_for_html_and_plain() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": "<p>Rich</p>",
+            "plain": "Rich",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+
+        let message = super::build_legacy_send_message(&request, true).expect("build");
+        let raw = String::from_utf8(message.formatted()).expect("utf8");
+
+        assert!(raw.contains("multipart/alternative"));
+        assert!(raw.contains("text/plain"));
+        assert!(raw.contains("text/html"));
+    }
+
+    #[test]
+    fn build_legacy_send_message_sets_priority_and_tls_headers() {
+        let important = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": "hi",
+            "markAsImportant": 1,
+            "readReceiptRequest": 1,
+            "requireTLS": 0,
+        });
+        let request =
+            super::legacy_send_message_request_from_payload(&important, "acct@example.com")
+                .expect("payload should parse");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, true)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert!(raw.contains("X-Priority: 1"));
+        assert!(raw.contains("TLS-Required: No"));
+        assert!(raw.contains("Disposition-Notification-To: sender@example.com"));
+
+        let plain = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": "hi",
+            "requireTLS": 1,
+        });
+        let request = super::legacy_send_message_request_from_payload(&plain, "acct@example.com")
+            .expect("payload should parse");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, true)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert!(!raw.contains("TLS-Required"));
+        assert!(!raw.contains("X-Priority"));
+    }
+
+    #[test]
+    fn legacy_parse_single_address_extracts_bare_address() {
+        assert_eq!(
+            super::legacy_parse_single_address("\"Doe, John\" <john@example.com>").as_deref(),
+            Some("john@example.com")
+        );
+        assert_eq!(
+            super::legacy_parse_single_address("  plain@example.com  ").as_deref(),
+            Some("plain@example.com")
+        );
+        assert!(super::legacy_parse_single_address("not-an-address").is_none());
+        assert!(super::legacy_parse_single_address("").is_none());
+    }
+
+    #[test]
+    fn legacy_draft_info_requires_complete_triple() {
+        assert!(super::legacy_draft_info_from_payload(&json!({})).is_none());
+        assert!(super::legacy_draft_info_from_payload(
+            &json!({ "draftInfo": ["reply", 0, "INBOX"] })
+        )
+        .is_none());
+        assert!(
+            super::legacy_draft_info_from_payload(&json!({ "draftInfo": ["reply", 5] })).is_none()
+        );
+
+        let parsed = super::legacy_draft_info_from_payload(
+            &json!({ "draftInfo": ["forward", "9", "Archive"] }),
+        )
+        .expect("string uid should parse");
+        assert_eq!(parsed.info_type, "forward");
+        assert_eq!(parsed.uid, 9);
+        assert_eq!(parsed.folder, "Archive");
     }
 
     #[test]
