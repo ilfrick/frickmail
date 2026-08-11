@@ -1779,7 +1779,7 @@ fn legacy_save_message_request_from_payload(
         .map(|from| from.trim().to_string())
         .filter(|from| !from.is_empty())
         .unwrap_or_else(|| account_email.to_string());
-    let envelope_from = legacy_parse_single_address(&from)
+    let (from, envelope_from) = legacy_normalize_compose_mailbox(&from)
         .ok_or_else(|| format!("Invalid sender address: {from}"))?;
 
     Ok(LegacySendMessageRequest {
@@ -1921,9 +1921,12 @@ impl LegacySendMessageRequest {
     fn all_recipients(&self) -> Vec<String> {
         let mut recipients = Vec::new();
         for group in [&self.to, &self.cc, &self.bcc] {
-            for address in group {
-                if !recipients.contains(address) {
-                    recipients.push(address.clone());
+            for header_address in group {
+                let Some(address) = legacy_parse_single_address(header_address) else {
+                    continue;
+                };
+                if !recipients.contains(&address) {
+                    recipients.push(address);
                 }
             }
         }
@@ -1941,7 +1944,7 @@ fn legacy_send_message_request_from_payload(
         .map(|from| from.trim().to_string())
         .filter(|from| !from.is_empty())
         .unwrap_or_else(|| account_email.to_string());
-    let envelope_from = legacy_parse_single_address(&from)
+    let (from, envelope_from) = legacy_normalize_compose_mailbox(&from)
         .ok_or_else(|| format!("Invalid sender address: {from}"))?;
 
     let to = legacy_parse_address_list(payload_string(payload, "to").unwrap_or_default().as_str())?;
@@ -2010,16 +2013,19 @@ fn legacy_draft_info_from_payload(payload: &Value) -> Option<LegacyDraftInfoRequ
 /// Splits a legacy comma-separated address header, respecting quoted display
 /// names and angle-bracketed addresses, then validates each entry.
 fn legacy_parse_address_list(raw: &str) -> Result<Vec<String>, String> {
-    let mut addresses = Vec::new();
+    let mut addresses: Vec<String> = Vec::new();
     for item in legacy_address_items(raw) {
         let trimmed = item.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let address = legacy_parse_single_address(trimmed)
+        let (header_address, envelope_address) = legacy_normalize_compose_mailbox(trimmed)
             .ok_or_else(|| format!("Invalid recipient address: {trimmed}"))?;
-        if !addresses.contains(&address) {
-            addresses.push(address);
+        let duplicate = addresses.iter().any(|address| {
+            legacy_parse_single_address(address).as_deref() == Some(envelope_address.as_str())
+        });
+        if !duplicate {
+            addresses.push(header_address);
         }
     }
     Ok(addresses)
@@ -2047,6 +2053,31 @@ fn legacy_parse_single_address(raw: &str) -> Option<String> {
     // the offending address rather than as a generic build error.
     candidate.parse::<lettre::Address>().ok()?;
     Some(candidate.to_string())
+}
+
+/// Produces a lettre-safe mailbox string plus its bare SMTP address. MailSo
+/// accepts RFC comments that lettre's mailbox parser does not; the fallback
+/// uses the existing legacy parser to retain the display name while discarding
+/// comments before serialization.
+fn legacy_normalize_compose_mailbox(raw: &str) -> Option<(String, String)> {
+    use lettre::message::Mailbox;
+
+    if raw.chars().any(char::is_control) {
+        return None;
+    }
+    let envelope = legacy_parse_single_address(raw)?;
+    if let Ok(mailbox) = raw.trim().parse::<Mailbox>() {
+        return Some((mailbox.to_string(), envelope));
+    }
+
+    let parsed = legacy_email_components(raw);
+    let name = legacy_email_display_name(&parsed.name);
+    if name.chars().any(char::is_control) {
+        return None;
+    }
+    let address = envelope.parse::<lettre::Address>().ok()?;
+    let mailbox = Mailbox::new((!name.is_empty()).then_some(name), address);
+    Some((mailbox.to_string(), envelope))
 }
 
 /// Builds the RFC 5322 message.
@@ -16305,7 +16336,10 @@ Subject: Empty body metadata\r\n\r\n"
 
         assert_eq!(request.from, "Sender <sender@example.com>");
         assert_eq!(request.envelope_from, "sender@example.com");
-        assert_eq!(request.to, vec!["john@example.com", "jane@example.com"]);
+        assert_eq!(
+            request.to,
+            vec!["\"Doe, John\" <john@example.com>", "jane@example.com"]
+        );
         assert_eq!(request.cc, vec!["cc@example.com"]);
         assert_eq!(request.bcc, vec!["hidden@example.com"]);
         assert_eq!(request.reply_to, vec!["reply@example.com"]);
@@ -16417,6 +16451,81 @@ Subject: Empty body metadata\r\n\r\n"
 
         assert!(raw.contains("Sender Name"));
         assert_eq!(request.envelope_from, "sender@example.com");
+    }
+
+    #[test]
+    fn build_legacy_send_message_preserves_recipient_display_names() {
+        let payload = json!({
+            "from": "Sender <sender@example.com>",
+            "to": "Recipient Name <to@example.com>",
+            "cc": "Carbon Copy <cc@example.com>",
+            "bcc": "Blind Copy <bcc@example.com>",
+            "replyTo": "Reply Desk <reply@example.com>",
+            "plain": "hi",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, true)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        for display_name in ["Recipient Name", "Carbon Copy", "Blind Copy", "Reply Desk"] {
+            assert!(
+                raw.contains(display_name),
+                "missing {display_name} in {raw}"
+            );
+        }
+        assert_eq!(
+            request.all_recipients(),
+            vec!["to@example.com", "cc@example.com", "bcc@example.com"]
+        );
+    }
+
+    #[test]
+    fn legacy_send_message_normalizes_recipient_comments() {
+        let payload = json!({
+            "from": "Sender (operator) <sender@example.com>",
+            "to": "Recipient (VIP) <to@example.com>, Duplicate <to@example.com>",
+            "plain": "hi",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("MailSo-compatible comments should normalize");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("normalized mailbox should build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert!(raw.contains("From: Sender <sender@example.com>"));
+        assert!(raw.contains("To: Recipient <to@example.com>"));
+        assert_eq!(request.all_recipients(), vec!["to@example.com"]);
+    }
+
+    #[test]
+    fn legacy_send_message_rejects_control_characters_without_panicking() {
+        for payload in [
+            json!({
+                "from": "Victim\r\nBcc: attacker@example.net <safe@example.com>",
+                "to": "to@example.com",
+            }),
+            json!({
+                "from": "sender@example.com",
+                "to": "Victim\0Injected <safe@example.com>",
+            }),
+        ] {
+            let result = std::panic::catch_unwind(|| {
+                super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            });
+            assert!(result.is_ok(), "malformed input must not panic");
+            assert!(
+                result.unwrap().is_err(),
+                "control characters must be rejected"
+            );
+        }
     }
 
     #[test]
