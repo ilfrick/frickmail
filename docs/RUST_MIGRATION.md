@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-11 16:06:40 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-11 16:36:55 CEST (UTC+02:00)
 
 ### Completed And Pushed Today
 
@@ -33,48 +33,48 @@ The following commits are present on both `master` and
 5. `0d767c954` (`docs: require migration progress snapshots`) made this
    timestamped snapshot and its review, Docker, image, live-container, remote
    tip, and applicable-CI evidence a mandatory part of every migration cycle.
+6. `46f1965d2` (`rust: add bounded linked data compose support`) completed
+   parser-sanitized, canonical, output-bounded HTML and JSON-LD `linkedData`
+   handling for native send and draft compose, including safe script escaping,
+   blocking-work admission controls, and recipient-less draft serialization.
 
 The completed code passed independent senior review, strict workspace Clippy,
 the full Rust workspace test suite, and production-image smoke testing. The
-image built from the reviewed worktree immediately committed as `c23cbb3ba`
-(`frickmail-rust:recipient-final`, immutable digest
-`sha256:2dc5c77a922c68e276ba69a67c41d0ec8efc29c59e676ea9228f01684c580271`)
+image from the reviewed worktree immediately committed as `46f1965d2`
+(`frickmail-rust:linkeddata-final`, immutable digest
+`sha256:054464db1232f5a791d4f8dd349280b67bbc7d7fb7cf05061538cabfb58e5b0e`)
 ran as a healthy, non-root, read-only canary, served HTTP successfully,
 connected to the database, logged no startup errors, and recorded zero
-restarts. Future release images still need a revision OCI label and immutable
-revision tag so provenance is directly auditable from the image.
+restarts. All four GitHub/Gitea branch tips were verified at that commit and
+GitHub `rust-ci` run `31500050039` passed. Future release images still need a
+revision OCI label and immutable revision tag so provenance is directly
+auditable from the image.
 
 ### Current Slice Included In This Pending Commit
 
-This slice completes bounded native JSON-LD `linkedData` support for
-`SendMessage` and `SaveMessage` when an HTML body is present. Escaped JSON is
-counted before authentication with a bounded streaming writer, HTML is parsed
-and sanitized into one canonical document, and JSON-LD is inserted into its
-real head with PHP-compatible solidus escaping. The normalized document is
-bounded after entity expansion and is reused for SMTP transport and stored
-copies. Plain-only compose continues to ignore `linkedData` like PHP.
+This slice restores MailSo's HTML-compose fallback for native `SendMessage` and
+`SaveMessage`. Every compose with PHP-truthy HTML now emits
+`multipart/alternative`; when the client omits `plain` or supplies PHP-falsey
+`"0"`, Rust derives text/plain from the already sanitized canonical HTML using
+the same ordered heading, paragraph, break, emphasis, list, link, rule, table,
+tag-removal, whitespace, and HTML-entity transformations as
+`HtmlUtils::ConvertHtmlToPlain`. Explicit PHP-truthy client plain text remains
+authoritative.
 
-Sanitization runs on Tokio's blocking pool behind a dedicated two-slot
-admission semaphore rather than on async workers. Admission and caller wait
-are bounded to 10 seconds; timed-out blocking tasks are non-cancellable and
-retain their permit until exit. A 4 MiB raw HTML limit, 10,000 tag-marker
-limit, shared eight-operation compose semaphore, and the existing 8 MiB
-normalized compose-body limit constrain CPU and memory amplification. The
-deliberately stricter HTML policy preserves common safe email markup while
-removing active content, comments, event/data attributes, and unsafe elements.
-MailSo data-image transformations remain part of the unmigrated attachment
-pipeline. The slice also repairs recipient-less draft serialization without
-adding a visible `To` header.
+Derivation runs inside the existing two-permit `spawn_blocking` admission
+boundary. Its regular expressions are linear-time, whitespace collapse is a
+single-pass input-capacity-bounded build, and regex passes reuse the existing
+String when no match exists. The final sanitized HTML and selected/derived
+plain parts are charged together against the 8 MiB normalized compose limit
+before MIME assembly. Independent review found and then verified fixes for a
+temporary token-vector allocation amplification and two PHP replacement-order
+and empty-capture mismatches. Re-review approved the corrected implementation
+with no remaining actionable finding.
 
-Independent senior review initially found unbounded pre-authentication JSON
-serialization, unsafe raw-head insertion, sanitizer output amplification, and
-synchronous DOM parsing on async workers. Each finding was fixed and the
-reviewer approved the resulting implementation with no remaining blocker,
-high-severity, correctness, or security finding. Docker validation passed
-`fmt`, workspace `check`, all 516 workspace tests, and strict all-target
-workspace Clippy. The exact production image was built as
-`frickmail-rust:linkeddata-final`, digest
-`sha256:054464db1232f5a791d4f8dd349280b67bbc7d7fb7cf05061538cabfb58e5b0e`.
+Docker validation passed `fmt`, workspace `check`, all 520 workspace tests,
+and strict all-target workspace Clippy. The exact production image was built
+as `frickmail-rust:html-plain-final`, digest
+`sha256:168e7b202c32d751a4b81233aa796dfac2e49313efba8c0a3450e94dbe26362e`.
 That digest now runs as the local canary: it is healthy, non-root, read-only,
 capability-dropped, and protected by `no-new-privileges`; `/health` and `/`
 return HTTP 200, PostgreSQL connection verification succeeded, logs contain no
@@ -86,8 +86,8 @@ snapshot.
 ### In Progress But Not Committed
 
 There is no separate rejected or partially implemented work outside the
-reviewed JSON-LD slice described above. It remains uncommitted only until the
-timestamped snapshot receives its final staged review and the publication
+reviewed HTML-to-plain slice described above. It remains uncommitted only until
+this timestamped snapshot receives its final staged review and the publication
 workflow completes.
 
 ### Still Missing Before The Final Rust-Only Goal

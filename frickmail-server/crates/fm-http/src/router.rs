@@ -65,6 +65,7 @@ use p256::{
     ecdsa::{signature::Signer, Signature, SigningKey},
     pkcs8::DecodePrivateKey,
 };
+use regex::{Captures, Regex};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
@@ -1147,6 +1148,15 @@ struct LegacySendMessageRequest {
     draft_info: Option<LegacyDraftInfoRequest>,
 }
 
+/// Final compose body after HTML sanitation and optional PHP-compatible plain
+/// fallback derivation. The combined serialized content is size-bounded before
+/// this value leaves the dedicated blocking-work admission boundary.
+#[derive(Debug)]
+struct LegacyNormalizedComposeBody {
+    html: String,
+    plain: String,
+}
+
 /// `draftInfo` triple: [type, uid, folder]. Drives the reply/forward flag update.
 #[derive(Debug)]
 struct LegacyDraftInfoRequest {
@@ -1262,14 +1272,14 @@ async fn native_send_message_inner(
         }
     };
 
-    let normalized_html = match legacy_normalize_compose_html_async(payload).await {
-        Ok(html) => html,
+    let normalized_body = match legacy_normalize_compose_body_async(payload).await {
+        Ok(body) => body,
         Err(message) => return json_result_error(original_action, &message),
     };
     let request = match legacy_send_message_request_from_payload_with_html(
         payload,
         &account.email,
-        normalized_html,
+        normalized_body,
     ) {
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, &message),
@@ -1711,15 +1721,15 @@ async fn native_save_message(
 
     // Drafts are still being composed, so unlike SendMessage they may legitimately
     // have no recipients yet.
-    let normalized_html = match legacy_normalize_compose_html_async(payload).await {
-        Ok(html) => html,
+    let normalized_body = match legacy_normalize_compose_body_async(payload).await {
+        Ok(body) => body,
         Err(message) => return json_result_error(original_action, &message),
     };
     let request = match legacy_save_message_request_from_payload_with_html(
         payload,
         &account.email,
         &save_folder,
-        normalized_html,
+        normalized_body,
     ) {
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, &message),
@@ -1813,12 +1823,12 @@ fn legacy_save_message_request_from_payload(
     account_email: &str,
     save_folder: &str,
 ) -> Result<LegacySendMessageRequest, String> {
-    let normalized_html = legacy_normalize_compose_html(payload)?;
+    let normalized_body = legacy_normalize_compose_body(payload)?;
     legacy_save_message_request_from_payload_with_html(
         payload,
         account_email,
         save_folder,
-        normalized_html,
+        normalized_body,
     )
 }
 
@@ -1826,7 +1836,7 @@ fn legacy_save_message_request_from_payload_with_html(
     payload: &Value,
     account_email: &str,
     save_folder: &str,
-    normalized_html: String,
+    normalized_body: LegacyNormalizedComposeBody,
 ) -> Result<LegacySendMessageRequest, String> {
     let from = payload_string(payload, "from")
         .map(|from| from.trim().to_string())
@@ -1849,8 +1859,8 @@ fn legacy_save_message_request_from_payload_with_html(
                 .as_str(),
         )?,
         subject: payload_string(payload, "subject").unwrap_or_default(),
-        html: normalized_html,
-        plain: payload_string(payload, "plain").unwrap_or_default(),
+        html: normalized_body.html,
+        plain: normalized_body.plain,
         in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
         references: payload_string(payload, "references").unwrap_or_default(),
         read_receipt_request: payload_bool(payload, "readReceiptRequest"),
@@ -1905,7 +1915,10 @@ fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
             COMPOSE_BODY_LIMIT_BYTES / 1024 / 1024
         ));
     }
-    let has_html = payload.get("html").is_some_and(legacy_payload_has_value);
+    let has_html = payload
+        .get("html")
+        .and_then(Value::as_str)
+        .is_some_and(legacy_compose_string_is_php_truthy);
     if has_html {
         if let Some(linked_data) = payload
             .get("linkedData")
@@ -2115,37 +2128,226 @@ fn legacy_html_with_linked_data(
     String::from_utf8(output.bytes).map_err(|_| "Normalized HTML is not valid UTF-8".to_string())
 }
 
-#[cfg(test)]
-fn legacy_normalize_compose_html(payload: &Value) -> Result<String, String> {
-    if !payload.get("html").is_some_and(legacy_payload_has_value) {
-        return Ok(String::new());
+struct LegacyHtmlToPlainPatterns {
+    heading_open: Regex,
+    rewrites: Vec<(Regex, &'static str)>,
+    div_open: Regex,
+    remaining_tags: Regex,
+    spaced_blank_line: Regex,
+    excess_blank_lines: Regex,
+}
+
+fn legacy_html_to_plain_patterns() -> &'static LegacyHtmlToPlainPatterns {
+    static PATTERNS: OnceLock<LegacyHtmlToPlainPatterns> = OnceLock::new();
+    PATTERNS.get_or_init(|| LegacyHtmlToPlainPatterns {
+        heading_open: Regex::new(r"(?i)<h([1-6])[^>]*>").expect("valid heading regex"),
+        rewrites: vec![
+            (Regex::new(r"\r").expect("valid carriage-return regex"), ""),
+            (
+                Regex::new(r"[\n\t]+").expect("valid line-whitespace regex"),
+                " ",
+            ),
+            (
+                Regex::new(
+                    r"(?is)(?:<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<title[^>]*>.*?</title>)",
+                )
+                .expect("valid active-content regex"),
+                "",
+            ),
+            (
+                Regex::new(r"(?i)</h[1-6]>").expect("valid heading-close regex"),
+                "\n\n",
+            ),
+            (
+                Regex::new(r"(?i)<p[^>]*>").expect("valid paragraph regex"),
+                "\n\n\t",
+            ),
+            (
+                Regex::new(r"(?i)<br[^>]*>").expect("valid break regex"),
+                "\n",
+            ),
+            (
+                Regex::new(r"(?is)<b[^>]*>(.+?)</b>").expect("valid bold regex"),
+                "$1",
+            ),
+            (
+                Regex::new(r"(?is)<i[^>]*>(.+?)</i>").expect("valid italic regex"),
+                "$1",
+            ),
+            (
+                Regex::new(r"(?i)(?:<ul[^>]*>|</ul>|<ol[^>]*>|</ol>)")
+                    .expect("valid list regex"),
+                "\n\n",
+            ),
+            (
+                Regex::new(r"(?i)<li[^>]*>").expect("valid list-item regex"),
+                "\n\t* ",
+            ),
+            (
+                Regex::new(r#"(?is)<a[^>]*href="([^"]+)"[^>]*>(.+?)</a>"#)
+                    .expect("valid link regex"),
+                "$2 ($1)",
+            ),
+            (
+                Regex::new(r"(?i)<hr[^>]*>").expect("valid rule regex"),
+                "\n------------------------------------\n",
+            ),
+            (
+                Regex::new(r"(?i)</?table[^>]*>").expect("valid table regex"),
+                "\n",
+            ),
+            (
+                Regex::new(r"(?i)</?tr[^>]*>").expect("valid row regex"),
+                "\n",
+            ),
+            (
+                Regex::new(r"(?is)<td[^>]*>(.+?)</td>").expect("valid cell regex"),
+                "\t$1\n",
+            ),
+            (
+                Regex::new(r"(?is)<th[^>]*>(.+?)</th>").expect("valid header-cell regex"),
+                "\t$1\n",
+            ),
+        ],
+        div_open: Regex::new(r"(?i)<div>").expect("valid div regex"),
+        remaining_tags: Regex::new(r"(?s)<[^>]*>").expect("valid tag regex"),
+        spaced_blank_line: Regex::new(r"\n\s+\n").expect("valid blank-line regex"),
+        excess_blank_lines: Regex::new(r"\n{3,}").expect("valid newline regex"),
+    })
+}
+
+fn legacy_collapse_html_whitespace(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            pending_space = !output.is_empty();
+        } else {
+            if pending_space {
+                output.push(' ');
+            }
+            output.push(character);
+            pending_space = false;
+        }
     }
+    output
+}
+
+fn legacy_regex_replace_owned(text: String, pattern: &Regex, replacement: &str) -> String {
+    if pattern.is_match(&text) {
+        pattern.replace_all(&text, replacement).into_owned()
+    } else {
+        text
+    }
+}
+
+/// Port of MailSo `HtmlUtils::ConvertHtmlToPlain`, applied to the already
+/// sanitized canonical document. The final text is charged together with HTML
+/// against the compose-body limit before MIME assembly.
+fn legacy_html_to_plain(html: &str, limit: usize) -> Result<String, String> {
+    let patterns = legacy_html_to_plain_patterns();
+    let mut text = legacy_collapse_html_whitespace(html);
+    if patterns.heading_open.is_match(&text) {
+        text = patterns
+            .heading_open
+            .replace_all(&text, |captures: &Captures<'_>| {
+                let level = captures
+                    .get(1)
+                    .and_then(|value| value.as_str().parse::<usize>().ok())
+                    .unwrap_or(1);
+                format!("\n\n{} ", "#".repeat(level))
+            })
+            .into_owned();
+    }
+    for (pattern, replacement) in &patterns.rewrites {
+        text = legacy_regex_replace_owned(text, pattern, replacement);
+    }
+    text = legacy_regex_replace_owned(text, &patterns.div_open, "\n<div>");
+    text = legacy_regex_replace_owned(text, &patterns.remaining_tags, "");
+    text = legacy_regex_replace_owned(text, &patterns.spaced_blank_line, "\n");
+    text = legacy_regex_replace_owned(text, &patterns.excess_blank_lines, "\n\n");
+    let decoded = html_escape::decode_html_entities(&text);
+    let plain = legacy_message_body_trim(&decoded);
+    if plain.len() > limit {
+        return Err("Normalized compose body exceeds the compose body limit".to_string());
+    }
+    Ok(plain.to_string())
+}
+
+fn legacy_compose_string_is_php_truthy(value: &str) -> bool {
+    !value.is_empty() && value != "0"
+}
+
+#[cfg(test)]
+fn legacy_normalize_compose_body(payload: &Value) -> Result<LegacyNormalizedComposeBody, String> {
     let html = payload_string(payload, "html").unwrap_or_default();
-    let plain_bytes = payload_string(payload, "plain").map_or(0, |plain| plain.len());
+    let plain = payload_string(payload, "plain").unwrap_or_default();
+    if !legacy_compose_string_is_php_truthy(&html) {
+        if plain.len() > COMPOSE_BODY_LIMIT_BYTES {
+            return Err("Normalized compose body exceeds the compose body limit".to_string());
+        }
+        return Ok(LegacyNormalizedComposeBody {
+            html: String::new(),
+            plain,
+        });
+    }
     let linked_data = payload
         .get("linkedData")
         .filter(|value| legacy_payload_has_value(value))
         .cloned();
-    legacy_normalize_compose_html_parts(html, plain_bytes, linked_data)
+    legacy_normalize_compose_body_parts(html, plain, linked_data)
 }
 
-fn legacy_normalize_compose_html_parts(
+fn legacy_normalize_compose_body_parts(
     html: String,
-    plain_bytes: usize,
+    plain: String,
     linked_data: Option<Value>,
-) -> Result<String, String> {
+) -> Result<LegacyNormalizedComposeBody, String> {
     legacy_validate_raw_compose_html(&html)?;
-    let remaining = COMPOSE_BODY_LIMIT_BYTES.saturating_sub(plain_bytes);
+    let has_explicit_plain = legacy_compose_string_is_php_truthy(&plain);
+    let html_limit = if has_explicit_plain {
+        COMPOSE_BODY_LIMIT_BYTES.saturating_sub(plain.len())
+    } else {
+        COMPOSE_BODY_LIMIT_BYTES
+    };
     let linked_data_json = linked_data.as_ref().and_then(legacy_linked_data_json_value);
-    legacy_html_with_linked_data(&html, linked_data_json.as_deref(), remaining)
+    let normalized_html =
+        legacy_html_with_linked_data(&html, linked_data_json.as_deref(), html_limit)?;
+    let normalized_plain = if has_explicit_plain {
+        plain
+    } else {
+        legacy_html_to_plain(
+            &normalized_html,
+            COMPOSE_BODY_LIMIT_BYTES.saturating_sub(normalized_html.len()),
+        )?
+    };
+    let body_bytes = normalized_html
+        .len()
+        .checked_add(normalized_plain.len())
+        .ok_or_else(|| "Normalized compose body size overflow".to_string())?;
+    if body_bytes > COMPOSE_BODY_LIMIT_BYTES {
+        return Err("Normalized compose body exceeds the compose body limit".to_string());
+    }
+    Ok(LegacyNormalizedComposeBody {
+        html: normalized_html,
+        plain: normalized_plain,
+    })
 }
 
-async fn legacy_normalize_compose_html_async(payload: &Value) -> Result<String, String> {
-    if !payload.get("html").is_some_and(legacy_payload_has_value) {
-        return Ok(String::new());
-    }
+async fn legacy_normalize_compose_body_async(
+    payload: &Value,
+) -> Result<LegacyNormalizedComposeBody, String> {
     let html = payload_string(payload, "html").unwrap_or_default();
-    let plain_bytes = payload_string(payload, "plain").map_or(0, |plain| plain.len());
+    let plain = payload_string(payload, "plain").unwrap_or_default();
+    if !legacy_compose_string_is_php_truthy(&html) {
+        if plain.len() > COMPOSE_BODY_LIMIT_BYTES {
+            return Err("Normalized compose body exceeds the compose body limit".to_string());
+        }
+        return Ok(LegacyNormalizedComposeBody {
+            html: String::new(),
+            plain,
+        });
+    }
     let linked_data = payload
         .get("linkedData")
         .filter(|value| legacy_payload_has_value(value))
@@ -2161,7 +2363,7 @@ async fn legacy_normalize_compose_html_async(payload: &Value) -> Result<String, 
     .map_err(|_| "HTML sanitizer is unavailable".to_string())?;
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        legacy_normalize_compose_html_parts(html, plain_bytes, linked_data)
+        legacy_normalize_compose_body_parts(html, plain, linked_data)
     });
     match tokio::time::timeout(COMPOSE_SANITIZE_DEADLINE, task).await {
         Ok(Ok(result)) => result,
@@ -2225,14 +2427,14 @@ fn legacy_send_message_request_from_payload(
     payload: &Value,
     account_email: &str,
 ) -> Result<LegacySendMessageRequest, String> {
-    let normalized_html = legacy_normalize_compose_html(payload)?;
-    legacy_send_message_request_from_payload_with_html(payload, account_email, normalized_html)
+    let normalized_body = legacy_normalize_compose_body(payload)?;
+    legacy_send_message_request_from_payload_with_html(payload, account_email, normalized_body)
 }
 
 fn legacy_send_message_request_from_payload_with_html(
     payload: &Value,
     account_email: &str,
-    normalized_html: String,
+    normalized_body: LegacyNormalizedComposeBody,
 ) -> Result<LegacySendMessageRequest, String> {
     // The display name is preserved in the `From:` header like legacy PHP; only
     // the bare address is validated and used for the SMTP envelope.
@@ -2267,8 +2469,8 @@ fn legacy_send_message_request_from_payload_with_html(
         bcc,
         reply_to,
         subject: payload_string(payload, "subject").unwrap_or_default(),
-        html: normalized_html,
-        plain: payload_string(payload, "plain").unwrap_or_default(),
+        html: normalized_body.html,
+        plain: normalized_body.plain,
         in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
         references: payload_string(payload, "references").unwrap_or_default(),
         read_receipt_request: payload_bool(payload, "readReceiptRequest"),
@@ -2489,9 +2691,9 @@ fn build_legacy_send_message_with_metadata(
         builder = builder.raw_header(legacy_raw_header("TLS-Required", "No")?);
     }
 
-    let html = request.html.trim();
-    let plain = request.plain.trim();
-    if !html.is_empty() && !plain.is_empty() {
+    // MailSo always emits multipart/alternative for an HTML compose. When the
+    // client omits `plain`, normalization derives it from the sanitized HTML.
+    if !request.html.is_empty() {
         builder
             .multipart(
                 MultiPart::alternative()
@@ -2506,11 +2708,6 @@ fn build_legacy_send_message_with_metadata(
                             .body(request.html.clone()),
                     ),
             )
-            .map_err(|err| format!("Message build failed: {err}"))
-    } else if !html.is_empty() {
-        builder
-            .header(header::ContentType::TEXT_HTML)
-            .body(request.html.clone())
             .map_err(|err| format!("Message build failed: {err}"))
     } else {
         builder
@@ -16858,6 +17055,95 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn build_legacy_send_message_derives_plain_fallback_from_html() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": r#"<h2>Title &amp; More</h2><p>Hello <a href="https://example.com">site</a></p><ul><li>One</li><li>Two</li></ul>"#,
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("HTML-only payload should derive a plain fallback");
+
+        assert!(
+            request.plain.contains("## Title & More"),
+            "{}",
+            request.plain
+        );
+        assert!(
+            request.plain.contains("site (https://example.com)"),
+            "{}",
+            request.plain
+        );
+        assert!(request.plain.contains("* One"), "{}", request.plain);
+        assert!(request.plain.contains("* Two"), "{}", request.plain);
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(raw.contains("multipart/alternative"));
+        assert!(raw.contains("text/plain"));
+        assert!(raw.contains("text/html"));
+    }
+
+    #[test]
+    fn legacy_html_plain_fallback_matches_php_falsey_zero_and_preserves_explicit_plain() {
+        let falsey = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": "<p>Derived</p>",
+            "plain": "0",
+        });
+        let request = super::legacy_send_message_request_from_payload(&falsey, "acct@example.com")
+            .expect("PHP-falsey plain should derive");
+        assert_eq!(request.plain, "Derived");
+
+        let explicit = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": "<p>HTML text</p>",
+            "plain": "Client supplied text",
+        });
+        let request =
+            super::legacy_send_message_request_from_payload(&explicit, "acct@example.com")
+                .expect("explicit plain should be retained");
+        assert_eq!(request.plain, "Client supplied text");
+    }
+
+    #[test]
+    fn legacy_html_to_plain_matches_mailso_order_and_nonempty_captures() {
+        assert_eq!(
+            super::legacy_html_to_plain(
+                "before<h2>Title</h2>after",
+                super::COMPOSE_BODY_LIMIT_BYTES,
+            )
+            .expect("heading conversion"),
+            "before ## Title\n\nafter"
+        );
+        assert_eq!(
+            super::legacy_html_to_plain(
+                r#"x<a href="https://example.com"></a>y"#,
+                super::COMPOSE_BODY_LIMIT_BYTES,
+            )
+            .expect("empty anchor conversion"),
+            "xy"
+        );
+    }
+
+    #[test]
+    fn legacy_derived_plain_is_charged_against_normalized_body_limit() {
+        let payload = json!({
+            "html": "x".repeat(super::COMPOSE_HTML_RAW_LIMIT_BYTES),
+        });
+        assert!(super::legacy_validate_compose_limits(&payload).is_ok());
+        assert!(super::legacy_normalize_compose_body(&payload)
+            .unwrap_err()
+            .contains("body limit"));
+    }
+
+    #[test]
     fn build_legacy_send_message_embeds_linked_data_without_script_breakout() {
         let payload = json!({
             "from": "sender@example.com",
@@ -16965,7 +17251,7 @@ Subject: Empty body metadata\r\n\r\n"
         for _ in 0..2 {
             let payload = json!({"html": tag_heavy_html});
             tasks.push(tokio::spawn(async move {
-                super::legacy_normalize_compose_html_async(&payload).await
+                super::legacy_normalize_compose_body_async(&payload).await
             }));
         }
         tokio::task::yield_now().await;
@@ -16983,7 +17269,9 @@ Subject: Empty body metadata\r\n\r\n"
 
         for task in tasks {
             let normalized = task.await.expect("sanitizer task").expect("sanitized HTML");
-            assert!(normalized.len() <= super::COMPOSE_BODY_LIMIT_BYTES);
+            assert!(
+                normalized.html.len() + normalized.plain.len() <= super::COMPOSE_BODY_LIMIT_BYTES
+            );
         }
     }
 

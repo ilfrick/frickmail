@@ -16,6 +16,7 @@ deadpool-redis.workspace = true
 futures.workspace = true
 fm-core = { path = "../fm-core" }
 hex.workspace = true
+html-escape.workspace = true
 fm-imap = { path = "../fm-imap" }
 fm-mime = { path = "../fm-mime" }
 fm-plugin-compat = { path = "../fm-plugin-compat" }
@@ -27,6 +28,7 @@ lettre.workspace = true
 md-5.workspace = true
 p256.workspace = true
 reqwest.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
