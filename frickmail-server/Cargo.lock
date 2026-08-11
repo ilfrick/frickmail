@@ -976,6 +976,7 @@ dependencies = [
 name = "fm-http"
 version = "0.1.0"
 dependencies = [
+ "ammonia",
  "async-trait",
  "axum",
  "base64 0.22.1",

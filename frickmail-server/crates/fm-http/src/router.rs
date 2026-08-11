@@ -84,9 +84,13 @@ const CANT_SAVE_MESSAGE: u16 = 301;
 const CANT_SEND_MESSAGE: u16 = 302;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const COMPOSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+const COMPOSE_HTML_RAW_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const COMPOSE_HTML_TAG_MARKER_LIMIT: usize = 10_000;
 const COMPOSE_HEADER_LIMIT_BYTES: usize = 256 * 1024;
 const COMPOSE_RECIPIENT_LIMIT: usize = 500;
-const COMPOSE_SEND_CONCURRENCY: usize = 8;
+const COMPOSE_OPERATION_CONCURRENCY: usize = 8;
+const COMPOSE_SANITIZE_CONCURRENCY: usize = 2;
+const COMPOSE_SANITIZE_DEADLINE: Duration = Duration::from_secs(10);
 const TOTP_PENDING_SESSION_KEY: &str = "frickmail_totp_pending_secret";
 const MESSAGE_BODY_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
@@ -1107,9 +1111,14 @@ const SEND_PHASE_PRE_SMTP: u8 = 0;
 const SEND_PHASE_SMTP_IN_FLIGHT: u8 = 1;
 const SEND_PHASE_DELIVERED: u8 = 2;
 
-fn compose_send_semaphore() -> &'static Semaphore {
+fn compose_operation_semaphore() -> &'static Semaphore {
     static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
-    SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_SEND_CONCURRENCY))
+    SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_OPERATION_CONCURRENCY))
+}
+
+fn compose_sanitize_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_SANITIZE_CONCURRENCY))
 }
 
 /// Legacy `SendMessage` compose payload after validation.
@@ -1124,6 +1133,7 @@ struct LegacySendMessageRequest {
     bcc: Vec<String>,
     reply_to: Vec<String>,
     subject: String,
+    /// Sanitized, canonical, size-bounded HTML document.
     html: String,
     plain: String,
     in_reply_to: String,
@@ -1239,23 +1249,31 @@ async fn native_send_message_inner(
         Err(_) => return json_result_error(original_action, "Missing account password"),
     };
 
-    let request = match legacy_send_message_request_from_payload(payload, &account.email) {
+    let _compose_permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        compose_operation_semaphore().acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => return json_result_error(original_action, "Message compose is unavailable"),
+        Err(_) => {
+            return json_result_error(original_action, "Message compose is busy; retry later")
+        }
+    };
+
+    let normalized_html = match legacy_normalize_compose_html_async(payload).await {
+        Ok(html) => html,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+    let request = match legacy_send_message_request_from_payload_with_html(
+        payload,
+        &account.email,
+        normalized_html,
+    ) {
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, &message),
     };
-
-    let send_permit =
-        match tokio::time::timeout(Duration::from_secs(10), compose_send_semaphore().acquire())
-            .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => {
-                return json_result_error(original_action, "Message sending is unavailable")
-            }
-            Err(_) => {
-                return json_result_error(original_action, "Message sending is busy; retry later")
-            }
-        };
 
     let smtp_settings =
         match legacy_smtp_send_settings(state, pool, user.user_id, account_id, &account, &password)
@@ -1326,8 +1344,6 @@ async fn native_send_message_inner(
             )
         }
     }
-    drop(send_permit);
-
     // Delivery succeeded. A requested Sent copy is mandatory; draft flagging and
     // cleanup remain best-effort because SMTP delivery cannot be rolled back.
     let post_send_imap_requested = stored_message.is_some()
@@ -1680,13 +1696,34 @@ async fn native_save_message(
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
 
+    let _compose_permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        compose_operation_semaphore().acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => return json_result_error(original_action, "Message compose is unavailable"),
+        Err(_) => {
+            return json_result_error(original_action, "Message compose is busy; retry later")
+        }
+    };
+
     // Drafts are still being composed, so unlike SendMessage they may legitimately
     // have no recipients yet.
-    let request =
-        match legacy_save_message_request_from_payload(payload, &account.email, &save_folder) {
-            Ok(request) => request,
-            Err(message) => return json_result_error(original_action, &message),
-        };
+    let normalized_html = match legacy_normalize_compose_html_async(payload).await {
+        Ok(html) => html,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+    let request = match legacy_save_message_request_from_payload_with_html(
+        payload,
+        &account.email,
+        &save_folder,
+        normalized_html,
+    ) {
+        Ok(request) => request,
+        Err(message) => return json_result_error(original_action, &message),
+    };
 
     // The Message-ID is pinned so the appended draft can be located afterwards.
     let message_id = legacy_generate_draft_message_id(&request.envelope_from);
@@ -1770,10 +1807,26 @@ fn should_cleanup_previous_draft(
 
 /// Builds a draft request. Unlike `SendMessage` this tolerates an empty
 /// recipient set because drafts are saved mid-composition.
+#[cfg(test)]
 fn legacy_save_message_request_from_payload(
     payload: &Value,
     account_email: &str,
     save_folder: &str,
+) -> Result<LegacySendMessageRequest, String> {
+    let normalized_html = legacy_normalize_compose_html(payload)?;
+    legacy_save_message_request_from_payload_with_html(
+        payload,
+        account_email,
+        save_folder,
+        normalized_html,
+    )
+}
+
+fn legacy_save_message_request_from_payload_with_html(
+    payload: &Value,
+    account_email: &str,
+    save_folder: &str,
+    normalized_html: String,
 ) -> Result<LegacySendMessageRequest, String> {
     let from = payload_string(payload, "from")
         .map(|from| from.trim().to_string())
@@ -1796,7 +1849,7 @@ fn legacy_save_message_request_from_payload(
                 .as_str(),
         )?,
         subject: payload_string(payload, "subject").unwrap_or_default(),
-        html: payload_string(payload, "html").unwrap_or_default(),
+        html: normalized_html,
         plain: payload_string(payload, "plain").unwrap_or_default(),
         in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
         references: payload_string(payload, "references").unwrap_or_default(),
@@ -1817,7 +1870,6 @@ fn legacy_unsupported_compose_feature(payload: &Value, sending: bool) -> Option<
         ("signed", "OpenPGP signed content"),
         ("encrypted", "OpenPGP encrypted content"),
         ("autocrypt", "Autocrypt headers"),
-        ("linkedData", "linked data"),
         ("sign", "S/MIME signing"),
         ("signFingerprint", "GnuPG signing"),
         ("encryptFingerprints", "GnuPG encryption"),
@@ -1839,6 +1891,9 @@ fn legacy_unsupported_compose_feature(payload: &Value, sending: bool) -> Option<
 }
 
 fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
+    if let Some(html) = payload.get("html").and_then(Value::as_str) {
+        legacy_validate_raw_compose_html(html)?;
+    }
     let body_bytes = ["plain", "html"]
         .into_iter()
         .filter_map(|field| payload.get(field).and_then(Value::as_str))
@@ -1850,7 +1905,39 @@ fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
             COMPOSE_BODY_LIMIT_BYTES / 1024 / 1024
         ));
     }
+    let has_html = payload.get("html").is_some_and(legacy_payload_has_value);
+    if has_html {
+        if let Some(linked_data) = payload
+            .get("linkedData")
+            .filter(|value| legacy_payload_has_value(value))
+        {
+            let remaining = COMPOSE_BODY_LIMIT_BYTES - body_bytes;
+            if legacy_linked_data_escaped_len(linked_data, remaining).is_err() {
+                return Err(format!(
+                    "Message body exceeds the {} MiB compose limit",
+                    COMPOSE_BODY_LIMIT_BYTES / 1024 / 1024
+                ));
+            }
+        }
+    }
 
+    legacy_validate_compose_headers_and_recipients(payload)
+}
+
+fn legacy_validate_raw_compose_html(html: &str) -> Result<(), String> {
+    if html.len() > COMPOSE_HTML_RAW_LIMIT_BYTES {
+        return Err(format!(
+            "HTML body exceeds the {} MiB raw HTML limit",
+            COMPOSE_HTML_RAW_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+    if html.bytes().filter(|byte| *byte == b'<').count() > COMPOSE_HTML_TAG_MARKER_LIMIT {
+        return Err("HTML body is too structurally complex".to_string());
+    }
+    Ok(())
+}
+
+fn legacy_validate_compose_headers_and_recipients(payload: &Value) -> Result<(), String> {
     let header_fields = [
         "from",
         "to",
@@ -1882,6 +1969,205 @@ fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+struct BoundedEscapedJsonCounter {
+    written: usize,
+    limit: usize,
+}
+
+impl std::io::Write for BoundedEscapedJsonCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let solidi = bytes.iter().filter(|byte| **byte == b'/').count();
+        let expanded = bytes
+            .len()
+            .checked_add(solidi)
+            .ok_or_else(|| std::io::Error::other("escaped JSON size overflow"))?;
+        if expanded > self.limit.saturating_sub(self.written) {
+            return Err(std::io::Error::other("escaped JSON exceeds limit"));
+        }
+        self.written += expanded;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn legacy_linked_data_escaped_len(value: &Value, limit: usize) -> Result<usize, ()> {
+    let mut counter = BoundedEscapedJsonCounter { written: 0, limit };
+    serde_json::to_writer(&mut counter, value).map_err(|_| ())?;
+    Ok(counter.written)
+}
+
+struct SolidusEscapingJsonWriter {
+    bytes: Vec<u8>,
+}
+
+impl std::io::Write for SolidusEscapingJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut start = 0;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'/' {
+                self.bytes.extend_from_slice(&bytes[start..index]);
+                self.bytes.extend_from_slice(b"\\/");
+                start = index + 1;
+            }
+        }
+        self.bytes.extend_from_slice(&bytes[start..]);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serializes structured-email JSON with PHP `json_encode`'s default solidus
+/// escaping. Escaping `/` prevents a string containing `</script>` from ending
+/// the JSON-LD element early when the message is rendered as HTML.
+fn legacy_linked_data_json_value(value: &Value) -> Option<String> {
+    let mut writer = SolidusEscapingJsonWriter { bytes: Vec::new() };
+    serde_json::to_writer(&mut writer, value).ok()?;
+    String::from_utf8(writer.bytes).ok()
+}
+
+struct BoundedHtmlBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for BoundedHtmlBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("normalized HTML exceeds limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn legacy_html_with_linked_data(
+    html: &str,
+    linked_data_json: Option<&str>,
+    limit: usize,
+) -> Result<String, String> {
+    let mut sanitizer = ammonia::Builder::default();
+    sanitizer
+        .rm_tags(&["area", "map"])
+        .add_tags(&["font", "main", "section", "tfoot"])
+        .add_clean_content_tags(&[
+            "applet", "audio", "embed", "frame", "frameset", "iframe", "map", "object", "svg",
+            "title", "video",
+        ])
+        .add_generic_attributes(&[
+            "align",
+            "background",
+            "bgcolor",
+            "border",
+            "bordercolor",
+            "cellpadding",
+            "cellspacing",
+            "class",
+            "dir",
+            "direction",
+            "face",
+            "frame",
+            "id",
+            "name",
+            "rules",
+            "style",
+            "target",
+            "role",
+            "valign",
+        ])
+        .generic_attribute_prefixes(HashSet::from(["aria-"]))
+        .add_url_schemes(&["cid"])
+        .link_rel(None);
+    let sanitized = sanitizer.clean(html);
+    let mut output = BoundedHtmlBuffer {
+        bytes: Vec::with_capacity(html.len().min(limit)),
+        limit,
+    };
+    let write = |output: &mut BoundedHtmlBuffer, bytes: &[u8]| {
+        std::io::Write::write_all(output, bytes)
+            .map_err(|_| "Normalized HTML exceeds the compose body limit".to_string())
+    };
+    write(
+        &mut output,
+        b"<!DOCTYPE html><html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">",
+    )?;
+    if let Some(linked_data_json) = linked_data_json {
+        write(&mut output, b"<script type=\"application/ld+json\">")?;
+        write(&mut output, linked_data_json.as_bytes())?;
+        write(&mut output, b"</script>")?;
+    }
+    write(&mut output, b"</head><body>")?;
+    sanitized
+        .write_to(&mut output)
+        .map_err(|_| "Normalized HTML exceeds the compose body limit".to_string())?;
+    write(&mut output, b"</body></html>")?;
+    String::from_utf8(output.bytes).map_err(|_| "Normalized HTML is not valid UTF-8".to_string())
+}
+
+#[cfg(test)]
+fn legacy_normalize_compose_html(payload: &Value) -> Result<String, String> {
+    if !payload.get("html").is_some_and(legacy_payload_has_value) {
+        return Ok(String::new());
+    }
+    let html = payload_string(payload, "html").unwrap_or_default();
+    let plain_bytes = payload_string(payload, "plain").map_or(0, |plain| plain.len());
+    let linked_data = payload
+        .get("linkedData")
+        .filter(|value| legacy_payload_has_value(value))
+        .cloned();
+    legacy_normalize_compose_html_parts(html, plain_bytes, linked_data)
+}
+
+fn legacy_normalize_compose_html_parts(
+    html: String,
+    plain_bytes: usize,
+    linked_data: Option<Value>,
+) -> Result<String, String> {
+    legacy_validate_raw_compose_html(&html)?;
+    let remaining = COMPOSE_BODY_LIMIT_BYTES.saturating_sub(plain_bytes);
+    let linked_data_json = linked_data.as_ref().and_then(legacy_linked_data_json_value);
+    legacy_html_with_linked_data(&html, linked_data_json.as_deref(), remaining)
+}
+
+async fn legacy_normalize_compose_html_async(payload: &Value) -> Result<String, String> {
+    if !payload.get("html").is_some_and(legacy_payload_has_value) {
+        return Ok(String::new());
+    }
+    let html = payload_string(payload, "html").unwrap_or_default();
+    let plain_bytes = payload_string(payload, "plain").map_or(0, |plain| plain.len());
+    let linked_data = payload
+        .get("linkedData")
+        .filter(|value| legacy_payload_has_value(value))
+        .cloned();
+    legacy_validate_raw_compose_html(&html)?;
+
+    let permit = tokio::time::timeout(
+        COMPOSE_SANITIZE_DEADLINE,
+        compose_sanitize_semaphore().acquire(),
+    )
+    .await
+    .map_err(|_| "HTML sanitizer is busy; retry later".to_string())?
+    .map_err(|_| "HTML sanitizer is unavailable".to_string())?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        legacy_normalize_compose_html_parts(html, plain_bytes, linked_data)
+    });
+    match tokio::time::timeout(COMPOSE_SANITIZE_DEADLINE, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("HTML sanitizer task failed".to_string()),
+        Err(_) => Err("HTML sanitizer timed out".to_string()),
+    }
 }
 
 fn legacy_payload_has_value(value: &Value) -> bool {
@@ -1934,9 +2220,19 @@ impl LegacySendMessageRequest {
     }
 }
 
+#[cfg(test)]
 fn legacy_send_message_request_from_payload(
     payload: &Value,
     account_email: &str,
+) -> Result<LegacySendMessageRequest, String> {
+    let normalized_html = legacy_normalize_compose_html(payload)?;
+    legacy_send_message_request_from_payload_with_html(payload, account_email, normalized_html)
+}
+
+fn legacy_send_message_request_from_payload_with_html(
+    payload: &Value,
+    account_email: &str,
+    normalized_html: String,
 ) -> Result<LegacySendMessageRequest, String> {
     // The display name is preserved in the `From:` header like legacy PHP; only
     // the bare address is validated and used for the SMTP envelope.
@@ -1971,7 +2267,7 @@ fn legacy_send_message_request_from_payload(
         bcc,
         reply_to,
         subject: payload_string(payload, "subject").unwrap_or_default(),
-        html: payload_string(payload, "html").unwrap_or_default(),
+        html: normalized_html,
         plain: payload_string(payload, "plain").unwrap_or_default(),
         in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
         references: payload_string(payload, "references").unwrap_or_default(),
@@ -2132,6 +2428,21 @@ fn build_legacy_send_message_with_metadata(
         .from(parse_mailbox(&request.from)?)
         .subject(request.subject.clone());
 
+    // Lettre requires a non-empty SMTP envelope even when the message is only
+    // being serialized for an IMAP draft. A private placeholder envelope keeps
+    // recipient-less drafts buildable without adding a visible To header; the
+    // SendMessage parser rejects empty recipient sets before this point.
+    if request.to.is_empty() && request.cc.is_empty() && request.bcc.is_empty() {
+        let envelope_address = request
+            .envelope_from
+            .parse::<lettre::Address>()
+            .map_err(|err| format!("Invalid envelope sender: {err}"))?;
+        let envelope =
+            lettre::address::Envelope::new(Some(envelope_address.clone()), vec![envelope_address])
+                .map_err(|err| format!("Invalid draft envelope: {err}"))?;
+        builder = builder.envelope(envelope);
+    }
+
     for address in &request.to {
         builder = builder.to(parse_mailbox(address)?);
     }
@@ -2180,7 +2491,6 @@ fn build_legacy_send_message_with_metadata(
 
     let html = request.html.trim();
     let plain = request.plain.trim();
-
     if !html.is_empty() && !plain.is_empty() {
         builder
             .multipart(
@@ -16548,6 +16858,214 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn build_legacy_send_message_embeds_linked_data_without_script_breakout() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": "<p>Calendar invitation</p>",
+            "linkedData": [{
+                "@context": "https://schema.org",
+                "@type": "Event",
+                "name": "Unsafe </script><img src=x>"
+            }],
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+        let rendered = &request.html;
+
+        assert!(rendered.contains("<script type=\"application/ld+json\">"));
+        assert!(rendered.contains("<\\/script>"));
+        assert_eq!(rendered.matches("</script>").count(), 1);
+        assert!(rendered.contains("<body><p>Calendar invitation</p></body>"));
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(raw.contains("application/ld+json"));
+        assert!(raw.contains("Event"));
+    }
+
+    #[test]
+    fn legacy_linked_data_sanitizes_html_and_uses_a_canonical_head() {
+        let rendered = super::legacy_html_with_linked_data(
+            r#"<HTML><HEAD><!-- fake </head> --><script>alert(1)</script><style>p{color:red}</style></HEAD>
+                <BODY><iframe>frame</iframe><object>object</object>
+                <p title="</head>" onclick="steal()" data-secret="x" style="color: blue">Safe <B>invite</BODY>"#,
+            Some("[{\"@type\":\"Event\"}]"),
+            super::COMPOSE_BODY_LIMIT_BYTES,
+        )
+        .expect("sanitized HTML should fit");
+
+        assert!(rendered.starts_with(
+            "<!DOCTYPE html><html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"><script type=\"application/ld+json\">[{\"@type\":\"Event\"}]</script></head><body>"
+        ));
+        assert_eq!(rendered.matches("<head>").count(), 1);
+        assert!(rendered.find("</head>").unwrap() < rendered.find("<body>").unwrap());
+        assert_eq!(rendered.matches("<script").count(), 1);
+        assert!(!rendered.contains("fake </head>"));
+        assert!(!rendered.contains("alert(1)"));
+        assert!(!rendered.contains("p{color:red}"));
+        assert!(!rendered.contains("iframe"));
+        assert!(!rendered.contains("object"));
+        assert!(!rendered.contains("onclick"));
+        assert!(!rendered.contains("data-secret"));
+        assert!(rendered.contains("Safe <b>invite</b>"));
+        assert!(rendered.ends_with("</body></html>"));
+    }
+
+    #[test]
+    fn legacy_linked_data_limit_counts_exact_solidus_expansion() {
+        let value = json!("////");
+        // JSON quotes add two bytes; PHP-compatible escaping doubles each slash.
+        assert_eq!(super::legacy_linked_data_escaped_len(&value, 10), Ok(10));
+        assert_eq!(super::legacy_linked_data_escaped_len(&value, 9), Err(()));
+
+        let exact_slashes = (super::COMPOSE_BODY_LIMIT_BYTES - 1 - 4) / 2;
+        let exact = json!({
+            "html": "x",
+            "linkedData": ["/".repeat(exact_slashes)]
+        });
+        assert!(super::legacy_validate_compose_limits(&exact).is_ok());
+
+        let oversized = json!({
+            "html": "x",
+            "linkedData": ["/".repeat(exact_slashes + 1)]
+        });
+        assert!(super::legacy_validate_compose_limits(&oversized)
+            .unwrap_err()
+            .contains("body exceeds"));
+    }
+
+    #[test]
+    fn legacy_normalized_html_is_bounded_after_entity_expansion() {
+        let raw = "&".repeat(256);
+        let normalized = super::legacy_html_with_linked_data(&raw, None, 2_048)
+            .expect("normalized HTML should fit the generous bound");
+        assert!(normalized.contains("&amp;"));
+        assert!(normalized.len() <= 2_048);
+        assert_eq!(
+            super::legacy_html_with_linked_data(&raw, None, normalized.len())
+                .expect("exact output bound"),
+            normalized
+        );
+        assert!(
+            super::legacy_html_with_linked_data(&raw, None, normalized.len() - 1)
+                .unwrap_err()
+                .contains("body limit")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_html_sanitization_keeps_async_workers_responsive() {
+        let tag_heavy_html = format!("{}body{}", "<div>".repeat(4_000), "</div>".repeat(4_000));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let payload = json!({"html": tag_heavy_html});
+            tasks.push(tokio::spawn(async move {
+                super::legacy_normalize_compose_html_async(&payload).await
+            }));
+        }
+        tokio::task::yield_now().await;
+
+        let heartbeat = tokio::time::timeout(Duration::from_millis(250), async {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            heartbeat.is_ok(),
+            "blocking sanitizer work starved Tokio workers"
+        );
+
+        for task in tasks {
+            let normalized = task.await.expect("sanitizer task").expect("sanitized HTML");
+            assert!(normalized.len() <= super::COMPOSE_BODY_LIMIT_BYTES);
+        }
+    }
+
+    #[test]
+    fn legacy_plain_only_compose_ignores_linked_data_like_php() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": "Plain message",
+            "linkedData": [{"value": "/".repeat(super::COMPOSE_BODY_LIMIT_BYTES)}]
+        });
+        assert!(super::legacy_validate_compose_limits(&payload).is_ok());
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("plain-only linked data should be ignored");
+        assert!(request.html.is_empty());
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(!raw.contains("application/ld+json"));
+    }
+
+    #[test]
+    fn legacy_save_message_serializes_sanitized_linked_data() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "saveFolder": "Drafts",
+            "html": "<section><p>Draft invite</p></section>",
+            "linkedData": [{"@type": "Event"}]
+        });
+        let request =
+            super::legacy_save_message_request_from_payload(&payload, "acct@example.com", "Drafts")
+                .expect("draft payload");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, true)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(raw.contains("application/ld+json"));
+        assert!(raw.contains("Draft invite"));
+    }
+
+    #[test]
+    fn legacy_compose_html_preserves_common_safe_email_markup() {
+        let rendered = super::legacy_html_with_linked_data(
+            r#"<title>remove me</title><map><area alt="remove me"></map>
+               <main><section role="region" aria-label="Details">
+               <table border="1" cellpadding="2"><tfoot><tr><td>Cell</td></tr></tfoot></table>
+               <font face="serif"><a href="https://example.com" target="_blank">Link</a></font>
+               <img src="cid:logo@example" alt="Logo"><form><input value="remove"></form>
+               </section></main>"#,
+            None,
+            super::COMPOSE_BODY_LIMIT_BYTES,
+        )
+        .expect("safe fixture should fit");
+
+        for expected in [
+            "<main>",
+            "<section role=\"region\" aria-label=\"Details\">",
+            "cellpadding=\"2\"",
+            "<tfoot>",
+            "<font face=\"serif\">",
+            "target=\"_blank\"",
+            "src=\"cid:logo@example\"",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}: {rendered}"
+            );
+        }
+        for removed in ["remove me", "<map", "<area", "<form", "<input"] {
+            assert!(
+                !rendered.contains(removed),
+                "retained {removed}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn build_legacy_send_message_preserves_thread_message_id_syntax() {
         let payload = json!({
             "from": "sender@example.com",
@@ -16664,6 +17182,13 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(request.to.is_empty());
         assert!(request.all_recipients().is_empty());
         assert_eq!(request.save_folder, "Drafts");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, true)
+                .expect("recipient-less draft should serialize")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(!raw.contains("\r\nTo:"));
 
         // The same payload is rejected by the send path.
         assert_eq!(
@@ -16800,6 +17325,30 @@ Subject: Empty body metadata\r\n\r\n"
                 .unwrap_err()
                 .contains("recipient limit")
         );
+
+        let oversized_linked_data = json!({
+            "html": "x",
+            "linkedData": [{"value": "x".repeat(super::COMPOSE_BODY_LIMIT_BYTES)}]
+        });
+        assert!(
+            super::legacy_validate_compose_limits(&oversized_linked_data)
+                .unwrap_err()
+                .contains("body exceeds")
+        );
+
+        let oversized_html = json!({
+            "html": "x".repeat(super::COMPOSE_HTML_RAW_LIMIT_BYTES + 1)
+        });
+        assert!(super::legacy_validate_compose_limits(&oversized_html)
+            .unwrap_err()
+            .contains("raw HTML limit"));
+
+        let complex_html = json!({
+            "html": "<br>".repeat(super::COMPOSE_HTML_TAG_MARKER_LIMIT + 1)
+        });
+        assert!(super::legacy_validate_compose_limits(&complex_html)
+            .unwrap_err()
+            .contains("structurally complex"));
     }
 
     #[test]
@@ -16847,7 +17396,6 @@ Subject: Empty body metadata\r\n\r\n"
                 "OpenPGP encrypted content",
             ),
             (json!({"sign": "S/MIME"}), "S/MIME signing"),
-            (json!({"linkedData": [{"@type": "Event"}]}), "linked data"),
         ] {
             assert_eq!(
                 super::legacy_unsupported_compose_feature(&payload, false),
@@ -16865,7 +17413,12 @@ Subject: Empty body metadata\r\n\r\n"
         );
         assert_eq!(
             super::legacy_unsupported_compose_feature(
-                &json!({"attachments": {}, "autocrypt": [], "dsn": 0}),
+                &json!({
+                    "attachments": {},
+                    "autocrypt": [],
+                    "linkedData": [{"@type": "Event"}],
+                    "dsn": 0
+                }),
                 true
             ),
             None

@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-11 15:31:07 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-11 16:06:40 CEST (UTC+02:00)
 
 ### Completed And Pushed Today
 
@@ -30,6 +30,9 @@ The following commits are present on both `master` and
    timestamped progress/readiness record and documented the completed compose
    work, rejected JSON-LD attempt, immutable canary evidence, and remaining
    Rust-only cutover gates.
+5. `0d767c954` (`docs: require migration progress snapshots`) made this
+   timestamped snapshot and its review, Docker, image, live-container, remote
+   tip, and applicable-CI evidence a mandatory part of every migration cycle.
 
 The completed code passed independent senior review, strict workspace Clippy,
 the full Rust workspace test suite, and production-image smoke testing. The
@@ -43,38 +46,49 @@ revision tag so provenance is directly auditable from the image.
 
 ### Current Slice Included In This Pending Commit
 
-This documentation-only slice makes this timestamped progress update a
-mandatory part of every regular migration cycle. The workflow now requires
-review/re-review, Docker-only quality gates, production-image and live-container
-inspection, explicit separation of pushed/current/rejected work, immutable
-image provenance, and live remote-tip verification on both operator-mandated
-branches and remotes. It also records an expected no-run when GitHub Actions
-path filters do not apply instead of falsely claiming CI success.
+This slice completes bounded native JSON-LD `linkedData` support for
+`SendMessage` and `SaveMessage` when an HTML body is present. Escaped JSON is
+counted before authentication with a bounded streaming writer, HTML is parsed
+and sanitized into one canonical document, and JSON-LD is inserted into its
+real head with PHP-compatible solidus escaping. The normalized document is
+bounded after entity expansion and is reused for SMTP transport and stored
+copies. Plain-only compose continues to ignore `linkedData` like PHP.
 
-Docker validation for the code accompanying this documentation passed `fmt`,
-workspace `check`, all 508 workspace tests, and strict all-target workspace
-Clippy. The production image was rebuilt as
-`frickmail-rust:workflow-dd9a392b6209` with digest
-`sha256:2dc5c77a922c68e276ba69a67c41d0ec8efc29c59e676ea9228f01684c580271`.
-The running canary uses that same digest and remained healthy, non-root,
-read-only, connected to PostgreSQL, free of startup errors, OOM events, and
-restarts, with `/health` returning HTTP 200. The final review outcome, commit
-ID, four live remote-tip SHAs, and applicable CI result are recorded by the
-publication workflow and rolled into the next snapshot.
+Sanitization runs on Tokio's blocking pool behind a dedicated two-slot
+admission semaphore rather than on async workers. Admission and caller wait
+are bounded to 10 seconds; timed-out blocking tasks are non-cancellable and
+retain their permit until exit. A 4 MiB raw HTML limit, 10,000 tag-marker
+limit, shared eight-operation compose semaphore, and the existing 8 MiB
+normalized compose-body limit constrain CPU and memory amplification. The
+deliberately stricter HTML policy preserves common safe email markup while
+removing active content, comments, event/data attributes, and unsafe elements.
+MailSo data-image transformations remain part of the unmigrated attachment
+pipeline. The slice also repairs recipient-less draft serialization without
+adding a visible `To` header.
+
+Independent senior review initially found unbounded pre-authentication JSON
+serialization, unsafe raw-head insertion, sanitizer output amplification, and
+synchronous DOM parsing on async workers. Each finding was fixed and the
+reviewer approved the resulting implementation with no remaining blocker,
+high-severity, correctness, or security finding. Docker validation passed
+`fmt`, workspace `check`, all 516 workspace tests, and strict all-target
+workspace Clippy. The exact production image was built as
+`frickmail-rust:linkeddata-final`, digest
+`sha256:054464db1232f5a791d4f8dd349280b67bbc7d7fb7cf05061538cabfb58e5b0e`.
+That digest now runs as the local canary: it is healthy, non-root, read-only,
+capability-dropped, and protected by `no-new-privileges`; `/health` and `/`
+return HTTP 200, PostgreSQL connection verification succeeded, logs contain no
+startup errors, and Docker reports zero restarts and no OOM kill. The final
+staged review outcome, commit ID, four live remote-tip SHAs, and GitHub CI
+result will be verified by the publication workflow and rolled into the next
+snapshot.
 
 ### In Progress But Not Committed
 
-Native compose support for structured-email JSON-LD `linkedData` was
-implemented locally and all 510 workspace tests passed, but the independent
-review rejected the first version. It must not be merged until both high-level
-findings are fixed and re-reviewed:
-
-1. Count the exact escaped JSON-LD size with a bounded, non-allocating writer
-   before authentication so slash-heavy input cannot expand past the 8 MiB
-   compose limit.
-2. Parse, sanitize, and canonicalize compose HTML like PHP `BuildHtml` before
-   inserting JSON-LD into the real document head; raw script/iframe/style
-   content and fake `</head>` text must not survive or redirect insertion.
+There is no separate rejected or partially implemented work outside the
+reviewed JSON-LD slice described above. It remains uncommitted only until the
+timestamped snapshot receives its final staged review and the publication
+workflow completes.
 
 ### Still Missing Before The Final Rust-Only Goal
 
