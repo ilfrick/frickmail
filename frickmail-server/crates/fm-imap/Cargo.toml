@@ -22,4 +22,5 @@ serde_urlencoded.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+tracing.workspace = true
 webpki-roots.workspace = true

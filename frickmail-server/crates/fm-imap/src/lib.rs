@@ -809,8 +809,100 @@ async fn fetch_legacy_message_email_ids_and_previews(
     include_preview: bool,
     operation: &'static str,
 ) -> Result<(HashMap<u32, String>, HashMap<u32, String>)> {
+    match fetch_legacy_message_email_ids_and_previews_once(
+        session,
+        uids,
+        include_email_id,
+        include_preview,
+        operation,
+    )
+    .await
+    {
+        Ok(OptionalMetadataFetchAttempt::Accepted(metadata)) => return Ok(metadata),
+        Ok(OptionalMetadataFetchAttempt::Rejected) => {
+            tracing::warn!(
+                "optional combined IMAP EMAILID/PREVIEW fetch was rejected; retrying independently"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                "optional IMAP EMAILID/PREVIEW fetch ended uncertainly; retiring session: {error}"
+            );
+            return Err(error);
+        }
+    };
+
+    // An uncertain/early failure can leave the command outstanding. Retry only
+    // after a fully consumed matching tagged rejection.
+
+    // A server can advertise both extensions but reject one attribute. Retry
+    // them independently so a broken EMAILID implementation does not suppress a
+    // usable PREVIEW (and vice versa). Tagged rejections omit that field; an
+    // uncertain failure retires the session by propagating the error.
+    let email_ids = if include_email_id && include_preview {
+        match fetch_legacy_message_email_ids_and_previews_once(
+            session,
+            uids,
+            true,
+            false,
+            "retry optional EMAILID fetch",
+        )
+        .await
+        {
+            Ok(OptionalMetadataFetchAttempt::Accepted(metadata)) => metadata.0,
+            Ok(OptionalMetadataFetchAttempt::Rejected) => HashMap::new(),
+            Err(error) => {
+                tracing::warn!(
+                    "optional IMAP EMAILID retry ended uncertainly; retiring session: {error}"
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+    let previews = if include_email_id && include_preview {
+        match fetch_legacy_message_email_ids_and_previews_once(
+            session,
+            uids,
+            false,
+            true,
+            "retry optional PREVIEW fetch",
+        )
+        .await
+        {
+            Ok(OptionalMetadataFetchAttempt::Accepted(metadata)) => metadata.1,
+            Ok(OptionalMetadataFetchAttempt::Rejected) => HashMap::new(),
+            Err(error) => {
+                tracing::warn!(
+                    "optional IMAP PREVIEW retry ended uncertainly; retiring session: {error}"
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+    Ok((email_ids, previews))
+}
+
+enum OptionalMetadataFetchAttempt {
+    Accepted((HashMap<u32, String>, HashMap<u32, String>)),
+    Rejected,
+}
+
+async fn fetch_legacy_message_email_ids_and_previews_once(
+    session: &mut BoxedSession,
+    uids: &[u32],
+    include_email_id: bool,
+    include_preview: bool,
+    operation: &'static str,
+) -> Result<OptionalMetadataFetchAttempt> {
     if !include_email_id && !include_preview {
-        return Ok((HashMap::new(), HashMap::new()));
+        return Ok(OptionalMetadataFetchAttempt::Accepted((
+            HashMap::new(),
+            HashMap::new(),
+        )));
     }
 
     let requested_uids = uids
@@ -819,7 +911,10 @@ async fn fetch_legacy_message_email_ids_and_previews(
         .filter(|uid| *uid > 0)
         .collect::<HashSet<_>>();
     let Some(uid_set) = legacy_uid_sequence_set(uids) else {
-        return Ok((HashMap::new(), HashMap::new()));
+        return Ok(OptionalMetadataFetchAttempt::Accepted((
+            HashMap::new(),
+            HashMap::new(),
+        )));
     };
 
     let mut attrs: Vec<&str> = vec!["UID"];
@@ -874,12 +969,13 @@ async fn fetch_legacy_message_email_ids_and_previews(
                                 AttributeValue::Preview(Some(preview)) => Some(preview.as_ref()),
                                 _ => None,
                             }) {
-                                let preview = std::str::from_utf8(preview).map_err(|_| {
-                                    FrickmailError::Upstream(
-                                        "IMAP PREVIEW response was not valid UTF-8".to_string(),
-                                    )
-                                })?;
-                                previews.insert(response_uid, preview.to_string());
+                                if let Ok(preview) = std::str::from_utf8(preview) {
+                                    previews.insert(response_uid, preview.to_string());
+                                } else {
+                                    tracing::warn!(
+                                        "ignoring IMAP PREVIEW response that was not valid UTF-8"
+                                    );
+                                }
                             }
                         }
                     }
@@ -889,8 +985,28 @@ async fn fetch_legacy_message_email_ids_and_previews(
                         "{operation} failed: unexpected IMAP continuation"
                     )));
                 }
-                if imap_command_completion(response.parsed(), &request_id, operation)?.is_some() {
-                    return Ok((email_ids, previews));
+                match response.parsed() {
+                    Response::Done {
+                        tag,
+                        status: Status::Ok,
+                        ..
+                    } if tag == &request_id => {
+                        return Ok(OptionalMetadataFetchAttempt::Accepted((
+                            email_ids, previews,
+                        )))
+                    }
+                    Response::Done { tag, .. } if tag == &request_id => {
+                        return Ok(OptionalMetadataFetchAttempt::Rejected)
+                    }
+                    Response::Data {
+                        status: Status::Bye,
+                        ..
+                    } => {
+                        return Err(FrickmailError::Upstream(format!(
+                            "{operation} failed: IMAP server closed the session"
+                        )))
+                    }
+                    _ => {}
                 }
             }
         }),
@@ -1302,6 +1418,60 @@ pub async fn append_raw_message(
     append_raw_message_with_flags(config, password, mailbox, raw, Some("(\\Seen)")).await
 }
 
+/// Failure classification for an IMAP APPEND. A definitive failure is known to
+/// have happened before commit (or is a tagged NO/BAD), so callers may safely
+/// try another mailbox. An uncertain failure may have committed and must not be
+/// retried automatically because that can create duplicate messages.
+#[derive(Debug)]
+pub enum AppendRawMessageFailure {
+    Definitive(String),
+    Uncertain(String),
+}
+
+impl AppendRawMessageFailure {
+    pub fn public_message(&self) -> &str {
+        match self {
+            Self::Definitive(message) | Self::Uncertain(message) => message,
+        }
+    }
+}
+
+pub async fn append_raw_message_classified(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    raw: &[u8],
+) -> std::result::Result<(), AppendRawMessageFailure> {
+    validate_mailbox(mailbox)
+        .and_then(|_| validate_eml(raw))
+        .map_err(|err| AppendRawMessageFailure::Definitive(err.public_message()))?;
+    let mut session = login(config, password)
+        .await
+        .map_err(|err| AppendRawMessageFailure::Definitive(err.public_message()))?;
+
+    let result = match timeout(
+        COMMAND_TIMEOUT,
+        session.append(mailbox, Some("(\\Seen)"), None, raw),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(async_imap::error::Error::No(message) | async_imap::error::Error::Bad(message))) => {
+            Err(AppendRawMessageFailure::Definitive(format!(
+                "append raw message failed: {message}"
+            )))
+        }
+        Ok(Err(err)) => Err(AppendRawMessageFailure::Uncertain(format!(
+            "append raw message failed: {err}"
+        ))),
+        Err(_) => Err(AppendRawMessageFailure::Uncertain(
+            "append raw message timed out".to_string(),
+        )),
+    };
+    logout_quietly(session).await;
+    result
+}
+
 pub async fn append_raw_message_without_flags(
     config: ImapConnectionConfig,
     password: &str,
@@ -1329,6 +1499,126 @@ async fn append_raw_message_with_flags(
     .await?;
     logout_quietly(session).await;
     Ok(())
+}
+
+/// Appends a draft as `\Seen` and resolves the resulting UID.
+///
+/// The `async-imap` `APPEND` helper consumes the tagged completion internally, so
+/// the RFC 4315 `APPENDUID` response code is not reachable through it. Legacy PHP
+/// has the same gap for servers without UIDPLUS and falls back to locating the
+/// message by its `Message-ID`; this does the same lookup unconditionally.
+///
+/// Returns `None` when the append succeeded but the UID could not be resolved,
+/// which callers must treat as a successful save with an unknown UID.
+pub async fn append_draft_message(
+    config: ImapConnectionConfig,
+    password: &str,
+    mailbox: &str,
+    raw: &[u8],
+    message_id: Option<&str>,
+) -> Result<Option<u32>> {
+    validate_mailbox(mailbox)?;
+    validate_eml(raw)?;
+
+    let mut session = login(config.clone(), password).await?;
+    let result = append_draft_message_in_session(&mut session, mailbox, raw, message_id).await;
+    logout_quietly(session).await;
+    match result? {
+        DraftAppendAttempt::Saved(uid) => Ok(uid),
+        DraftAppendAttempt::Uncertain(message) => {
+            tracing::warn!("draft APPEND has an uncertain outcome: {message}");
+            let Some(message_id) = message_id.map(str::trim).filter(|id| !id.is_empty()) else {
+                return Ok(None);
+            };
+            // Reconnect because the original stream may be desynchronized or
+            // closed. Locating the unique Message-ID proves that APPEND committed.
+            let Ok(mut recovery) = login(config, password).await else {
+                return Ok(None);
+            };
+            let recovered =
+                if timeout_imap("select draft recovery mailbox", recovery.select(mailbox))
+                    .await
+                    .is_ok()
+                {
+                    find_uid_by_message_id(&mut recovery, message_id)
+                        .await
+                        .unwrap_or(None)
+                } else {
+                    None
+                };
+            logout_quietly(recovery).await;
+            Ok(recovered)
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DraftAppendAttempt {
+    Saved(Option<u32>),
+    Uncertain(String),
+}
+
+async fn append_draft_message_in_session(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    raw: &[u8],
+    message_id: Option<&str>,
+) -> Result<DraftAppendAttempt> {
+    match timeout(
+        COMMAND_TIMEOUT,
+        session.append(mailbox, Some("(\\Seen)"), None, raw),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(async_imap::error::Error::No(message) | async_imap::error::Error::Bad(message))) => {
+            return Err(FrickmailError::Upstream(format!(
+                "append draft message failed: {message}"
+            )))
+        }
+        Ok(Err(error)) => {
+            return Ok(DraftAppendAttempt::Uncertain(format!(
+                "append draft message failed: {error}"
+            )))
+        }
+        Err(_) => {
+            return Ok(DraftAppendAttempt::Uncertain(
+                "append draft message timed out".to_string(),
+            ))
+        }
+    }
+
+    let Some(message_id) = message_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(DraftAppendAttempt::Saved(None));
+    };
+
+    // The APPEND is already committed at this point. A later SELECT/SEARCH
+    // failure must not turn the save into an API failure that encourages the
+    // client to retry and create another copy of the same draft.
+    if let Err(error) = timeout_imap("select draft mailbox", session.select(mailbox)).await {
+        tracing::warn!("draft was appended but selecting it for UID lookup failed: {error}");
+        return Ok(DraftAppendAttempt::Saved(None));
+    }
+    match find_uid_by_message_id(session, message_id).await {
+        Ok(uid) => Ok(DraftAppendAttempt::Saved(uid)),
+        Err(error) => {
+            tracing::warn!("draft was appended but its UID lookup failed: {error}");
+            Ok(DraftAppendAttempt::Saved(None))
+        }
+    }
+}
+
+/// Finds the highest UID whose `Message-ID` header matches, mirroring legacy
+/// PHP's `FindMessageUidByMessageId`. The newest match wins because a redundant
+/// append of the same draft leaves older copies behind.
+async fn find_uid_by_message_id(
+    session: &mut BoxedSession,
+    message_id: &str,
+) -> Result<Option<u32>> {
+    let quoted = quote_imap_string("message id", message_id)?;
+    let criteria = format!("HEADER MESSAGE-ID {quoted}");
+    let uids = timeout_imap("search draft by message id", session.uid_search(&criteria)).await?;
+    Ok(uids.into_iter().max())
 }
 
 pub async fn set_mailbox_subscription(
@@ -3634,6 +3924,92 @@ enum LegacyMessageListFetchMode {
     Sequences,
 }
 
+struct LegacyMessageSummaryAccumulator {
+    summary: LegacyMessageSummary,
+    header_seen: bool,
+    bodystructure_seen: bool,
+    internal_date_seen: bool,
+    size_seen: bool,
+    flags_seen: bool,
+    email_id_seen: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LegacyMessageSummaryFragment {
+    header: bool,
+    bodystructure: bool,
+    internal_date: bool,
+    size: bool,
+    flags: bool,
+    email_id: bool,
+}
+
+impl LegacyMessageSummaryAccumulator {
+    fn new(summary: LegacyMessageSummary, fragment: LegacyMessageSummaryFragment) -> Self {
+        Self {
+            summary,
+            header_seen: fragment.header,
+            bodystructure_seen: fragment.bodystructure,
+            internal_date_seen: fragment.internal_date,
+            size_seen: fragment.size,
+            flags_seen: fragment.flags,
+            email_id_seen: fragment.email_id,
+        }
+    }
+
+    fn merge(&mut self, incoming: LegacyMessageSummary, fragment: LegacyMessageSummaryFragment) {
+        if fragment.header && !self.header_seen {
+            self.summary.subject = incoming.subject;
+            self.summary.message_id = incoming.message_id;
+            self.summary.spam_score = incoming.spam_score;
+            self.summary.spam_result = incoming.spam_result;
+            self.summary.is_spam = incoming.is_spam;
+            self.summary.in_reply_to = incoming.in_reply_to;
+            self.summary.references = incoming.references;
+            self.summary.from = incoming.from;
+            self.summary.reply_to = incoming.reply_to;
+            self.summary.to = incoming.to;
+            self.summary.cc = incoming.cc;
+            self.summary.bcc = incoming.bcc;
+            self.summary.sender = incoming.sender;
+            self.summary.delivered_to = incoming.delivered_to;
+            self.summary.read_receipt = incoming.read_receipt;
+            self.summary.date = incoming.date;
+            if incoming.date_timestamp_source == "header" || !self.internal_date_seen {
+                self.summary.date_timestamp = incoming.date_timestamp;
+                self.summary.date_timestamp_source = incoming.date_timestamp_source.clone();
+            }
+            self.summary.encrypted |= incoming.encrypted;
+            self.header_seen = true;
+        }
+        if fragment.bodystructure && !self.bodystructure_seen {
+            self.summary.has_attachments = incoming.has_attachments;
+            self.summary.attachments = incoming.attachments;
+            self.summary.encrypted |= incoming.encrypted;
+            self.bodystructure_seen = true;
+        }
+        if fragment.internal_date && !self.internal_date_seen {
+            if self.summary.date_timestamp_source != "header" {
+                self.summary.date_timestamp = incoming.date_timestamp;
+                self.summary.date_timestamp_source = incoming.date_timestamp_source;
+            }
+            self.internal_date_seen = true;
+        }
+        if fragment.size && !self.size_seen {
+            self.summary.size = incoming.size;
+            self.size_seen = true;
+        }
+        if fragment.flags && !self.flags_seen {
+            self.summary.flags = incoming.flags;
+            self.flags_seen = true;
+        }
+        if fragment.email_id && !self.email_id_seen {
+            self.summary.email_id = incoming.email_id;
+            self.email_id_seen = true;
+        }
+    }
+}
+
 async fn fetch_legacy_message_list_summaries(
     session: &mut BoxedSession,
     mailbox: &str,
@@ -3676,7 +4052,7 @@ async fn fetch_legacy_message_list_summaries(
             .await?,
         ),
     };
-    let mut messages_by_id = HashMap::new();
+    let mut messages_by_id: HashMap<u32, LegacyMessageSummaryAccumulator> = HashMap::new();
     while let Some(fetch) =
         timeout_imap("read legacy message list item", fetches.try_next()).await?
     {
@@ -3691,38 +4067,42 @@ async fn fetch_legacy_message_list_summaries(
         if !requested_ids.contains(&id) {
             continue;
         }
-        let header = fetch.header().unwrap_or_default();
+        let header = fetch.header();
+        let internal_timestamp = fetch.internal_date().map(|value| value.timestamp());
+        let size = fetch.size;
+        let flags = fetch.flags().collect::<Vec<_>>();
+        let email_id = fetch.gmail_msg_id().map(u64::to_string);
+        let fragment = LegacyMessageSummaryFragment {
+            header: header.is_some(),
+            bodystructure: bodystructure.is_some(),
+            internal_date: internal_timestamp.is_some(),
+            size: size.is_some(),
+            flags: !flags.is_empty(),
+            email_id: email_id.is_some(),
+        };
         let mut summary = legacy_message_summary_from_fetch_with_email_id(
             mailbox,
             uid,
-            fetch.internal_date().map(|value| value.timestamp()),
-            fetch.size.unwrap_or_default(),
-            fetch.flags(),
+            internal_timestamp,
+            size.unwrap_or_default(),
+            flags.into_iter(),
             bodystructure,
-            header,
-            fetch.gmail_msg_id().map(u64::to_string),
+            header.unwrap_or_default(),
+            email_id,
         );
         (summary.threads, summary.thread_unseen) =
             legacy_message_thread_metadata(uid, message_threads, unseen_uids);
-        // Prefer the most complete response: if an earlier FETCH for this UID
-        // already yielded a bodystructure, keep it instead of overwriting with
-        // a later response that only has flags/size. New summaries with a
-        // bodystructure always replace prior ones that lacked one.
-        let should_replace =
-            messages_by_id
-                .get(&id)
-                .is_none_or(|existing: &LegacyMessageSummary| {
-                    bodystructure.is_some() && existing.attachments.is_empty()
-                });
-        if should_replace {
-            messages_by_id.insert(id, summary);
+        if let Some(existing) = messages_by_id.get_mut(&id) {
+            existing.merge(summary, fragment);
+        } else {
+            messages_by_id.insert(id, LegacyMessageSummaryAccumulator::new(summary, fragment));
         }
     }
     drop(fetches);
 
     let fetched_uids = messages_by_id
         .values()
-        .map(|message| message.uid)
+        .map(|message| message.summary.uid)
         .filter(|uid| *uid > 0)
         .collect::<Vec<_>>();
     if !fetched_uids.is_empty() {
@@ -3735,18 +4115,18 @@ async fn fetch_legacy_message_list_summaries(
         )
         .await?;
         for message in messages_by_id.values_mut() {
-            if let Some(email_id) = email_ids.get(&message.uid) {
-                message.email_id = Some(email_id.clone());
+            if let Some(email_id) = email_ids.get(&message.summary.uid) {
+                message.summary.email_id = Some(email_id.clone());
             }
-            if let Some(preview) = previews.iter().find(|(uid, _)| *uid == &message.uid) {
-                message.preview = Some(preview.1.clone());
+            if let Some(preview) = previews.get(&message.summary.uid) {
+                message.summary.preview = Some(preview.clone());
             }
         }
     }
 
     Ok(ids
         .iter()
-        .filter_map(|id| messages_by_id.remove(id))
+        .filter_map(|id| messages_by_id.remove(id).map(|message| message.summary))
         .collect())
 }
 
@@ -3809,7 +4189,7 @@ async fn fetch_legacy_message_list_multisearch_page(
             )
         })?;
         let requested_uids = page_uids.iter().copied().collect::<HashSet<_>>();
-        let mut messages_by_uid = HashMap::new();
+        let mut messages_by_uid: HashMap<u32, LegacyMessageSummaryAccumulator> = HashMap::new();
         let mut fetches = timeout_imap(
             "fetch multisearch legacy message list",
             session.uid_fetch(
@@ -3834,25 +4214,34 @@ async fn fetch_legacy_message_list_multisearch_page(
             if !requested_uids.contains(&uid) {
                 continue;
             }
-            let header = fetch.header().unwrap_or_default();
+            let header = fetch.header();
+            let internal_timestamp = fetch.internal_date().map(|value| value.timestamp());
+            let size = fetch.size;
+            let flags = fetch.flags().collect::<Vec<_>>();
+            let email_id = fetch.gmail_msg_id().map(u64::to_string);
+            let fragment = LegacyMessageSummaryFragment {
+                header: header.is_some(),
+                bodystructure: bodystructure.is_some(),
+                internal_date: internal_timestamp.is_some(),
+                size: size.is_some(),
+                flags: !flags.is_empty(),
+                email_id: email_id.is_some(),
+            };
             let summary = legacy_message_summary_from_fetch_with_email_id(
                 mailbox,
                 uid,
-                fetch.internal_date().map(|value| value.timestamp()),
-                fetch.size.unwrap_or_default(),
-                fetch.flags(),
+                internal_timestamp,
+                size.unwrap_or_default(),
+                flags.into_iter(),
                 bodystructure,
-                header,
-                fetch.gmail_msg_id().map(u64::to_string),
+                header.unwrap_or_default(),
+                email_id,
             );
-            let should_replace =
+            if let Some(existing) = messages_by_uid.get_mut(&uid) {
+                existing.merge(summary, fragment);
+            } else {
                 messages_by_uid
-                    .get(&uid)
-                    .is_none_or(|existing: &LegacyMessageSummary| {
-                        bodystructure.is_some() && existing.attachments.is_empty()
-                    });
-            if should_replace {
-                messages_by_uid.insert(uid, summary);
+                    .insert(uid, LegacyMessageSummaryAccumulator::new(summary, fragment));
             }
         }
         drop(fetches);
@@ -3876,19 +4265,19 @@ async fn fetch_legacy_message_list_multisearch_page(
             .await?;
             for (uid, email_id) in email_ids {
                 if let Some(message) = messages_by_uid.get_mut(&uid) {
-                    message.email_id = Some(email_id);
+                    message.summary.email_id = Some(email_id);
                 }
             }
             for (uid, preview) in previews {
                 if let Some(message) = messages_by_uid.get_mut(&uid) {
-                    message.preview = Some(preview);
+                    message.summary.preview = Some(preview);
                 }
             }
         }
         messages.extend(
             page_uids
                 .iter()
-                .filter_map(|uid| messages_by_uid.remove(uid)),
+                .filter_map(|uid| messages_by_uid.remove(uid).map(|message| message.summary)),
         );
     }
 
@@ -6964,48 +7353,75 @@ async fn fetch_body_part_specs(
     )
     .await?;
 
+    let mut header = Vec::new();
+    let mut flags = Vec::new();
+    let mut internal_timestamp = None;
+    let mut size = None;
+    let mut email_id = None;
+    let mut envelope = LegacyMessageEnvelope::default();
+    let mut bodystructure: Option<BodyStructure<'static>> = None;
+    let mut matched = false;
+
     while let Some(fetch) = timeout_imap("read body structure", fetches.try_next()).await? {
         if fetch.uid != Some(uid) {
             continue;
         }
-        let flags =
+        matched = true;
+        if let Some(value) = fetch.header() {
+            header = value.to_vec();
+        }
+        let fetched_flags =
             legacy_unique_flag_strings(fetch.flags().map(|flag| legacy_message_flag_string(&flag)));
-        let header = fetch.header().unwrap_or_default().to_vec();
-        let internal_timestamp = fetch.internal_date().map(|value| value.timestamp());
-        let size = fetch.size.unwrap_or_default();
-        let email_id = fetch.gmail_msg_id().map(u64::to_string);
-        let envelope = fetch
-            .envelope()
-            .map(legacy_message_envelope_metadata)
-            .unwrap_or_default();
-        let Some(bodystructure) = fetch.bodystructure() else {
-            return Ok(Some(BodyPreviewFetchSpec {
-                parts: vec![BodyPartSpec {
-                    path: None,
-                    depth: 0,
-                    kind: BodyPartKind::RawMessage,
-                    octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
-                    charset: String::new(),
-                    transfer_encoding: BodyPartTransferEncoding::Identity,
-                    decode_flowed: false,
-                }],
-                flags,
-                crypto: LegacyMessageCrypto::default(),
-                metadata: LegacyMessageFetchMetadata {
-                    header,
-                    internal_timestamp,
-                    size,
-                    email_id,
-                    preview: None,
-                    attachments: Vec::new(),
-                    envelope,
-                },
-            }));
-        };
-        let crypto = legacy_message_crypto_metadata(bodystructure);
-        let attachments = legacy_message_attachments(folder, uid, Some(bodystructure));
-        let specs = body_preview_part_specs(bodystructure, &header);
-        let metadata = LegacyMessageFetchMetadata {
+        if !fetched_flags.is_empty() {
+            flags = fetched_flags;
+        }
+        internal_timestamp = fetch
+            .internal_date()
+            .map(|value| value.timestamp())
+            .or(internal_timestamp);
+        size = fetch.size.or(size);
+        email_id = fetch.gmail_msg_id().map(u64::to_string).or(email_id);
+        if let Some(value) = fetch.envelope() {
+            envelope = legacy_message_envelope_metadata(value);
+        }
+        if let Some(value) = fetch.bodystructure() {
+            bodystructure = Some(value.clone().into_owned());
+        }
+    }
+
+    if !matched {
+        return Ok(None);
+    }
+    let size = size.unwrap_or_default();
+    let crypto = bodystructure
+        .as_ref()
+        .map(legacy_message_crypto_metadata)
+        .unwrap_or_default();
+    let attachments = legacy_message_attachments(folder, uid, bodystructure.as_ref());
+    let mut parts = bodystructure
+        .as_ref()
+        .map(|bodystructure| body_preview_part_specs(bodystructure, &header))
+        .unwrap_or_default();
+    if parts.is_empty() {
+        parts.push(BodyPartSpec {
+            path: None,
+            depth: 0,
+            kind: BodyPartKind::RawMessage,
+            octets: if size == 0 {
+                BODY_PREVIEW_PART_LIMIT_BYTES as u32
+            } else {
+                size
+            },
+            charset: String::new(),
+            transfer_encoding: BodyPartTransferEncoding::Identity,
+            decode_flowed: false,
+        });
+    }
+    Ok(Some(BodyPreviewFetchSpec {
+        parts,
+        flags,
+        crypto,
+        metadata: LegacyMessageFetchMetadata {
             header,
             internal_timestamp,
             size,
@@ -7013,32 +7429,8 @@ async fn fetch_body_part_specs(
             preview: None,
             attachments,
             envelope,
-        };
-        if specs.is_empty() {
-            return Ok(Some(BodyPreviewFetchSpec {
-                parts: vec![BodyPartSpec {
-                    path: None,
-                    depth: 0,
-                    kind: BodyPartKind::RawMessage,
-                    octets: fetch.size.unwrap_or(BODY_PREVIEW_PART_LIMIT_BYTES as u32),
-                    charset: String::new(),
-                    transfer_encoding: BodyPartTransferEncoding::Identity,
-                    decode_flowed: false,
-                }],
-                flags,
-                crypto,
-                metadata,
-            }));
-        }
-        return Ok(Some(BodyPreviewFetchSpec {
-            parts: specs,
-            flags,
-            crypto,
-            metadata,
-        }));
-    }
-
-    Ok(None)
+        },
+    }))
 }
 
 async fn fetch_preview_parts(
@@ -7056,69 +7448,75 @@ async fn fetch_preview_parts(
     )
     .await?;
 
+    let mut fetched_sections: HashMap<Vec<u32>, Vec<u8>> = HashMap::new();
+    let mut fetched_raw = None;
     while let Some(fetch) = timeout_imap("read body preview", fetches.try_next()).await? {
         if fetch.uid != Some(uid) {
             continue;
         }
-
-        let mut parts = Vec::new();
-        let mut detected_crypto = crypto.clone();
         for spec in specs {
             match spec.path_vec() {
                 Some(path) => {
-                    let part_id = section_path(&path);
-                    let body = fetch
-                        .section(&SectionPath::Part(path, None))
-                        .unwrap_or_default();
-                    if !body.is_empty() {
-                        let text = decode_body_preview_text(spec, body);
-                        detect_armored_pgp_metadata(
-                            &mut detected_crypto,
-                            &part_id,
-                            text.as_bytes(),
-                        );
-                        let raw = render_decoded_body_preview_part(spec, text);
-                        parts.push(BodyPreviewPart {
-                            kind: spec.kind,
-                            raw,
-                            is_complete: false,
-                            flags: flags.to_vec(),
-                            crypto: LegacyMessageCrypto::default(),
-                            metadata: metadata.clone(),
-                        });
+                    if let Some(body) = fetch.section(&SectionPath::Part(path.clone(), None)) {
+                        fetched_sections
+                            .entry(path)
+                            .or_insert_with(|| body.to_vec());
                     }
                 }
                 None => {
                     if let Some(body) = fetch.body() {
-                        parts.push(BodyPreviewPart {
-                            kind: BodyPartKind::RawMessage,
-                            raw: body.to_vec(),
-                            is_complete: raw_message_preview_is_complete(body, spec.octets),
-                            flags: flags.to_vec(),
-                            crypto: crypto.clone(),
-                            metadata: metadata.clone(),
-                        });
+                        fetched_raw.get_or_insert_with(|| body.to_vec());
                     }
                 }
             }
         }
-
-        for part in &mut parts {
-            part.crypto = detected_crypto.clone();
-        }
-
-        if parts.is_empty() {
-            if let Some(part) = metadata_only_body_preview_part(flags, crypto, metadata) {
-                parts.push(part);
-            }
-        }
-
-        return Ok(parts);
     }
 
-    Ok(metadata_only_body_preview_part(flags, crypto, metadata)
-        .into_iter()
-        .collect())
+    let mut parts = Vec::new();
+    let mut detected_crypto = crypto.clone();
+    for spec in specs {
+        match spec.path_vec() {
+            Some(path) => {
+                let Some(body) = fetched_sections.get(&path) else {
+                    continue;
+                };
+                let text = decode_body_preview_text(spec, body);
+                detect_armored_pgp_metadata(
+                    &mut detected_crypto,
+                    &section_path(&path),
+                    text.as_bytes(),
+                );
+                parts.push(BodyPreviewPart {
+                    kind: spec.kind,
+                    raw: render_decoded_body_preview_part(spec, text),
+                    is_complete: false,
+                    flags: flags.to_vec(),
+                    crypto: LegacyMessageCrypto::default(),
+                    metadata: metadata.clone(),
+                });
+            }
+            None => {
+                if let Some(body) = &fetched_raw {
+                    parts.push(BodyPreviewPart {
+                        kind: BodyPartKind::RawMessage,
+                        raw: body.clone(),
+                        is_complete: raw_message_preview_is_complete(body, spec.octets),
+                        flags: flags.to_vec(),
+                        crypto: crypto.clone(),
+                        metadata: metadata.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    for part in &mut parts {
+        part.crypto = detected_crypto.clone();
+    }
+    if parts.is_empty() {
+        parts.extend(metadata_only_body_preview_part(flags, crypto, metadata));
+    }
+    Ok(parts)
 }
 
 fn metadata_only_body_preview_part(
@@ -11723,6 +12121,117 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
     }
 
     #[tokio::test]
+    async fn draft_append_uses_seen_and_resolves_the_newest_message_id_uid() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let raw = b"Subject: Draft\r\n\r\nBody";
+        let (client_stream, mut server_stream) = tokio::io::duplex(2048);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let append = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                append,
+                format!("A0002 APPEND \"Drafts\" (\\Seen) {{{}}}\r\n", raw.len())
+            );
+            server_stream.write_all(b"+ Ready\r\n").await.unwrap();
+            let mut literal = vec![0_u8; raw.len() + 2];
+            server_stream.read_exact(&mut literal).await.unwrap();
+            assert_eq!(&literal[..raw.len()], raw);
+            assert_eq!(&literal[raw.len()..], b"\r\n");
+            server_stream
+                .write_all(b"A0002 OK [APPENDUID 9 43] appended\r\n")
+                .await
+                .unwrap();
+
+            let select = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(select, "A0003 SELECT \"Drafts\"\r\n");
+            server_stream
+                .write_all(
+                    b"* 2 EXISTS\r\n* OK [UIDVALIDITY 9] valid\r\nA0003 OK [READ-WRITE] selected\r\n",
+                )
+                .await
+                .unwrap();
+
+            let search = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(
+                search,
+                "A0004 UID SEARCH HEADER MESSAGE-ID \"draft@example.com\"\r\n"
+            );
+            server_stream
+                .write_all(b"* SEARCH 41 43\r\nA0004 OK searched\r\n")
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let uid =
+            append_draft_message_in_session(&mut session, "Drafts", raw, Some("draft@example.com"))
+                .await
+                .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(uid, DraftAppendAttempt::Saved(Some(43)));
+    }
+
+    #[tokio::test]
+    async fn draft_append_stays_successful_when_post_commit_uid_lookup_fails() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let raw = b"Subject: Draft\r\n\r\nBody";
+        let (client_stream, mut server_stream) = tokio::io::duplex(2048);
+        let server = tokio::spawn(async move {
+            let login = read_scripted_imap_command(&mut server_stream).await;
+            assert!(login.starts_with("A0001 LOGIN "));
+            server_stream
+                .write_all(b"A0001 OK logged in\r\n")
+                .await
+                .unwrap();
+
+            let append = read_scripted_imap_command(&mut server_stream).await;
+            assert!(append.starts_with("A0002 APPEND \"Drafts\" (\\Seen) {"));
+            server_stream.write_all(b"+ Ready\r\n").await.unwrap();
+            let mut literal = vec![0_u8; raw.len() + 2];
+            server_stream.read_exact(&mut literal).await.unwrap();
+            server_stream
+                .write_all(b"A0002 OK appended\r\n")
+                .await
+                .unwrap();
+
+            let select = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(select, "A0003 SELECT \"Drafts\"\r\n");
+            server_stream
+                .write_all(b"A0003 NO temporarily unavailable\r\n")
+                .await
+                .unwrap();
+        });
+
+        let stream: BoxedImapIo = Box::new(client_stream);
+        let client: BoxedClient = Client::new(stream);
+        let mut session = match client.login("user", "password").await {
+            Ok(session) => session,
+            Err((error, _client)) => panic!("scripted login failed: {error}"),
+        };
+        let uid =
+            append_draft_message_in_session(&mut session, "Drafts", raw, Some("draft@example.com"))
+                .await
+                .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(uid, DraftAppendAttempt::Saved(None));
+    }
+
+    #[tokio::test]
     async fn detailed_message_fetch_reads_capability_gated_uid_correlated_preview() {
         use tokio::io::AsyncWriteExt as _;
 
@@ -15655,6 +16164,56 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         );
 
         assert!(!summary.encrypted);
+    }
+
+    #[test]
+    fn split_fetch_merge_preserves_internal_date_fallback_and_header_fields() {
+        let internal = legacy_message_summary_from_fetch(
+            "INBOX",
+            51,
+            Some(1_700_000_000),
+            2048,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            b"",
+        );
+        let header = legacy_message_summary_from_fetch(
+            "INBOX",
+            51,
+            None,
+            0,
+            Vec::<Flag<'_>>::new().into_iter(),
+            None,
+            b"Subject: Arrived later\r\nMessage-ID: <split@example.com>\r\n\r\n",
+        );
+        let mut merged = LegacyMessageSummaryAccumulator::new(
+            internal,
+            LegacyMessageSummaryFragment {
+                header: false,
+                bodystructure: false,
+                internal_date: true,
+                size: true,
+                flags: false,
+                email_id: false,
+            },
+        );
+        merged.merge(
+            header,
+            LegacyMessageSummaryFragment {
+                header: true,
+                bodystructure: false,
+                internal_date: false,
+                size: false,
+                flags: false,
+                email_id: false,
+            },
+        );
+
+        assert_eq!(merged.summary.subject, "Arrived later");
+        assert_eq!(merged.summary.message_id, "<split@example.com>");
+        assert_eq!(merged.summary.date_timestamp, 1_700_000_000);
+        assert_eq!(merged.summary.date_timestamp_source, "internal");
+        assert_eq!(merged.summary.size, 2048);
     }
 
     #[test]

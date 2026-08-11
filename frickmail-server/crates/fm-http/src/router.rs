@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, OnceLock,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -65,6 +68,7 @@ use p256::{
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
+use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
 use tracing::warn;
@@ -76,7 +80,13 @@ const UNKNOWN_ERROR: u16 = 999;
 const AUTH_ERROR: u16 = 102;
 const CONNECTION_ERROR: u16 = 104;
 const CANT_GET_MESSAGE_LIST: u16 = 201;
+const CANT_SAVE_MESSAGE: u16 = 301;
+const CANT_SEND_MESSAGE: u16 = 302;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const COMPOSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+const COMPOSE_HEADER_LIMIT_BYTES: usize = 256 * 1024;
+const COMPOSE_RECIPIENT_LIMIT: usize = 500;
+const COMPOSE_SEND_CONCURRENCY: usize = 8;
 const TOTP_PENDING_SESSION_KEY: &str = "frickmail_totp_pending_secret";
 const MESSAGE_BODY_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
@@ -886,15 +896,9 @@ async fn native_compat_response(
         "MessageDelete" => {
             Some(native_legacy_message_delete(state, original_action, payload, session).await)
         }
-        "AttachmentsActions" => {
-            Some(native_legacy_attachments_actions(state, original_action, payload, session).await)
-        }
-        "MessageUploadAttachments" => Some(
-            native_legacy_message_upload_attachments(state, original_action, payload, session)
-                .await,
-        ),
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
         "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
+        "SaveMessage" => Some(native_save_message(state, original_action, payload, session).await),
         _ => None,
     }
 }
@@ -977,13 +981,16 @@ async fn native_hibp_check(
         None => return json_result_error(original_action, "Account password not available"),
     };
 
-    let pwned = hibp_check_password(&password).await;
+    let pwned = match hibp_check_password(&password).await {
+        Ok(count) => count,
+        Err(message) => return json_result_error(original_action, &message),
+    };
 
     let api_key = state.config().hibp.api_key.as_deref().unwrap_or("");
     let breaches = if api_key.is_empty() {
         None
     } else {
-        hibp_check_account(api_key, &secret.email).await
+        hibp_check_account(api_key, &hibp_ascii_email(&secret.email)).await
     };
 
     json_value_envelope(
@@ -999,8 +1006,9 @@ async fn native_hibp_check(
 }
 
 /// Check a password against the Have I Been Pwned Pwned Passwords API (k-anonymity model).
-/// Returns the breach count, or 0 if not found.
-async fn hibp_check_password(password: &str) -> i64 {
+/// Returns the breach count, or an error when HIBP could not provide an answer.
+/// An unavailable upstream must never be reported as a reassuring zero.
+async fn hibp_check_password(password: &str) -> Result<i64, String> {
     let hash = hex::encode(Sha1::digest(password.as_bytes())).to_uppercase();
     let prefix = &hash[..5];
     let suffix = &hash[5..];
@@ -1012,26 +1020,45 @@ async fn hibp_check_password(password: &str) -> i64 {
         .build()
     {
         Ok(client) => client,
-        Err(_) => return 0,
+        Err(err) => return Err(format!("HIBP password check unavailable: {err}")),
     };
 
-    let body = match client.get(&url).send().await {
-        Ok(response) => match response.text().await {
+    let body = match client.get(&url).header("Add-Padding", "true").send().await {
+        Ok(response) if response.status().is_success() => match response.text().await {
             Ok(text) => text,
-            Err(_) => return 0,
+            Err(err) => return Err(format!("HIBP password check unavailable: {err}")),
         },
-        Err(_) => return 0,
+        Ok(response) => {
+            return Err(format!(
+                "HIBP password check unavailable: HTTP {}",
+                response.status()
+            ))
+        }
+        Err(err) => return Err(format!("HIBP password check unavailable: {err}")),
     };
 
     for line in body.lines() {
         if let Some((hash_suffix, count)) = line.split_once(':') {
             if hash_suffix.eq_ignore_ascii_case(suffix) {
-                return count.trim().parse::<i64>().unwrap_or(1);
+                return count
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| "HIBP password check returned an invalid count".to_string());
             }
         }
     }
 
-    0
+    Ok(0)
+}
+
+fn hibp_ascii_email(email: &str) -> String {
+    let Some((local, domain)) = email.trim().rsplit_once('@') else {
+        return email.trim().to_string();
+    };
+    match idna::domain_to_ascii(domain) {
+        Ok(domain) => format!("{local}@{domain}"),
+        Err(_) => email.trim().to_string(),
+    }
 }
 
 /// Check an email address against the Have I Been Pwned Breached Account API.
@@ -1074,8 +1101,16 @@ async fn hibp_check_account(api_key: &str, email: &str) -> Option<Vec<serde_json
 }
 
 const SEND_MESSAGE_SMTP_DEADLINE: Duration = Duration::from_secs(120);
-const SEND_MESSAGE_APPEND_DEADLINE: Duration = Duration::from_secs(60);
+const SEND_MESSAGE_ACTION_DEADLINE: Duration = Duration::from_secs(240);
 const SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE: Duration = Duration::from_secs(30);
+const SEND_PHASE_PRE_SMTP: u8 = 0;
+const SEND_PHASE_SMTP_IN_FLIGHT: u8 = 1;
+const SEND_PHASE_DELIVERED: u8 = 2;
+
+fn compose_send_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_SEND_CONCURRENCY))
+}
 
 /// Legacy `SendMessage` compose payload after validation.
 #[derive(Debug)]
@@ -1116,6 +1151,62 @@ async fn native_send_message(
     payload: &Value,
     session: &fm_session::Session,
 ) -> Response {
+    let delivery_phase = Arc::new(AtomicU8::new(SEND_PHASE_PRE_SMTP));
+    match tokio::time::timeout(
+        SEND_MESSAGE_ACTION_DEADLINE,
+        native_send_message_inner(
+            state,
+            original_action,
+            payload,
+            session,
+            Arc::clone(&delivery_phase),
+        ),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            let (code, message) =
+                legacy_send_deadline_error(delivery_phase.load(Ordering::Acquire));
+            legacy_action_error(original_action, code, message)
+        }
+    }
+}
+
+fn legacy_send_deadline_error(delivery_phase: u8) -> (u16, &'static str) {
+    match delivery_phase {
+        SEND_PHASE_DELIVERED => (
+            CANT_SAVE_MESSAGE,
+            "The message was sent, but post-send processing exceeded its server deadline",
+        ),
+        SEND_PHASE_SMTP_IN_FLIGHT => (
+            CANT_SEND_MESSAGE,
+            "SMTP timed out with an unknown delivery outcome; check Sent and the recipient before retrying",
+        ),
+        _ => (
+            CANT_SEND_MESSAGE,
+            "Message sending timed out before SMTP delivery started",
+        ),
+    }
+}
+
+async fn native_send_message_inner(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    delivery_phase: Arc<AtomicU8>,
+) -> Response {
+    if let Some(feature) = legacy_unsupported_compose_feature(payload, true) {
+        return json_result_error(
+            original_action,
+            &format!("Compose feature is not yet supported by Rust: {feature}"),
+        );
+    }
+    if let Err(message) = legacy_validate_compose_limits(payload) {
+        return json_result_error(original_action, &message);
+    }
+
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
         Ok(auth) => auth,
         Err(response) => return response,
@@ -1153,6 +1244,19 @@ async fn native_send_message(
         Err(message) => return json_result_error(original_action, &message),
     };
 
+    let send_permit =
+        match tokio::time::timeout(Duration::from_secs(10), compose_send_semaphore().acquire())
+            .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return json_result_error(original_action, "Message sending is unavailable")
+            }
+            Err(_) => {
+                return json_result_error(original_action, "Message sending is busy; retry later")
+            }
+        };
+
     let smtp_settings =
         match legacy_smtp_send_settings(state, pool, user.user_id, account_id, &account, &password)
             .await
@@ -1161,11 +1265,31 @@ async fn native_send_message(
             Err(message) => return json_result_error(original_action, &message),
         };
 
-    // Legacy parity: the transport copy omits the Bcc header because the SMTP
-    // envelope already carries those recipients; the Sent copy keeps it.
-    let transport_message = match build_legacy_send_message(&request, false) {
+    // Build both serializations from one stable identity. Legacy serializes the
+    // same message object for SMTP and Sent, so Message-ID and Date must match.
+    let message_id = legacy_generate_draft_message_id(&request.envelope_from);
+    let message_date = SystemTime::now();
+    let transport_message = match build_legacy_send_message_with_metadata(
+        &request,
+        false,
+        Some(&message_id),
+        Some(message_date),
+    ) {
         Ok(message) => message,
         Err(message) => return json_result_error(original_action, &message),
+    };
+    let stored_message = if request.save_folder.is_empty() {
+        None
+    } else {
+        match build_legacy_send_message_with_metadata(
+            &request,
+            true,
+            Some(&message_id),
+            Some(message_date),
+        ) {
+            Ok(message) => Some(message),
+            Err(message) => return json_result_error(original_action, &message),
+        }
     };
 
     let envelope = match fm_smtp::build_envelope(&request.envelope_from, &request.all_recipients())
@@ -1175,28 +1299,52 @@ async fn native_send_message(
     };
 
     let transport_bytes = transport_message.formatted();
-    let send_settings = smtp_settings.clone();
+    delivery_phase.store(SEND_PHASE_SMTP_IN_FLIGHT, Ordering::Release);
     let send_result = tokio::time::timeout(
         SEND_MESSAGE_SMTP_DEADLINE,
-        tokio::task::spawn_blocking(move || {
-            fm_smtp::send_raw_message(&send_settings, &envelope, &transport_bytes)
-        }),
+        fm_smtp::send_raw_message_async(&smtp_settings, &envelope, &transport_bytes),
     )
     .await;
 
     match send_result {
-        Ok(Ok(Ok(_))) => {}
-        Ok(Ok(Err(err))) => return json_result_error(original_action, &err.public_message()),
+        Ok(Ok(_)) => delivery_phase.store(SEND_PHASE_DELIVERED, Ordering::Release),
         Ok(Err(err)) => {
-            return json_result_error(original_action, &format!("SMTP send task failed: {err}"))
+            return legacy_action_error(
+                original_action,
+                CANT_SEND_MESSAGE,
+                format!(
+                    "SMTP delivery failed or has an unknown outcome; check before retrying: {}",
+                    err.public_message()
+                ),
+            )
         }
-        Err(_) => return json_result_error(original_action, "SMTP send timed out"),
+        Err(_) => {
+            return legacy_action_error(
+                original_action,
+                CANT_SEND_MESSAGE,
+                "SMTP timed out with an unknown delivery outcome; check before retrying",
+            )
+        }
     }
+    drop(send_permit);
 
-    // Delivery succeeded. Everything below is best-effort: legacy PHP logs these
-    // failures and still reports success, because the mail is already sent.
+    // Delivery succeeded. A requested Sent copy is mandatory; draft flagging and
+    // cleanup remain best-effort because SMTP delivery cannot be rolled back.
+    let post_send_imap_requested = stored_message.is_some()
+        || request.draft_info.is_some()
+        || (!request.draft_folder.is_empty() && request.draft_uid > 0);
     let imap_config = match imap_config_from_account_secret(&account) {
         Ok(config) => config,
+        Err(err) if post_send_imap_requested => {
+            return legacy_action_error(
+                original_action,
+                CANT_SAVE_MESSAGE,
+                format!(
+                    "Message was sent, but post-send IMAP processing is unavailable: {}",
+                    err.public_message()
+                ),
+            )
+        }
         Err(err) => {
             tracing::warn!(
                 "SendMessage: skipping post-send IMAP work, no usable IMAP config: {}",
@@ -1206,15 +1354,8 @@ async fn native_send_message(
         }
     };
 
-    if !request.save_folder.is_empty() {
-        let stored_message = match build_legacy_send_message(&request, true) {
-            Ok(message) => message,
-            Err(message) => {
-                tracing::warn!("SendMessage: could not rebuild message for append: {message}");
-                return legacy_send_message_success(original_action);
-            }
-        };
-        legacy_send_message_append_to_sent(
+    if let Some(stored_message) = stored_message {
+        if let Err(message) = legacy_send_message_append_to_sent(
             state,
             pool,
             user.user_id,
@@ -1224,7 +1365,10 @@ async fn native_send_message(
             &request.save_folder,
             &stored_message.formatted(),
         )
-        .await;
+        .await
+        {
+            return legacy_action_error(original_action, CANT_SAVE_MESSAGE, message);
+        }
     }
 
     if let Some(draft_info) = &request.draft_info {
@@ -1284,18 +1428,23 @@ async fn legacy_send_message_append_to_sent(
     password: &str,
     save_folder: &str,
     raw: &[u8],
-) {
+) -> Result<(), String> {
     let _ = state;
-    let first = tokio::time::timeout(
-        SEND_MESSAGE_APPEND_DEADLINE,
-        fm_imap::append_raw_message(imap_config.clone(), password, save_folder, raw),
+    let first_error = match fm_imap::append_raw_message_classified(
+        imap_config.clone(),
+        password,
+        save_folder,
+        raw,
     )
-    .await;
-
-    let first_error = match first {
-        Ok(Ok(())) => return,
-        Ok(Err(err)) => err.public_message(),
-        Err(_) => "append timed out".to_string(),
+    .await
+    {
+        Ok(()) => return Ok(()),
+        Err(fm_imap::AppendRawMessageFailure::Definitive(message)) => message,
+        Err(fm_imap::AppendRawMessageFailure::Uncertain(message)) => {
+            return Err(format!(
+                "Message was sent, but saving its Sent copy has an unknown outcome: {message}"
+            ))
+        }
     };
 
     let fallback_folder =
@@ -1317,24 +1466,24 @@ async fn legacy_send_message_append_to_sent(
 
     let Some(fallback_folder) = fallback_folder else {
         tracing::warn!("SendMessage: append to '{save_folder}' failed: {first_error}");
-        return;
+        return Err(format!(
+            "Message was sent, but the Sent copy could not be saved: {first_error}"
+        ));
     };
 
-    let second = tokio::time::timeout(
-        SEND_MESSAGE_APPEND_DEADLINE,
-        fm_imap::append_raw_message(imap_config.clone(), password, &fallback_folder, raw),
+    match fm_imap::append_raw_message_classified(
+        imap_config.clone(),
+        password,
+        &fallback_folder,
+        raw,
     )
-    .await;
-
-    match second {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => tracing::warn!(
-            "SendMessage: append to '{save_folder}' failed ({first_error}) and fallback '{fallback_folder}' failed: {}",
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(err) => Err(format!(
+            "Message was sent, but saving to '{save_folder}' failed ({first_error}) and fallback '{fallback_folder}' failed: {}",
             err.public_message()
-        ),
-        Err(_) => tracing::warn!(
-            "SendMessage: append to '{save_folder}' failed ({first_error}) and fallback '{fallback_folder}' timed out"
-        ),
+        )),
     }
 }
 
@@ -1453,13 +1602,318 @@ async fn legacy_smtp_send_settings(
         .unwrap_or(account.email.as_str())
         .to_string();
 
+    let addresses = tokio::time::timeout(Duration::from_secs(10), public_socket_addrs(&host, port))
+        .await
+        .map_err(|_| "SMTP hostname resolution timed out".to_string())?
+        .ok_or_else(|| "SMTP host must resolve only to public IP addresses".to_string())?;
+    let connect_host = addresses
+        .first()
+        .map(|address| address.ip().to_string())
+        .ok_or_else(|| "SMTP host has no validated public address".to_string())?;
+
     Ok(fm_smtp::SmtpSendSettings {
         host,
+        connect_host,
         port,
         secure,
         login,
         password: password.to_string(),
     })
+}
+
+async fn native_save_message(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    if let Some(feature) = legacy_unsupported_compose_feature(payload, false) {
+        return json_result_error(
+            original_action,
+            &format!("Compose feature is not yet supported by Rust: {feature}"),
+        );
+    }
+    if let Err(message) = legacy_validate_compose_limits(payload) {
+        return json_result_error(original_action, &message);
+    }
+
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    // Legacy PHP raises UnknownError when saveFolder is absent.
+    let save_folder = payload_string(payload, "saveFolder").unwrap_or_default();
+    if save_folder.trim().is_empty() {
+        return json_result_error(original_action, "Save folder required");
+    }
+
+    let account_id = match resolve_message_body_account_id(payload, session, original_action).await
+    {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
+
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return json_result_error(original_action, "Account not found"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    let password = match account_password(&account, &credential_key) {
+        Ok(password) => password,
+        Err(_) => return json_result_error(original_action, "Missing account password"),
+    };
+
+    let imap_config = match imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    // Drafts are still being composed, so unlike SendMessage they may legitimately
+    // have no recipients yet.
+    let request =
+        match legacy_save_message_request_from_payload(payload, &account.email, &save_folder) {
+            Ok(request) => request,
+            Err(message) => return json_result_error(original_action, &message),
+        };
+
+    // The Message-ID is pinned so the appended draft can be located afterwards.
+    let message_id = legacy_generate_draft_message_id(&request.envelope_from);
+    let draft_message = match build_legacy_send_message_with_id(&request, true, Some(&message_id)) {
+        Ok(message) => message,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
+    let new_uid = match fm_imap::append_draft_message(
+        imap_config.clone(),
+        &password,
+        &save_folder,
+        &draft_message.formatted(),
+        Some(&message_id),
+    )
+    .await
+    {
+        Ok(uid) => uid,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+
+    // The prior revision is removed only after the new one is stored, so a
+    // failure here can never lose the draft.
+    let previous_folder = payload_string(payload, "messageFolder").unwrap_or_default();
+    let previous_uid = u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0);
+    if should_cleanup_previous_draft(new_uid, &previous_folder, previous_uid) {
+        let uid_set = previous_uid.to_string();
+        let cleanup = tokio::time::timeout(
+            SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
+            fm_imap::delete_messages(imap_config, &password, &previous_folder, &uid_set),
+        )
+        .await;
+        match cleanup {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!(
+                "SaveMessage: could not remove previous draft {}:{}: {}",
+                previous_folder,
+                previous_uid,
+                err.public_message()
+            ),
+            Err(_) => tracing::warn!(
+                "SaveMessage: removing previous draft {}:{} timed out",
+                previous_folder,
+                previous_uid
+            ),
+        }
+    } else if new_uid.is_none() {
+        tracing::warn!(
+            "SaveMessage: draft append succeeded but its UID could not be resolved; retaining previous draft {}:{}",
+            previous_folder,
+            previous_uid
+        );
+    }
+
+    // Legacy returns {folder, uid} when the UID is known and bare `true`
+    // otherwise; the frontend only advances its draft pointer in the first case.
+    let result = match new_uid {
+        Some(uid) if uid > 0 => json!({
+            "folder": save_folder,
+            "uid": uid,
+        }),
+        _ => Value::Bool(true),
+    };
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": result
+        }),
+    )
+}
+
+fn should_cleanup_previous_draft(
+    new_uid: Option<u32>,
+    previous_folder: &str,
+    previous_uid: u32,
+) -> bool {
+    new_uid.is_some() && !previous_folder.trim().is_empty() && previous_uid > 0
+}
+
+/// Builds a draft request. Unlike `SendMessage` this tolerates an empty
+/// recipient set because drafts are saved mid-composition.
+fn legacy_save_message_request_from_payload(
+    payload: &Value,
+    account_email: &str,
+    save_folder: &str,
+) -> Result<LegacySendMessageRequest, String> {
+    let from = payload_string(payload, "from")
+        .map(|from| from.trim().to_string())
+        .filter(|from| !from.is_empty())
+        .unwrap_or_else(|| account_email.to_string());
+    let envelope_from = legacy_parse_single_address(&from)
+        .ok_or_else(|| format!("Invalid sender address: {from}"))?;
+
+    Ok(LegacySendMessageRequest {
+        from,
+        envelope_from,
+        to: legacy_parse_address_list(payload_string(payload, "to").unwrap_or_default().as_str())?,
+        cc: legacy_parse_address_list(payload_string(payload, "cc").unwrap_or_default().as_str())?,
+        bcc: legacy_parse_address_list(
+            payload_string(payload, "bcc").unwrap_or_default().as_str(),
+        )?,
+        reply_to: legacy_parse_address_list(
+            payload_string(payload, "replyTo")
+                .unwrap_or_default()
+                .as_str(),
+        )?,
+        subject: payload_string(payload, "subject").unwrap_or_default(),
+        html: payload_string(payload, "html").unwrap_or_default(),
+        plain: payload_string(payload, "plain").unwrap_or_default(),
+        in_reply_to: payload_string(payload, "inReplyTo").unwrap_or_default(),
+        references: payload_string(payload, "references").unwrap_or_default(),
+        read_receipt_request: payload_bool(payload, "readReceiptRequest"),
+        mark_as_important: payload_bool(payload, "markAsImportant"),
+        // PHP's shared buildMessage() includes this header in saved drafts too.
+        require_tls: payload_bool(payload, "requireTLS"),
+        save_folder: save_folder.to_string(),
+        draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
+        draft_uid: u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0),
+        draft_info: legacy_draft_info_from_payload(payload),
+    })
+}
+
+fn legacy_unsupported_compose_feature(payload: &Value, sending: bool) -> Option<&'static str> {
+    const MIME_FEATURES: &[(&str, &str)] = &[
+        ("attachments", "attachments"),
+        ("signed", "OpenPGP signed content"),
+        ("encrypted", "OpenPGP encrypted content"),
+        ("autocrypt", "Autocrypt headers"),
+        ("linkedData", "linked data"),
+        ("sign", "S/MIME signing"),
+        ("signFingerprint", "GnuPG signing"),
+        ("encryptFingerprints", "GnuPG encryption"),
+        ("encryptCertificates", "S/MIME encryption"),
+    ];
+
+    for (field, label) in MIME_FEATURES {
+        if payload.get(*field).is_some_and(legacy_payload_has_value) {
+            return Some(label);
+        }
+    }
+    if sending && payload_bool(payload, "dsn") {
+        return Some("delivery status notifications");
+    }
+    if sending && payload_bool(payload, "requireTLS") {
+        return Some("SMTP REQUIRETLS");
+    }
+    None
+}
+
+fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
+    let body_bytes = ["plain", "html"]
+        .into_iter()
+        .filter_map(|field| payload.get(field).and_then(Value::as_str))
+        .map(str::len)
+        .sum::<usize>();
+    if body_bytes > COMPOSE_BODY_LIMIT_BYTES {
+        return Err(format!(
+            "Message body exceeds the {} MiB compose limit",
+            COMPOSE_BODY_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let header_fields = [
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "replyTo",
+        "subject",
+        "inReplyTo",
+        "references",
+    ];
+    let header_bytes = header_fields
+        .into_iter()
+        .filter_map(|field| payload.get(field).and_then(Value::as_str))
+        .map(str::len)
+        .sum::<usize>();
+    if header_bytes > COMPOSE_HEADER_LIMIT_BYTES {
+        return Err("Compose headers are too large".to_string());
+    }
+
+    let recipient_count = ["to", "cc", "bcc", "replyTo"]
+        .into_iter()
+        .filter_map(|field| payload.get(field).and_then(Value::as_str))
+        .map(legacy_address_items)
+        .map(|items| items.len())
+        .sum::<usize>();
+    if recipient_count > COMPOSE_RECIPIENT_LIMIT {
+        return Err(format!(
+            "Compose request exceeds the {COMPOSE_RECIPIENT_LIMIT} recipient limit"
+        ));
+    }
+    Ok(())
+}
+
+fn legacy_payload_has_value(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.trim().is_empty() && value.trim() != "0",
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+/// Generates an RFC 5322 `Message-ID` rooted at the sender's domain.
+fn legacy_generate_draft_message_id(envelope_from: &str) -> String {
+    let domain = envelope_from
+        .rsplit_once('@')
+        .map(|(_, domain)| domain)
+        .filter(|domain| !domain.is_empty())
+        .unwrap_or("frickmail.local");
+    let unique = hex::encode(Sha1::digest(
+        format!(
+            "{envelope_from}/{}/{}",
+            current_epoch(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.subsec_nanos())
+                .unwrap_or_default()
+        )
+        .as_bytes(),
+    ));
+    format!("{unique}@{domain}")
 }
 
 impl LegacySendMessageRequest {
@@ -1601,9 +2055,29 @@ fn legacy_parse_single_address(raw: &str) -> Option<String> {
 /// copy omits the `Bcc` header (the SMTP envelope carries those recipients), while
 /// the copy appended to the Sent folder keeps it so the sender can see who was
 /// blind-copied.
+#[cfg(test)]
 fn build_legacy_send_message(
     request: &LegacySendMessageRequest,
     keep_bcc_header: bool,
+) -> Result<lettre::Message, String> {
+    build_legacy_send_message_with_metadata(request, keep_bcc_header, None, None)
+}
+
+/// As [`build_legacy_send_message`], but allows pinning the `Message-ID` so a
+/// saved draft can be located again after APPEND.
+fn build_legacy_send_message_with_id(
+    request: &LegacySendMessageRequest,
+    keep_bcc_header: bool,
+    message_id: Option<&str>,
+) -> Result<lettre::Message, String> {
+    build_legacy_send_message_with_metadata(request, keep_bcc_header, message_id, None)
+}
+
+fn build_legacy_send_message_with_metadata(
+    request: &LegacySendMessageRequest,
+    keep_bcc_header: bool,
+    message_id: Option<&str>,
+    message_date: Option<SystemTime>,
 ) -> Result<lettre::Message, String> {
     use lettre::message::{header, Mailbox, MultiPart, SinglePart};
 
@@ -1613,7 +2087,17 @@ fn build_legacy_send_message(
             .map_err(|err| format!("Invalid address '{address}': {err}"))
     };
 
-    let mut builder = lettre::Message::builder()
+    let mut builder = lettre::Message::builder();
+    if let Some(message_id) = message_id {
+        builder = builder.message_id(Some(format!(
+            "<{}>",
+            legacy_strip_angle_brackets(message_id)
+        )));
+    }
+    if let Some(message_date) = message_date {
+        builder = builder.date(message_date);
+    }
+    let mut builder = builder
         .from(parse_mailbox(&request.from)?)
         .subject(request.subject.clone());
 
@@ -1635,19 +2119,29 @@ fn build_legacy_send_message(
     }
 
     if !request.in_reply_to.trim().is_empty() {
-        builder = builder.in_reply_to(legacy_strip_angle_brackets(&request.in_reply_to));
+        builder = builder.in_reply_to(request.in_reply_to.trim().to_string());
     }
     if !request.references.trim().is_empty() {
-        builder = builder.references(request.references.trim().to_string());
+        builder = builder.references(
+            request
+                .references
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
     }
     if request.read_receipt_request {
         builder = builder.raw_header(legacy_raw_header(
             "Disposition-Notification-To",
             &request.envelope_from,
         )?);
+        builder = builder.raw_header(legacy_raw_header(
+            "X-Confirm-Reading-To",
+            &request.envelope_from,
+        )?);
     }
     if request.mark_as_important {
-        builder = builder.raw_header(legacy_raw_header("X-Priority", "1")?);
+        builder = builder.raw_header(legacy_raw_header("X-Priority", "1 (Highest)")?);
     }
     if !request.require_tls {
         builder = builder.raw_header(legacy_raw_header("TLS-Required", "No")?);
@@ -5577,6 +6071,7 @@ async fn legacy_folder_append_account_id(
     Ok(selected.account_id)
 }
 
+#[allow(dead_code)]
 async fn native_legacy_attachments_actions(
     state: &AppState,
     original_action: &str,
@@ -5832,6 +6327,7 @@ async fn cleanup_temp_files(tmp_dir: &str, max_age: Duration) {
     }
 }
 
+#[allow(dead_code)]
 async fn native_legacy_message_upload_attachments(
     state: &AppState,
     original_action: &str,
@@ -15943,6 +16439,28 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn build_legacy_send_message_preserves_thread_message_id_syntax() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": "reply",
+            "inReplyTo": " <parent@example.com> ",
+            "references": "<root@example.com>\r\n\t<parent@example.com>",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert!(raw.contains("In-Reply-To: <parent@example.com>"));
+        assert!(raw.contains("References: <root@example.com> <parent@example.com>"));
+    }
+
+    #[test]
     fn build_legacy_send_message_sets_priority_and_tls_headers() {
         let important = json!({
             "from": "sender@example.com",
@@ -15962,9 +16480,10 @@ Subject: Empty body metadata\r\n\r\n"
         )
         .expect("utf8");
 
-        assert!(raw.contains("X-Priority: 1"));
+        assert!(raw.contains("X-Priority: 1 (Highest)"));
         assert!(raw.contains("TLS-Required: No"));
         assert!(raw.contains("Disposition-Notification-To: sender@example.com"));
+        assert!(raw.contains("X-Confirm-Reading-To: sender@example.com"));
 
         let plain = json!({
             "from": "sender@example.com",
@@ -16017,6 +16536,231 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(parsed.info_type, "forward");
         assert_eq!(parsed.uid, 9);
         assert_eq!(parsed.folder, "Archive");
+    }
+
+    #[test]
+    fn legacy_save_message_allows_empty_recipients() {
+        // Drafts are saved mid-composition, so an empty recipient set is valid
+        // even though SendMessage rejects it.
+        let payload = json!({
+            "from": "sender@example.com",
+            "subject": "Work in progress",
+            "plain": "half a thought",
+        });
+
+        let request =
+            super::legacy_save_message_request_from_payload(&payload, "acct@example.com", "Drafts")
+                .expect("draft with no recipients should be accepted");
+
+        assert!(request.to.is_empty());
+        assert!(request.all_recipients().is_empty());
+        assert_eq!(request.save_folder, "Drafts");
+
+        // The same payload is rejected by the send path.
+        assert_eq!(
+            super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+                .unwrap_err(),
+            "No recipients"
+        );
+    }
+
+    #[test]
+    fn legacy_save_message_keeps_bcc_and_pins_message_id() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "bcc": "hidden@example.com",
+            "subject": "Draft subject",
+            "plain": "body",
+        });
+        let request =
+            super::legacy_save_message_request_from_payload(&payload, "acct@example.com", "Drafts")
+                .expect("payload should parse");
+
+        let message_id = super::legacy_generate_draft_message_id(&request.envelope_from);
+        let raw = String::from_utf8(
+            super::build_legacy_send_message_with_id(&request, true, Some(&message_id))
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        // A saved draft keeps Bcc so reopening it restores the blind recipients.
+        assert!(raw.contains("Bcc: hidden@example.com"));
+        // The pinned Message-ID is what locates the draft after APPEND.
+        assert!(
+            raw.contains(&format!("Message-ID: <{message_id}>")),
+            "unexpected draft headers:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn legacy_draft_message_id_uses_sender_domain_and_is_unique() {
+        let first = super::legacy_generate_draft_message_id("sender@example.com");
+        let second = super::legacy_generate_draft_message_id("sender@example.com");
+
+        assert!(first.ends_with("@example.com"));
+        assert_ne!(first, second, "message ids must not collide");
+
+        // A sender without a domain still yields a syntactically valid id.
+        let fallback = super::legacy_generate_draft_message_id("malformed");
+        assert!(fallback.ends_with("@frickmail.local"));
+    }
+
+    #[test]
+    fn legacy_save_message_keeps_php_tls_required_header_parity() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": "body",
+        });
+        let request =
+            super::legacy_save_message_request_from_payload(&payload, "acct@example.com", "Drafts")
+                .expect("payload should parse");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, true)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+
+        assert!(raw.contains("TLS-Required: No"));
+    }
+
+    #[test]
+    fn legacy_send_transport_and_stored_copy_share_identity_headers() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "bcc": "hidden@example.com",
+            "plain": "body",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("payload should parse");
+        let message_id = "stable@example.com";
+        let date = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let transport = String::from_utf8(
+            super::build_legacy_send_message_with_metadata(
+                &request,
+                false,
+                Some(message_id),
+                Some(date),
+            )
+            .expect("transport build")
+            .formatted(),
+        )
+        .expect("utf8");
+        let stored = String::from_utf8(
+            super::build_legacy_send_message_with_metadata(
+                &request,
+                true,
+                Some(message_id),
+                Some(date),
+            )
+            .expect("stored build")
+            .formatted(),
+        )
+        .expect("utf8");
+
+        for prefix in ["Message-ID:", "Date:"] {
+            let transport_header = transport
+                .lines()
+                .find(|line| line.starts_with(prefix))
+                .expect("transport identity header");
+            let stored_header = stored
+                .lines()
+                .find(|line| line.starts_with(prefix))
+                .expect("stored identity header");
+            assert_eq!(transport_header, stored_header);
+        }
+    }
+
+    #[test]
+    fn legacy_compose_limits_reject_oversized_content_and_recipient_fanout() {
+        let oversized = json!({"plain": "x".repeat(super::COMPOSE_BODY_LIMIT_BYTES + 1)});
+        assert!(super::legacy_validate_compose_limits(&oversized)
+            .unwrap_err()
+            .contains("body exceeds"));
+
+        let recipients = (0..=super::COMPOSE_RECIPIENT_LIMIT)
+            .map(|index| format!("user{index}@example.com"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            super::legacy_validate_compose_limits(&json!({"to": recipients}))
+                .unwrap_err()
+                .contains("recipient limit")
+        );
+    }
+
+    #[test]
+    fn previous_draft_cleanup_requires_a_resolved_new_uid() {
+        assert!(!super::should_cleanup_previous_draft(None, "Drafts", 41));
+        assert!(!super::should_cleanup_previous_draft(Some(42), "", 41));
+        assert!(!super::should_cleanup_previous_draft(Some(42), "Drafts", 0));
+        assert!(super::should_cleanup_previous_draft(Some(42), "Drafts", 41));
+    }
+
+    #[test]
+    fn send_deadline_reports_success_only_after_confirmed_delivery() {
+        assert_eq!(
+            super::legacy_send_deadline_error(super::SEND_PHASE_PRE_SMTP).0,
+            super::CANT_SEND_MESSAGE
+        );
+        assert_eq!(
+            super::legacy_send_deadline_error(super::SEND_PHASE_SMTP_IN_FLIGHT).0,
+            super::CANT_SEND_MESSAGE
+        );
+        assert_eq!(
+            super::legacy_send_deadline_error(super::SEND_PHASE_DELIVERED).0,
+            super::CANT_SAVE_MESSAGE
+        );
+    }
+
+    #[test]
+    fn hibp_account_identifier_normalizes_idn_domain() {
+        assert_eq!(
+            super::hibp_ascii_email("alice@bücher.example"),
+            "alice@xn--bcher-kva.example"
+        );
+        assert_eq!(super::hibp_ascii_email("not-an-email"), "not-an-email");
+    }
+
+    #[test]
+    fn native_compose_rejects_unsupported_content_instead_of_silently_dropping_it() {
+        for (payload, expected) in [
+            (
+                json!({"attachments": {"tmp": {"name": "report.pdf"}}}),
+                "attachments",
+            ),
+            (
+                json!({"encrypted": "ciphertext"}),
+                "OpenPGP encrypted content",
+            ),
+            (json!({"sign": "S/MIME"}), "S/MIME signing"),
+            (json!({"linkedData": [{"@type": "Event"}]}), "linked data"),
+        ] {
+            assert_eq!(
+                super::legacy_unsupported_compose_feature(&payload, false),
+                Some(expected)
+            );
+        }
+
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(&json!({"dsn": 1}), true),
+            Some("delivery status notifications")
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(&json!({"requireTLS": 1}), true),
+            Some("SMTP REQUIRETLS")
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(
+                &json!({"attachments": {}, "autocrypt": [], "dsn": 0}),
+                true
+            ),
+            None
+        );
     }
 
     #[test]

@@ -2,10 +2,14 @@ use fm_core::{config::TransactionalSmtpConfig, FrickmailError, Result};
 use lettre::{
     address::{Address, Envelope},
     message::{header::ContentType, Mailbox},
-    transport::smtp::authentication::Credentials,
-    Message, SmtpTransport, Transport,
+    transport::smtp::{
+        authentication::Credentials,
+        client::{Tls, TlsParameters},
+    },
+    AsyncSmtpTransport, AsyncTransport, Message, SmtpTransport, Tokio1Executor, Transport,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SmtpEndpoint {
@@ -105,7 +109,10 @@ pub fn send_password_reset_email(
 /// `Debug` is implemented manually so the password is never written to logs.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SmtpSendSettings {
+    /// Original validated hostname, retained for TLS certificate verification.
     pub host: String,
+    /// Public IP resolved and pinned immediately before the SMTP connection.
+    pub connect_host: String,
     pub port: u16,
     pub secure: String,
     pub login: String,
@@ -116,6 +123,7 @@ impl std::fmt::Debug for SmtpSendSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SmtpSendSettings")
             .field("host", &self.host)
+            .field("connect_host", &self.connect_host)
             .field("port", &self.port)
             .field("secure", &self.secure)
             .field("login", &self.login)
@@ -126,27 +134,73 @@ impl std::fmt::Debug for SmtpSendSettings {
 
 fn smtp_transport(settings: &SmtpSendSettings) -> Result<SmtpTransport> {
     let host = settings.host.trim();
-    if host.is_empty() {
+    let connect_host = settings.connect_host.trim();
+    if host.is_empty() || connect_host.is_empty() {
         return Err(FrickmailError::Upstream(
             "SMTP host is not configured".to_string(),
         ));
     }
 
+    let tls_parameters = || {
+        TlsParameters::new(host.to_string())
+            .map_err(|err| FrickmailError::Upstream(format!("SMTP TLS setup failed: {err}")))
+    };
     let mut builder = match settings.secure.trim().to_ascii_lowercase().as_str() {
-        "none" | "" => SmtpTransport::builder_dangerous(host),
-        "starttls" => SmtpTransport::starttls_relay(host).map_err(|err| {
-            FrickmailError::Upstream(format!("SMTP transport setup failed: {err}"))
-        })?,
-        "ssl" | "tls" => SmtpTransport::relay(host).map_err(|err| {
-            FrickmailError::Upstream(format!("SMTP transport setup failed: {err}"))
-        })?,
+        "none" | "" => SmtpTransport::builder_dangerous(connect_host).tls(Tls::None),
+        "starttls" => {
+            SmtpTransport::builder_dangerous(connect_host).tls(Tls::Required(tls_parameters()?))
+        }
+        "ssl" | "tls" => {
+            SmtpTransport::builder_dangerous(connect_host).tls(Tls::Wrapper(tls_parameters()?))
+        }
         other => {
             return Err(FrickmailError::Upstream(format!(
                 "unsupported SMTP security mode: {other}"
             )));
         }
     }
-    .port(settings.port);
+    .port(settings.port)
+    .timeout(Some(Duration::from_secs(30)));
+
+    if !settings.login.is_empty() {
+        builder = builder.credentials(Credentials::new(
+            settings.login.clone(),
+            settings.password.clone(),
+        ));
+    }
+
+    Ok(builder.build())
+}
+
+fn async_smtp_transport(settings: &SmtpSendSettings) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+    let host = settings.host.trim();
+    let connect_host = settings.connect_host.trim();
+    if host.is_empty() || connect_host.is_empty() {
+        return Err(FrickmailError::Upstream(
+            "SMTP host is not configured".to_string(),
+        ));
+    }
+
+    let tls_parameters = || {
+        TlsParameters::new(host.to_string())
+            .map_err(|err| FrickmailError::Upstream(format!("SMTP TLS setup failed: {err}")))
+    };
+    let mut builder = match settings.secure.trim().to_ascii_lowercase().as_str() {
+        "none" | "" => {
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(connect_host).tls(Tls::None)
+        }
+        "starttls" => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(connect_host)
+            .tls(Tls::Required(tls_parameters()?)),
+        "ssl" | "tls" => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(connect_host)
+            .tls(Tls::Wrapper(tls_parameters()?)),
+        other => {
+            return Err(FrickmailError::Upstream(format!(
+                "unsupported SMTP security mode: {other}"
+            )));
+        }
+    }
+    .port(settings.port)
+    .timeout(Some(Duration::from_secs(30)));
 
     if !settings.login.is_empty() {
         builder = builder.credentials(Credentials::new(
@@ -199,6 +253,21 @@ pub fn send_raw_message(
 ) -> Result<bool> {
     smtp_transport(settings)?
         .send_raw(envelope, message)
+        .map(|_| true)
+        .map_err(|err| FrickmailError::Upstream(format!("SMTP send failed: {err}")))
+}
+
+/// Send a raw RFC 5322 message without blocking a Tokio worker. The caller may
+/// apply a transaction-level timeout; dropping this future cancels active I/O
+/// instead of leaving an uncancellable blocking SMTP task behind.
+pub async fn send_raw_message_async(
+    settings: &SmtpSendSettings,
+    envelope: &Envelope,
+    message: &[u8],
+) -> Result<bool> {
+    async_smtp_transport(settings)?
+        .send_raw(envelope, message)
+        .await
         .map(|_| true)
         .map_err(|err| FrickmailError::Upstream(format!("SMTP send failed: {err}")))
 }

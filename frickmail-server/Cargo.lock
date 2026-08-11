@@ -1030,6 +1030,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "webpki-roots 1.0.7",
 ]
 

@@ -569,7 +569,11 @@ export class ComposePopupView extends AbstractViewPopup {
 								reloadDraftFolder();
 							},
 							params,
-							30000
+							// Native SMTP plus the mandatory Sent-folder APPEND can
+							// legitimately exceed the old 30s deadline. Keep the client
+							// waiting beyond every bounded server-side phase so it never
+							// reports failure while delivery continues in the background.
+							300000
 						);
 					};
 
