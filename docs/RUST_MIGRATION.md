@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-11 15:03:58 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-11 15:31:07 CEST (UTC+02:00)
 
 ### Completed And Pushed Today
 
@@ -26,6 +26,10 @@ The following commits are present on both `master` and
    From/To/Cc/Bcc/Reply-To display-name and legacy RFC comment handling closer
    to PHP parity while keeping SMTP envelope addresses bare, de-duplicated, and
    protected against control-character injection and panic paths.
+4. `dd9a392b6` (`docs: record Rust migration progress`) established the prior
+   timestamped progress/readiness record and documented the completed compose
+   work, rejected JSON-LD attempt, immutable canary evidence, and remaining
+   Rust-only cutover gates.
 
 The completed code passed independent senior review, strict workspace Clippy,
 the full Rust workspace test suite, and production-image smoke testing. The
@@ -36,6 +40,27 @@ ran as a healthy, non-root, read-only canary, served HTTP successfully,
 connected to the database, logged no startup errors, and recorded zero
 restarts. Future release images still need a revision OCI label and immutable
 revision tag so provenance is directly auditable from the image.
+
+### Current Slice Included In This Pending Commit
+
+This documentation-only slice makes this timestamped progress update a
+mandatory part of every regular migration cycle. The workflow now requires
+review/re-review, Docker-only quality gates, production-image and live-container
+inspection, explicit separation of pushed/current/rejected work, immutable
+image provenance, and live remote-tip verification on both operator-mandated
+branches and remotes. It also records an expected no-run when GitHub Actions
+path filters do not apply instead of falsely claiming CI success.
+
+Docker validation for the code accompanying this documentation passed `fmt`,
+workspace `check`, all 508 workspace tests, and strict all-target workspace
+Clippy. The production image was rebuilt as
+`frickmail-rust:workflow-dd9a392b6209` with digest
+`sha256:2dc5c77a922c68e276ba69a67c41d0ec8efc29c59e676ea9228f01684c580271`.
+The running canary uses that same digest and remained healthy, non-root,
+read-only, connected to PostgreSQL, free of startup errors, OOM events, and
+restarts, with `/health` returning HTTP 200. The final review outcome, commit
+ID, four live remote-tip SHAs, and applicable CI result are recorded by the
+publication workflow and rolled into the next snapshot.
 
 ### In Progress But Not Committed
 
@@ -587,14 +612,46 @@ Every migration slice must follow this loop:
 
 1. Modify.
 2. Senior Rust reviewer agent review.
-3. Fix reviewer findings.
-4. Docker-only `fmt`, `check`, `test`, and `clippy`.
-5. Docker build.
-6. Temporary test container startup and log check.
-7. Commit and push to both configured remotes.
-8. Confirm GitHub Actions passes.
-9. At the Frickmail-user usable release gate, publish the release candidate and
+3. Fix every actionable reviewer finding and repeat independent review until
+   the slice is approved.
+4. Run Docker-only `fmt`, `check`, `test`, and `clippy`.
+5. Build the production Docker image, start a temporary test container, exercise
+   its health and relevant HTTP paths, and inspect its state and logs for
+   startup/runtime errors, OOM events, and restarts.
+6. Fix every issue found by Docker validation, then return to step 2 and repeat
+   review and verification.
+7. Refresh the timestamped progress snapshot near the top of this file before
+   the final commit. Preserve the same structure used by the 2026-08-11
+   snapshot and record:
+   - completed and already pushed commits since the preceding snapshot;
+   - the current approved/verified slice as pending in the same commit, without
+     falsely claiming it was pushed before remote verification;
+   - rejected or uncommitted work separately, including unresolved review
+     findings;
+   - the major remaining gates toward the final Rust-only goal;
+   - exact test/lint results and Docker evidence; and
+   - auditable image provenance using an immutable digest plus revision tag or
+     OCI revision label when available.
+8. Have the senior reviewer inspect the final staged diff, including the
+   refreshed snapshot, and fix/re-review any documentation findings.
+9. Commit once and, under the operator's explicit dual-branch publication
+   policy, push the identical commit to `master` and `rust-full-migration` on
+   `origin` (GitHub) and `gitea`. Changing this publication policy requires a
+   new operator instruction.
+10. Use live `git ls-remote` checks against `origin` and `gitea` to verify all
+   four branch tips resolve to that commit, and record the returned SHAs. Confirm
+   every applicable CI check passes. When path filters legitimately produce no
+   GitHub Actions run (for example, a documentation-only change), explicitly
+   record the expected no-run instead of claiming CI success. On the next
+   snapshot, move the prior pending slice into the completed-and-pushed section
+   with its commit ID.
+11. At the Frickmail-user usable release gate, publish the release candidate and
    ask for user/operator input before starting the next migration phase.
+
+The progress snapshot is a concise operational summary, not a replacement for
+the detailed route inventory or release checklist. Keep
+`docs/LEGACY_ACTION_INVENTORY.md` authoritative for action parity and
+`docs/DEPLOYMENT.md` authoritative for production readiness and cutover.
 
 ## Immediate Next Work
 
