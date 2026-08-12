@@ -17,6 +17,7 @@ futures.workspace = true
 fm-core = { path = "../fm-core" }
 hex.workspace = true
 html-escape.workspace = true
+html5ever.workspace = true
 fm-imap = { path = "../fm-imap" }
 fm-mime = { path = "../fm-mime" }
 fm-plugin-compat = { path = "../fm-plugin-compat" }
@@ -26,6 +27,7 @@ fm-user = { path = "../fm-user" }
 idna.workspace = true
 lettre.workspace = true
 libc.workspace = true
+markup5ever_rcdom.workspace = true
 md-5.workspace = true
 p256.workspace = true
 pgp.workspace = true

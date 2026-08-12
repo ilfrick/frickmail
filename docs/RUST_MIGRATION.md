@@ -50,6 +50,12 @@ The following commits are present on both `master` and
     transfer-decoded `MessageUploadAttachments`, bounded hostile-IMAP literal
     handling, staged regular/inline/CID/raw-message MIME assembly, and exact
     post-delivery capability cleanup.
+11. `da1460b8b` (`rust: convert embedded data images`) completed parser-based
+    canonical `data:image/<alphanumeric>;base64,...` HTML image conversion to
+    CID-linked MIME parts for native SendMessage and SaveMessage. Deduplicated
+    identical data URLs, WHATWG-compliant scheme detection, padded/unpadded
+    Base64 with ASCII whitespace acceptance, MailSo-compatible
+    multipart/related+alternative nesting, shared attachment limits.
 
 The completed code passed independent senior review, strict workspace Clippy,
 the full Rust workspace test suite, and production-image smoke testing. The
@@ -66,6 +72,25 @@ release images still need a revision OCI label and immutable revision tag so
 provenance is directly auditable from the image.
 
 ### Current Slice Included In This Pending Commit
+
+This slice completes `Message` action parity by adding thread support.
+When `useThreads` is requested with `threadUid` and `threadAlgorithm`, the
+native handler now:
+- Fetches all message threads via `UID THREAD` IMAP command
+- Locates the thread containing the requested message UID
+- Returns `threads` (all UIDs in that thread) and `threadUnseen` (unseen UIDs
+  within the thread, when `threadUid` is not specified)
+- Integrates with existing Redis UID cache for thread map caching
+- Updates `LEGACY_ACTION_INVENTORY.md` to mark `Message` as `native`
+
+The implementation reuses existing `fetch_legacy_message_threads_cached` and
+`legacy_message_list_visible_uids_cached` infrastructure, adds
+`value_to_php_u32` helper, makes `LegacyMessageListQueryOptions` and
+`legacy_message_list_visible_uids_cached` public in `fm-imap`, and exports
+`login` and `timeout_imap` for thread fetching in the HTTP handler.
+
+All 569 workspace tests pass, strict Clippy clean, formatting clean, and
+production Docker image builds successfully with health check responding.
 
 This slice converts canonical
 `data:image/<alphanumeric>;base64,...` HTML images into generated CID-linked

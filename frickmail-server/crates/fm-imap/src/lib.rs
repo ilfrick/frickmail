@@ -86,7 +86,7 @@ impl<T> RawImapIo for T where
 /// Decrypted IMAP transport with an optional per-command read budget.  The
 /// budget sits below async-imap's response buffer, so a server cannot make the
 /// parser allocate an arbitrarily large literal after a bounded partial FETCH.
-struct BoxedImapIo {
+pub struct BoxedImapIo {
     inner: Box<dyn RawImapIo>,
     read_remaining: Option<usize>,
     max_literal_bytes: Option<usize>,
@@ -287,7 +287,7 @@ impl AsyncWrite for BoxedImapIo {
 }
 
 type BoxedClient = Client<BoxedImapIo>;
-type BoxedSession = Session<BoxedImapIo>;
+pub type BoxedSession = Session<BoxedImapIo>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -3728,17 +3728,17 @@ fn legacy_message_list_search_wire_with_settings(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LegacyMessageListQueryOptions<'a> {
-    hide_deleted: bool,
-    fast_simple_search: bool,
-    permanent_filter: &'a str,
-    sort: Option<&'a str>,
-    utf8_mode: bool,
-    supports_within: bool,
-    supports_literal_plus: bool,
+pub struct LegacyMessageListQueryOptions<'a> {
+    pub hide_deleted: bool,
+    pub fast_simple_search: bool,
+    pub permanent_filter: &'a str,
+    pub sort: Option<&'a str>,
+    pub utf8_mode: bool,
+    pub supports_within: bool,
+    pub supports_literal_plus: bool,
 }
 
-async fn legacy_message_list_visible_uids_cached(
+pub async fn legacy_message_list_visible_uids_cached(
     session: &mut BoxedSession,
     mailbox: &str,
     folder_hash: &str,
@@ -4300,7 +4300,7 @@ fn legacy_message_list_thread_uids_cache_key(folder_hash: &str) -> String {
     format!("ThreadsOldUids/{folder_hash}/N")
 }
 
-async fn fetch_legacy_message_threads_cached(
+pub async fn fetch_legacy_message_threads_cached(
     session: &mut BoxedSession,
     algorithm: &str,
     folder_hash: &str,
@@ -8731,7 +8731,7 @@ fn legacy_php_body_quoted_printable_decode(value: &[u8]) -> Vec<u8> {
     output
 }
 
-async fn login(config: ImapConnectionConfig, password: &str) -> Result<BoxedSession> {
+pub async fn login(config: ImapConnectionConfig, password: &str) -> Result<BoxedSession> {
     let client = connect_client(&config).await?;
     login_client(client, &config.login, password).await
 }
@@ -8858,7 +8858,7 @@ async fn logout_quietly(mut session: BoxedSession) {
     let _ = timeout(COMMAND_TIMEOUT, session.logout()).await;
 }
 
-async fn timeout_imap<T, F>(operation: &'static str, future: F) -> Result<T>
+pub async fn timeout_imap<T, F>(operation: &'static str, future: F) -> Result<T>
 where
     F: std::future::Future<Output = async_imap::error::Result<T>>,
 {

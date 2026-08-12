@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     env,
     net::{IpAddr, SocketAddr},
@@ -34,17 +35,18 @@ use fm_imap::{
     append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
     copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
     fetch_legacy_folder_information, fetch_legacy_folders,
-    fetch_legacy_message_list_with_uid_cache_if_changed, fetch_mailbox_acl, fetch_mailbox_status,
-    fetch_message_body_preview, fetch_mime_part, fetch_mime_part_bounded,
-    fetch_raw_folder_messages, fetch_raw_message, legacy_message_cache_key, legacy_message_hash,
-    legacy_message_list_cache_key, legacy_message_list_params_hash, move_messages, rename_mailbox,
-    set_mailbox_acl, set_mailbox_metadata, set_mailbox_subscription, store_message_flag,
-    store_message_keyword, store_seen_to_all, update_mailbox_settings, validate_eml,
-    BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning,
-    ImapMoveOptions, LegacyFolder, LegacyFolderCollection, LegacyFolderInformation,
-    LegacyMessageList, LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry,
-    MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction, RuleCondition,
-    RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    fetch_legacy_message_list_with_uid_cache_if_changed, fetch_legacy_message_threads_cached,
+    fetch_mailbox_acl, fetch_mailbox_status, fetch_message_body_preview, fetch_mime_part,
+    fetch_mime_part_bounded, fetch_raw_folder_messages, fetch_raw_message,
+    legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
+    legacy_message_list_params_hash, legacy_message_list_visible_uids_cached, login, move_messages,
+    rename_mailbox, set_mailbox_acl, set_mailbox_metadata, set_mailbox_subscription,
+    store_message_flag, store_message_keyword, store_seen_to_all, timeout_imap,
+    update_mailbox_settings, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
+    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolder, LegacyFolderCollection,
+    LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest, LegacyNamespaces,
+    MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction,
+    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
     RuleExecutionReport,
 };
 use fm_mime::{
@@ -62,6 +64,14 @@ use fm_user::{
     UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES,
 };
 use futures::StreamExt;
+use html5ever::{
+    ns,
+    tendril::StrTendril,
+    tokenizer::{BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer},
+    tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeBuilder, TreeSink},
+    Attribute, ExpandedName, LocalName, QualName, TokenizerResult,
+};
+use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
 use md5::{Digest, Md5};
 use p256::{
     ecdsa::{signature::Signer, Signature, SigningKey},
@@ -69,7 +79,10 @@ use p256::{
 };
 use rand_core::{OsRng, RngCore};
 use regex::{Captures, Regex};
-use serde::Serialize;
+use serde::{
+    de::{MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
 use tokio::io::AsyncWriteExt;
@@ -91,6 +104,19 @@ const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const COMPOSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const COMPOSE_HTML_RAW_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const COMPOSE_HTML_TAG_MARKER_LIMIT: usize = 10_000;
+// html5ever's longest character escape used here is `&quot;` (6 bytes).
+// Parser-inserted structural markup is bounded separately by the raw tag-marker
+// limit. Before serialization we strip every attribute the shared Ammonia
+// policy would discard; reconstructed allowed attributes survive the final
+// sanitizer as well and are therefore subject to its stricter 8 MiB output
+// limit. At most two transform buffers can exist because the whole operation
+// runs under `compose_sanitize_semaphore`.
+const COMPOSE_HTML_TRANSFORM_LIMIT_BYTES: usize =
+    COMPOSE_HTML_RAW_LIMIT_BYTES * 6 + COMPOSE_HTML_TAG_MARKER_LIMIT * 128 + 4 * 1024;
+const COMPOSE_CLEAN_CONTENT_TAGS: &[&str] = &[
+    "applet", "audio", "embed", "frame", "frameset", "iframe", "map", "object", "script", "style",
+    "svg", "title", "video",
+];
 const COMPOSE_HEADER_LIMIT_BYTES: usize = 256 * 1024;
 const COMPOSE_RECIPIENT_LIMIT: usize = 500;
 const COMPOSE_AUTOCRYPT_HEADER_LIMIT: usize = 1;
@@ -180,6 +206,8 @@ struct LegacyMessageRawKeyRequest {
     folder: String,
     uid: u32,
     use_threads: bool,
+    thread_uid: u32,
+    thread_algorithm: String,
     account_hash: String,
 }
 
@@ -3172,6 +3200,545 @@ impl std::io::Write for BoundedHtmlBuffer {
     }
 }
 
+fn legacy_dom_attribute_value(attributes: &[Attribute], name: &str) -> Option<String> {
+    attributes
+        .iter()
+        .find(|attribute| attribute.name.local.as_ref().eq_ignore_ascii_case(name))
+        .map(|attribute| attribute.value.to_string())
+}
+
+fn legacy_compose_sanitizer_builder() -> ammonia::Builder<'static> {
+    let mut sanitizer = ammonia::Builder::default();
+    sanitizer
+        .rm_tags(&["area", "map"])
+        .add_tags(&["font", "main", "section", "tfoot"])
+        .add_clean_content_tags(COMPOSE_CLEAN_CONTENT_TAGS)
+        .add_generic_attributes(&[
+            "align",
+            "background",
+            "bgcolor",
+            "border",
+            "bordercolor",
+            "cellpadding",
+            "cellspacing",
+            "class",
+            "dir",
+            "direction",
+            "face",
+            "frame",
+            "id",
+            "name",
+            "rules",
+            "style",
+            "target",
+            "role",
+            "valign",
+        ])
+        .generic_attribute_prefixes(HashSet::from(["aria-"]))
+        .add_url_schemes(&["cid", "data"])
+        .link_rel(None);
+    sanitizer
+}
+
+struct LegacySanitizerAttributePolicy {
+    tags: HashSet<&'static str>,
+    tag_attributes: HashMap<&'static str, HashSet<&'static str>>,
+    tag_attribute_values: HashMap<&'static str, HashMap<&'static str, HashSet<&'static str>>>,
+    generic_attributes: HashSet<&'static str>,
+    generic_attribute_prefixes: Option<HashSet<&'static str>>,
+    url_schemes: HashSet<&'static str>,
+    allowed_classes: HashMap<&'static str, HashSet<&'static str>>,
+}
+
+fn legacy_sanitizer_attribute_policy() -> &'static LegacySanitizerAttributePolicy {
+    static POLICY: OnceLock<LegacySanitizerAttributePolicy> = OnceLock::new();
+    POLICY.get_or_init(|| {
+        let sanitizer = legacy_compose_sanitizer_builder();
+        LegacySanitizerAttributePolicy {
+            tags: sanitizer.clone_tags(),
+            tag_attributes: sanitizer.clone_tag_attributes(),
+            tag_attribute_values: sanitizer.clone_tag_attribute_values(),
+            generic_attributes: sanitizer.clone_generic_attributes(),
+            generic_attribute_prefixes: sanitizer.clone_generic_attribute_prefixes(),
+            url_schemes: sanitizer.clone_url_schemes(),
+            allowed_classes: sanitizer.clone_allowed_classes(),
+        }
+    })
+}
+
+fn legacy_sanitizer_url_attribute(element: &str, attribute: &str) -> bool {
+    attribute == "href"
+        || attribute == "src"
+        || (element == "form" && attribute == "action")
+        || (element == "object" && attribute == "data")
+        || ((element == "button" || element == "input") && attribute == "formaction")
+        || (element == "a" && attribute == "ping")
+        || (element == "video" && attribute == "poster")
+}
+
+fn legacy_attribute_survives_sanitizer(
+    policy: &LegacySanitizerAttributePolicy,
+    element: &str,
+    attribute: &str,
+    value: &str,
+) -> bool {
+    if !policy.tags.contains(element) {
+        return false;
+    }
+    let whitelisted = policy.generic_attributes.contains(attribute)
+        || policy
+            .generic_attribute_prefixes
+            .as_ref()
+            .is_some_and(|prefixes| prefixes.iter().any(|prefix| attribute.starts_with(prefix)))
+        || policy
+            .tag_attributes
+            .get(element)
+            .is_some_and(|attributes| attributes.contains(attribute))
+        || policy
+            .tag_attribute_values
+            .get(element)
+            .and_then(|attributes| attributes.get(attribute))
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(value))
+            })
+        || (attribute == "class" && policy.allowed_classes.contains_key(element));
+    if !whitelisted || !legacy_sanitizer_url_attribute(element, attribute) {
+        return whitelisted;
+    }
+
+    match url::Url::parse(value) {
+        Ok(url) if url.scheme() == "data" => {
+            element == "img"
+                && attribute == "src"
+                && legacy_ascii_prefix_eq_ignore_case(value, "data:image/")
+        }
+        Ok(url) => policy.url_schemes.contains(url.scheme()),
+        Err(url::ParseError::RelativeUrlWithoutBase) => true,
+        Err(_) => false,
+    }
+}
+
+fn legacy_set_dom_attribute(attributes: &mut Vec<Attribute>, name: &str, value: String) {
+    if let Some(attribute) = attributes
+        .iter_mut()
+        .find(|attribute| attribute.name.local.as_ref().eq_ignore_ascii_case(name))
+    {
+        attribute.value = value.into();
+    } else {
+        attributes.push(Attribute {
+            name: QualName::new(None, ns!(), LocalName::from(name)),
+            value: value.into(),
+        });
+    }
+}
+
+fn legacy_inline_content_id_is_safe(content_id: &str) -> bool {
+    !content_id.is_empty()
+        && content_id.len() <= COMPOSE_ATTACHMENT_CONTENT_ID_LIMIT_BYTES
+        && content_id.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'/'
+                        | b'='
+                        | b'?'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'{'
+                        | b'|'
+                        | b'}'
+                        | b'~'
+                        | b'@'
+                )
+        })
+}
+
+fn legacy_css_property_name(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len().saturating_add(4));
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            normalized.push('-');
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
+}
+
+struct LegacyOrderedStyleSources(Vec<(String, Value)>);
+
+impl<'de> Deserialize<'de> for LegacyOrderedStyleSources {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OrderedStyleSourcesVisitor;
+
+        impl<'de> Visitor<'de> for OrderedStyleSourcesVisitor {
+            type Value = LegacyOrderedStyleSources;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a legacy data-x-style-url object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut entries =
+                    Vec::<(String, Value)>::with_capacity(map.size_hint().unwrap_or(0).min(16));
+                let mut indexes = HashMap::<String, usize>::with_capacity(entries.capacity());
+                while let Some((name, value)) = map.next_entry::<String, Value>()? {
+                    if let Some(index) = indexes.get(&name).copied() {
+                        entries[index].1 = value;
+                    } else {
+                        indexes.insert(name.clone(), entries.len());
+                        entries.push((name, value));
+                    }
+                }
+                Ok(LegacyOrderedStyleSources(entries))
+            }
+        }
+
+        deserializer.deserialize_map(OrderedStyleSourcesVisitor)
+    }
+}
+
+fn legacy_set_cid_style_property(style: &str, property: &str, content_id: &str) -> String {
+    static BACKGROUND_IMAGE: OnceLock<Regex> = OnceLock::new();
+    static LIST_STYLE_IMAGE: OnceLock<Regex> = OnceLock::new();
+    static CONTENT: OnceLock<Regex> = OnceLock::new();
+
+    let matcher = match property {
+        "background-image" => BACKGROUND_IMAGE
+            .get_or_init(|| Regex::new(r"(?i)background-image\s*:\s*[^;]+").unwrap()),
+        "list-style-image" => LIST_STYLE_IMAGE
+            .get_or_init(|| Regex::new(r"(?i)list-style-image\s*:\s*[^;]+").unwrap()),
+        "content" => CONTENT.get_or_init(|| Regex::new(r"(?i)content\s*:\s*[^;]+").unwrap()),
+        _ => return style.to_string(),
+    };
+    let replacement = format!("{property}:url(cid:{content_id})");
+    let style = style.trim().trim_matches(';');
+    if matcher.is_match(style) {
+        matcher
+            .replace_all(style, regex::NoExpand(&replacement))
+            .trim_matches(';')
+            .to_string()
+    } else if style.is_empty() {
+        replacement
+    } else {
+        format!("{style};{replacement}")
+            .trim_matches(';')
+            .to_string()
+    }
+}
+
+fn legacy_prepare_compose_dom_attributes(name: &QualName, attributes: &mut Vec<Attribute>) {
+    #[cfg(test)]
+    LEGACY_DOM_ATTRIBUTE_PREPARE_BYTES.with(|bytes| {
+        bytes.set(
+            bytes.get().saturating_add(
+                attributes
+                    .iter()
+                    .map(|attribute| attribute.value.len())
+                    .sum(),
+            ),
+        );
+    });
+
+    if attributes.iter_mut().any(|attribute| {
+        let remove = matches!(
+            attribute.name.local.as_ref(),
+            "data-x-src-broken" | "data-x-src-hidden"
+        );
+        if remove {
+            attribute.value.clear();
+        }
+        remove
+    }) {
+        attributes.retain(|attribute| {
+            matches!(
+                attribute.name.local.as_ref(),
+                "data-x-src-broken" | "data-x-src-hidden"
+            )
+        });
+        return;
+    }
+
+    if name.ns == ns!(html) {
+        let cid_source = legacy_dom_attribute_value(attributes, "data-x-src-cid");
+        let ordinary_source = legacy_dom_attribute_value(attributes, "data-x-src");
+        let style_sources = legacy_dom_attribute_value(attributes, "data-x-style-url");
+
+        if let Some(content_id) = cid_source.filter(|value| {
+            legacy_compose_string_is_php_truthy(value) && legacy_inline_content_id_is_safe(value)
+        }) {
+            legacy_set_dom_attribute(attributes, "src", format!("cid:{content_id}"));
+        }
+        // MailSo applies data-x-src after data-x-src-cid, so it wins when both
+        // are present even when its value is empty.
+        if let Some(source) = ordinary_source {
+            legacy_set_dom_attribute(attributes, "src", source);
+        }
+        if let Some(style_sources) = style_sources {
+            if let Ok(LegacyOrderedStyleSources(style_sources)) =
+                serde_json::from_str::<LegacyOrderedStyleSources>(&style_sources)
+            {
+                let mut final_sources = Vec::<(String, String)>::with_capacity(3);
+                let mut final_source_indexes = HashMap::<String, usize>::with_capacity(3);
+                for (source_name, content_id) in style_sources {
+                    let property = legacy_css_property_name(&source_name);
+                    if !matches!(
+                        property.as_str(),
+                        "background-image" | "list-style-image" | "content"
+                    ) {
+                        continue;
+                    }
+                    let content_id = value_to_php_string(&content_id);
+                    if legacy_inline_content_id_is_safe(&content_id) {
+                        if let Some(index) = final_source_indexes.get(&property).copied() {
+                            final_sources[index].1 = content_id;
+                        } else {
+                            final_source_indexes.insert(property.clone(), final_sources.len());
+                            final_sources.push((property, content_id));
+                        }
+                    }
+                }
+                let mut style = legacy_dom_attribute_value(attributes, "style").unwrap_or_default();
+                for (property, content_id) in final_sources {
+                    style = legacy_set_cid_style_property(&style, &property, &content_id);
+                }
+                if !style.is_empty() {
+                    legacy_set_dom_attribute(attributes, "style", style);
+                }
+            }
+        }
+    }
+    attributes.retain(|attribute| {
+        let is_data_attribute = attribute
+            .name
+            .local
+            .as_ref()
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data-"));
+        !is_data_attribute
+            && legacy_attribute_survives_sanitizer(
+                legacy_sanitizer_attribute_policy(),
+                name.local.as_ref(),
+                attribute.name.local.as_ref(),
+                &attribute.value,
+            )
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static LEGACY_DOM_ATTRIBUTE_PREPARE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct LegacyComposeTokenSink<Sink> {
+    inner: Sink,
+}
+
+impl<Sink> TokenSink for LegacyComposeTokenSink<Sink>
+where
+    Sink: TokenSink,
+{
+    type Handle = Sink::Handle;
+
+    fn process_token(&self, mut token: Token, line_number: u64) -> TokenSinkResult<Self::Handle> {
+        if let Token::TagToken(tag) = &mut token {
+            if tag.kind == TagKind::StartTag {
+                let name = QualName::new(None, ns!(html), tag.name.clone());
+                legacy_prepare_compose_dom_attributes(&name, &mut tag.attrs);
+            }
+        }
+        self.inner.process_token(token, line_number)
+    }
+
+    fn end(&self) {
+        self.inner.end();
+    }
+
+    fn adjusted_current_node_present_but_not_in_html_namespace(&self) -> bool {
+        self.inner
+            .adjusted_current_node_present_but_not_in_html_namespace()
+    }
+}
+
+#[derive(Default)]
+struct LegacyComposeRcDomSink {
+    dom: RcDom,
+}
+
+impl TreeSink for LegacyComposeRcDomSink {
+    type Output = RcDom;
+    type Handle = Handle;
+    type ElemName<'a>
+        = ExpandedName<'a>
+    where
+        Self: 'a;
+
+    fn finish(self) -> Self::Output {
+        self.dom
+    }
+
+    fn parse_error(&self, message: Cow<'static, str>) {
+        self.dom.parse_error(message);
+    }
+
+    fn get_document(&self) -> Self::Handle {
+        self.dom.get_document()
+    }
+
+    fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
+        self.dom.get_template_contents(target)
+    }
+
+    fn set_quirks_mode(&self, mode: QuirksMode) {
+        self.dom.set_quirks_mode(mode);
+    }
+
+    fn same_node(&self, first: &Self::Handle, second: &Self::Handle) -> bool {
+        self.dom.same_node(first, second)
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
+        self.dom.elem_name(target)
+    }
+
+    fn create_element(
+        &self,
+        name: QualName,
+        mut attributes: Vec<Attribute>,
+        flags: ElementFlags,
+    ) -> Self::Handle {
+        legacy_prepare_compose_dom_attributes(&name, &mut attributes);
+        self.dom.create_element(name, attributes, flags)
+    }
+
+    fn create_comment(&self, text: StrTendril) -> Self::Handle {
+        self.dom.create_comment(text)
+    }
+
+    fn create_pi(&self, target: StrTendril, data: StrTendril) -> Self::Handle {
+        self.dom.create_pi(target, data)
+    }
+
+    fn append(&self, parent: &Self::Handle, child: NodeOrText<Self::Handle>) {
+        self.dom.append(parent, child);
+    }
+
+    fn append_before_sibling(&self, sibling: &Self::Handle, child: NodeOrText<Self::Handle>) {
+        self.dom.append_before_sibling(sibling, child);
+    }
+
+    fn append_based_on_parent_node(
+        &self,
+        element: &Self::Handle,
+        previous_element: &Self::Handle,
+        child: NodeOrText<Self::Handle>,
+    ) {
+        self.dom
+            .append_based_on_parent_node(element, previous_element, child);
+    }
+
+    fn append_doctype_to_document(
+        &self,
+        name: StrTendril,
+        public_id: StrTendril,
+        system_id: StrTendril,
+    ) {
+        self.dom
+            .append_doctype_to_document(name, public_id, system_id);
+    }
+
+    fn add_attrs_if_missing(&self, target: &Self::Handle, mut attributes: Vec<Attribute>) {
+        let NodeData::Element { ref name, .. } = target.data else {
+            return;
+        };
+        legacy_prepare_compose_dom_attributes(name, &mut attributes);
+        self.dom.add_attrs_if_missing(target, attributes);
+    }
+
+    fn remove_from_parent(&self, target: &Self::Handle) {
+        self.dom.remove_from_parent(target);
+    }
+
+    fn reparent_children(&self, node: &Self::Handle, new_parent: &Self::Handle) {
+        self.dom.reparent_children(node, new_parent);
+    }
+
+    fn is_mathml_annotation_xml_integration_point(&self, target: &Self::Handle) -> bool {
+        self.dom.is_mathml_annotation_xml_integration_point(target)
+    }
+}
+
+fn legacy_transform_compose_dom(html: &str, limit: usize) -> Result<String, String> {
+    let tree_builder = TreeBuilder::new(LegacyComposeRcDomSink::default(), Default::default());
+    let tokenizer = Tokenizer::new(
+        LegacyComposeTokenSink {
+            inner: tree_builder,
+        },
+        Default::default(),
+    );
+    let input = BufferQueue::default();
+    input.push_back(html.into());
+    while let TokenizerResult::Script(_) = tokenizer.feed(&input) {}
+    tokenizer.end();
+    let dom = tokenizer.sink.inner.sink.finish();
+    let mut pending = vec![dom.document.clone()];
+    while let Some(parent) = pending.pop() {
+        let mut children = parent.children.borrow_mut();
+        let mut index = 0_usize;
+        while index < children.len() {
+            let child = &children[index];
+            let remove = if let NodeData::Element { ref attrs, .. } = child.data {
+                let attributes = attrs.borrow();
+                let marked = legacy_dom_attribute_value(&attributes, "data-x-src-broken").is_some()
+                    || legacy_dom_attribute_value(&attributes, "data-x-src-hidden").is_some();
+                let clean_content = if let NodeData::Element { ref name, .. } = child.data {
+                    COMPOSE_CLEAN_CONTENT_TAGS.contains(&name.local.as_ref())
+                } else {
+                    false
+                };
+                marked || clean_content
+            } else {
+                false
+            };
+            if remove {
+                children.remove(index);
+                continue;
+            }
+            pending.push(child.clone());
+            index += 1;
+        }
+    }
+
+    let mut output = BoundedHtmlBuffer {
+        bytes: Vec::with_capacity(html.len().min(limit)),
+        limit,
+    };
+    html5ever::serialize(
+        &mut output,
+        &SerializableHandle::from(dom.document),
+        Default::default(),
+    )
+    .map_err(|_| "Normalized HTML exceeds the compose body limit".to_string())?;
+    String::from_utf8(output.bytes).map_err(|_| "Normalized HTML is not valid UTF-8".to_string())
+}
+
 struct LegacySanitizedHtml {
     html: String,
     inline_attachments: Vec<LegacyComposeAttachment>,
@@ -3299,6 +3866,11 @@ fn legacy_html_with_linked_data_and_inline(
     linked_data_json: Option<&str>,
     limit: usize,
 ) -> Result<LegacySanitizedHtml, String> {
+    // Recreate the legacy DOM-only data-x transformations before Ammonia
+    // removes every residual data-* attribute. The transformed serialization
+    // is itself output-bounded before it is parsed a second time for policy
+    // sanitation.
+    let transformed_html = legacy_transform_compose_dom(html, COMPOSE_HTML_TRANSFORM_LIMIT_BYTES)?;
     let mut random = [0_u8; 16];
     OsRng.fill_bytes(&mut random);
     let inline_state = Arc::new(Mutex::new(LegacyInlineDataState {
@@ -3309,63 +3881,32 @@ fn legacy_html_with_linked_data_and_inline(
         error: None,
     }));
     let inline_state_filter = Arc::clone(&inline_state);
-    let mut sanitizer = ammonia::Builder::default();
-    sanitizer
-        .rm_tags(&["area", "map"])
-        .add_tags(&["font", "main", "section", "tfoot"])
-        .add_clean_content_tags(&[
-            "applet", "audio", "embed", "frame", "frameset", "iframe", "map", "object", "svg",
-            "title", "video",
-        ])
-        .add_generic_attributes(&[
-            "align",
-            "background",
-            "bgcolor",
-            "border",
-            "bordercolor",
-            "cellpadding",
-            "cellspacing",
-            "class",
-            "dir",
-            "direction",
-            "face",
-            "frame",
-            "id",
-            "name",
-            "rules",
-            "style",
-            "target",
-            "role",
-            "valign",
-        ])
-        .generic_attribute_prefixes(HashSet::from(["aria-"]))
-        .add_url_schemes(&["cid", "data"])
-        .attribute_filter(move |element, attribute, value| {
-            // Ammonia validates URLs with the WHATWG parser, which trims C0
-            // controls/space and removes ASCII tabs/newlines from schemes. Use
-            // that same effective scheme here so an obfuscated data: URL can
-            // never survive merely because it lacks a literal byte prefix.
-            if legacy_effective_url_uses_data_scheme(value) {
-                if element == "img"
-                    && attribute == "src"
-                    && legacy_ascii_prefix_eq_ignore_case(value, "data:image/")
-                {
-                    let mut state = inline_state_filter
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match legacy_inline_data_image(value, &mut state) {
-                        Ok(content_id) => {
-                            return Some(std::borrow::Cow::Owned(format!("cid:{content_id}")));
-                        }
-                        Err(message) => state.error = Some(message),
+    let mut sanitizer = legacy_compose_sanitizer_builder();
+    sanitizer.attribute_filter(move |element, attribute, value| {
+        // Ammonia validates URLs with the WHATWG parser, which trims C0
+        // controls/space and removes ASCII tabs/newlines from schemes. Use
+        // that same effective scheme here so an obfuscated data: URL can
+        // never survive merely because it lacks a literal byte prefix.
+        if legacy_effective_url_uses_data_scheme(value) {
+            if element == "img"
+                && attribute == "src"
+                && legacy_ascii_prefix_eq_ignore_case(value, "data:image/")
+            {
+                let mut state = inline_state_filter
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match legacy_inline_data_image(value, &mut state) {
+                    Ok(content_id) => {
+                        return Some(std::borrow::Cow::Owned(format!("cid:{content_id}")));
                     }
+                    Err(message) => state.error = Some(message),
                 }
-                return None;
             }
-            Some(std::borrow::Cow::Borrowed(value))
-        })
-        .link_rel(None);
-    let sanitized = sanitizer.clean(html);
+            return None;
+        }
+        Some(std::borrow::Cow::Borrowed(value))
+    });
+    let sanitized = sanitizer.clean(&transformed_html);
     let mut output = BoundedHtmlBuffer {
         bytes: Vec::with_capacity(html.len().min(limit)),
         limit,
@@ -9232,6 +9773,79 @@ where
     };
     let client_hash = config.login.clone();
 
+    // Fetch thread data if use_threads is requested
+    let (thread_uids, thread_unseen_uids) = if message_request.use_threads
+        && !message_request.thread_algorithm.is_empty()
+    {
+        let folder_hash = legacy_message_list_cache_key(&message_request.folder, &client_hash);
+
+        // Fetch all threads
+        let all_threads = match login(config.clone(), &password).await {
+            Ok(mut session) => {
+                fetch_legacy_message_threads_cached(
+                    &mut session,
+                    &message_request.thread_algorithm,
+                    &folder_hash,
+                    None,
+                )
+                .await
+            }
+            Err(_) => Vec::new(),
+        };
+
+        // Find the thread containing the current message UID
+        let thread_uids = all_threads
+            .iter()
+            .find(|thread| thread.contains(&message_request.uid))
+            .cloned()
+            .unwrap_or_default();
+
+        let thread_unseen_uids = if message_request.thread_uid > 0 {
+            Vec::new()
+        } else if !thread_uids.is_empty() {
+            // Fetch unseen UIDs for thread_unseen
+            match login(config.clone(), &password).await {
+                Ok(mut session) => {
+                    let _ =
+                        timeout_imap("examine mailbox", session.examine(&message_request.folder))
+                            .await;
+                    let all_unseen = legacy_message_list_visible_uids_cached(
+                        &mut session,
+                        &message_request.folder,
+                        &client_hash,
+                        &config.login,
+                        "unseen",
+                        fm_imap::LegacyMessageListQueryOptions {
+                            hide_deleted: true,
+                            fast_simple_search: true,
+                            permanent_filter: "",
+                            sort: None,
+                            utf8_mode: false,
+                            supports_within: false,
+                            supports_literal_plus: false,
+                        },
+                        None,
+                    )
+                    .await
+                    .unwrap_or_default();
+                    // Filter to only unseen UIDs in this thread
+                    let thread_set: std::collections::HashSet<u32> =
+                        thread_uids.iter().copied().collect();
+                    all_unseen
+                        .into_iter()
+                        .filter(|uid| thread_set.contains(uid))
+                        .collect()
+                }
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        (thread_uids, thread_unseen_uids)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     let result = tokio::time::timeout(
         fetch_deadline,
         fetcher(
@@ -9268,6 +9882,8 @@ where
                 &message_request.folder,
                 message_request.uid,
                 parts,
+                &thread_uids,
+                &thread_unseen_uids,
             );
             legacy_apply_http_cache_headers(
                 response.headers_mut(),
@@ -9306,6 +9922,8 @@ fn legacy_message_request_from_payload(
         folder,
         uid: uid as u32,
         use_threads: payload_bool(payload, "useThreads"),
+        thread_uid: payload_optional_u32(payload, "threadUid").unwrap_or_default(),
+        thread_algorithm: payload_string(payload, "threadAlgorithm").unwrap_or_default(),
         account_hash: payload_string(payload, "accountHash").unwrap_or_default(),
     })
 }
@@ -9339,6 +9957,8 @@ fn legacy_message_raw_key_request_from_payload(
         folder,
         uid: uid as u32,
         use_threads: values.get(2).map(legacy_php_truthy).unwrap_or(false),
+        thread_uid: values.get(4).map(value_to_php_u32).unwrap_or_default(),
+        thread_algorithm: values.get(5).map(value_to_php_string).unwrap_or_default(),
         account_hash: values.get(3).map(value_to_php_string).unwrap_or_default(),
     }))
 }
@@ -11569,6 +12189,8 @@ fn legacy_message_json(
     flags: &[String],
     email_id: Option<&str>,
     preview: Option<&str>,
+    threads: &[u32],
+    thread_unseen: &[u32],
 ) -> Value {
     let mut value = json!({
         "@Object": "Object/Message",
@@ -11608,6 +12230,12 @@ fn legacy_message_json(
     }
     if let Some(draft_info) = draft_info {
         value["draftInfo"] = json!([draft_info.info_type, draft_info.uid, draft_info.folder]);
+    }
+    if !threads.is_empty() {
+        value["threads"] = json!(threads);
+    }
+    if !thread_unseen.is_empty() {
+        value["threadUnseen"] = json!(thread_unseen);
     }
     legacy_apply_message_crypto_json(&mut value, crypto);
     if !html.is_empty() || !plain.is_empty() {
@@ -11730,6 +12358,8 @@ fn legacy_message_body_response(
     folder: &str,
     uid: u32,
     parts: Vec<BodyPreviewPart>,
+    thread_uids: &[u32],
+    thread_unseen_uids: &[u32],
 ) -> Response {
     let flags = parts
         .first()
@@ -12019,6 +12649,8 @@ fn legacy_message_body_response(
                 flags,
                 email_id,
                 preview,
+                thread_uids,
+                thread_unseen_uids,
             )
         }),
     )
@@ -14376,6 +15008,19 @@ fn value_to_php_string(value: &Value) -> String {
         Value::Number(number) => number.to_string(),
         Value::String(value) => value.clone(),
         _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn value_to_php_u32(value: &Value) -> u32 {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .map(|value| value.min(u32::MAX as u64) as u32)
+            .or_else(|| number.as_f64().map(|value| value as u32))
+            .unwrap_or_default(),
+        Value::Bool(value) => u32::from(*value),
+        Value::String(value) => value.trim().parse::<u32>().unwrap_or_default(),
+        _ => 0,
     }
 }
 
@@ -19620,6 +20265,184 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn legacy_compose_restores_data_x_sources_and_cid_style_references() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": r#"
+                <div data-x-src-broken="1"><p>BROKEN-CONTENT</p></div>
+                <img data-x-src-hidden="" alt="HIDDEN">
+                <img data-x-src-cid="part@example" data-leftover="gone" alt="CID">
+                <img src="https://example.com/unchanged.png" data-x-src-cid="0" alt="PHP empty CID">
+                <img data-x-src-cid="loses@example" data-x-src="https://example.com/wins.png" alt="ordinary wins">
+                <p style="color:red;background-image:url(old)" data-x-style-url='{
+                    "backgroundImage":"background@example",
+                    "listStyleImage":"list@example",
+                    "content":"content@example",
+                    "position":"ignored@example"
+                }'>Styled</p>
+                <p style="background-image:url(old);background:none" data-x-style-url='{
+                    "backgroundImage":"cascade@example"
+                }'>Cascade</p>
+                <p style="font-family:'A; B'" data-x-style-url='{
+                    "backgroundImage":"preserve@example"
+                }'>Preserve unrelated CSS</p>
+                <p data-x-style-url='{
+                    "backgroundImage":"first@example",
+                    "background-image":"second@example",
+                    "backgroundImage":"last@example"
+                }'>Preserve JSON order</p>
+            "#,
+            "plain": "legacy transforms",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("legacy data-x markup should normalize");
+        let html = &request.html;
+
+        assert!(!html.contains("BROKEN-CONTENT"));
+        assert!(!html.contains("HIDDEN"));
+        assert!(html.contains("src=\"cid:part@example\""), "{html}");
+        assert!(
+            html.contains("src=\"https://example.com/unchanged.png\""),
+            "{html}"
+        );
+        assert!(!html.contains("src=\"cid:0\""), "{html}");
+        assert!(
+            html.contains("src=\"https://example.com/wins.png\""),
+            "{html}"
+        );
+        assert!(html.contains("color:red"), "{html}");
+        assert!(
+            html.contains("background-image:url(cid:background@example)"),
+            "{html}"
+        );
+        assert!(
+            html.contains("list-style-image:url(cid:list@example)"),
+            "{html}"
+        );
+        assert!(html.contains("content:url(cid:content@example)"), "{html}");
+        assert!(
+            html.contains("background-image:url(cid:cascade@example);background:none"),
+            "{html}"
+        );
+        assert!(!html.contains("background:none;background-image:url(cid:cascade@example)"));
+        assert!(
+            html.contains("font-family:'A; B';background-image:url(cid:preserve@example)"),
+            "{html}"
+        );
+        assert!(
+            html.contains("background-image:url(cid:second@example)"),
+            "{html}"
+        );
+        assert!(!html.contains("background-image:url(cid:first@example)"));
+        assert!(!html.contains("ignored@example"));
+        assert!(!html.contains("data-"));
+    }
+
+    #[test]
+    fn legacy_compose_converts_a_data_image_restored_from_data_x_src() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": r#"<img src="https://example.com/placeholder" data-x-src="data:image/png;base64,UE5H">"#,
+            "plain": "restored image",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("restored data image should become a linked MIME part");
+
+        assert_eq!(request.attachments.len(), 1);
+        assert_eq!(request.attachments[0].data, b"PNG");
+        assert!(request.attachments[0].spec.is_linked);
+        assert!(request.html.contains("src=\"cid:"));
+        assert!(!request.html.contains("data-x-src"));
+        assert!(!request.html.contains("data:image"));
+    }
+
+    #[test]
+    fn legacy_compose_drops_malformed_data_x_metadata_and_unsafe_cids() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": r#"
+                <img data-x-src-cid="bad);color:red">
+                <img data-x-src-cid="foo'bar@example">
+                <img data-x-src-cid="foo&amp;bar@example">
+                <p style="color:blue" data-x-style-url='{"backgroundImage":"bad);display:none"}'>Safe</p>
+                <p data-x-style-url="not-json">Still safe</p>
+            "#,
+            "plain": "safe",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("unsafe legacy metadata should be dropped");
+
+        assert!(!request.html.contains("data-x-"));
+        assert!(!request.html.contains("display:none"));
+        assert!(!request.html.contains("bad);"));
+        assert!(!request.html.contains("foo'bar@example"));
+        assert!(!request.html.contains("foo&amp;bar@example"));
+        assert!(request.html.contains("color:blue"));
+        assert!(request.html.contains("Still safe"));
+    }
+
+    #[test]
+    fn legacy_compose_drops_clean_content_before_bounded_dom_serialization() {
+        let discarded = "&".repeat(super::COMPOSE_BODY_LIMIT_BYTES / 5);
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": format!("<p>kept</p><object>{discarded}</object><svg>{discarded}</svg>"),
+            "plain": "bounded transform",
+        });
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("clean-content expansion should be removed before serialization");
+
+        assert!(request.html.contains("kept"));
+        assert!(!request.html.contains("object"));
+        assert!(!request.html.contains("svg"));
+        assert!(!request.html.contains("&amp;"));
+    }
+
+    #[test]
+    fn legacy_compose_prepares_active_formatting_metadata_once_before_reconstruction() {
+        let ignored = "x".repeat(512 * 1024);
+        let style_sources = json!({
+            "ignored": ignored,
+            "backgroundImage": "active@example",
+        })
+        .to_string();
+        let source = format!("https://example.com/{}", "y".repeat(512 * 1024));
+        let formatting_reconstruction = "<div>x</div>".repeat(256);
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "html": format!(
+                "<p><b onclick='discarded' data-x-src='{source}' data-x-style-url='{style_sources}'>safe{formatting_reconstruction}"
+            ),
+            "plain": "bounded transform",
+        });
+        super::LEGACY_DOM_ATTRIBUTE_PREPARE_BYTES.with(|bytes| bytes.set(0));
+        let request = super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+            .expect("formatting metadata should be prepared before tree reconstruction");
+        let prepared_bytes = super::LEGACY_DOM_ATTRIBUTE_PREPARE_BYTES.with(std::cell::Cell::get);
+
+        assert!(request.html.contains("safe"));
+        assert!(!request.html.contains("onclick"));
+        assert!(!request.html.contains("data-x-"));
+        assert!(!request.html.contains("example.com"));
+        assert!(
+            request
+                .html
+                .contains("background-image:url(cid:active@example)"),
+            "{}",
+            request.html
+        );
+        assert!(
+            prepared_bytes < style_sources.len() + source.len() + 512 * 1024,
+            "prepared {prepared_bytes} bytes; source metadata was replayed"
+        );
+    }
+
+    #[test]
     fn legacy_compose_bounds_the_number_of_embedded_data_images() {
         let html = (0..=super::COMPOSE_ATTACHMENT_LIMIT)
             .map(|index| {
@@ -20882,6 +21705,8 @@ Subject: Empty body metadata\r\n\r\n"
             &[],
             Some("gmail-message-id"),
             None,
+            &[],
+            &[],
         );
 
         assert_eq!(message["references"], "<root@example>");
@@ -27571,7 +28396,7 @@ Subject: Empty body metadata\r\n\r\n"
         .execute(state.db_pool().unwrap())
         .await
         .unwrap();
-        let html = "<p>Logo <img src=\"data:image/gif;base64,R0lG\"></p>";
+        let html = "<p>Logo <img src=\"https://example.com/placeholder\" data-x-src=\"data:image/gif;base64,R0lG\"></p>";
 
         let sent = Arc::new(Mutex::new(None));
         let sender = RecordingSmtpSender {
