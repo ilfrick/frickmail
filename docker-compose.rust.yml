@@ -10,7 +10,7 @@ services:
       CARGO_HOME: /workspace/.docker/dev/.cache/cargo
       CARGO_TARGET_DIR: /workspace/.docker/dev/.cache/rust-target
       RUST_BACKTRACE: "1"
-      FRICKMAIL__BIND_ADDR: "127.0.0.1:18088"
+      FRICKMAIL__BIND_ADDR: "0.0.0.0:18088"
       FRICKMAIL__BASE_URL: "http://localhost:18088"
       FRICKMAIL__STATIC_ROOT: "/workspace/frickmail-static"
       # Set this to the same database URL used by the current Frickmail runtime.
