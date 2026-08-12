@@ -1769,13 +1769,20 @@ async fn native_send_message_inner_with_sender(
     request.attachments = attachments;
     request._attachment_memory_permit = memory_permit;
 
-    let smtp_settings =
-        match legacy_smtp_send_settings(state, pool, user.user_id, account_id, &account, &password)
-            .await
-        {
-            Ok(settings) => settings,
-            Err(message) => return json_result_error(original_action, &message),
-        };
+    let smtp_settings = match legacy_smtp_send_settings(
+        state,
+        pool,
+        user.user_id,
+        account_id,
+        &account,
+        &password,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(settings) => settings,
+        Err(message) => return json_result_error(original_action, &message),
+    };
 
     // Build both serializations from one stable identity. Legacy serializes the
     // same message object for SMTP and Sent, so Message-ID and Date must match.
@@ -2084,6 +2091,7 @@ async fn legacy_smtp_send_settings(
     account_id: i64,
     account: &MailAccountConnectionSecret,
     password: &str,
+    credential_key: &[u8],
 ) -> Result<fm_smtp::SmtpSendSettings, String> {
     let stored = SqlxUserRepository::get_mail_account(pool, user_id, account_id)
         .await
@@ -2139,6 +2147,37 @@ async fn legacy_smtp_send_settings(
         .map(|address| address.ip().to_string())
         .ok_or_else(|| "SMTP host has no validated public address".to_string())?;
 
+    // Determine if this is an OAuth account and get access token
+    let access_token = match account.account_type.as_str() {
+        "gmail" | "o365" => {
+            // Check if account has an encrypted OAuth refresh token
+            if let Some(blob) = account.encrypted_oauth_refresh_token.as_deref() {
+                match decrypt_account_secret(blob, credential_key) {
+                    Ok(Some(refresh_token)) if !refresh_token.trim().is_empty() => {
+                        // Exchange refresh token for access token
+                        match get_oauth_access_token_for_smtp(
+                            &account.account_type,
+                            &refresh_token,
+                            account.oauth_tenant.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(token) => Some(token),
+                            Err(e) => {
+                                tracing::warn!("Failed to get OAuth access token for SMTP, falling back to password: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
     Ok(fm_smtp::SmtpSendSettings {
         host,
         connect_host,
@@ -2146,6 +2185,7 @@ async fn legacy_smtp_send_settings(
         secure,
         login,
         password: password.to_string(),
+        access_token,
     })
 }
 
@@ -14321,6 +14361,27 @@ async fn graph_access_token_for(
                 "Microsoft token response did not include access_token".to_string(),
             )
         })
+}
+
+async fn get_oauth_access_token_for_smtp(
+    account_type: &str,
+    refresh_token: &str,
+    tenant: Option<&str>,
+) -> fm_core::Result<String> {
+    let config = oauth_refresh_config_from_env(account_type, tenant)?;
+    let client = reqwest::Client::builder()
+        .timeout(ACCOUNT_SWITCH_VALIDATE_DEADLINE)
+        .build()
+        .map_err(|err| FrickmailError::Upstream(format!("OAuth client setup failed: {err}")))?;
+    oauth_access_token_for(
+        &client,
+        &config.token_url,
+        &config.client_id,
+        config.client_secret.as_deref(),
+        refresh_token,
+        config.scope,
+    )
+    .await
 }
 
 async fn oauth_access_token_for(

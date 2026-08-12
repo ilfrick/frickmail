@@ -3,7 +3,7 @@ use lettre::{
     address::{Address, Envelope},
     message::{header::ContentType, Mailbox},
     transport::smtp::{
-        authentication::{Credentials, DEFAULT_MECHANISMS},
+        authentication::{Credentials, Mechanism, DEFAULT_MECHANISMS},
         client::{AsyncSmtpConnection, Tls, TlsParameters},
         commands::{Data, Ehlo, Mail, Rcpt},
         extension::{ClientId, MailBodyParameter, MailParameter, RcptParameter},
@@ -120,6 +120,9 @@ pub struct SmtpSendSettings {
     pub secure: String,
     pub login: String,
     pub password: String,
+    /// Optional OAuth access token for XOAUTH2 authentication.
+    /// When present, takes precedence over password-based authentication.
+    pub access_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -137,6 +140,10 @@ impl std::fmt::Debug for SmtpSendSettings {
             .field("secure", &self.secure)
             .field("login", &self.login)
             .field("password", &"<redacted>")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -172,10 +179,23 @@ fn smtp_transport(settings: &SmtpSendSettings) -> Result<SmtpTransport> {
     .timeout(Some(Duration::from_secs(30)));
 
     if !settings.login.is_empty() {
-        builder = builder.credentials(Credentials::new(
-            settings.login.clone(),
-            settings.password.clone(),
-        ));
+        let credentials = if let Some(access_token) = &settings.access_token {
+            if !access_token.is_empty() {
+                Credentials::new(settings.login.clone(), access_token.clone())
+            } else {
+                Credentials::new(settings.login.clone(), settings.password.clone())
+            }
+        } else {
+            Credentials::new(settings.login.clone(), settings.password.clone())
+        };
+        builder = builder.credentials(credentials);
+
+        // Set XOAUTH2 mechanism if access token is available
+        if let Some(access_token) = &settings.access_token {
+            if !access_token.is_empty() {
+                builder = builder.authentication(vec![Mechanism::Xoauth2]);
+            }
+        }
     }
 
     Ok(builder.build())
@@ -212,10 +232,23 @@ fn async_smtp_transport(settings: &SmtpSendSettings) -> Result<AsyncSmtpTranspor
     .timeout(Some(Duration::from_secs(30)));
 
     if !settings.login.is_empty() {
-        builder = builder.credentials(Credentials::new(
-            settings.login.clone(),
-            settings.password.clone(),
-        ));
+        let credentials = if let Some(access_token) = &settings.access_token {
+            if !access_token.is_empty() {
+                Credentials::new(settings.login.clone(), access_token.clone())
+            } else {
+                Credentials::new(settings.login.clone(), settings.password.clone())
+            }
+        } else {
+            Credentials::new(settings.login.clone(), settings.password.clone())
+        };
+        builder = builder.credentials(credentials);
+
+        // Set XOAUTH2 mechanism if access token is available
+        if let Some(access_token) = &settings.access_token {
+            if !access_token.is_empty() {
+                builder = builder.authentication(vec![Mechanism::Xoauth2]);
+            }
+        }
     }
 
     Ok(builder.build())
@@ -350,11 +383,30 @@ async fn send_raw_message_with_extensions_async(
     let eight_bit_mime_supported = smtp_response_has_capability(&capabilities, "8BITMIME");
 
     if !settings.login.is_empty() {
+        // Use XOAUTH2 if access token is available, otherwise fall back to password auth
+        let mechanisms = if let Some(access_token) = &settings.access_token {
+            if !access_token.is_empty() {
+                vec![Mechanism::Xoauth2]
+            } else {
+                DEFAULT_MECHANISMS.to_vec()
+            }
+        } else {
+            DEFAULT_MECHANISMS.to_vec()
+        };
+
+        let credentials = if let Some(access_token) = &settings.access_token {
+            if !access_token.is_empty() {
+                // For XOAUTH2, the secret field contains the access token
+                Credentials::new(settings.login.clone(), access_token.clone())
+            } else {
+                Credentials::new(settings.login.clone(), settings.password.clone())
+            }
+        } else {
+            Credentials::new(settings.login.clone(), settings.password.clone())
+        };
+
         connection
-            .auth(
-                DEFAULT_MECHANISMS,
-                &Credentials::new(settings.login.clone(), settings.password.clone()),
-            )
+            .auth(&mechanisms, &credentials)
             .await
             .map_err(|err| FrickmailError::Upstream(format!("SMTP send failed: {err}")))?;
     }
@@ -483,6 +535,7 @@ mod tests {
             secure: "none".to_string(),
             login: "sender".to_string(),
             password: "secret".to_string(),
+            access_token: None,
         };
         let envelope =
             build_envelope("sender@example.com", &["recipient@example.com".to_string()]).unwrap();
