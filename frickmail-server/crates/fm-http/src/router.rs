@@ -171,6 +171,7 @@ const FOLDER_INFORMATION_DEADLINE: Duration = Duration::from_secs(15);
 const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const SMIME_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
+const SMIME_SIGNING_DEADLINE: Duration = Duration::from_secs(15);
 const SMIME_VERIFY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const SMIME_VERIFY_MAX_BASE64_CHARS: usize = SMIME_VERIFY_MAX_BYTES.div_ceil(3) * 4;
 const LEGACY_SNAPPYMAIL_APP_VERSION: &str = env!("FRICKMAIL_WEBMAIL_VERSION");
@@ -1547,6 +1548,23 @@ struct LegacySendMessageRequest {
     draft_folder: String,
     draft_uid: u32,
     draft_info: Option<LegacyDraftInfoRequest>,
+    /// S/MIME signing identity (email or identityID)
+    smime_sign_identity: Option<String>,
+    /// S/MIME encryption recipient certificates (fingerprints or emails)
+    #[allow(dead_code)]
+    smime_encrypt_certificates: Option<String>,
+    /// Whether to sign with OpenPGP
+    #[allow(dead_code)]
+    pgp_signed: bool,
+    /// Whether to encrypt with OpenPGP
+    #[allow(dead_code)]
+    pgp_encrypted: bool,
+    /// OpenPGP recipient fingerprints for encryption
+    #[allow(dead_code)]
+    pgp_encrypt_fingerprints: Option<String>,
+    /// OpenPGP signing fingerprint (if None, use default)
+    #[allow(dead_code)]
+    pgp_sign_fingerprint: Option<String>,
 }
 
 /// Validated legacy Autocrypt header values. Key material is stored as
@@ -1819,6 +1837,23 @@ async fn native_send_message_inner_with_sender(
         Err(message) => return json_result_error(original_action, &message),
     };
 
+    // Apply S/MIME signing if requested
+    let (transport_bytes, stored_bytes) = match legacy_apply_smime_crypto(
+        state,
+        pool,
+        user.user_id,
+        &account,
+        &credential_key,
+        transport_bytes,
+        stored_bytes,
+        &request,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
     let envelope = match fm_smtp::build_envelope(&request.envelope_from, &request.all_recipients())
     {
         Ok(envelope) => envelope,
@@ -1939,6 +1974,81 @@ async fn native_send_message_inner_with_sender(
     }
 
     legacy_send_message_success(original_action)
+}
+
+/// Applies S/MIME signing to the transport and stored copies of a composed
+/// message when S/MIME signing is requested in the payload.
+///
+/// S/MIME signing uses the sender's S/MIME certificate (selected by identityID
+/// or email). The stored copy (Sent folder) is also signed, matching legacy PHP
+/// behavior where recipients can read their own Sent copy. S/MIME encryption is
+/// not yet wired up; recipient certificates are parsed but retained for future use.
+#[allow(clippy::too_many_arguments)]
+async fn legacy_apply_smime_crypto(
+    _state: &AppState,
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account: &MailAccountConnectionSecret,
+    credential_key: &[u8],
+    transport_bytes: Vec<u8>,
+    stored_bytes: Option<Vec<u8>>,
+    request: &LegacySendMessageRequest,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    // S/MIME signing
+    let transport_bytes = if request.smime_sign_identity.is_some() {
+        let identity = request
+            .smime_sign_identity
+            .as_deref()
+            .unwrap_or(&account.email);
+        match tokio::time::timeout(
+            SMIME_SIGNING_DEADLINE,
+            fm_user::SqlxUserRepository::sign_smime_message(
+                pool,
+                user_id,
+                identity,
+                &String::from_utf8_lossy(&transport_bytes),
+                credential_key,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(signed)) => signed,
+            Ok(Err(err)) => return Err(err.public_message()),
+            Err(_) => return Err("S/MIME signing timed out".to_string()),
+        }
+    } else {
+        transport_bytes
+    };
+
+    let stored_bytes = if let Some(mut stored) = stored_bytes {
+        if request.smime_sign_identity.is_some() {
+            let identity = request
+                .smime_sign_identity
+                .as_deref()
+                .unwrap_or(&account.email);
+            match tokio::time::timeout(
+                SMIME_SIGNING_DEADLINE,
+                fm_user::SqlxUserRepository::sign_smime_message(
+                    pool,
+                    user_id,
+                    identity,
+                    &String::from_utf8_lossy(&stored),
+                    credential_key,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(signed)) => stored = signed,
+                Ok(Err(err)) => return Err(err.public_message()),
+                Err(_) => return Err("S/MIME signing of stored copy timed out".to_string()),
+            }
+        }
+        Some(stored)
+    } else {
+        None
+    };
+
+    Ok((transport_bytes, stored_bytes))
 }
 
 fn legacy_send_message_success(original_action: &str) -> Response {
@@ -2501,18 +2611,19 @@ fn legacy_save_message_request_from_payload_with_html(
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid: u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0),
         draft_info: legacy_draft_info_from_payload(payload),
+        smime_sign_identity: payload_string(payload, "sign"),
+        smime_encrypt_certificates: payload_string(payload, "encryptCertificates"),
+        pgp_signed: payload_bool(payload, "signed"),
+        pgp_encrypted: payload_bool(payload, "encrypted"),
+        pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
+        pgp_sign_fingerprint: payload_string(payload, "signFingerprint"),
     })
 }
 
 fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
-    const MIME_FEATURES: &[(&str, &str)] = &[
-        ("signed", "OpenPGP signed content"),
-        ("encrypted", "OpenPGP encrypted content"),
-        ("sign", "S/MIME signing"),
-        ("signFingerprint", "GnuPG signing"),
-        ("encryptFingerprints", "GnuPG encryption"),
-        ("encryptCertificates", "S/MIME encryption"),
-    ];
+    // PGP signed, PGP encrypted, and S/MIME encrypt are not yet natively supported.
+    // S/Mime signing is now supported.
+    const MIME_FEATURES: &[(&str, &str)] = &[("encrypted", "OpenPGP encrypted content")];
 
     for (field, label) in MIME_FEATURES {
         if payload.get(*field).is_some_and(legacy_payload_has_value) {
@@ -4388,6 +4499,12 @@ fn legacy_send_message_request_from_payload_with_html(
         draft_folder: payload_string(payload, "messageFolder").unwrap_or_default(),
         draft_uid,
         draft_info: legacy_draft_info_from_payload(payload),
+        smime_sign_identity: payload_string(payload, "sign"),
+        smime_encrypt_certificates: payload_string(payload, "encryptCertificates"),
+        pgp_signed: payload_bool(payload, "signed"),
+        pgp_encrypted: payload_bool(payload, "encrypted"),
+        pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
+        pgp_sign_fingerprint: payload_string(payload, "signFingerprint"),
     })
 }
 

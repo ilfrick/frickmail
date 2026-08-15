@@ -147,8 +147,8 @@ routes, but it is not yet a safe drop-in replacement for the PHP production
 container. The major remaining gates are:
 
 1. Finish compose parity: remaining legacy `data-x-src*`/`data-x-style-url`
-   inline transformations, PGP and S/MIME signing/encryption, OAuth-backed
-   SMTP, and related draft behavior.
+   inline transformations, PGP signing/encryption, S/MIME encryption, OAuth-backed
+   SMTP, and related draft behavior. (S/MIME signing is complete.)
 2. Finish exact legacy `Message` response/header/body parity and migrate every
    remaining mail action still routed through the compatibility bridge.
 3. Complete the Rust-only connection-token/CSRF/session contract, then remove
