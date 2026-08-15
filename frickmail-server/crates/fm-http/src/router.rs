@@ -2621,9 +2621,12 @@ fn legacy_save_message_request_from_payload_with_html(
 }
 
 fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
-    // PGP signed, PGP encrypted, and S/MIME encrypt are not yet natively supported.
-    // S/Mime signing is now supported.
-    const MIME_FEATURES: &[(&str, &str)] = &[("encrypted", "OpenPGP encrypted content")];
+    // GPG signed content and GPG encrypted content are not yet natively supported.
+    // S/MIME signing is now supported; S/MIME encrypt is still pending.
+    const MIME_FEATURES: &[(&str, &str)] = &[
+        ("signed", "OpenPGP signed content"),
+        ("encrypted", "OpenPGP encrypted content"),
+    ];
 
     for (field, label) in MIME_FEATURES {
         if payload.get(*field).is_some_and(legacy_payload_has_value) {
@@ -21475,7 +21478,7 @@ Subject: Empty body metadata\r\n\r\n"
                 json!({"encrypted": "ciphertext"}),
                 "OpenPGP encrypted content",
             ),
-            (json!({"sign": "S/MIME"}), "S/MIME signing"),
+            (json!({"signed": "pgp-key-id"}), "OpenPGP signed content"),
         ] {
             assert_eq!(
                 super::legacy_unsupported_compose_feature(&payload, false),
