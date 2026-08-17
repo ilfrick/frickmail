@@ -172,6 +172,7 @@ const WEB_PUSH_DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 const GRAPH_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const SMIME_VERIFY_DEADLINE: Duration = Duration::from_secs(10);
 const SMIME_SIGNING_DEADLINE: Duration = Duration::from_secs(15);
+const SMIME_ENCRYPT_DEADLINE: Duration = Duration::from_secs(15);
 const SMIME_VERIFY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const SMIME_VERIFY_MAX_BASE64_CHARS: usize = SMIME_VERIFY_MAX_BYTES.div_ceil(3) * 4;
 const LEGACY_SNAPPYMAIL_APP_VERSION: &str = env!("FRICKMAIL_WEBMAIL_VERSION");
@@ -1550,9 +1551,8 @@ struct LegacySendMessageRequest {
     draft_info: Option<LegacyDraftInfoRequest>,
     /// S/MIME signing identity (email or identityID)
     smime_sign_identity: Option<String>,
-    /// S/MIME encryption recipient certificates (fingerprints or emails)
-    #[allow(dead_code)]
-    smime_encrypt_certificates: Option<String>,
+    /// S/MIME encryption recipient certificate IDs or PEM strings
+    smime_encrypt_certificates: Vec<String>,
     /// Whether to sign with OpenPGP
     #[allow(dead_code)]
     pgp_signed: bool,
@@ -1976,13 +1976,14 @@ async fn native_send_message_inner_with_sender(
     legacy_send_message_success(original_action)
 }
 
-/// Applies S/MIME signing to the transport and stored copies of a composed
-/// message when S/MIME signing is requested in the payload.
+/// Applies S/MIME signing and encryption to the transport and stored copies
+/// of a composed message when those features are requested in the payload.
 ///
 /// S/MIME signing uses the sender's S/MIME certificate (selected by identityID
-/// or email). The stored copy (Sent folder) is also signed, matching legacy PHP
-/// behavior where recipients can read their own Sent copy. S/MIME encryption is
-/// not yet wired up; recipient certificates are parsed but retained for future use.
+/// or email) and is applied to both the transport and stored (Sent) copies.
+/// S/MIME encryption encrypts only the transport copy for the listed recipient
+/// certificates; the stored copy remains unencrypted so the sender can read
+/// their own Sent copy, matching legacy PHP behavior.
 #[allow(clippy::too_many_arguments)]
 async fn legacy_apply_smime_crypto(
     _state: &AppState,
@@ -1994,7 +1995,7 @@ async fn legacy_apply_smime_crypto(
     stored_bytes: Option<Vec<u8>>,
     request: &LegacySendMessageRequest,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
-    // S/MIME signing
+    // S/MIME signing (applied to both transport and stored copies)
     let transport_bytes = if request.smime_sign_identity.is_some() {
         let identity = request
             .smime_sign_identity
@@ -2015,6 +2016,28 @@ async fn legacy_apply_smime_crypto(
             Ok(Ok(signed)) => signed,
             Ok(Err(err)) => return Err(err.public_message()),
             Err(_) => return Err("S/MIME signing timed out".to_string()),
+        }
+    } else {
+        transport_bytes
+    };
+
+    // S/MIME encryption (applied to transport copy only; stored copy in Sent
+    // remains unencrypted so the sender can read their own copy, matching PHP)
+    let transport_bytes = if !request.smime_encrypt_certificates.is_empty() {
+        match tokio::time::timeout(
+            SMIME_ENCRYPT_DEADLINE,
+            fm_user::SqlxUserRepository::encrypt_smime_message(
+                pool,
+                user_id,
+                &request.smime_encrypt_certificates,
+                &String::from_utf8_lossy(&transport_bytes),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(encrypted)) => encrypted,
+            Ok(Err(err)) => return Err(err.public_message()),
+            Err(_) => return Err("S/MIME encryption timed out".to_string()),
         }
     } else {
         transport_bytes
@@ -2612,7 +2635,7 @@ fn legacy_save_message_request_from_payload_with_html(
         draft_uid: u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0),
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: payload_string(payload, "sign"),
-        smime_encrypt_certificates: payload_string(payload, "encryptCertificates"),
+        smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
         pgp_signed: payload_bool(payload, "signed"),
         pgp_encrypted: payload_bool(payload, "encrypted"),
         pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
@@ -4503,7 +4526,7 @@ fn legacy_send_message_request_from_payload_with_html(
         draft_uid,
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: payload_string(payload, "sign"),
-        smime_encrypt_certificates: payload_string(payload, "encryptCertificates"),
+        smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
         pgp_signed: payload_bool(payload, "signed"),
         pgp_encrypted: payload_bool(payload, "encrypted"),
         pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
@@ -5013,6 +5036,31 @@ fn legacy_strip_angle_brackets(value: &str) -> String {
         .trim_start_matches('<')
         .trim_end_matches('>')
         .to_string()
+}
+
+/// Parses the `encryptCertificates` payload field, which is an array of
+/// certificate IDs (integers) or PEM certificate strings, into a flat list
+/// of string tokens for later resolution.
+fn legacy_parse_smime_encrypt_certificates(payload: &Value) -> Vec<String> {
+    let raw = payload_array(payload, "encryptCertificates");
+    let mut certs = Vec::with_capacity(raw.len());
+    for value in raw {
+        match value {
+            Value::Number(number) => {
+                if let Some(id) = number.as_i64() {
+                    certs.push(id.to_string());
+                }
+            }
+            Value::String(value) => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    certs.push(trimmed.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    certs
 }
 
 async fn native_frickmail_get_totp_status(

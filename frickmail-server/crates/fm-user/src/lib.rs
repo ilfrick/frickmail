@@ -792,6 +792,17 @@ impl SqlxUserRepository {
         verify_smime_message(message)
     }
 
+    /// Encrypts a message body for S/MIME delivery using the recipient
+    /// certificates identified by `cert_tokens` (database IDs or PEM strings).
+    pub async fn encrypt_smime_message(
+        pool: &AnyPool,
+        user_id: i64,
+        cert_tokens: &[String],
+        message_body: &str,
+    ) -> Result<Vec<u8>> {
+        encrypt_smime_message(pool, user_id, cert_tokens, message_body).await
+    }
+
     pub async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
         delete_mail_account(pool, user_id, account_id).await
     }
@@ -3048,6 +3059,122 @@ fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
         signer_email,
         error: None,
     }
+}
+
+/// Resolves certificate tokens (database IDs or PEM strings) into X509
+/// certificate objects. Numeric tokens are looked up in the database; non-numeric
+/// tokens are parsed directly as PEM certificate data.
+async fn resolve_smime_certificates(
+    pool: &AnyPool,
+    user_id: i64,
+    cert_tokens: &[String],
+) -> Result<Stack<X509>> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let mut certs = Stack::new()
+        .map_err(|err| FrickmailError::Upstream(format!("S/MIME cert stack init failed: {err}")))?;
+
+    for token in cert_tokens {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let cert_pem = if let Ok(id) = token.parse::<i64>() {
+            // Resolve by database ID
+            let row = if backend == "PostgreSQL" {
+                sqlx::query(
+                    "SELECT cert_pem FROM frickmail_smime_certs WHERE id = $1 AND user_id = $2",
+                )
+                .bind(id)
+                .bind(user_id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(db_error)?
+            } else {
+                sqlx::query(
+                    "SELECT cert_pem FROM frickmail_smime_certs WHERE id = ? AND user_id = ?",
+                )
+                .bind(id)
+                .bind(user_id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(db_error)?
+            };
+            let row = row.ok_or_else(|| {
+                FrickmailError::BadRequest(format!("S/MIME certificate ID {id} not found"))
+            })?;
+            let pem: String = row.try_get("cert_pem").map_err(db_error)?;
+            pem
+        } else if token.starts_with("-----BEGIN CERTIFICATE-----") {
+            token.to_string()
+        } else {
+            // Try as a fingerprint - look up by fingerprint
+            let row = if backend == "PostgreSQL" {
+                sqlx::query("SELECT cert_pem FROM frickmail_smime_certs WHERE fingerprint = $1 AND user_id = $2")
+                    .bind(token)
+                    .bind(user_id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(db_error)?
+            } else {
+                sqlx::query("SELECT cert_pem FROM frickmail_smime_certs WHERE fingerprint = ? AND user_id = ?")
+                    .bind(token)
+                    .bind(user_id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(db_error)?
+            };
+            match row {
+                Some(row) => {
+                    let pem: String = row.try_get("cert_pem").map_err(db_error)?;
+                    pem
+                }
+                None => token.to_string(), // Assume it's a PEM string
+            }
+        };
+
+        let cert = X509::from_pem(cert_pem.as_bytes()).map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME recipient certificate parse failed: {err}"))
+        })?;
+        certs.push(cert).map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME recipient cert stack push failed: {err}"))
+        })?;
+    }
+
+    Ok(certs)
+}
+
+async fn encrypt_smime_message(
+    pool: &AnyPool,
+    user_id: i64,
+    cert_tokens: &[String],
+    message_body: &str,
+) -> Result<Vec<u8>> {
+    if cert_tokens.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "No S/MIME certificates provided for encryption".to_string(),
+        ));
+    }
+
+    let certs = resolve_smime_certificates(pool, user_id, cert_tokens).await?;
+
+    if certs.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "No valid S/MIME certificates found for encryption".to_string(),
+        ));
+    }
+
+    let cipher = openssl::symm::Cipher::aes_128_cbc();
+    let flags = Pkcs7Flags::NOOLDMIMETYPE;
+
+    let pkcs7 = Pkcs7::encrypt(&certs, message_body.as_bytes(), cipher, flags)
+        .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_encrypt failed: {err}")))?;
+
+    pkcs7
+        .to_smime(message_body.as_bytes(), flags)
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("openssl_pkcs7_encrypt to_smime failed: {err}"))
+        })
 }
 
 async fn fetch_smime_signing_material(
