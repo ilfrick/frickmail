@@ -118,6 +118,8 @@ const COMPOSE_CLEAN_CONTENT_TAGS: &[&str] = &[
     "svg", "title", "video",
 ];
 const COMPOSE_HEADER_LIMIT_BYTES: usize = 256 * 1024;
+const COMPOSE_PGP_MIME_LIMIT_BYTES: usize = COMPOSE_BODY_LIMIT_BYTES;
+const COMPOSE_PGP_BOUNDARY_LIMIT_BYTES: usize = 70;
 const COMPOSE_RECIPIENT_LIMIT: usize = 500;
 const COMPOSE_AUTOCRYPT_HEADER_LIMIT: usize = 1;
 const COMPOSE_AUTOCRYPT_WIRE_LIMIT_BYTES: usize = 10 * 1024;
@@ -1559,18 +1561,6 @@ struct LegacySendMessageRequest {
     pgp_encrypted: Option<String>,
     /// MIME boundary for pgp_signed multipart/signed structure
     pgp_boundary: Option<String>,
-    /// OpenPGP recipient fingerprints for GnuPG server-side encryption
-    #[allow(dead_code)]
-    pgp_encrypt_fingerprints: Option<String>,
-    /// OpenPGP signing fingerprint for GnuPG server-side signing
-    #[allow(dead_code)]
-    pgp_sign_fingerprint: Option<String>,
-    /// Passphrase for GnuPG server-side signing
-    #[allow(dead_code)]
-    pgp_sign_passphrase: Option<String>,
-    /// Pre-built PGP signature (armored) for server-side GnuPG signing
-    #[allow(dead_code)]
-    pgp_signature: Option<String>,
 }
 
 /// Validated legacy Autocrypt header values. Key material is stored as
@@ -1580,6 +1570,23 @@ struct LegacySendMessageRequest {
 struct LegacyAutocryptHeader {
     addr: String,
     keydata: String,
+}
+
+#[derive(Clone)]
+struct LegacyPgpAttachmentDisposition;
+
+impl lettre::message::header::Header for LegacyPgpAttachmentDisposition {
+    fn name() -> lettre::message::header::HeaderName {
+        lettre::message::header::HeaderName::new_from_ascii_str("Content-Disposition")
+    }
+
+    fn parse(_value: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self)
+    }
+
+    fn display(&self) -> lettre::message::header::HeaderValue {
+        lettre::message::header::HeaderValue::new(Self::name(), "attachment".to_string())
+    }
 }
 
 /// Final compose body after HTML sanitation and optional PHP-compatible plain
@@ -2642,18 +2649,31 @@ fn legacy_save_message_request_from_payload_with_html(
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: payload_string(payload, "sign"),
         smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
-        pgp_signed: payload_optional_string(payload, "signed"),
-        pgp_encrypted: payload_optional_string(payload, "encrypted"),
-        pgp_boundary: payload_optional_string(payload, "boundary"),
-        pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
-        pgp_sign_fingerprint: payload_string(payload, "signFingerprint"),
-        pgp_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
-        pgp_signature: payload_optional_string(payload, "pgpSignature"),
+        pgp_signed: legacy_pgp_signed_content(payload),
+        pgp_encrypted: legacy_pgp_encrypted_content(payload),
+        pgp_boundary: legacy_pgp_boundary_from_payload(payload),
     })
 }
 
 fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
-    // S/MIME encryption is not yet natively supported.
+    // A client-supplied `signed` or `encrypted` MIME payload is handled below.
+    // The legacy server-side GnuPG flow is intentionally not claimed as native
+    // until Rust has an audited keyring and signing implementation.
+    if [
+        "signFingerprint",
+        "encryptFingerprints",
+        "signPassphrase",
+        "pgpSignature",
+    ]
+    .into_iter()
+    .any(|field| {
+        payload
+            .get(field)
+            .is_some_and(legacy_openpgp_directive_is_php_truthy)
+    }) {
+        return Some("server-side OpenPGP signing or encryption");
+    }
+
     const MIME_FEATURES: &[(&str, &str)] = &[];
 
     for (field, label) in MIME_FEATURES {
@@ -2958,6 +2978,7 @@ fn legacy_html_content_ids(html: &str, wanted: &HashSet<Vec<u8>>) -> HashSet<Vec
 
 fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
     legacy_compose_attachment_specs(payload)?;
+    legacy_validate_pgp_compose_content(payload)?;
     if let Some(html) = payload.get("html").and_then(Value::as_str) {
         legacy_validate_raw_compose_html(html)?;
     }
@@ -2992,6 +3013,119 @@ fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
     }
 
     legacy_validate_compose_headers_and_recipients(payload)
+}
+
+fn legacy_pgp_signed_content(payload: &Value) -> Option<String> {
+    payload_string(payload, "signed").filter(|value| legacy_compose_string_is_php_truthy(value))
+}
+
+fn legacy_pgp_encrypted_content(payload: &Value) -> Option<String> {
+    if legacy_pgp_signed_content(payload).is_some() {
+        None
+    } else {
+        payload_string(payload, "encrypted")
+            .filter(|value| legacy_compose_string_is_php_truthy(value))
+    }
+}
+
+fn legacy_pgp_boundary_from_payload(payload: &Value) -> Option<String> {
+    legacy_pgp_signed_content(payload).and_then(|_| payload_optional_string(payload, "boundary"))
+}
+
+fn legacy_pgp_boundary_is_valid(boundary: &str) -> bool {
+    (1..=COMPOSE_PGP_BOUNDARY_LIMIT_BYTES).contains(&boundary.len())
+        && !boundary.ends_with(' ')
+        && boundary.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'\''
+                        | b'('
+                        | b')'
+                        | b'+'
+                        | b'_'
+                        | b','
+                        | b'-'
+                        | b'.'
+                        | b'/'
+                        | b':'
+                        | b'='
+                        | b'?'
+                        | b' '
+                )
+        })
+}
+
+fn legacy_pgp_is_seven_bit_text(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b'\r' | b'\n' | b'\t') || (b' '..=b'~').contains(&byte))
+}
+
+fn legacy_normalize_pgp_crlf(value: &str) -> String {
+    let value = value.trim();
+    let mut normalized = String::with_capacity(value.len().saturating_add(16));
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\r' {
+            if characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+            normalized.push_str("\r\n");
+        } else if character == '\n' {
+            normalized.push_str("\r\n");
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized
+}
+
+fn legacy_validate_pgp_compose_content(payload: &Value) -> Result<(), String> {
+    let signed = payload.get("signed").and_then(Value::as_str);
+    let encrypted = payload.get("encrypted").and_then(Value::as_str);
+    let content_bytes = signed
+        .map(str::len)
+        .unwrap_or_default()
+        .checked_add(encrypted.map(str::len).unwrap_or_default())
+        .ok_or_else(|| "OpenPGP MIME content size overflow".to_string())?;
+    if content_bytes > COMPOSE_PGP_MIME_LIMIT_BYTES {
+        return Err(format!(
+            "OpenPGP MIME content exceeds the {} MiB compose limit",
+            COMPOSE_PGP_MIME_LIMIT_BYTES / 1024 / 1024
+        ));
+    }
+
+    if let Some(signed) = legacy_pgp_signed_content(payload) {
+        if !legacy_compose_attachment_specs(payload)?.is_empty() {
+            return Err(
+                "Client-provided OpenPGP MIME with staged attachments is not yet supported"
+                    .to_string(),
+            );
+        }
+        if !legacy_pgp_is_seven_bit_text(&signed) {
+            return Err("OpenPGP signed MIME must be 7-bit text".to_string());
+        }
+        if !signed.contains("\r\n\r\n") {
+            return Err("OpenPGP signed MIME is missing its header/body separator".to_string());
+        }
+        let boundary = legacy_pgp_boundary_from_payload(payload)
+            .ok_or_else(|| "OpenPGP signed MIME is missing its boundary".to_string())?;
+        if !legacy_pgp_boundary_is_valid(&boundary) {
+            return Err("OpenPGP signed MIME boundary is invalid".to_string());
+        }
+    } else if let Some(encrypted) = legacy_pgp_encrypted_content(payload) {
+        if !legacy_compose_attachment_specs(payload)?.is_empty() {
+            return Err(
+                "Client-provided OpenPGP MIME with staged attachments is not yet supported"
+                    .to_string(),
+            );
+        }
+        if !legacy_pgp_is_seven_bit_text(&encrypted) {
+            return Err("OpenPGP encrypted data must be 7-bit text".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn legacy_validate_raw_compose_html(html: &str) -> Result<(), String> {
@@ -4420,6 +4554,22 @@ fn legacy_payload_has_value(value: &Value) -> bool {
     }
 }
 
+/// PHP's `if ($value)` semantics for the legacy server-side OpenPGP request
+/// fields.  This deliberately differs from `legacy_payload_has_value`: string
+/// whitespace is significant (`" 0"` is truthy) and an object is truthy even
+/// when it has no properties.  Rust does not implement this server-side GnuPG
+/// path, so every PHP-truthy form must be rejected rather than ignored.
+fn legacy_openpgp_directive_is_php_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => legacy_compose_string_is_php_truthy(value),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(_) => true,
+    }
+}
+
 /// Generates an RFC 5322 `Message-ID` rooted at the sender's domain.
 fn legacy_generate_draft_message_id(envelope_from: &str) -> String {
     let domain = envelope_from
@@ -4532,13 +4682,9 @@ fn legacy_send_message_request_from_payload_with_html(
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: payload_string(payload, "sign"),
         smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
-        pgp_signed: payload_optional_string(payload, "signed"),
-        pgp_encrypted: payload_optional_string(payload, "encrypted"),
-        pgp_boundary: payload_optional_string(payload, "boundary"),
-        pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
-        pgp_sign_fingerprint: payload_string(payload, "signFingerprint"),
-        pgp_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
-        pgp_signature: payload_optional_string(payload, "pgpSignature"),
+        pgp_signed: legacy_pgp_signed_content(payload),
+        pgp_encrypted: legacy_pgp_encrypted_content(payload),
+        pgp_boundary: legacy_pgp_boundary_from_payload(payload),
     })
 }
 
@@ -4836,23 +4982,27 @@ fn build_legacy_send_message_with_metadata(
     if let Some(signed_mime) = &request.pgp_signed {
         let mut parts = signed_mime.splitn(2, "\r\n\r\n");
         let _signed_headers = parts.next().unwrap_or("");
-        let signed_body = parts.next().unwrap_or("");
-        let boundary = request.pgp_boundary.as_deref().unwrap_or("");
+        let signed_body = parts.next().ok_or_else(|| {
+            "OpenPGP signed MIME is missing its header/body separator".to_string()
+        })?;
+        let boundary = request
+            .pgp_boundary
+            .as_deref()
+            .ok_or_else(|| "OpenPGP signed MIME is missing its boundary".to_string())?;
         let content_type_str = format!(
             "multipart/signed; micalg=\"pgp-sha256\"; protocol=\"application/pgp-signature\"; boundary=\"{}\"",
             boundary
         );
         let content_type = header::ContentType::parse(&content_type_str)
             .map_err(|_| "Invalid PGP signed Content-Type".to_string())?;
-        let multipart = MultiPart::signed(
-            "application/pgp-signature".to_string(),
-            "pgp-sha256".to_string(),
-        )
-        .header(content_type)
-        .singlepart(SinglePart::builder().body(signed_body.to_string()));
         return Ok(LegacyBuiltMessage {
             message: builder
-                .multipart(multipart)
+                .header(header::MIME_VERSION_1_0)
+                .header(content_type)
+                .body(lettre::message::Body::dangerous_pre_encoded(
+                    signed_body.as_bytes().to_vec(),
+                    header::ContentTransferEncoding::SevenBit,
+                ))
                 .map_err(|err| format!("Message build failed: {err}"))?,
             autocrypt: request.autocrypt.clone(),
         });
@@ -4861,17 +5011,26 @@ fn build_legacy_send_message_with_metadata(
     // OpenPGP: if the client pre-encrypted data (e.g. via Mailvelope), wrap it
     // in the standard application/pgp-encrypted MIME structure.
     if let Some(encrypted) = &request.pgp_encrypted {
-        let normalized = encrypted.trim().replace("\r?\n", "\r\n");
+        let normalized = legacy_normalize_pgp_crlf(encrypted);
         let encrypted_part = SinglePart::builder()
             .header(
-                header::ContentType::parse("application/pgp-encrypted; version=\"1\"")
+                header::ContentType::parse("application/pgp-encrypted")
                     .map_err(|_| "Invalid PGP encrypted Content-Type".to_string())?,
             )
+            .header(LegacyPgpAttachmentDisposition)
             .header(header::ContentTransferEncoding::SevenBit)
             .body("Version: 1".to_string());
         let data_part = SinglePart::builder()
+            .header(
+                header::ContentType::parse("application/octet-stream")
+                    .map_err(|_| "Invalid PGP encrypted data Content-Type".to_string())?,
+            )
+            .header(header::ContentDisposition::inline_with_name("msg.asc"))
             .header(header::ContentTransferEncoding::SevenBit)
-            .body(normalized);
+            .body(lettre::message::Body::dangerous_pre_encoded(
+                normalized.into_bytes(),
+                header::ContentTransferEncoding::SevenBit,
+            ));
         let multipart = MultiPart::encrypted("application/pgp-encrypted".to_string())
             .singlepart(encrypted_part)
             .singlepart(data_part);
@@ -21583,7 +21742,8 @@ Subject: Empty body metadata\r\n\r\n"
 
     #[test]
     fn native_compose_rejects_unsupported_content_instead_of_silently_dropping_it() {
-        // PGP signed/encrypted content is now supported (embedded verbatim)
+        // Client-prepared PGP signed/encrypted content is supported; the
+        // unimplemented server-side GnuPG keyring flow is rejected explicitly.
 
         assert_eq!(
             super::legacy_unsupported_compose_feature(&json!({"dsn": 1}), true),
@@ -21628,6 +21788,160 @@ Subject: Empty body metadata\r\n\r\n"
                 true
             ),
             None
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(
+                &json!({"signFingerprint": "0123456789ABCDEF"}),
+                true
+            ),
+            Some("server-side OpenPGP signing or encryption")
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(
+                &json!({
+                    "encrypted": "-----BEGIN PGP MESSAGE-----",
+                    "encryptFingerprints": "0123456789ABCDEF"
+                }),
+                true
+            ),
+            Some("server-side OpenPGP signing or encryption")
+        );
+        // PHP treats only the exact string "0" as false; whitespace around
+        // it still selects the server-side GnuPG branch and must be rejected.
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(&json!({"signFingerprint": " 0"}), true),
+            Some("server-side OpenPGP signing or encryption")
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(&json!({"signFingerprint": "0 "}), true),
+            Some("server-side OpenPGP signing or encryption")
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(&json!({"signFingerprint": "0"}), true),
+            None
+        );
+        assert_eq!(
+            super::legacy_unsupported_compose_feature(
+                &json!({"signFingerprint": ["0123456789ABCDEF"]}),
+                true
+            ),
+            Some("server-side OpenPGP signing or encryption")
+        );
+    }
+
+    #[test]
+    fn legacy_compose_preserves_client_pgp_signed_mime_body() {
+        let signed_body = concat!(
+            "--signed-boundary\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "signed content\r\n",
+            "--signed-boundary\r\n",
+            "Content-Type: application/pgp-signature\r\n\r\n",
+            "signature\r\n",
+            "--signed-boundary--\r\n"
+        );
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "plain": "ignored",
+            "boundary": "signed-boundary",
+            "signed": format!("Content-Type: ignored\r\n\r\n{signed_body}"),
+        });
+        assert!(super::legacy_validate_compose_limits(&payload).is_ok());
+        let request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .expect("signed compose request");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("signed message build")
+                .formatted(),
+        )
+        .expect("7-bit signed message");
+
+        assert!(
+            raw.contains("Content-Type: multipart/signed")
+                && raw.contains("protocol=\"application/pgp-signature\"")
+                && raw.contains("micalg=\"pgp-sha256\"")
+                && raw.contains("boundary=\"signed-boundary\""),
+            "{raw}"
+        );
+        assert!(raw.ends_with(signed_body), "{raw}");
+        assert_eq!(raw.matches("--signed-boundary--").count(), 1, "{raw}");
+    }
+
+    #[test]
+    fn legacy_compose_builds_mailso_compatible_pgp_encrypted_wrapper() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "plain": "ignored",
+            "encrypted": "\n-----BEGIN PGP MESSAGE-----\nabc\r\ndef\n-----END PGP MESSAGE-----\n",
+        });
+        assert!(super::legacy_validate_compose_limits(&payload).is_ok());
+        let request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .expect("encrypted compose request");
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("encrypted message build")
+                .formatted(),
+        )
+        .expect("7-bit encrypted message");
+
+        assert!(
+            raw.contains("Content-Type: multipart/encrypted")
+                && raw.contains("protocol=\"application/pgp-encrypted\""),
+            "{raw}"
+        );
+        assert!(raw.contains("Content-Type: application/pgp-encrypted"));
+        assert!(raw.contains("Content-Disposition: attachment"));
+        assert!(raw.contains("Content-Type: application/octet-stream"));
+        assert!(raw.contains("Content-Disposition: inline; filename=\"msg.asc\""));
+        assert!(
+            raw.contains("-----BEGIN PGP MESSAGE-----\r\nabc\r\ndef\r\n-----END PGP MESSAGE-----")
+        );
+        assert!(!raw.contains("abc\n"));
+    }
+
+    #[test]
+    fn legacy_compose_bounds_and_validates_client_pgp_content() {
+        let oversized = json!({"encrypted": "x".repeat(super::COMPOSE_PGP_MIME_LIMIT_BYTES + 1)});
+        assert!(super::legacy_validate_compose_limits(&oversized)
+            .unwrap_err()
+            .contains("OpenPGP MIME content exceeds"));
+
+        let malformed_signed = json!({"signed": "not-a-mime-part", "boundary": "bad\r\nheader"});
+        assert!(super::legacy_validate_compose_limits(&malformed_signed)
+            .unwrap_err()
+            .contains("header/body separator"));
+
+        let bad_boundary = json!({"signed": "x\r\n\r\ny", "boundary": "bad\r\nheader"});
+        assert!(super::legacy_validate_compose_limits(&bad_boundary)
+            .unwrap_err()
+            .contains("boundary is invalid"));
+
+        let non_ascii = json!({"encrypted": "cipheré"});
+        assert!(super::legacy_validate_compose_limits(&non_ascii)
+            .unwrap_err()
+            .contains("7-bit text"));
+
+        // PHP's `if ($sSigned = ...)` / `else if ($sEncrypted = ...)`
+        // treats the string "0" as false.  It must not select either PGP
+        // branch, and a false signed value must still permit encryption.
+        let both_zero = json!({"signed": "0", "encrypted": "0"});
+        assert!(super::legacy_validate_compose_limits(&both_zero).is_ok());
+        assert!(super::legacy_pgp_signed_content(&both_zero).is_none());
+        assert!(super::legacy_pgp_encrypted_content(&both_zero).is_none());
+
+        let signed_zero = json!({
+            "signed": "0",
+            "encrypted": "-----BEGIN PGP MESSAGE-----\r\nabc\r\n-----END PGP MESSAGE-----"
+        });
+        assert!(super::legacy_validate_compose_limits(&signed_zero).is_ok());
+        assert!(super::legacy_pgp_signed_content(&signed_zero).is_none());
+        assert_eq!(
+            super::legacy_pgp_encrypted_content(&signed_zero).as_deref(),
+            Some("-----BEGIN PGP MESSAGE-----\r\nabc\r\n-----END PGP MESSAGE-----")
         );
     }
 
@@ -28648,6 +28962,79 @@ Subject: Empty body metadata\r\n\r\n"
         let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
         assert!(wire.contains("filename=\"draft.txt\""));
         assert!(wire.contains("RFJBRlQtQUNUSU9OLUJPVU5EQVJZ"));
+        assert!(scope.path(&token).unwrap().exists());
+
+        tokio::fs::remove_dir_all(&temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_pgp_with_staged_attachment_rejects_before_send_or_save_side_effects() {
+        let key = [64_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-client-pgp-attachment-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) =
+            message_body_test_state_with_config(8_942, 8_943, &key, config).await;
+        let scope =
+            super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 8_942, 8_943);
+        let token = "d".repeat(40);
+        super::legacy_stage_compose_attachment(&scope, &token, b"MUST-REMAIN-STAGED", false)
+            .await
+            .unwrap();
+        let payload = json!({
+            "account_id": 8_943,
+            "from": "work@example.com",
+            "to": "recipient@example.net",
+            "saveFolder": "Drafts",
+            "boundary": "client-pgp-boundary",
+            "signed": "Content-Type: ignored\r\n\r\n--client-pgp-boundary--\r\n",
+            "attachments": {
+                (token.clone()): {"name": "must-remain.txt", "inline": false, "type": "text/plain"}
+            }
+        });
+        let sent = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&sent),
+        };
+        let send_response = super::native_send_message_inner_with_sender(
+            &state,
+            "SendMessage",
+            &payload,
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+        )
+        .await;
+        let send_body = read_json(send_response).await;
+        assert!(send_body["Result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Client-provided OpenPGP MIME"));
+        assert!(sent.lock().unwrap().is_none());
+        assert!(scope.path(&token).unwrap().exists());
+
+        let appended = Arc::new(Mutex::new(None));
+        let appender = RecordingDraftAppender {
+            message: Arc::clone(&appended),
+        };
+        let save_response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &payload,
+            &session,
+            &appender,
+        )
+        .await;
+        let save_body = read_json(save_response).await;
+        assert!(save_body["Result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Client-provided OpenPGP MIME"));
+        assert!(appended.lock().unwrap().is_none());
         assert!(scope.path(&token).unwrap().exists());
 
         tokio::fs::remove_dir_all(&temp_root).await.unwrap();

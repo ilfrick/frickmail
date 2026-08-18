@@ -194,13 +194,14 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Complete `SendMessage` parity: remaining legacy
-   `data-x-src*`/`data-x-style-url` transformations, PGP/S-MIME
-   `signed`/`encrypted` payloads, OAuth-backed SMTP, and S/MIME certificate
-   selection by `identityID`.
-2. Complete `SaveMessage` crypto and remaining transformed-inline MIME parity
-   alongside `SendMessage`.
-3. Complete `Message` parity: remaining message/header details and detailed
+1. Complete the server-side GnuPG keyring/signing/encryption flow and any
+   remaining S/MIME identity-selection parity. Client-supplied OpenPGP
+   `signed`/`encrypted` MIME content, S/MIME signing, OAuth SMTP,
+   and `data-x-src*`/`data-x-style-url` transformations are native. Until the
+   GnuPG keyring is implemented, PHP-truthy server-side OpenPGP fields are
+   rejected explicitly; client-supplied OpenPGP MIME with staged attachments
+   is likewise rejected rather than silently dropping those attachments.
+2. Complete `Message` parity: remaining message/header details and detailed
    message payloads.
-4. Migrate the legacy connection-token/CSRF contract as part of the Rust-only
+3. Migrate the legacy connection-token/CSRF contract as part of the Rust-only
    session and runtime cutover.
