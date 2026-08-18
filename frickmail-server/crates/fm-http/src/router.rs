@@ -1553,18 +1553,24 @@ struct LegacySendMessageRequest {
     smime_sign_identity: Option<String>,
     /// S/MIME encryption recipient certificate IDs or PEM strings
     smime_encrypt_certificates: Vec<String>,
-    /// Whether to sign with OpenPGP
-    #[allow(dead_code)]
-    pgp_signed: bool,
-    /// Whether to encrypt with OpenPGP
-    #[allow(dead_code)]
-    pgp_encrypted: bool,
-    /// OpenPGP recipient fingerprints for encryption
+    /// OpenPGP signed MIME content (pre-built by client, e.g. Mailvelope)
+    pgp_signed: Option<String>,
+    /// OpenPGP encrypted data (pre-built by client, e.g. Mailvelope)
+    pgp_encrypted: Option<String>,
+    /// MIME boundary for pgp_signed multipart/signed structure
+    pgp_boundary: Option<String>,
+    /// OpenPGP recipient fingerprints for GnuPG server-side encryption
     #[allow(dead_code)]
     pgp_encrypt_fingerprints: Option<String>,
-    /// OpenPGP signing fingerprint (if None, use default)
+    /// OpenPGP signing fingerprint for GnuPG server-side signing
     #[allow(dead_code)]
     pgp_sign_fingerprint: Option<String>,
+    /// Passphrase for GnuPG server-side signing
+    #[allow(dead_code)]
+    pgp_sign_passphrase: Option<String>,
+    /// Pre-built PGP signature (armored) for server-side GnuPG signing
+    #[allow(dead_code)]
+    pgp_signature: Option<String>,
 }
 
 /// Validated legacy Autocrypt header values. Key material is stored as
@@ -2636,20 +2642,19 @@ fn legacy_save_message_request_from_payload_with_html(
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: payload_string(payload, "sign"),
         smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
-        pgp_signed: payload_bool(payload, "signed"),
-        pgp_encrypted: payload_bool(payload, "encrypted"),
+        pgp_signed: payload_optional_string(payload, "signed"),
+        pgp_encrypted: payload_optional_string(payload, "encrypted"),
+        pgp_boundary: payload_optional_string(payload, "boundary"),
         pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
         pgp_sign_fingerprint: payload_string(payload, "signFingerprint"),
+        pgp_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
+        pgp_signature: payload_optional_string(payload, "pgpSignature"),
     })
 }
 
 fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
-    // GPG signed content and GPG encrypted content are not yet natively supported.
-    // S/MIME signing is now supported; S/MIME encrypt is still pending.
-    const MIME_FEATURES: &[(&str, &str)] = &[
-        ("signed", "OpenPGP signed content"),
-        ("encrypted", "OpenPGP encrypted content"),
-    ];
+    // S/MIME encryption is not yet natively supported.
+    const MIME_FEATURES: &[(&str, &str)] = &[];
 
     for (field, label) in MIME_FEATURES {
         if payload.get(*field).is_some_and(legacy_payload_has_value) {
@@ -4527,10 +4532,13 @@ fn legacy_send_message_request_from_payload_with_html(
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: payload_string(payload, "sign"),
         smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
-        pgp_signed: payload_bool(payload, "signed"),
-        pgp_encrypted: payload_bool(payload, "encrypted"),
+        pgp_signed: payload_optional_string(payload, "signed"),
+        pgp_encrypted: payload_optional_string(payload, "encrypted"),
+        pgp_boundary: payload_optional_string(payload, "boundary"),
         pgp_encrypt_fingerprints: payload_string(payload, "encryptFingerprints"),
         pgp_sign_fingerprint: payload_string(payload, "signFingerprint"),
+        pgp_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
+        pgp_signature: payload_optional_string(payload, "pgpSignature"),
     })
 }
 
@@ -4819,6 +4827,60 @@ fn build_legacy_send_message_with_metadata(
     }
     if !request.require_tls {
         builder = builder.raw_header(legacy_raw_header("TLS-Required", "No")?);
+    }
+
+    // OpenPGP: if the client pre-built a signed MIME structure (e.g. via
+    // Mailvelope or OpenPGPUserStore), embed it verbatim. The `signed` string
+    // contains the headers + body of a multipart/signed part; we split at the
+    // first blank line to match PHP's `explode("\r\n\r\n", $signed, 2)`.
+    if let Some(signed_mime) = &request.pgp_signed {
+        let mut parts = signed_mime.splitn(2, "\r\n\r\n");
+        let _signed_headers = parts.next().unwrap_or("");
+        let signed_body = parts.next().unwrap_or("");
+        let boundary = request.pgp_boundary.as_deref().unwrap_or("");
+        let content_type_str = format!(
+            "multipart/signed; micalg=\"pgp-sha256\"; protocol=\"application/pgp-signature\"; boundary=\"{}\"",
+            boundary
+        );
+        let content_type = header::ContentType::parse(&content_type_str)
+            .map_err(|_| "Invalid PGP signed Content-Type".to_string())?;
+        let multipart = MultiPart::signed(
+            "application/pgp-signature".to_string(),
+            "pgp-sha256".to_string(),
+        )
+        .header(content_type)
+        .singlepart(SinglePart::builder().body(signed_body.to_string()));
+        return Ok(LegacyBuiltMessage {
+            message: builder
+                .multipart(multipart)
+                .map_err(|err| format!("Message build failed: {err}"))?,
+            autocrypt: request.autocrypt.clone(),
+        });
+    }
+
+    // OpenPGP: if the client pre-encrypted data (e.g. via Mailvelope), wrap it
+    // in the standard application/pgp-encrypted MIME structure.
+    if let Some(encrypted) = &request.pgp_encrypted {
+        let normalized = encrypted.trim().replace("\r?\n", "\r\n");
+        let encrypted_part = SinglePart::builder()
+            .header(
+                header::ContentType::parse("application/pgp-encrypted; version=\"1\"")
+                    .map_err(|_| "Invalid PGP encrypted Content-Type".to_string())?,
+            )
+            .header(header::ContentTransferEncoding::SevenBit)
+            .body("Version: 1".to_string());
+        let data_part = SinglePart::builder()
+            .header(header::ContentTransferEncoding::SevenBit)
+            .body(normalized);
+        let multipart = MultiPart::encrypted("application/pgp-encrypted".to_string())
+            .singlepart(encrypted_part)
+            .singlepart(data_part);
+        return Ok(LegacyBuiltMessage {
+            message: builder
+                .multipart(multipart)
+                .map_err(|err| format!("Message build failed: {err}"))?,
+            autocrypt: request.autocrypt.clone(),
+        });
     }
 
     let alternative = || {
@@ -21521,18 +21583,7 @@ Subject: Empty body metadata\r\n\r\n"
 
     #[test]
     fn native_compose_rejects_unsupported_content_instead_of_silently_dropping_it() {
-        for (payload, expected) in [
-            (
-                json!({"encrypted": "ciphertext"}),
-                "OpenPGP encrypted content",
-            ),
-            (json!({"signed": "pgp-key-id"}), "OpenPGP signed content"),
-        ] {
-            assert_eq!(
-                super::legacy_unsupported_compose_feature(&payload, false),
-                Some(expected)
-            );
-        }
+        // PGP signed/encrypted content is now supported (embedded verbatim)
 
         assert_eq!(
             super::legacy_unsupported_compose_feature(&json!({"dsn": 1}), true),
