@@ -39,6 +39,7 @@ use sqlx::{AnyPool, Connection, Row};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -51,7 +52,23 @@ pub const PASSWORD_HASH_OPSLIMIT: u32 = 4;
 pub const PASSWORD_HASH_MEMLIMIT_KIB: u32 = 65_536;
 pub const DUMMY_PASSWORD_HASH: &str =
     "$argon2id$v=19$m=65536,t=4,p=1$TTJYNUVsNlE5Q1RwTzZacQ$AnMUliGcTz3HHGhxmAib/d0fPagGYhpUa1uQxLPgyeg";
+/// Largest PEM certificate accepted at import and when resolving stored
+/// certificate material.  A DER X.509 certificate is far smaller in normal
+/// use; this leaves room for sizeable chains without making crypto requests
+/// an unbounded database-to-OpenSSL allocation path.
+pub const SMIME_CERT_PEM_MAX_BYTES: usize = 64 * 1024;
+/// PKCS#12 bundles contain both a certificate and an optional private key.
+pub const SMIME_P12_MAX_BYTES: usize = 512 * 1024;
+pub const SMIME_PRIVATE_KEY_PEM_MAX_BYTES: usize = 64 * 1024;
+const SMIME_PRIVATE_KEY_ENCRYPTED_MAX_BYTES: usize =
+    SMIME_PRIVATE_KEY_PEM_MAX_BYTES + ACCOUNT_SECRET_NONCE_BYTES + 16;
 const VAPID_SETTING_KEY: &str = "vapid_keys";
+const SMIME_CRYPTO_CONCURRENCY: usize = 2;
+
+fn smime_crypto_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(SMIME_CRYPTO_CONCURRENCY)))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrickmailUser {
@@ -782,10 +799,53 @@ impl SqlxUserRepository {
         pool: &AnyPool,
         user_id: i64,
         email: &str,
-        message_body: &str,
+        message_body: &[u8],
         credential_key: &[u8],
     ) -> Result<Vec<u8>> {
-        sign_smime_message(pool, user_id, email, message_body, credential_key).await
+        sign_smime_message(pool, user_id, None, email, message_body, credential_key).await
+    }
+
+    /// Signs using certificate material owned by one selected mail account.
+    /// Compose must not select a same-email identity/certificate from another
+    /// account belonging to the same user.
+    pub async fn sign_smime_message_for_account(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        email: &str,
+        message_body: &[u8],
+        credential_key: &[u8],
+    ) -> Result<Vec<u8>> {
+        sign_smime_message(
+            pool,
+            user_id,
+            Some(account_id),
+            email,
+            message_body,
+            credential_key,
+        )
+        .await
+    }
+
+    /// Reports whether a selected-account identity has bounded stored signing
+    /// material. Compose uses this to match MailSo's identity fallback before
+    /// asking OpenSSL to sign.
+    pub async fn has_smime_signing_material_for_account(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        email: &str,
+    ) -> Result<bool> {
+        Ok(
+            fetch_smime_signing_material(pool, user_id, Some(account_id), email)
+                .await?
+                .is_some_and(|material| {
+                    material
+                        .encrypted_key_pem
+                        .as_deref()
+                        .is_some_and(|key| !key.is_empty())
+                }),
+        )
     }
 
     pub fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
@@ -798,7 +858,7 @@ impl SqlxUserRepository {
         pool: &AnyPool,
         user_id: i64,
         cert_tokens: &[String],
-        message_body: &str,
+        message_body: &[u8],
     ) -> Result<Vec<u8>> {
         encrypt_smime_message(pool, user_id, cert_tokens, message_body).await
     }
@@ -2729,13 +2789,14 @@ async fn import_smime_cert(
         ));
     }
     let pem = input.pem.trim().to_string();
-    let parsed = parse_smime_cert(&pem)?;
+    validate_smime_cert_pem_size(&pem)?;
     if fetch_mail_account(pool, user_id, input.account_id)
         .await?
         .is_none()
     {
         return Err(FrickmailError::BadRequest("Account not found".to_string()));
     }
+    let parsed = run_smime_blocking("certificate import", move || parse_smime_cert(&pem)).await?;
 
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
@@ -2773,6 +2834,11 @@ async fn import_smime_p12(
     if input.p12_der.is_empty() {
         return Err(FrickmailError::BadRequest("p12_b64 required".to_string()));
     }
+    if input.p12_der.len() > SMIME_P12_MAX_BYTES {
+        return Err(FrickmailError::BadRequest(
+            "PKCS#12 bundle exceeds the safety limit".to_string(),
+        ));
+    }
     if fetch_mail_account(pool, user_id, input.account_id)
         .await?
         .is_none()
@@ -2780,34 +2846,52 @@ async fn import_smime_p12(
         return Err(FrickmailError::BadRequest("Account not found".to_string()));
     }
 
-    let parsed_archive = Pkcs12::from_der(&input.p12_der)
-        .and_then(|archive| archive.parse2(&input.password))
-        .map_err(|_| {
-            FrickmailError::BadRequest(
-                "Failed to read PKCS#12 file - wrong password or corrupt file".to_string(),
-            )
-        })?;
-    let cert = parsed_archive.cert.ok_or_else(|| {
-        FrickmailError::BadRequest("No certificate found in the PKCS#12 bundle".to_string())
-    })?;
-    let cert_pem = String::from_utf8(cert.to_pem().map_err(|err| {
-        FrickmailError::Upstream(format!("S/MIME certificate export failed: {err}"))
-    })?)
-    .map_err(|err| {
-        FrickmailError::Upstream(format!("S/MIME certificate PEM encoding failed: {err}"))
-    })?;
-    let parsed = parse_smime_cert(&cert_pem)?;
-    let encrypted_key_pem = parsed_archive
-        .pkey
-        .map(|key| -> Result<Vec<u8>> {
-            let key_pem = String::from_utf8(key.private_key_to_pem_pkcs8().map_err(|err| {
-                FrickmailError::Upstream(format!("S/MIME private key export failed: {err}"))
-            })?)
-            .map_err(|err| {
-                FrickmailError::Upstream(format!("S/MIME private key PEM encoding failed: {err}"))
+    let p12_der = input.p12_der;
+    let password = input.password;
+    let (parsed, key_pem) = run_smime_blocking("PKCS#12 import", move || {
+        let parsed_archive = Pkcs12::from_der(&p12_der)
+            .and_then(|archive| archive.parse2(&password))
+            .map_err(|_| {
+                FrickmailError::BadRequest(
+                    "Failed to read PKCS#12 file - wrong password or corrupt file".to_string(),
+                )
             })?;
-            encrypt_account_secret(&key_pem, credential_key)
-        })
+        let cert = parsed_archive.cert.ok_or_else(|| {
+            FrickmailError::BadRequest("No certificate found in the PKCS#12 bundle".to_string())
+        })?;
+        let cert_pem = String::from_utf8(cert.to_pem().map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME certificate export failed: {err}"))
+        })?)
+        .map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME certificate PEM encoding failed: {err}"))
+        })?;
+        validate_smime_cert_pem_size(&cert_pem)?;
+        let parsed = parse_smime_cert(&cert_pem)?;
+        let key_pem = parsed_archive
+            .pkey
+            .map(|key| -> Result<String> {
+                let key_pem = String::from_utf8(key.private_key_to_pem_pkcs8().map_err(|err| {
+                    FrickmailError::Upstream(format!("S/MIME private key export failed: {err}"))
+                })?)
+                .map_err(|err| {
+                    FrickmailError::Upstream(format!(
+                        "S/MIME private key PEM encoding failed: {err}"
+                    ))
+                })?;
+                if key_pem.len() > SMIME_PRIVATE_KEY_PEM_MAX_BYTES {
+                    return Err(FrickmailError::BadRequest(
+                        "S/MIME private key exceeds the safety limit".to_string(),
+                    ));
+                }
+                Ok(key_pem)
+            })
+            .transpose()?;
+        Ok((parsed, key_pem))
+    })
+    .await?;
+    let encrypted_key_pem = key_pem
+        .as_deref()
+        .map(|key_pem| encrypt_account_secret(key_pem, credential_key))
         .transpose()?;
 
     let mut conn = pool.acquire().await.map_err(db_error)?;
@@ -2945,18 +3029,40 @@ async fn delete_smime_cert(pool: &AnyPool, user_id: i64, cert_id: i64) -> Result
         .map_err(db_error)
 }
 
+/// Runs bounded OpenSSL work off Tokio's async workers.  The owned permit lives
+/// inside the blocking task, so a caller timeout cannot admit more crypto while
+/// an already-started operation is still consuming CPU or memory.
+async fn run_smime_blocking<T, F>(operation: &'static str, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let permit = smime_crypto_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| FrickmailError::Upstream("S/MIME crypto admission unavailable".to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| FrickmailError::Upstream(format!("S/MIME {operation} task failed")))?
+}
+
 async fn sign_smime_message(
     pool: &AnyPool,
     user_id: i64,
+    account_id: Option<i64>,
     email: &str,
-    message_body: &str,
+    message_body: &[u8],
     credential_key: &[u8],
 ) -> Result<Vec<u8>> {
     let email = email.trim();
     if email.is_empty() {
         return Err(FrickmailError::BadRequest("email required".to_string()));
     }
-    let material = fetch_smime_signing_material(pool, user_id, email)
+    let material = fetch_smime_signing_material(pool, user_id, account_id, email)
         .await?
         .ok_or_else(|| {
             FrickmailError::BadRequest(format!("No S/MIME certificate found for {email}"))
@@ -2973,21 +3079,39 @@ async fn sign_smime_message(
             "Failed to decrypt private key - session key mismatch".to_string(),
         )
     })?;
-    let cert = X509::from_pem(material.cert_pem.as_bytes()).map_err(|err| {
-        FrickmailError::Upstream(format!("S/MIME certificate load failed: {err}"))
-    })?;
-    let key = PKey::private_key_from_pem(key_pem.as_bytes()).map_err(|err| {
-        FrickmailError::BadRequest(format!("S/MIME private key load failed: {err}"))
-    })?;
-    let certs = Stack::new().map_err(|err| {
-        FrickmailError::Upstream(format!("S/MIME certificate stack init failed: {err}"))
-    })?;
+    validate_smime_cert_pem_size(&material.cert_pem)?;
+    if key_pem.len() > SMIME_PRIVATE_KEY_PEM_MAX_BYTES {
+        return Err(FrickmailError::BadRequest(
+            "S/MIME private key exceeds the safety limit".to_string(),
+        ));
+    }
     let flags = Pkcs7Flags::DETACHED | Pkcs7Flags::STREAM;
-    let pkcs7 = Pkcs7::sign(&cert, &key, &certs, message_body.as_bytes(), flags)
-        .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))?;
-    pkcs7
-        .to_smime(message_body.as_bytes(), flags)
-        .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))
+    let message_body = message_body.to_vec();
+    let cert_pem = material.cert_pem;
+    let permit = smime_crypto_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| FrickmailError::Upstream("S/MIME crypto admission unavailable".to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let cert = X509::from_pem(cert_pem.as_bytes()).map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME certificate load failed: {err}"))
+        })?;
+        let key = PKey::private_key_from_pem(key_pem.as_bytes()).map_err(|err| {
+            FrickmailError::BadRequest(format!("S/MIME private key load failed: {err}"))
+        })?;
+        let certs = Stack::new().map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME certificate stack init failed: {err}"))
+        })?;
+        let pkcs7 = Pkcs7::sign(&cert, &key, &certs, &message_body, flags)
+            .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))?;
+        pkcs7
+            .to_smime(&message_body, flags)
+            .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))
+    })
+    .await
+    .map_err(|_| FrickmailError::Upstream("S/MIME signing task failed".to_string()))?
 }
 
 fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
@@ -3061,18 +3185,17 @@ fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
     }
 }
 
-/// Resolves certificate tokens (database IDs or PEM strings) into X509
-/// certificate objects. Numeric tokens are looked up in the database; non-numeric
-/// tokens are parsed directly as PEM certificate data.
-async fn resolve_smime_certificates(
+/// Resolves bounded certificate tokens (database IDs or PEM strings) into PEM
+/// material.  Parsing remains in the retained blocking crypto admission below,
+/// so no caller can make an async worker run OpenSSL parsing.
+async fn resolve_smime_certificate_pems(
     pool: &AnyPool,
     user_id: i64,
     cert_tokens: &[String],
-) -> Result<Stack<X509>> {
+) -> Result<Vec<String>> {
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
-    let mut certs = Stack::new()
-        .map_err(|err| FrickmailError::Upstream(format!("S/MIME cert stack init failed: {err}")))?;
+    let mut cert_pems = Vec::with_capacity(cert_tokens.len());
 
     for token in cert_tokens {
         let token = token.trim();
@@ -3083,19 +3206,23 @@ async fn resolve_smime_certificates(
             // Resolve by database ID
             let row = if backend == "PostgreSQL" {
                 sqlx::query(
-                    "SELECT cert_pem FROM frickmail_smime_certs WHERE id = $1 AND user_id = $2",
+                    "SELECT cert_pem FROM frickmail_smime_certs \
+                     WHERE id = $1 AND user_id = $2 AND LENGTH(cert_pem) <= $3",
                 )
                 .bind(id)
                 .bind(user_id)
+                .bind(SMIME_CERT_PEM_MAX_BYTES as i64)
                 .fetch_optional(&mut *conn)
                 .await
                 .map_err(db_error)?
             } else {
                 sqlx::query(
-                    "SELECT cert_pem FROM frickmail_smime_certs WHERE id = ? AND user_id = ?",
+                    "SELECT cert_pem FROM frickmail_smime_certs \
+                     WHERE id = ? AND user_id = ? AND LENGTH(cert_pem) <= ?",
                 )
                 .bind(id)
                 .bind(user_id)
+                .bind(SMIME_CERT_PEM_MAX_BYTES as i64)
                 .fetch_optional(&mut *conn)
                 .await
                 .map_err(db_error)?
@@ -3110,19 +3237,27 @@ async fn resolve_smime_certificates(
         } else {
             // Try as a fingerprint - look up by fingerprint
             let row = if backend == "PostgreSQL" {
-                sqlx::query("SELECT cert_pem FROM frickmail_smime_certs WHERE fingerprint = $1 AND user_id = $2")
-                    .bind(token)
-                    .bind(user_id)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(db_error)?
+                sqlx::query(
+                    "SELECT cert_pem FROM frickmail_smime_certs \
+                             WHERE fingerprint = $1 AND user_id = $2 AND LENGTH(cert_pem) <= $3",
+                )
+                .bind(token)
+                .bind(user_id)
+                .bind(SMIME_CERT_PEM_MAX_BYTES as i64)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(db_error)?
             } else {
-                sqlx::query("SELECT cert_pem FROM frickmail_smime_certs WHERE fingerprint = ? AND user_id = ?")
-                    .bind(token)
-                    .bind(user_id)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(db_error)?
+                sqlx::query(
+                    "SELECT cert_pem FROM frickmail_smime_certs \
+                             WHERE fingerprint = ? AND user_id = ? AND LENGTH(cert_pem) <= ?",
+                )
+                .bind(token)
+                .bind(user_id)
+                .bind(SMIME_CERT_PEM_MAX_BYTES as i64)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(db_error)?
             };
             match row {
                 Some(row) => {
@@ -3133,22 +3268,18 @@ async fn resolve_smime_certificates(
             }
         };
 
-        let cert = X509::from_pem(cert_pem.as_bytes()).map_err(|err| {
-            FrickmailError::Upstream(format!("S/MIME recipient certificate parse failed: {err}"))
-        })?;
-        certs.push(cert).map_err(|err| {
-            FrickmailError::Upstream(format!("S/MIME recipient cert stack push failed: {err}"))
-        })?;
+        validate_smime_cert_pem_size(&cert_pem)?;
+        cert_pems.push(cert_pem);
     }
 
-    Ok(certs)
+    Ok(cert_pems)
 }
 
 async fn encrypt_smime_message(
     pool: &AnyPool,
     user_id: i64,
     cert_tokens: &[String],
-    message_body: &str,
+    message_body: &[u8],
 ) -> Result<Vec<u8>> {
     if cert_tokens.is_empty() {
         return Err(FrickmailError::BadRequest(
@@ -3156,43 +3287,86 @@ async fn encrypt_smime_message(
         ));
     }
 
-    let certs = resolve_smime_certificates(pool, user_id, cert_tokens).await?;
+    let cert_pems = resolve_smime_certificate_pems(pool, user_id, cert_tokens).await?;
 
-    if certs.is_empty() {
+    if cert_pems.is_empty() {
         return Err(FrickmailError::BadRequest(
             "No valid S/MIME certificates found for encryption".to_string(),
         ));
     }
 
-    let cipher = openssl::symm::Cipher::aes_128_cbc();
-    let flags = Pkcs7Flags::NOOLDMIMETYPE;
-
-    let pkcs7 = Pkcs7::encrypt(&certs, message_body.as_bytes(), cipher, flags)
-        .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_encrypt failed: {err}")))?;
-
-    pkcs7
-        .to_smime(message_body.as_bytes(), flags)
-        .map_err(|err| {
+    let message_body = message_body.to_vec();
+    let permit = smime_crypto_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| FrickmailError::Upstream("S/MIME crypto admission unavailable".to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let mut certs = Stack::new().map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME cert stack init failed: {err}"))
+        })?;
+        for cert_pem in cert_pems {
+            let cert = X509::from_pem(cert_pem.as_bytes()).map_err(|err| {
+                FrickmailError::Upstream(format!(
+                    "S/MIME recipient certificate parse failed: {err}"
+                ))
+            })?;
+            certs.push(cert).map_err(|err| {
+                FrickmailError::Upstream(format!("S/MIME recipient cert stack push failed: {err}"))
+            })?;
+        }
+        let cipher = openssl::symm::Cipher::aes_128_cbc();
+        let flags = Pkcs7Flags::NOOLDMIMETYPE;
+        let pkcs7 = Pkcs7::encrypt(&certs, &message_body, cipher, flags).map_err(|err| {
+            FrickmailError::Upstream(format!("openssl_pkcs7_encrypt failed: {err}"))
+        })?;
+        pkcs7.to_smime(&message_body, flags).map_err(|err| {
             FrickmailError::Upstream(format!("openssl_pkcs7_encrypt to_smime failed: {err}"))
         })
+    })
+    .await
+    .map_err(|_| FrickmailError::Upstream("S/MIME encryption task failed".to_string()))?
+}
+
+fn validate_smime_cert_pem_size(pem: &str) -> Result<()> {
+    if pem.len() > SMIME_CERT_PEM_MAX_BYTES {
+        return Err(FrickmailError::BadRequest(
+            "S/MIME certificate exceeds the safety limit".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn fetch_smime_signing_material(
     pool: &AnyPool,
     user_id: i64,
+    account_id: Option<i64>,
     email: &str,
 ) -> Result<Option<SmimeSigningMaterial>> {
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
-
-    sqlx::query(smime_signing_material_query(&backend))
-        .bind(user_id)
-        .bind(email)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(db_error)?
-        .map(row_to_smime_signing_material)
-        .transpose()
+    let row = if let Some(account_id) = account_id {
+        sqlx::query(smime_signing_material_for_account_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .bind(email)
+            .bind(SMIME_CERT_PEM_MAX_BYTES as i64)
+            .bind(SMIME_PRIVATE_KEY_ENCRYPTED_MAX_BYTES as i64)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?
+    } else {
+        sqlx::query(smime_signing_material_query(&backend))
+            .bind(user_id)
+            .bind(email)
+            .bind(SMIME_CERT_PEM_MAX_BYTES as i64)
+            .bind(SMIME_PRIVATE_KEY_ENCRYPTED_MAX_BYTES as i64)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?
+    };
+    row.map(row_to_smime_signing_material).transpose()
 }
 
 async fn delete_mail_account(pool: &AnyPool, user_id: i64, account_id: i64) -> Result<()> {
@@ -4666,11 +4840,36 @@ fn smime_signing_material_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
             "SELECT cert_pem, encrypted_key_pem FROM frickmail_smime_certs \
-             WHERE user_id = $1 AND email = $2 ORDER BY created_at DESC, id DESC LIMIT 1"
+             WHERE user_id = $1 AND email = $2 \
+               AND LENGTH(cert_pem) <= $3 \
+               AND (encrypted_key_pem IS NULL OR octet_length(encrypted_key_pem) <= $4) \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
         }
         _ => {
             "SELECT cert_pem, encrypted_key_pem FROM frickmail_smime_certs \
-             WHERE user_id = ? AND email = ? ORDER BY created_at DESC, id DESC LIMIT 1"
+             WHERE user_id = ? AND email = ? \
+               AND LENGTH(cert_pem) <= ? \
+               AND (encrypted_key_pem IS NULL OR LENGTH(encrypted_key_pem) <= ?) \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        }
+    }
+}
+
+fn smime_signing_material_for_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT cert_pem, encrypted_key_pem FROM frickmail_smime_certs \
+             WHERE user_id = $1 AND account_id = $2 AND email = $3 \
+               AND LENGTH(cert_pem) <= $4 \
+               AND (encrypted_key_pem IS NULL OR octet_length(encrypted_key_pem) <= $5) \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        }
+        _ => {
+            "SELECT cert_pem, encrypted_key_pem FROM frickmail_smime_certs \
+             WHERE user_id = ? AND account_id = ? AND email = ? \
+               AND LENGTH(cert_pem) <= ? \
+               AND (encrypted_key_pem IS NULL OR LENGTH(encrypted_key_pem) <= ?) \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
         }
     }
 }
@@ -7748,6 +7947,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn smime_compose_signing_material_is_scoped_to_its_mail_account() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_smime_cert_tables(&pool).await;
+        insert_user(&pool, 35, json!({})).await;
+        insert_smime_cert(
+            &pool,
+            105,
+            35,
+            305,
+            "same@example.com",
+            "first",
+            None,
+            Some(vec![1]),
+            "2026-06-01 00:00:00",
+        )
+        .await;
+        insert_smime_cert(
+            &pool,
+            106,
+            35,
+            306,
+            "same@example.com",
+            "second",
+            None,
+            Some(vec![2]),
+            "2026-06-02 00:00:00",
+        )
+        .await;
+        sqlx::query("UPDATE frickmail_smime_certs SET cert_pem = ? WHERE id = ?")
+            .bind("account-305")
+            .bind(105_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE frickmail_smime_certs SET cert_pem = ? WHERE id = ?")
+            .bind("account-306")
+            .bind(106_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            super::fetch_smime_signing_material(&pool, 35, Some(305), "same@example.com")
+                .await
+                .unwrap()
+                .unwrap()
+                .cert_pem,
+            "account-305"
+        );
+        assert_eq!(
+            super::fetch_smime_signing_material(&pool, 35, Some(306), "same@example.com")
+                .await
+                .unwrap()
+                .unwrap()
+                .cert_pem,
+            "account-306"
+        );
+    }
+
+    #[tokio::test]
     async fn repository_imports_smime_cert_from_public_pem() {
         let pool = sqlite_pool().await;
         create_users_table(&pool, "TEXT").await;
@@ -7789,6 +8049,21 @@ mod tests {
         let stored_pem = smime_cert_pem(&pool, result.id).await;
         assert!(stored_pem.contains("BEGIN CERTIFICATE"));
         assert!(!stored_pem.contains("PRIVATE KEY"));
+
+        let oversized = SqlxUserRepository::import_smime_cert(
+            &pool,
+            33,
+            NewSmimeCert {
+                account_id: 305,
+                pem: "x".repeat(super::SMIME_CERT_PEM_MAX_BYTES + 1),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            oversized.public_message(),
+            "S/MIME certificate exceeds the safety limit"
+        );
 
         let wrong_user = SqlxUserRepository::import_smime_cert(
             &pool,

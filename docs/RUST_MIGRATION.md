@@ -5,37 +5,39 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-18 21:59:20 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-19 00:23:58 CEST (UTC+02:00)
 
 ### Current Branch And Publication State
 
-`master` is at `7d932eade` and contains the recent native `Message` thread
-parity, OAuth SMTP, S/MIME signing work, staged-attachment/data-image compose
-work, and client-provided OpenPGP MIME support. Both `master` remotes currently
-match that commit. The `rust-full-migration` tracking refs are behind and must
-be fast-forwarded to the same reviewed commit as part of the next publication.
+`master` is at `f20140bec` and contains the recent native `Message` thread
+parity, OAuth SMTP, staged-attachment/data-image compose work, and reviewed
+client-provided OpenPGP MIME support. Both remotes' `master` and
+`rust-full-migration` refs match that commit.
 
-The active uncommitted correction hardens client-provided OpenPGP compose for
-both `SendMessage` and `SaveMessage`: it preserves the supplied multipart/signed
-body, emits MailSo-compatible multipart/encrypted parts, normalizes encrypted
-line endings, rejects unsupported PHP-truthy server-side GnuPG directives, and
-rejects client-PGP messages carrying staged attachments before SMTP/APPEND can
-silently lose them. It has focused action-boundary regressions and independent
-senior approval. The Docker workspace test/Clippy gate and fresh production
-canary also passed on 2026-08-18 22:16 CEST; publication remains pending.
+The active uncommitted S/MIME correction makes selected-account SendMessage and
+SaveMessage transform the root MIME entity once, then retain outer delivery
+headers and share the same CMS root for SMTP and Sent. It is byte-safe for raw
+non-UTF-8 attachments, handles exact legacy `sign: "S/MIME"` identity
+selection, applies encryption to drafts/Sent as legacy does, and bounds
+certificate material, crypto concurrency, blocking work, and output. Focused
+OpenSSL/action regressions and independent review passed; Docker validation is
+complete. Commit, publication, and exact-SHA CI remain pending.
 
 ### Latest Docker Validation
 
-The clean Docker development image passed `cargo fmt --all --check`, the full
-workspace test suite, and strict workspace all-target Clippy. The release image
-`frickmail-rust:openpgp-canary` is
-`sha256:a498fc5f188fab25bb8ea02693b41e55acbb51e9df4be363efbf3dac06a46de0`.
+For the current S/MIME slice, the release image
+`frickmail-rust:smime-canary` is
+`sha256:63c91acfbf5df569940c5249dfdb63614a69c34bb3d40e41826292407bf7618d`.
 Its Compose canary is healthy with zero restarts and no OOM kill, runs as
 `frickmail:frickmail` on a read-only root filesystem with all capabilities
 dropped and `no-new-privileges`, serves both `/health` and `/` with HTTP 200,
 and logs a verified database connection and server startup with no error,
 panic, fatal, or OOM entry. The general 64 MiB `/tmp` tmpfs and private 72 MiB
 compose-staging tmpfs were verified; the latter is UID/GID 10001 and mode 0700.
+The Rust fmt/check, focused S/MIME tests, full `fm-user`/`fm-http` tests, and
+strict all-target Clippy passed before this canary. This image is built from
+the final uncommitted reviewed tree; publication and exact-SHA CI must still
+follow the commit.
 
 ### Required Per-Slice Workflow
 
@@ -53,10 +55,11 @@ The Rust service is usable as a guarded canary for the native routes, but is not
 yet a safe drop-in replacement for the PHP production container. The major
 remaining gates are:
 
-1. Complete server-side OpenPGP/GnuPG keyring signing/encryption and remaining
-   S/MIME encryption/identity-selection parity. Client-provided OpenPGP MIME,
-   S/MIME signing, OAuth SMTP, staged attachments, and data-x transformations
-   are native; unsupported combinations are explicitly rejected.
+1. Complete server-side OpenPGP/GnuPG keyring signing/encryption and MailSo's
+   direct client-supplied S/MIME certificate/private-key signing path. Client-
+   provided OpenPGP MIME and selected-account S/MIME signing/encryption are
+   native; direct S/MIME material and other unsupported combinations are
+   explicitly rejected.
 2. Finish exact legacy action and response parity, then migrate every request
    still dependent on the PHP compatibility bridge.
 3. Complete the Rust-only connection-token/CSRF/session contract and port or
