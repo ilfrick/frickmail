@@ -5,23 +5,23 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-19 00:23:58 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-19 00:26:58 CEST (UTC+02:00)
 
 ### Current Branch And Publication State
 
-`master` is at `f20140bec` and contains the recent native `Message` thread
-parity, OAuth SMTP, staged-attachment/data-image compose work, and reviewed
-client-provided OpenPGP MIME support. Both remotes' `master` and
-`rust-full-migration` refs match that commit.
+`master` and `rust-full-migration` are both at `0c1a5de99` on both remotes.
+That reviewed S/MIME compose parity commit includes the recent native `Message`
+thread parity, OAuth SMTP, staged-attachment/data-image compose work, and
+client-provided OpenPGP MIME support.
 
-The active uncommitted S/MIME correction makes selected-account SendMessage and
+The newly published S/MIME correction makes selected-account SendMessage and
 SaveMessage transform the root MIME entity once, then retain outer delivery
 headers and share the same CMS root for SMTP and Sent. It is byte-safe for raw
 non-UTF-8 attachments, handles exact legacy `sign: "S/MIME"` identity
 selection, applies encryption to drafts/Sent as legacy does, and bounds
 certificate material, crypto concurrency, blocking work, and output. Focused
-OpenSSL/action regressions and independent review passed; Docker validation is
-complete. Commit, publication, and exact-SHA CI remain pending.
+OpenSSL/action regressions, independent review, Docker validation, and
+publication completed. Exact-SHA GitHub CI remains pending at this timestamp.
 
 ### Latest Docker Validation
 
@@ -35,9 +35,9 @@ and logs a verified database connection and server startup with no error,
 panic, fatal, or OOM entry. The general 64 MiB `/tmp` tmpfs and private 72 MiB
 compose-staging tmpfs were verified; the latter is UID/GID 10001 and mode 0700.
 The Rust fmt/check, focused S/MIME tests, full `fm-user`/`fm-http` tests, and
-strict all-target Clippy passed before this canary. This image is built from
-the final uncommitted reviewed tree; publication and exact-SHA CI must still
-follow the commit.
+strict all-target Clippy passed before this canary. The image was built from
+the reviewed code published in `0c1a5de99`; follow the exact-SHA CI run before
+considering its canary evidence complete.
 
 ### Required Per-Slice Workflow
 
