@@ -9,8 +9,9 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ### Current Branch And Publication State
 
-`master` and `rust-full-migration` are both at `0c1a5de99` on both remotes.
-That reviewed S/MIME compose parity commit includes the recent native `Message`
+The reviewed S/MIME compose parity code commit `0c1a5de99` was pushed to both
+`master` and `rust-full-migration` on both remotes. This timestamped snapshot
+follows that publication; the code commit includes the recent native `Message`
 thread parity, OAuth SMTP, staged-attachment/data-image compose work, and
 client-provided OpenPGP MIME support.
 
