@@ -5,26 +5,25 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-19 09:43:40 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-19 09:49:39 CEST (UTC+02:00)
 
 ### Current Branch And Publication State
 
-The reviewed selected-account S/MIME compose parity code commit `0c1a5de99`
-was pushed to both `master` and `rust-full-migration` on both remotes. The
-current direct-S/MIME follow-up is independently reviewed and Docker-validated
-in this working tree, pending its intentional commit and publication. The prior
-code commit includes the recent native `Message` thread parity, OAuth SMTP,
-staged-attachment/data-image compose work, and client-provided OpenPGP MIME
-support.
+The reviewed direct-S/MIME compose code commit `19ec4840e` was pushed to both
+`master` and `rust-full-migration` on both remotes. It follows the earlier
+selected-account S/MIME parity commit `0c1a5de99`, alongside recent native
+`Message` thread parity, OAuth SMTP, staged-attachment/data-image compose work,
+and client-provided OpenPGP MIME support.
 
-The pending direct-S/MIME correction makes SendMessage and SaveMessage accept
+The newly published direct-S/MIME correction makes SendMessage and SaveMessage accept
 bounded direct `signCertificate`/`signPrivateKey` material, including encrypted
 PKCS#8 keys with a bounded passphrase. It matches MailSo precedence: a usable
 selected-account `sign: "S/MIME"` identity wins; otherwise a complete direct
 pair signs; otherwise compose remains unsigned. The single transformed MIME
 root still retains outer delivery headers and is shared by SMTP/Sent. Focused
-OpenSSL/action regressions, independent review, and Docker validation are
-complete; commit, dual-remote publication, and exact-SHA CI remain pending.
+OpenSSL/action regressions, independent review, Docker validation, and
+dual-remote publication are complete; exact-SHA CI remains pending at this
+timestamp.
 
 ### Latest Docker Validation
 
@@ -39,9 +38,8 @@ panic, fatal, or OOM entry. The general 64 MiB `/tmp` tmpfs and private 72 MiB
 compose-staging tmpfs were verified; the latter is UID/GID 10001 and mode 0700.
 Rust fmt/check, all 52 `fm-user` tests, all 316 `fm-http` tests, focused
 S/MIME action tests, and strict all-target Clippy passed before this canary.
-The image was built from the reviewed pending working tree; repeat the canary
-only if the staged code changes, then follow the exact-SHA CI run after
-publication before considering this evidence complete.
+The image was built from the reviewed code published in `19ec4840e`; follow the
+exact-SHA CI run before considering this evidence complete.
 
 ### Required Per-Slice Workflow
 
