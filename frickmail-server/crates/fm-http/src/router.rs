@@ -185,6 +185,7 @@ const SMIME_VERIFY_MAX_BYTES: usize = 2 * 1024 * 1024;
 const SMIME_VERIFY_MAX_BASE64_CHARS: usize = SMIME_VERIFY_MAX_BYTES.div_ceil(3) * 4;
 const SMIME_SIGNING_MAX_BYTES: usize = SMIME_VERIFY_MAX_BYTES;
 const SMIME_SIGNING_OUTPUT_MAX_BYTES: usize = SMIME_SIGNING_MAX_BYTES.div_ceil(3) * 4 + 16 * 1024;
+const SMIME_DIRECT_SIGN_PASSPHRASE_MAX_BYTES: usize = 4096;
 const LEGACY_SNAPPYMAIL_APP_VERSION: &str = env!("FRICKMAIL_WEBMAIL_VERSION");
 const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com";
 const MICROSOFT_GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access";
@@ -1561,6 +1562,7 @@ struct LegacySendMessageRequest {
     draft_info: Option<LegacyDraftInfoRequest>,
     /// `Some(identityID)` requests the legacy exact `sign=S/MIME` flow.
     smime_sign_identity: Option<String>,
+    smime_direct_signing: Option<LegacyDirectSmimeSigning>,
     /// S/MIME encryption recipient certificate IDs or PEM strings
     smime_encrypt_certificates: Vec<String>,
     /// OpenPGP signed MIME content (pre-built by client, e.g. Mailvelope)
@@ -1569,6 +1571,18 @@ struct LegacySendMessageRequest {
     pgp_encrypted: Option<String>,
     /// MIME boundary for pgp_signed multipart/signed structure
     pgp_boundary: Option<String>,
+}
+
+struct LegacyDirectSmimeSigning {
+    certificate_pem: String,
+    private_key_pem: String,
+    passphrase: String,
+}
+
+impl std::fmt::Debug for LegacyDirectSmimeSigning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LegacyDirectSmimeSigning { material: [redacted] }")
+    }
 }
 
 /// Validated legacy Autocrypt header values. Key material is stored as
@@ -2081,36 +2095,68 @@ async fn legacy_apply_smime_crypto(
     // MailSo transforms one shared root entity in buildMessage(), then emits
     // it for SMTP and Sent with only the outer Bcc header differing. Reuse the
     // same randomized CMS entity for both serialized copies.
-    if request.smime_sign_identity.is_some() {
-        let identity = legacy_resolve_smime_sign_identity(
-            pool,
-            user_id,
-            account_id,
-            request.smime_sign_identity.as_deref().unwrap_or_default(),
-            &request.envelope_from,
-        )
-        .await?;
+    if request.smime_sign_identity.is_some() || request.smime_direct_signing.is_some() {
         let root = legacy_rfc822_root(&transport_bytes)?;
-        let signed = match tokio::time::timeout(
-            SMIME_SIGNING_DEADLINE,
-            fm_user::SqlxUserRepository::sign_smime_message_for_account(
+        // Direct key material is MailSo's default. An exact `sign=S/MIME`
+        // marker may replace it only when a matching selected-account
+        // identity has usable material; otherwise PHP retains the direct
+        // fallback (or leaves the message unsigned when neither exists).
+        let stored_identity = if let Some(identity_id) = request.smime_sign_identity.as_deref() {
+            legacy_resolve_smime_sign_identity(
                 pool,
                 user_id,
                 account_id,
-                &identity,
-                &root,
-                credential_key,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(signed)) => signed,
-            Ok(Err(err)) => return Err(err.public_message()),
-            Err(_) => return Err("S/MIME signing timed out".to_string()),
+                identity_id,
+                &request.envelope_from,
+            )
+            .await?
+        } else {
+            None
         };
-        transport_bytes = legacy_replace_rfc822_root(&transport_bytes, &signed)?;
-        if let Some(stored) = stored_bytes.as_mut() {
-            *stored = legacy_replace_rfc822_root(stored, &signed)?;
+        let signed = if let Some(identity) = stored_identity {
+            match tokio::time::timeout(
+                SMIME_SIGNING_DEADLINE,
+                fm_user::SqlxUserRepository::sign_smime_message_for_account(
+                    pool,
+                    user_id,
+                    account_id,
+                    &identity,
+                    &root,
+                    credential_key,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(signed)) => Some(signed),
+                Ok(Err(err)) => return Err(err.public_message()),
+                Err(_) => return Err("S/MIME signing timed out".to_string()),
+            }
+        } else if let Some(direct) = request.smime_direct_signing.as_ref() {
+            // Do not retry direct material after a selected identity was
+            // chosen: a corrupt stored identity has precedence in MailSo.
+            match tokio::time::timeout(
+                SMIME_SIGNING_DEADLINE,
+                fm_user::SqlxUserRepository::sign_smime_message_with_material(
+                    &direct.certificate_pem,
+                    &direct.private_key_pem,
+                    &direct.passphrase,
+                    &root,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(signed)) => Some(signed),
+                Ok(Err(err)) => return Err(err.public_message()),
+                Err(_) => return Err("S/MIME signing timed out".to_string()),
+            }
+        } else {
+            None
+        };
+        if let Some(signed) = signed {
+            transport_bytes = legacy_replace_rfc822_root(&transport_bytes, &signed)?;
+            if let Some(stored) = stored_bytes.as_mut() {
+                *stored = legacy_replace_rfc822_root(stored, &signed)?;
+            }
         }
     }
 
@@ -2857,6 +2903,7 @@ fn legacy_save_message_request_from_payload_with_html(
         draft_uid: u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0),
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: legacy_smime_sign_identity(payload),
+        smime_direct_signing: legacy_direct_smime_signing(payload)?,
         smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
         pgp_signed: legacy_pgp_signed_content(payload),
         pgp_encrypted: legacy_pgp_encrypted_content(payload),
@@ -2868,26 +2915,7 @@ fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option
     // A client-supplied `signed` or `encrypted` MIME payload is handled below.
     // The legacy server-side GnuPG flow is intentionally not claimed as native
     // until Rust has an audited keyring and signing implementation.
-    if [
-        "signFingerprint",
-        "encryptFingerprints",
-        "signPassphrase",
-        "pgpSignature",
-    ]
-    .into_iter()
-    .any(|field| {
-        payload
-            .get(field)
-            .is_some_and(legacy_openpgp_directive_is_php_truthy)
-    }) {
-        return Some("server-side OpenPGP signing or encryption");
-    }
-
-    // MailSo also accepts a direct client-provided certificate/private-key
-    // signing path. Rust deliberately supports only selected-account stored
-    // S/MIME identity material; rejecting either PHP-truthy direct field avoids
-    // silently sending an unsigned message.
-    if ["signCertificate", "signPrivateKey"]
+    if ["signFingerprint", "encryptFingerprints", "pgpSignature"]
         .into_iter()
         .any(|field| {
             payload
@@ -2895,7 +2923,7 @@ fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option
                 .is_some_and(legacy_openpgp_directive_is_php_truthy)
         })
     {
-        return Some("direct S/MIME certificate signing");
+        return Some("server-side OpenPGP signing or encryption");
     }
 
     const MIME_FEATURES: &[(&str, &str)] = &[];
@@ -3204,6 +3232,7 @@ fn legacy_validate_compose_limits(payload: &Value) -> Result<(), String> {
     legacy_compose_attachment_specs(payload)?;
     legacy_validate_pgp_compose_content(payload)?;
     legacy_validate_smime_encrypt_certificates(payload)?;
+    let _ = legacy_direct_smime_signing(payload)?;
     if let Some(html) = payload.get("html").and_then(Value::as_str) {
         legacy_validate_raw_compose_html(html)?;
     }
@@ -4938,6 +4967,7 @@ fn legacy_send_message_request_from_payload_with_html(
         draft_uid,
         draft_info: legacy_draft_info_from_payload(payload),
         smime_sign_identity: legacy_smime_sign_identity(payload),
+        smime_direct_signing: legacy_direct_smime_signing(payload)?,
         smime_encrypt_certificates: legacy_parse_smime_encrypt_certificates(payload),
         pgp_signed: legacy_pgp_signed_content(payload),
         pgp_encrypted: legacy_pgp_encrypted_content(payload),
@@ -5524,35 +5554,74 @@ fn legacy_smime_sign_identity(payload: &Value) -> Option<String> {
         .then(|| payload_string(payload, "identityID").unwrap_or_default())
 }
 
+fn legacy_direct_smime_signing(
+    payload: &Value,
+) -> Result<Option<LegacyDirectSmimeSigning>, String> {
+    let certificate_pem = payload_string(payload, "signCertificate").unwrap_or_default();
+    let private_key_pem = payload_string(payload, "signPrivateKey").unwrap_or_default();
+    if !legacy_compose_string_is_php_truthy(&certificate_pem)
+        || !legacy_compose_string_is_php_truthy(&private_key_pem)
+    {
+        return Ok(None);
+    }
+    if certificate_pem.len() > fm_user::SMIME_CERT_PEM_MAX_BYTES {
+        return Err("S/MIME certificate exceeds the safety limit".to_string());
+    }
+    if private_key_pem.len() > fm_user::SMIME_PRIVATE_KEY_PEM_MAX_BYTES {
+        return Err("S/MIME private key exceeds the safety limit".to_string());
+    }
+    let passphrase = payload_string(payload, "signPassphrase").unwrap_or_default();
+    if passphrase.len() > SMIME_DIRECT_SIGN_PASSPHRASE_MAX_BYTES {
+        return Err("S/MIME private-key passphrase exceeds the safety limit".to_string());
+    }
+    Ok(Some(LegacyDirectSmimeSigning {
+        certificate_pem,
+        private_key_pem,
+        passphrase,
+    }))
+}
+
 async fn legacy_resolve_smime_sign_identity(
     pool: &sqlx::AnyPool,
     user_id: i64,
     account_id: i64,
     requested_identity_id: &str,
     from_email: &str,
-) -> Result<String, String> {
-    if !requested_identity_id.is_empty() {
-        let identities = SqlxUserRepository::list_mail_identities(pool, user_id, account_id)
-            .await
-            .map_err(|err| err.public_message())?;
-        if let Some(identity) = identities
-            .into_iter()
-            .find(|identity| identity.id.to_string() == requested_identity_id)
+) -> Result<Option<String>, String> {
+    let identities = SqlxUserRepository::list_mail_identities(pool, user_id, account_id)
+        .await
+        .map_err(|err| err.public_message())?;
+    for identity in identities {
+        if identity.id.to_string() != requested_identity_id
+            && !identity.email.eq_ignore_ascii_case(from_email)
         {
-            if SqlxUserRepository::has_smime_signing_material_for_account(
-                pool,
-                user_id,
-                account_id,
-                &identity.email,
-            )
-            .await
-            .map_err(|err| err.public_message())?
-            {
-                return Ok(identity.email);
-            }
+            continue;
+        }
+        if SqlxUserRepository::has_smime_signing_material_for_account(
+            pool,
+            user_id,
+            account_id,
+            &identity.email,
+        )
+        .await
+        .map_err(|err| err.public_message())?
+        {
+            return Ok(Some(identity.email));
         }
     }
-    Ok(from_email.to_string())
+    // Frickmail stores selected-account S/MIME material by email, while the
+    // legacy identity list includes the account's effective From identity.
+    // Preserve that default-identity case even where no explicit identity row
+    // was persisted locally.
+    if SqlxUserRepository::has_smime_signing_material_for_account(
+        pool, user_id, account_id, from_email,
+    )
+    .await
+    .map_err(|err| err.public_message())?
+    {
+        return Ok(Some(from_email.to_string()));
+    }
+    Ok(None)
 }
 
 fn legacy_parse_smime_encrypt_certificates(payload: &Value) -> Vec<String> {
@@ -22148,14 +22217,14 @@ Subject: Empty body metadata\r\n\r\n"
                 &json!({"signCertificate": "-----BEGIN CERTIFICATE-----"}),
                 true
             ),
-            Some("direct S/MIME certificate signing")
+            None
         );
         assert_eq!(
             super::legacy_unsupported_compose_feature(
                 &json!({"signPrivateKey": ["private-key"]}),
                 false
             ),
-            Some("direct S/MIME certificate signing")
+            None
         );
     }
 
@@ -22378,6 +22447,7 @@ Subject: Empty body metadata\r\n\r\n"
         seed_mail_account(&pool, 9_920, 992, "First", true).await;
         seed_mail_account(&pool, 9_921, 992, "Second", false).await;
         seed_identity(&pool, 9_922, 992, 9_920, "Selected", true).await;
+        seed_identity(&pool, 9_924, 992, 9_920, "From", false).await;
         seed_smime_cert(
             &pool,
             9_923,
@@ -22387,6 +22457,18 @@ Subject: Empty body metadata\r\n\r\n"
             "selected-signing-material",
             None,
             Some(vec![1]),
+            "2026-01-01 00:00:00",
+        )
+        .await;
+        seed_smime_cert(
+            &pool,
+            9_925,
+            992,
+            9_920,
+            "from@example.com",
+            "from-signing-material",
+            None,
+            Some(vec![2]),
             "2026-01-01 00:00:00",
         )
         .await;
@@ -22401,7 +22483,7 @@ Subject: Empty body metadata\r\n\r\n"
             )
             .await
             .unwrap(),
-            "selected@example.com"
+            Some("selected@example.com".to_string())
         );
         assert_eq!(
             super::legacy_resolve_smime_sign_identity(
@@ -22413,7 +22495,7 @@ Subject: Empty body metadata\r\n\r\n"
             )
             .await
             .unwrap(),
-            "from@example.com"
+            None
         );
 
         sqlx::query("UPDATE frickmail_smime_certs SET encrypted_key_pem = NULL WHERE id = ?")
@@ -22431,7 +22513,7 @@ Subject: Empty body metadata\r\n\r\n"
             )
             .await
             .unwrap(),
-            "from@example.com"
+            Some("from@example.com".to_string())
         );
     }
 
@@ -29632,6 +29714,10 @@ Subject: Empty body metadata\r\n\r\n"
             message_body_test_state_with_config(7_052, 7_053, &key, test_config(None)).await;
         create_smime_cert_tables(state.db_pool().unwrap()).await;
         let (cert_pem, private_key, certificate) = test_smime_cert_material("work@example.com");
+        let (direct_cert_pem, direct_private_key, _) =
+            test_smime_cert_material("direct@example.com");
+        let direct_private_key_pem =
+            String::from_utf8(direct_private_key.private_key_to_pem_pkcs8().unwrap()).unwrap();
         let p12 = Pkcs12::builder()
             .name("work@example.com")
             .pkey(&private_key)
@@ -29681,6 +29767,8 @@ Subject: Empty body metadata\r\n\r\n"
                 "subject": "Signed outer subject",
                 "plain": "Signed root",
                 "sign": "S/MIME",
+                "signCertificate": direct_cert_pem,
+                "signPrivateKey": direct_private_key_pem,
                 "saveFolder": "Sent"
             }),
             &session,
@@ -29707,6 +29795,13 @@ Subject: Empty body metadata\r\n\r\n"
         let (signed, detached_content) = Pkcs7::from_smime(&smtp_root).unwrap();
         let store = X509StoreBuilder::new().unwrap().build();
         let certificates = openssl::stack::Stack::new().unwrap();
+        let signers = signed.signers(&certificates, Pkcs7Flags::empty()).unwrap();
+        assert_eq!(signers.len(), 1);
+        assert_eq!(
+            signers[0].to_der().unwrap(),
+            certificate.to_der().unwrap(),
+            "a usable selected-account identity must take precedence over direct material"
+        );
         let mut verified_root = Vec::new();
         signed
             .verify(
@@ -29722,6 +29817,175 @@ Subject: Empty body metadata\r\n\r\n"
             .windows(b"Signed root".len())
             .any(|part| part == b"Signed root"));
         assert!(cert_pem.contains("BEGIN CERTIFICATE"));
+    }
+
+    #[tokio::test]
+    async fn send_and_save_smime_direct_material_without_marker_supports_an_encrypted_key() {
+        let key = [67_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(7_062, 7_063, &key, test_config(None)).await;
+        create_smime_cert_tables(state.db_pool().unwrap()).await;
+        let (certificate_pem, private_key, certificate) =
+            test_smime_cert_material("direct@example.com");
+        let private_key_pem = String::from_utf8(
+            private_key
+                .private_key_to_pem_pkcs8_passphrase(
+                    openssl::symm::Cipher::aes_256_cbc(),
+                    b"direct-passphrase",
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        sqlx::query("UPDATE frickmail_mail_accounts SET smtp_host = ?, smtp_port = ?, smtp_secure = ? WHERE id = ?")
+            .bind("8.8.8.8")
+            .bind(25_i64)
+            .bind("none")
+            .bind(7_063_i64)
+            .execute(state.db_pool().unwrap())
+            .await
+            .unwrap();
+
+        let payload = json!({
+            "account_id": 7_063,
+            "from": "work@example.com",
+            "to": "recipient@example.net",
+            "subject": "Direct S/MIME",
+            "plain": "Direct signed root",
+            "signCertificate": certificate_pem,
+            "signPrivateKey": private_key_pem,
+            "signPassphrase": "direct-passphrase",
+            "saveFolder": "Sent"
+        });
+        let smtp = Arc::new(Mutex::new(None));
+        let sent = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&smtp),
+        };
+        let sent_appender = RecordingSentAppender {
+            message: Arc::clone(&sent),
+        };
+        let response = super::native_send_message_inner_with_sender_and_sent_appender(
+            &state,
+            "SendMessage",
+            &payload,
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+            &sent_appender,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+        let smtp_wire = smtp.lock().unwrap().clone().unwrap();
+        let sent_wire = sent.lock().unwrap().clone().unwrap();
+        let smtp_root = super::legacy_rfc822_root(&smtp_wire).unwrap();
+        assert_eq!(smtp_root, super::legacy_rfc822_root(&sent_wire).unwrap());
+        let (signed, detached_content) = Pkcs7::from_smime(&smtp_root).unwrap();
+        let store = X509StoreBuilder::new().unwrap().build();
+        let certificates = openssl::stack::Stack::new().unwrap();
+        let mut verified_root = Vec::new();
+        signed
+            .verify(
+                &certificates,
+                &store,
+                detached_content.as_deref(),
+                Some(&mut verified_root),
+                Pkcs7Flags::NOVERIFY,
+            )
+            .unwrap();
+        assert!(verified_root
+            .windows(b"Direct signed root".len())
+            .any(|part| part == b"Direct signed root"));
+        assert_eq!(
+            signed.signers(&certificates, Pkcs7Flags::empty()).unwrap()[0]
+                .to_der()
+                .unwrap(),
+            certificate.to_der().unwrap()
+        );
+
+        let appended = Arc::new(Mutex::new(None));
+        let appender = RecordingDraftAppender {
+            message: Arc::clone(&appended),
+        };
+        let save_response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &json!({
+                "account_id": 7_063,
+                "from": "work@example.com",
+                "subject": "Direct S/MIME draft",
+                "plain": "Direct signed draft",
+                "signCertificate": payload["signCertificate"],
+                "signPrivateKey": payload["signPrivateKey"],
+                "signPassphrase": "direct-passphrase",
+                "saveFolder": "Drafts"
+            }),
+            &session,
+            &appender,
+        )
+        .await;
+        assert_eq!(read_json(save_response).await["Result"]["uid"], 77);
+        let draft_root =
+            super::legacy_rfc822_root(&appended.lock().unwrap().clone().unwrap()).unwrap();
+        let (draft_signed, draft_content) = Pkcs7::from_smime(&draft_root).unwrap();
+        let mut verified_draft = Vec::new();
+        draft_signed
+            .verify(
+                &certificates,
+                &store,
+                draft_content.as_deref(),
+                Some(&mut verified_draft),
+                Pkcs7Flags::NOVERIFY,
+            )
+            .unwrap();
+        assert!(verified_draft
+            .windows(b"Direct signed draft".len())
+            .any(|part| part == b"Direct signed draft"));
+    }
+
+    #[tokio::test]
+    async fn smime_marker_without_usable_material_leaves_compose_unsigned() {
+        let key = [68_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(7_072, 7_073, &key, test_config(None)).await;
+        create_smime_cert_tables(state.db_pool().unwrap()).await;
+        sqlx::query("UPDATE frickmail_mail_accounts SET smtp_host = ?, smtp_port = ?, smtp_secure = ? WHERE id = ?")
+            .bind("8.8.8.8")
+            .bind(25_i64)
+            .bind("none")
+            .bind(7_073_i64)
+            .execute(state.db_pool().unwrap())
+            .await
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&captured),
+        };
+        let response = super::native_send_message_inner_with_sender(
+            &state,
+            "SendMessage",
+            &json!({
+                "account_id": 7_073,
+                "from": "work@example.com",
+                "to": "recipient@example.net",
+                "plain": "Unsigned legacy fallback",
+                "sign": "S/MIME",
+                "identityID": "missing"
+            }),
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+        let wire = captured.lock().unwrap().clone().unwrap();
+        assert!(wire
+            .windows(b"Unsigned legacy fallback".len())
+            .any(|part| part == b"Unsigned legacy fallback"));
+        assert!(!wire
+            .windows(b"multipart/signed".len())
+            .any(|part| part == b"multipart/signed"));
     }
 
     #[tokio::test]

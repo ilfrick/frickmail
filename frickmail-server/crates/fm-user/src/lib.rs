@@ -827,6 +827,19 @@ impl SqlxUserRepository {
         .await
     }
 
+    /// Signs a bounded compose MIME entity with explicitly supplied S/MIME
+    /// material. The caller is responsible for authenticating the request and
+    /// applying its own request-level limits.
+    pub async fn sign_smime_message_with_material(
+        certificate_pem: &str,
+        private_key_pem: &str,
+        passphrase: &str,
+        message_body: &[u8],
+    ) -> Result<Vec<u8>> {
+        sign_smime_message_with_material(certificate_pem, private_key_pem, passphrase, message_body)
+            .await
+    }
+
     /// Reports whether a selected-account identity has bounded stored signing
     /// material. Compose uses this to match MailSo's identity fallback before
     /// asking OpenSSL to sign.
@@ -3112,6 +3125,52 @@ async fn sign_smime_message(
     })
     .await
     .map_err(|_| FrickmailError::Upstream("S/MIME signing task failed".to_string()))?
+}
+
+async fn sign_smime_message_with_material(
+    certificate_pem: &str,
+    private_key_pem: &str,
+    passphrase: &str,
+    message_body: &[u8],
+) -> Result<Vec<u8>> {
+    validate_smime_cert_pem_size(certificate_pem)?;
+    if private_key_pem.len() > SMIME_PRIVATE_KEY_PEM_MAX_BYTES {
+        return Err(FrickmailError::BadRequest(
+            "S/MIME private key exceeds the safety limit".to_string(),
+        ));
+    }
+    if passphrase.len() > 4096 {
+        return Err(FrickmailError::BadRequest(
+            "S/MIME private-key passphrase exceeds the safety limit".to_string(),
+        ));
+    }
+    let certificate_pem = certificate_pem.to_string();
+    let private_key_pem = private_key_pem.to_string();
+    let passphrase = passphrase.to_string();
+    let message_body = message_body.to_vec();
+    run_smime_blocking("direct signing", move || {
+        let cert = X509::from_pem(certificate_pem.as_bytes()).map_err(|err| {
+            FrickmailError::BadRequest(format!("S/MIME certificate load failed: {err}"))
+        })?;
+        let key = if passphrase.is_empty() {
+            PKey::private_key_from_pem(private_key_pem.as_bytes())
+        } else {
+            PKey::private_key_from_pem_passphrase(private_key_pem.as_bytes(), passphrase.as_bytes())
+        }
+        .map_err(|err| {
+            FrickmailError::BadRequest(format!("S/MIME private key load failed: {err}"))
+        })?;
+        let certs = Stack::new().map_err(|err| {
+            FrickmailError::Upstream(format!("S/MIME certificate stack init failed: {err}"))
+        })?;
+        let flags = Pkcs7Flags::DETACHED | Pkcs7Flags::STREAM;
+        let pkcs7 = Pkcs7::sign(&cert, &key, &certs, &message_body, flags)
+            .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))?;
+        pkcs7
+            .to_smime(&message_body, flags)
+            .map_err(|err| FrickmailError::Upstream(format!("openssl_pkcs7_sign failed: {err}")))
+    })
+    .await
 }
 
 fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
