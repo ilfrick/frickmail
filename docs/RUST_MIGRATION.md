@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-20 06:18:38 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-20 06:25:15 CEST (UTC+02:00)
 
 ### Current Branch And Publication State
 
@@ -25,19 +25,20 @@ OpenSSL/action regressions, independent review, Docker validation, and
 dual-remote publication are complete; exact-SHA CI remains pending at this
 timestamp.
 
-The pending ZIP attachment-export correction makes the legacy
+The published ZIP attachment-export correction `41b0a41b9` makes the legacy
 `AttachmentsActions` `target=zip` flow native, including its exact RawDownload
 follow-up route. It uses account-scoped opaque archive capabilities, bounded
 decoded IMAP part fetches, serialized private archive construction, expiry and
 user/global file-and-byte quotas, and bounded streamed downloads. Archive entry
 names, PHP truthiness, and visible timestamped download names follow MailSo;
 non-ZIP plugin targets remain on their compatibility-hook path. Independent
-review and the production canary below passed. Commit, dual-remote publication,
-and exact-SHA CI remain pending at this timestamp.
+review and the production canary below passed. The same SHA was pushed to both
+`master` and `rust-full-migration` on both remotes; exact-SHA CI remains pending
+at this timestamp.
 
 ### Latest Docker Validation
 
-For the pending ZIP attachment-export slice, the release image
+For the published ZIP attachment-export slice, the release image
 `frickmail-rust:attachment-export-canary` is
 `sha256:d19406e1f04d1771df8e19317688b2647dc692f08345004bdada2953cca129ae`.
 Its Compose canary is healthy with zero restarts and no OOM kill, runs as
