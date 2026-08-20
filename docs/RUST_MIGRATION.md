@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-19 09:49:39 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-20 06:18:38 CEST (UTC+02:00)
 
 ### Current Branch And Publication State
 
@@ -25,21 +25,31 @@ OpenSSL/action regressions, independent review, Docker validation, and
 dual-remote publication are complete; exact-SHA CI remains pending at this
 timestamp.
 
+The pending ZIP attachment-export correction makes the legacy
+`AttachmentsActions` `target=zip` flow native, including its exact RawDownload
+follow-up route. It uses account-scoped opaque archive capabilities, bounded
+decoded IMAP part fetches, serialized private archive construction, expiry and
+user/global file-and-byte quotas, and bounded streamed downloads. Archive entry
+names, PHP truthiness, and visible timestamped download names follow MailSo;
+non-ZIP plugin targets remain on their compatibility-hook path. Independent
+review and the production canary below passed. Commit, dual-remote publication,
+and exact-SHA CI remain pending at this timestamp.
+
 ### Latest Docker Validation
 
-For the pending direct-S/MIME slice, the release image
-`frickmail-rust:smime-direct-canary` is
-`sha256:324f265f5700ab379a515ae85cb591d303a6c2940b68d691cd8cb17ba11e6ba3`.
+For the pending ZIP attachment-export slice, the release image
+`frickmail-rust:attachment-export-canary` is
+`sha256:d19406e1f04d1771df8e19317688b2647dc692f08345004bdada2953cca129ae`.
 Its Compose canary is healthy with zero restarts and no OOM kill, runs as
 `frickmail:frickmail` on a read-only root filesystem with all capabilities
 dropped and `no-new-privileges`, serves both `/health` and `/` with HTTP 200,
 and logs a verified database connection and server startup with no error,
-panic, fatal, or OOM entry. The general 64 MiB `/tmp` tmpfs and private 72 MiB
-compose-staging tmpfs were verified; the latter is UID/GID 10001 and mode 0700.
-Rust fmt/check, all 52 `fm-user` tests, all 316 `fm-http` tests, focused
-S/MIME action tests, and strict all-target Clippy passed before this canary.
-The image was built from the reviewed code published in `19ec4840e`; follow the
-exact-SHA CI run before considering this evidence complete.
+panic, fatal, or OOM entry. The general 64 MiB `/tmp` tmpfs, private 72 MiB
+compose-staging tmpfs, and new private 96 MiB archive-export tmpfs were
+verified; private mounts are UID/GID 10001 and mode 0700. Focused ZIP/action
+tests, formatting, checks, strict Clippy, and independent review passed before
+this canary. The image is from the reviewed pending code; follow the exact-SHA
+CI run after publication before considering this evidence complete.
 
 ### Required Per-Slice Workflow
 

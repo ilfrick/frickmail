@@ -68,10 +68,14 @@ services:
     ports:
       - "127.0.0.1:${FRICKMAIL_RUST_PORT:-18088}:8888"
     tmpfs:
-      # Keep general exports separate from compose staging so a ZIP cannot
-      # consume attachment quota.  Staging needs 60 MiB committed data plus
-      # one serialized 10 MiB atomic partial and filesystem overhead.
+      # Keep ZIP exports separate from compose staging so archives cannot
+      # consume compose quota.  The export service admits at most 40 MiB of
+      # retained archives and one serialized build uses <=20 MiB of private
+      # sources plus <=10 MiB of output.
       - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /tmp/frickmail/attachment-exports:rw,noexec,nosuid,nodev,size=96m,uid=10001,gid=10001,mode=0700
+      # Staging needs 60 MiB committed data plus one serialized 10 MiB atomic
+      # partial and filesystem overhead.
       - /tmp/frickmail/compose-attachments:rw,noexec,nosuid,nodev,size=72m,uid=10001,gid=10001,mode=0700
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8888/health"]

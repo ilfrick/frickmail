@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     env,
+    io::Seek,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
@@ -36,18 +37,17 @@ use fm_imap::{
     copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
     fetch_legacy_folder_information, fetch_legacy_folders,
     fetch_legacy_message_list_with_uid_cache_if_changed, fetch_legacy_message_threads_cached,
-    fetch_mailbox_acl, fetch_mailbox_status, fetch_message_body_preview, fetch_mime_part,
-    fetch_mime_part_bounded, fetch_raw_folder_messages, fetch_raw_message,
-    legacy_message_cache_key, legacy_message_hash, legacy_message_list_cache_key,
-    legacy_message_list_params_hash, legacy_message_list_visible_uids_cached, login, move_messages,
-    rename_mailbox, set_mailbox_acl, set_mailbox_metadata, set_mailbox_subscription,
-    store_message_flag, store_message_keyword, store_seen_to_all, timeout_imap,
-    update_mailbox_settings, validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapLoginProbe,
-    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolder, LegacyFolderCollection,
-    LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest, LegacyNamespaces,
-    MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction,
-    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
-    RuleExecutionReport,
+    fetch_mailbox_acl, fetch_mailbox_status, fetch_message_body_preview, fetch_mime_part_bounded,
+    fetch_raw_folder_messages, fetch_raw_message, legacy_message_cache_key, legacy_message_hash,
+    legacy_message_list_cache_key, legacy_message_list_params_hash,
+    legacy_message_list_visible_uids_cached, login, move_messages, rename_mailbox, set_mailbox_acl,
+    set_mailbox_metadata, set_mailbox_subscription, store_message_flag, store_message_keyword,
+    store_seen_to_all, timeout_imap, update_mailbox_settings, validate_eml, BodyPreviewPart,
+    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
+    LegacyFolder, LegacyFolderCollection, LegacyFolderInformation, LegacyMessageList,
+    LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry, MailboxMetadata, MailboxStatus,
+    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
+    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
 };
 use fm_mime::{
     parse_body, parse_body_part_text, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment,
@@ -85,7 +85,7 @@ use serde::{
 };
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
@@ -136,6 +136,16 @@ const COMPOSE_ATTACHMENT_GLOBAL_LIMIT_BYTES: usize = 60 * 1024 * 1024;
 const COMPOSE_ATTACHMENT_GLOBAL_FILE_LIMIT: usize = 300;
 const COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT: usize = 1_024;
 const COMPOSE_ATTACHMENT_DIRECTORY_RECOVERY_SCAN_LIMIT: usize = 4_096;
+const ATTACHMENT_EXPORT_MAX_ITEMS: usize = 20;
+const ATTACHMENT_EXPORT_INPUT_LIMIT_BYTES: usize = 20 * 1024 * 1024;
+const ATTACHMENT_EXPORT_ARCHIVE_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+const ATTACHMENT_EXPORT_USER_LIMIT_BYTES: usize = 20 * 1024 * 1024;
+const ATTACHMENT_EXPORT_GLOBAL_LIMIT_BYTES: usize = 40 * 1024 * 1024;
+const ATTACHMENT_EXPORT_USER_FILE_LIMIT: usize = 2;
+const ATTACHMENT_EXPORT_GLOBAL_FILE_LIMIT: usize = 4;
+const ATTACHMENT_EXPORT_MAX_AGE: Duration = Duration::from_secs(15 * 60);
+const ATTACHMENT_EXPORT_DEADLINE: Duration = Duration::from_secs(120);
+const ATTACHMENT_EXPORT_DOWNLOAD_CONCURRENCY: usize = 4;
 const COMPOSE_ATTACHMENT_MEMORY_BUDGET_MIB: usize = 64;
 const COMPOSE_MIME_BUILD_CONCURRENCY: usize = 2;
 const COMPOSE_MIME_BUILD_DEADLINE: Duration = Duration::from_secs(30);
@@ -397,6 +407,9 @@ async fn root_get(
     OriginalUri(uri): OriginalUri,
     request: AxumRequest,
 ) -> Response {
+    if let Some(raw_key) = legacy_attachment_export_download_route(&uri) {
+        return native_legacy_attachment_export_download(&state, raw_key, &session).await;
+    }
     if is_legacy_json_request(&uri) {
         return json_api_request(state, uri, request, session).await;
     }
@@ -533,6 +546,21 @@ async fn json_api_request(
         .await;
     }
 
+    if action == "AttachmentsActions"
+        && payload_optional_string(&request.payload, "target")
+            .is_some_and(|target| target.eq_ignore_ascii_case("zip"))
+    {
+        return match tokio::time::timeout(
+            ATTACHMENT_EXPORT_DEADLINE,
+            native_legacy_attachments_actions(&state, &request.action, &request.payload, &session),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => json_result_error(&request.action, "Attachment archive export timed out"),
+        };
+    }
+
     if is_compat_hook(&action) {
         if let Some(response) = native_compat_response(
             &state,
@@ -626,6 +654,16 @@ fn legacy_route_action(uri: &Uri) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The legacy client downloads an archive immediately after `AttachmentsActions`
+/// through this exact service-query shape.  Keep it narrow so JSON and ordinary
+/// Raw attachment routes retain their existing bridge/compatibility behavior.
+fn legacy_attachment_export_download_route(uri: &Uri) -> Option<&str> {
+    const PREFIX: &str = "/Raw/&q[]=/0/Download/&q[]=/";
+    uri.query()?
+        .strip_prefix(PREFIX)
+        .filter(|raw_key| !raw_key.is_empty() && !raw_key.contains('&'))
 }
 
 fn legacy_upload_service_route(uri: &Uri) -> bool {
@@ -1331,22 +1369,44 @@ fn compose_mime_build_semaphore() -> &'static Semaphore {
     SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_MIME_BUILD_CONCURRENCY))
 }
 
+fn attachment_export_semaphore() -> &'static Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    // A build can use the archive output plus private source files.  Serialize
+    // it so the bounded export tmpfs remains predictable under load.
+    SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(1)))
+}
+
+fn attachment_export_download_semaphore() -> &'static Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(ATTACHMENT_EXPORT_DOWNLOAD_CONCURRENCY)))
+}
+
 #[derive(Debug, Clone)]
 struct LegacyComposeStagingScope {
     root: PathBuf,
     user_directory: PathBuf,
     directory: PathBuf,
+    account_id: i64,
 }
 
 impl LegacyComposeStagingScope {
     fn new(tmp_dir: &str, user_id: i64, account_id: i64) -> Self {
-        let root = Path::new(tmp_dir).join("compose-attachments");
+        Self::in_namespace(tmp_dir, "compose-attachments", user_id, account_id)
+    }
+
+    fn attachment_export(tmp_dir: &str, user_id: i64, account_id: i64) -> Self {
+        Self::in_namespace(tmp_dir, "attachment-exports", user_id, account_id)
+    }
+
+    fn in_namespace(tmp_dir: &str, namespace: &str, user_id: i64, account_id: i64) -> Self {
+        let root = Path::new(tmp_dir).join(namespace);
         let user_directory = root.join(format!("user-{user_id:x}"));
         let directory = user_directory.join(format!("account-{account_id:x}"));
         Self {
             root,
             user_directory,
             directory,
+            account_id,
         }
     }
 
@@ -9518,7 +9578,6 @@ async fn legacy_folder_append_account_id(
     Ok(selected.account_id)
 }
 
-#[allow(dead_code)]
 async fn native_legacy_attachments_actions(
     state: &AppState,
     original_action: &str,
@@ -9532,7 +9591,15 @@ async fn native_legacy_attachments_actions(
         session,
         MESSAGE_BODY_FETCH_DEADLINE,
         |config, password, folder, uid, mime_index| async move {
-            fetch_mime_part(config, &password, &folder, uid, &mime_index).await
+            fetch_mime_part_bounded(
+                config,
+                &password,
+                &folder,
+                uid,
+                &mime_index,
+                COMPOSE_ATTACHMENT_LIMIT_BYTES,
+            )
+            .await
         },
     )
     .await
@@ -9550,134 +9617,239 @@ where
     F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>>,
 {
-    let (config, password) =
-        match legacy_imap_connection_context(state, original_action, payload, session).await {
+    let (scope, config, password) =
+        match legacy_attachment_export_imap_context(state, original_action, payload, session).await
+        {
             Ok(connection) => connection,
             Err(response) => return response,
         };
     let target = payload_optional_string(payload, "target").unwrap_or_default();
-    if target != "zip" {
+    if !target.eq_ignore_ascii_case("zip") {
         return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
     }
 
-    let filename =
-        payload_optional_string(payload, "filename").unwrap_or_else(|| "attachments".to_string());
+    let requested_filename = payload_optional_string(payload, "filename").unwrap_or_default();
     let folder = payload_optional_string(payload, "folder").unwrap_or_default();
     let hashes = match payload.get("hashes") {
-        Some(Value::Array(arr)) => arr.clone(),
+        Some(Value::Array(arr)) if !arr.is_empty() && arr.len() <= ATTACHMENT_EXPORT_MAX_ITEMS => {
+            arr
+        }
         _ => {
             return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
         }
     };
+    let raw_key_bytes = hashes.iter().try_fold(0_usize, |total, hash| {
+        let value = hash.as_str()?;
+        (value.len() <= COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES)
+            .then_some(total.saturating_add(value.len()))
+    });
+    if raw_key_bytes.is_none_or(|bytes| bytes > COMPOSE_ATTACHMENT_RAW_KEY_TOTAL_LIMIT_BYTES) {
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+    }
 
-    let mut attachment_data: Vec<(String, Vec<u8>)> = Vec::new();
-    for hash in &hashes {
-        let hash_str = hash.as_str().unwrap_or_default();
-        let Some(raw_values) = legacy_raw_key_json(hash_str) else {
-            continue;
+    let _export_permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        Arc::clone(attachment_export_semaphore()).acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            return json_result_error(
+                original_action,
+                "Attachment archive export is busy; retry later",
+            )
+        }
+    };
+    if let Err(err) = legacy_prepare_compose_staging_scope(&scope).await {
+        tracing::warn!("Could not secure attachment export directory: {err}");
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+    }
+    let usage = match legacy_cleanup_attachment_exports(&scope).await {
+        Ok(usage) => usage,
+        Err(err) => {
+            tracing::warn!("Could not inspect attachment export quota: {err}");
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+        }
+    };
+    if ATTACHMENT_EXPORT_ARCHIVE_LIMIT_BYTES
+        > ATTACHMENT_EXPORT_GLOBAL_LIMIT_BYTES.saturating_sub(usage.global_bytes)
+        || ATTACHMENT_EXPORT_ARCHIVE_LIMIT_BYTES
+            > ATTACHMENT_EXPORT_USER_LIMIT_BYTES.saturating_sub(usage.user_bytes)
+        || usage.global_files >= ATTACHMENT_EXPORT_GLOBAL_FILE_LIMIT
+        || usage.user_files >= ATTACHMENT_EXPORT_USER_FILE_LIMIT
+    {
+        return json_result_error(
+            original_action,
+            "Attachment archive export quota is full; retry later",
+        );
+    }
+
+    let archive_token = legacy_random_compose_attachment_token();
+    let mut source_paths = LegacyAttachmentExportSources::default();
+    let mut input_bytes = 0_usize;
+    for (index, hash) in hashes.iter().enumerate() {
+        let Some(raw_values) = legacy_raw_key_json(hash.as_str().unwrap_or_default()) else {
+            legacy_remove_attachment_export_sources(&source_paths.0).await;
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
         };
-
         let file_name = raw_values
             .get("fileName")
             .and_then(Value::as_str)
+            .filter(|name| {
+                !name.is_empty() && name.len() <= COMPOSE_ATTACHMENT_FILENAME_LIMIT_BYTES
+            })
             .unwrap_or("file.dat")
             .to_string();
-
+        let source_uid = raw_values
+            .get("uid")
+            .and_then(Value::as_u64)
+            .and_then(|uid| u32::try_from(uid).ok());
+        let source_is_mime_part = raw_values
+            .get("mimeIndex")
+            .and_then(Value::as_str)
+            .is_some_and(legacy_compose_string_is_php_truthy);
         let data = if let Some(data_b64) = raw_values.get("data").and_then(Value::as_str) {
-            match URL_SAFE_NO_PAD
+            URL_SAFE_NO_PAD
                 .decode(data_b64.as_bytes())
                 .or_else(|_| URL_SAFE.decode(data_b64.as_bytes()))
-            {
-                Ok(decoded) => decoded,
-                Err(_) => continue,
-            }
+                .ok()
         } else {
             let item_folder = raw_values
                 .get("folder")
                 .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 1024)
                 .unwrap_or(&folder);
-            let item_uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let item_uid = raw_values
+                .get("uid")
+                .and_then(Value::as_u64)
+                .and_then(|uid| u32::try_from(uid).ok())
+                .unwrap_or(0);
             let mime_index = raw_values
                 .get("mimeIndex")
                 .and_then(Value::as_str)
-                .unwrap_or("")
+                .filter(|value| value.len() <= 256)
+                .unwrap_or_default()
                 .to_string();
-
             if item_uid == 0 || item_folder.is_empty() {
-                continue;
-            }
-
-            match tokio::time::timeout(
-                fetch_deadline,
-                fetcher(
-                    config.clone(),
-                    password.clone(),
-                    item_folder.to_string(),
-                    item_uid,
-                    mime_index,
-                ),
-            )
-            .await
-            {
-                Ok(Ok(Some(data))) => data,
-                Ok(Ok(None)) => continue,
-                Ok(Err(err)) => {
-                    tracing::warn!("Failed to fetch attachment: {err}");
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!("Attachment fetch timed out");
-                    continue;
+                None
+            } else {
+                let _memory_permit = match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    Arc::clone(compose_attachment_memory_semaphore())
+                        .acquire_many_owned(compose_attachment_fetch_memory_permit_units()),
+                )
+                .await
+                {
+                    Ok(Ok(permit)) => permit,
+                    _ => {
+                        legacy_remove_attachment_export_sources(&source_paths.0).await;
+                        return json_result_error(
+                            original_action,
+                            "Attachment export memory budget is busy; retry later",
+                        );
+                    }
+                };
+                match tokio::time::timeout(
+                    fetch_deadline,
+                    fetcher(
+                        config.clone(),
+                        password.clone(),
+                        item_folder.to_string(),
+                        item_uid,
+                        mime_index,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(Some(data))) => Some(data),
+                    Ok(Ok(None)) | Err(_) => None,
+                    Ok(Err(err)) => {
+                        tracing::warn!("Failed to fetch attachment for ZIP export: {err}");
+                        None
+                    }
                 }
             }
         };
-
-        attachment_data.push((file_name, data));
+        let Some(data) = data else {
+            legacy_remove_attachment_export_sources(&source_paths.0).await;
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+        };
+        if data.len() > COMPOSE_ATTACHMENT_LIMIT_BYTES
+            || data.len() > ATTACHMENT_EXPORT_INPUT_LIMIT_BYTES.saturating_sub(input_bytes)
+        {
+            legacy_remove_attachment_export_sources(&source_paths.0).await;
+            return json_result_error(
+                original_action,
+                "Attachment archive exceeds its bounded input limit",
+            );
+        }
+        input_bytes += data.len();
+        let source_path = scope
+            .directory
+            .join(format!(".{archive_token}.{index}.source"));
+        if let Err(err) = legacy_write_private_temporary_file(&source_path, &data).await {
+            legacy_remove_attachment_export_sources(&source_paths.0).await;
+            tracing::warn!("Could not stage attachment export source: {err}");
+            return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
+        }
+        source_paths
+            .0
+            .push((file_name, source_uid, source_is_mime_part, source_path));
     }
 
-    if attachment_data.is_empty() {
+    if source_paths.0.is_empty() {
         return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
     }
-
-    let zip_bytes = match tokio::task::spawn_blocking(move || create_zip_archive(&attachment_data))
-        .await
-    {
-        Ok(Ok(bytes)) => bytes,
+    let archive_path = scope
+        .path(&archive_token)
+        .expect("generated archive token is valid");
+    let partial_path = scope.directory.join(format!(".{archive_token}.partial"));
+    let archive_result = tokio::task::spawn_blocking({
+        let source_paths = source_paths;
+        let partial_path = partial_path.clone();
+        let archive_path = archive_path.clone();
+        let folder = folder.clone();
+        let export_permit = _export_permit;
+        move || {
+            let result = create_zip_archive_file(
+                &partial_path,
+                &source_paths.0,
+                &folder,
+                ATTACHMENT_EXPORT_ARCHIVE_LIMIT_BYTES,
+            )
+            .and_then(|()| {
+                std::fs::rename(&partial_path, &archive_path)?;
+                Ok(())
+            });
+            if result.is_err() {
+                let _ = std::fs::remove_file(&partial_path);
+            }
+            drop(source_paths);
+            drop(export_permit);
+            result
+        }
+    })
+    .await;
+    match archive_result {
+        Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            tracing::error!("Failed to create ZIP archive: {err}");
+            tracing::warn!("Failed to create bounded ZIP archive: {err}");
             return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
         }
-        Err(join_err) => {
-            tracing::error!("ZIP compression task panicked: {join_err}");
+        Err(err) => {
+            tracing::error!("ZIP compression task failed: {err}");
             return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
         }
-    };
-
-    let file_hash = hex::encode(Sha1::digest(&zip_bytes));
-    let tmp_dir = state.config().tmp_dir.clone();
-    if let Err(err) = tokio::fs::create_dir_all(&tmp_dir).await {
-        tracing::error!("Failed to create temp directory {tmp_dir}: {err}");
-        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
     }
-    cleanup_temp_files(&tmp_dir, Duration::from_secs(3600)).await;
-    let zip_path = format!("{tmp_dir}/{file_hash}.zip");
-    if let Err(err) = tokio::fs::write(&zip_path, &zip_bytes).await {
-        tracing::error!("Failed to write ZIP file {zip_path}: {err}");
-        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}));
-    }
-
-    let zip_filename = if !filename.is_empty() {
-        format!("{filename}.zip")
-    } else if !folder.is_empty() {
-        "messages.zip".to_string()
-    } else {
-        "attachments.zip".to_string()
-    };
+    let zip_filename =
+        legacy_attachment_export_visible_filename(&requested_filename, &folder, Local::now());
 
     let raw_key_value = json!({
         "fileName": zip_filename,
         "mimeType": "application/zip",
-        "fileHash": file_hash,
+        "fileHash": archive_token,
+        "accountId": legacy_attachment_export_account_id(&scope),
     });
 
     let json_str = serde_json::to_string(&raw_key_value)
@@ -9698,6 +9870,7 @@ where
     )
 }
 
+#[cfg(test)]
 fn create_zip_archive(
     files: &[(String, Vec<u8>)],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
@@ -9710,29 +9883,26 @@ fn create_zip_archive(
     for (name, data) in files {
         // Strip any directory components so the entry name cannot escape the
         // extraction directory (prevents zip-slip / path-traversal writes).
-        let safe_name = std::path::Path::new(name.as_str())
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file.dat");
+        let safe_name = legacy_safe_zip_entry_name(name);
         // Disambiguate duplicate basenames by appending a numeric suffix,
         // preventing `zip::ZipWriter::start_file` from erroring on
         // collisions when two attachments share the same filename.
-        let final_name = match seen_names.get(safe_name) {
+        let final_name = match seen_names.get(safe_name.as_str()) {
             Some(&count) => {
                 let (stem, extension) = match safe_name.rsplit_once('.') {
                     Some((s, ext)) if !s.is_empty() && !ext.is_empty() => (s, Some(ext)),
-                    _ => (safe_name, None),
+                    _ => (safe_name.as_str(), None),
                 };
                 let suffixed = match extension {
                     Some(ext) => format!("{stem}_{count}.{ext}"),
                     None => format!("{stem}_{count}"),
                 };
-                seen_names.insert(safe_name.to_string(), count + 1);
+                seen_names.insert(safe_name.clone(), count + 1);
                 suffixed
             }
             None => {
-                seen_names.insert(safe_name.to_string(), 1);
-                safe_name.to_string()
+                seen_names.insert(safe_name.clone(), 1);
+                safe_name
             }
         };
         zip.start_file(final_name, options)?;
@@ -9740,6 +9910,380 @@ fn create_zip_archive(
     }
 
     Ok(zip.finish()?.into_inner())
+}
+
+struct LimitedZipWriter {
+    file: std::fs::File,
+    limit: usize,
+}
+
+impl std::io::Write for LimitedZipWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let position = usize::try_from(self.file.stream_position()?).unwrap_or(usize::MAX);
+        if bytes.len() > self.limit.saturating_sub(position) {
+            return Err(std::io::Error::other(
+                "ZIP archive exceeds the configured size limit",
+            ));
+        }
+        self.file.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl std::io::Seek for LimitedZipWriter {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+fn create_zip_archive_file(
+    output_path: &Path,
+    files: &[(String, Option<u32>, bool, PathBuf)],
+    folder: &str,
+    max_bytes: usize,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::{Read as _, Write as _};
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(output_path)?;
+    let writer = LimitedZipWriter {
+        file,
+        limit: max_bytes,
+    };
+    let mut zip = zip::ZipWriter::new(writer);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut seen_names: HashMap<String, u32> = HashMap::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    let mime_uids = files
+        .iter()
+        .filter_map(|(_, uid, is_mime_part, _)| is_mime_part.then_some(*uid).flatten())
+        .collect::<HashSet<_>>();
+    let group_by_uid = mime_uids.len() > 1;
+    for (name, uid, _, source_path) in files {
+        let safe_name = legacy_safe_zip_entry_name(name);
+        let final_name = match uid {
+            Some(uid) if group_by_uid => format!("{uid}/{safe_name}"),
+            Some(uid) if !folder.is_empty() => format!("{uid}-{safe_name}"),
+            _ => safe_name,
+        };
+        let final_name = legacy_unique_zip_entry_name(&final_name, &mut seen_names);
+        zip.start_file(final_name, options)?;
+        let mut source = std::fs::File::open(source_path)?;
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            zip.write_all(&buffer[..read])?;
+        }
+    }
+    zip.finish()?.flush()?;
+    Ok(())
+}
+
+fn legacy_unique_zip_entry_name(name: &str, seen_names: &mut HashMap<String, u32>) -> String {
+    match seen_names.get(name) {
+        Some(&count) => {
+            let (stem, extension) = match name.rsplit_once('.') {
+                Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+                    (stem, Some(extension))
+                }
+                _ => (name, None),
+            };
+            let suffixed = match extension {
+                Some(extension) => format!("{stem}_{count}.{extension}"),
+                None => format!("{stem}_{count}"),
+            };
+            seen_names.insert(name.to_string(), count + 1);
+            suffixed
+        }
+        None => {
+            seen_names.insert(name.to_string(), 1);
+            name.to_string()
+        }
+    }
+}
+
+fn legacy_safe_zip_entry_name(value: &str) -> String {
+    let name = value.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name = name
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    if name.is_empty() || matches!(name.as_str(), "." | "..") {
+        "file.dat".to_string()
+    } else {
+        name
+    }
+}
+
+async fn legacy_write_private_temporary_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    if let Err(err) = file.write_all(data).await {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(err);
+    }
+    if let Err(err) = file.flush().await {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(err);
+    }
+    Ok(())
+}
+
+async fn legacy_remove_attachment_export_sources(sources: &[(String, Option<u32>, bool, PathBuf)]) {
+    for (_, _, _, path) in sources {
+        if let Err(err) = tokio::fs::remove_file(path).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "Could not remove temporary ZIP source {}: {err}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct LegacyAttachmentExportSources(Vec<(String, Option<u32>, bool, PathBuf)>);
+
+impl Drop for LegacyAttachmentExportSources {
+    fn drop(&mut self) {
+        for (_, _, _, path) in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct AttachmentExportUsage {
+    global_bytes: usize,
+    user_bytes: usize,
+    global_files: usize,
+    user_files: usize,
+}
+
+async fn legacy_cleanup_attachment_exports(
+    scope: &LegacyComposeStagingScope,
+) -> std::io::Result<AttachmentExportUsage> {
+    let mut usage = AttachmentExportUsage::default();
+    let mut directories = vec![scope.root.clone()];
+    let mut pending = vec![scope.root.clone()];
+    let cutoff = SystemTime::now() - ATTACHMENT_EXPORT_MAX_AGE;
+    while let Some(directory) = pending.pop() {
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let kind = entry.file_type().await?;
+            if kind.is_dir() {
+                if directories.len() >= COMPOSE_ATTACHMENT_GLOBAL_DIRECTORY_LIMIT {
+                    return Err(std::io::Error::other(
+                        "attachment export directory limit exceeded",
+                    ));
+                }
+                let path = entry.path();
+                directories.push(path.clone());
+                pending.push(path);
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let metadata = entry.metadata().await?;
+            if metadata.modified().is_ok_and(|modified| modified < cutoff)
+                && tokio::fs::remove_file(entry.path()).await.is_ok()
+            {
+                continue;
+            }
+            let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+            usage.global_bytes = usage.global_bytes.saturating_add(size);
+            usage.global_files = usage.global_files.saturating_add(1);
+            if entry.path().starts_with(&scope.user_directory) {
+                usage.user_bytes = usage.user_bytes.saturating_add(size);
+                usage.user_files = usage.user_files.saturating_add(1);
+            }
+            if usage.global_bytes > ATTACHMENT_EXPORT_GLOBAL_LIMIT_BYTES
+                || usage.user_bytes > ATTACHMENT_EXPORT_USER_LIMIT_BYTES
+                || usage.global_files > ATTACHMENT_EXPORT_GLOBAL_FILE_LIMIT
+                || usage.user_files > ATTACHMENT_EXPORT_USER_FILE_LIMIT
+            {
+                return Err(std::io::Error::other("attachment export quota exceeded"));
+            }
+        }
+    }
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        if directory != scope.root
+            && directory != scope.user_directory
+            && directory != scope.directory
+        {
+            let _ = tokio::fs::remove_dir(directory).await;
+        }
+    }
+    Ok(usage)
+}
+
+fn legacy_attachment_export_account_id(scope: &LegacyComposeStagingScope) -> i64 {
+    scope.account_id
+}
+
+fn legacy_attachment_export_filename(value: &str) -> String {
+    let mut output = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        .take(180)
+        .collect::<String>();
+    if output.is_empty() {
+        output = "attachments".to_string();
+    }
+    output
+}
+
+fn legacy_attachment_export_visible_filename(
+    value: &str,
+    folder: &str,
+    now: chrono::DateTime<Local>,
+) -> String {
+    let stem = if value.is_empty() {
+        if folder.is_empty() {
+            "attachments".to_string()
+        } else {
+            "messages".to_string()
+        }
+    } else {
+        legacy_attachment_export_filename(value)
+    };
+    format!("{}-{}.zip", stem, now.format("%Y%m%d%H%M%S"))
+}
+
+async fn native_legacy_attachment_export_download(
+    state: &AppState,
+    raw_key: &str,
+    session: &fm_session::Session,
+) -> Response {
+    if raw_key.len() > COMPOSE_ATTACHMENT_RAW_KEY_LIMIT_BYTES {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(values) = legacy_raw_key_json(raw_key) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(account_id) = values
+        .get("accountId")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(token) = values
+        .get("fileHash")
+        .and_then(Value::as_str)
+        .filter(|token| legacy_compose_attachment_token_is_valid(token))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if values.get("mimeType").and_then(Value::as_str) != Some("application/zip") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(user) = (match load_session_user(state, "RawDownload", session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(pool) = state.db_pool() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match SqlxUserRepository::get_mail_account_connection_secret(pool, user.user_id, account_id)
+        .await
+    {
+        Ok(Some(_)) => {}
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    }
+    let scope = LegacyComposeStagingScope::attachment_export(
+        &state.config().tmp_dir,
+        user.user_id,
+        account_id,
+    );
+    match legacy_validate_compose_staging_scope(&scope).await {
+        Ok(true) => {}
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    }
+    let Some(path) = scope.path(token) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let metadata = match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.len() <= ATTACHMENT_EXPORT_ARCHIVE_LIMIT_BYTES as u64 =>
+        {
+            metadata
+        }
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let download_permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        Arc::clone(attachment_export_download_semaphore()).acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let filename = values
+        .get("fileName")
+        .and_then(Value::as_str)
+        .map(legacy_attachment_export_filename)
+        .unwrap_or_else(|| "attachments.zip".to_string());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/zip")
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header("content-transfer-encoding", "binary")
+        .header("accept-ranges", "none")
+        .header("content-length", metadata.len())
+        .body(Body::from_stream(futures::stream::try_unfold(
+            (file, download_permit),
+            |(mut file, permit)| async move {
+                let mut buffer = vec![0_u8; 64 * 1024];
+                let read = file.read(&mut buffer).await?;
+                if read == 0 {
+                    Ok::<
+                        Option<(Bytes, (tokio::fs::File, tokio::sync::OwnedSemaphorePermit))>,
+                        std::io::Error,
+                    >(None)
+                } else {
+                    buffer.truncate(read);
+                    Ok(Some((Bytes::from(buffer), (file, permit))))
+                }
+            },
+        )))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 fn legacy_compose_attachment_token_is_valid(token: &str) -> bool {
@@ -9817,6 +10361,46 @@ async fn legacy_compose_imap_staging_context(
         .map_err(|_| json_result_error(original_action, "Missing account password"))?;
     let scope = LegacyComposeStagingScope::new(&state.config().tmp_dir, user.user_id, account_id);
     Ok((scope, config, password))
+}
+
+async fn legacy_attachment_export_imap_context(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Result<(LegacyComposeStagingScope, ImapConnectionConfig, String), Response> {
+    let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
+    let Some(pool) = state.db_pool() else {
+        return Err(json_result_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+    let account_id = resolve_message_body_account_id(payload, session, original_action).await?;
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return Err(json_result_error(original_action, "Account not found")),
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+    let config = imap_config_from_account_secret(&account)
+        .map_err(|err| json_result_error(original_action, &err.public_message()))?;
+    let password = account_password(&account, &credential_key)
+        .map_err(|_| json_result_error(original_action, "Missing account password"))?;
+    Ok((
+        LegacyComposeStagingScope::attachment_export(
+            &state.config().tmp_dir,
+            user.user_id,
+            account_id,
+        ),
+        config,
+        password,
+    ))
 }
 
 #[derive(Debug, Default)]
@@ -10206,42 +10790,6 @@ fn legacy_upload_error(original_action: &str, code: u16, message: impl Into<Stri
             }
         }),
     )
-}
-
-/// Removes top-level temp files in `tmp_dir` older than `max_age` to prevent
-/// unbounded disk growth from attachment ZIP downloads. Compose staging has a
-/// separate recursive, quota-aware cleanup path.
-/// Logs a warning on directory read errors but never returns an error.
-async fn cleanup_temp_files(tmp_dir: &str, max_age: Duration) {
-    let mut entries = match tokio::fs::read_dir(tmp_dir).await {
-        Ok(entries) => entries,
-        Err(err) => {
-            tracing::warn!("Failed to read temp dir for cleanup {tmp_dir}: {err}");
-            return;
-        }
-    };
-
-    let cutoff = SystemTime::now() - max_age;
-    loop {
-        match entries.next_entry().await {
-            Ok(Some(entry)) => {
-                if entry.file_type().await.is_ok_and(|kind| kind.is_file())
-                    && entry
-                        .metadata()
-                        .await
-                        .and_then(|metadata| metadata.modified())
-                        .is_ok_and(|modified| modified < cutoff)
-                {
-                    let path = entry.path();
-                    if tokio::fs::remove_file(&path).await.is_err() {
-                        tracing::warn!("Failed to remove stale temp file: {}", path.display());
-                    }
-                }
-            }
-            Ok(None) => break,
-            Err(_) => break,
-        }
-    }
 }
 
 #[allow(dead_code)]
@@ -16138,6 +16686,7 @@ mod tests {
         engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
         Engine as _,
     };
+    use chrono::{Local, TimeZone};
     use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
@@ -28866,6 +29415,10 @@ Subject: Empty body metadata\r\n\r\n"
             ("../evil.sh".to_string(), b"SCRIPT".to_vec()),
             ("../../../../etc/passwd".to_string(), b"root:x:0:0".to_vec()),
             ("subdir/doc.txt".to_string(), b"hello".to_vec()),
+            (
+                r"C:\\windows\\system32\\evil.cmd".to_string(),
+                b"cmd".to_vec(),
+            ),
         ];
 
         let zip_bytes = super::create_zip_archive(&files).unwrap();
@@ -28883,11 +29436,12 @@ Subject: Empty body metadata\r\n\r\n"
                 "zip entry name escaped sanitization: {name}"
             );
         }
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"report.pdf".to_string()));
         assert!(names.contains(&"evil.sh".to_string()));
         assert!(names.contains(&"passwd".to_string()));
         assert!(names.contains(&"doc.txt".to_string()));
+        assert!(names.contains(&"evil.cmd".to_string()));
     }
 
     #[test]
@@ -28917,12 +29471,99 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(names.contains(&"report_2.pdf".to_string()));
     }
 
+    #[test]
+    fn create_zip_archive_file_enforces_the_output_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "frickmail-zip-limit-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let output = root.join("archive.partial");
+        let mut data = vec![0_u8; 4096];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut data);
+        std::fs::write(&source, data).unwrap();
+
+        let error = super::create_zip_archive_file(
+            &output,
+            &[("random.bin".to_string(), None, false, source)],
+            "",
+            256,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("size limit"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zip_archive_preserves_php_mime_index_zero_uid_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "frickmail-zip-layout-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        let output = root.join("archive.zip");
+        std::fs::write(&first, b"A").unwrap();
+        std::fs::write(&second, b"B").unwrap();
+        super::create_zip_archive_file(
+            &output,
+            &[
+                ("a.txt".to_string(), Some(1), false, first),
+                ("b.txt".to_string(), Some(2), true, second),
+            ],
+            "INBOX",
+            1024,
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        assert!(archive.by_name("1-a.txt").is_ok());
+        assert!(archive.by_name("2-b.txt").is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zip_export_uses_messages_timestamp_fallback_for_a_folder() {
+        let now = Local.with_ymd_and_hms(2026, 8, 19, 12, 34, 56).unwrap();
+        assert_eq!(
+            super::legacy_attachment_export_visible_filename("", "INBOX", now),
+            "messages-20260819123456.zip"
+        );
+    }
+
+    #[test]
+    fn attachment_export_download_route_is_exact() {
+        let raw_key = "ZXhwb3J0";
+        let uri: Uri = format!("/?/Raw/&q[]=/0/Download/&q[]=/{raw_key}")
+            .parse()
+            .unwrap();
+        assert_eq!(
+            super::legacy_attachment_export_download_route(&uri),
+            Some(raw_key)
+        );
+        for query in [
+            "/Raw/&q[]=/0/Download/",
+            "/Raw/&q[]=/0/Download/&q[]=/",
+            "/Raw/&q[]=/0/View/&q[]=/ZXhwb3J0",
+            "/Raw/&q[]=/0/Download/&q[]=/ZXhwb3J0&x=1",
+        ] {
+            let uri: Uri = format!("/?{query}").parse().unwrap();
+            assert_eq!(super::legacy_attachment_export_download_route(&uri), None);
+        }
+    }
+
     // --- native_legacy_attachments_actions tests ---
 
     #[tokio::test]
     async fn attachments_actions_downloads_zip_with_sanitized_names() {
         let key = [53_u8; fm_user::CREDENTIAL_KEY_BYTES];
-        let config = test_config(None);
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-attachment-export-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
         let (state, session) = message_body_test_state_with_config(1940, 1941, &key, config).await;
 
         // Build a raw key that references a folder/uid/mimeIndex (no inline data)
@@ -28956,7 +29597,67 @@ Subject: Empty body metadata\r\n\r\n"
         let body = read_json(response).await;
         assert_eq!(body["Action"], "AttachmentsActions");
         let result = &body["Result"];
-        assert!(result["fileHash"].is_string());
+        let raw_key = result["fileHash"].as_str().expect("export raw key");
+        let raw_key_values = super::legacy_raw_key_json(raw_key).unwrap();
+        let token = raw_key_values["fileHash"].as_str().unwrap();
+        assert!(super::legacy_compose_attachment_token_is_valid(token));
+        assert_eq!(raw_key_values["accountId"], 1941);
+
+        let download =
+            super::native_legacy_attachment_export_download(&state, raw_key, &session).await;
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(download.headers()["content-type"], "application/zip");
+        let zip_bytes = to_bytes(
+            download.into_body(),
+            super::ATTACHMENT_EXPORT_ARCHIVE_LIMIT_BYTES,
+        )
+        .await
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+        let mut entry = archive.by_name("57-report.pdf").unwrap();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+        assert_eq!(data, b"PDF-CONTENT");
+
+        let scope = super::LegacyComposeStagingScope::attachment_export(
+            &temp_root.to_string_lossy(),
+            1940,
+            1941,
+        );
+        assert!(scope.path(token).unwrap().is_file());
+        let mut entries = tokio::fs::read_dir(&scope.directory).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().into_string().unwrap());
+        }
+        assert_eq!(names, vec![token.to_string()]);
+        tokio::fs::remove_dir_all(temp_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attachment_export_raw_download_rejects_another_account_capability() {
+        let key = [54_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-attachment-export-isolation-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) = message_body_test_state_with_config(1942, 1943, &key, config).await;
+        let raw_key = URL_SAFE_NO_PAD.encode(
+            json!({
+                "fileName": "archive.zip",
+                "mimeType": "application/zip",
+                "fileHash": super::legacy_random_compose_attachment_token(),
+                "accountId": 1944,
+            })
+            .to_string(),
+        );
+
+        let response =
+            super::native_legacy_attachment_export_download(&state, &raw_key, &session).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(!temp_root.exists());
     }
 
     #[tokio::test]
