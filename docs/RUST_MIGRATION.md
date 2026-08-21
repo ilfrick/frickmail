@@ -5,7 +5,7 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-20 06:25:15 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-21 10:06:50 CEST (UTC+02:00)
 
 ### Current Branch And Publication State
 
@@ -36,7 +36,25 @@ review and the production canary below passed. The same SHA was pushed to both
 `master` and `rust-full-migration` on both remotes; exact-SHA CI remains pending
 at this timestamp.
 
+The reviewed native `SendReadReceiptMessage` slice is pending publication at
+this snapshot. It preflights the selected IMAP account before SMTP delivery,
+emits a bounded MailSo-compatible quoted-printable text receipt, records the
+exact `$MDNSent` keyword after successful delivery, and uses a bounded durable
+48-hour account/folder/UID suppression cache when that post-send STORE fails.
+Native `Message` and `MessageList` responses hide such prompts without stale
+HTTP-validator reuse; the cache schema is provisioned by both Rust and legacy
+container startup. Legacy PHP receipt/build/SMTP filters remain an explicit
+native-plugin-hook migration boundary.
+
 ### Latest Docker Validation
+
+For the pending receipt slice, image `frickmail-rust:read-receipt-canary`
+(`sha256:46b1d9db6883c4de5c1ff2f6d0fde2b3d38bd7f49a5b2f0f56fab1ab474c307d`)
+was built and started as the Compose canary at this timestamp. It is healthy
+with zero restarts and no OOM kill; `/health` and `/` both return HTTP 200.
+It runs as `frickmail:frickmail` with a read-only root filesystem, `CapDrop=ALL`,
+and `no-new-privileges`; startup logs show successful database verification and
+no error/panic/fatal entries. Publication and exact-SHA CI are pending.
 
 For the published ZIP attachment-export slice, the release image
 `frickmail-rust:attachment-export-canary` is

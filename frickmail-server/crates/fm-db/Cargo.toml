@@ -9,3 +9,6 @@ repository.workspace = true
 [dependencies]
 fm-core = { path = "../fm-core" }
 sqlx.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -146,6 +146,7 @@ const ATTACHMENT_EXPORT_GLOBAL_FILE_LIMIT: usize = 4;
 const ATTACHMENT_EXPORT_MAX_AGE: Duration = Duration::from_secs(15 * 60);
 const ATTACHMENT_EXPORT_DEADLINE: Duration = Duration::from_secs(120);
 const ATTACHMENT_EXPORT_DOWNLOAD_CONCURRENCY: usize = 4;
+const READ_RECEIPT_CACHE_TTL_SECONDS: u64 = 172_800;
 const COMPOSE_ATTACHMENT_MEMORY_BUDGET_MIB: usize = 64;
 const COMPOSE_MIME_BUILD_CONCURRENCY: usize = 2;
 const COMPOSE_MIME_BUILD_DEADLINE: Duration = Duration::from_secs(30);
@@ -1114,6 +1115,9 @@ async fn native_compat_response(
             native_legacy_message_upload_attachments(state, original_action, payload, session)
                 .await,
         ),
+        "SendReadReceiptMessage" => {
+            Some(native_send_read_receipt_message(state, original_action, payload, session).await)
+        }
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
         "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
         "SaveMessage" => Some(native_save_message(state, original_action, payload, session).await),
@@ -1717,6 +1721,46 @@ impl LegacySmtpSender for ProductionLegacySmtpSender {
 }
 
 #[async_trait::async_trait]
+trait LegacyReadReceiptImap: Sync {
+    async fn preflight(&self, config: ImapConnectionConfig, password: &str) -> fm_core::Result<()>;
+    async fn mark_mdn_sent(
+        &self,
+        config: ImapConnectionConfig,
+        password: &str,
+        folder: &str,
+        uid: u32,
+    ) -> fm_core::Result<()>;
+}
+
+struct ProductionLegacyReadReceiptImap;
+
+#[async_trait::async_trait]
+impl LegacyReadReceiptImap for ProductionLegacyReadReceiptImap {
+    async fn preflight(&self, config: ImapConnectionConfig, password: &str) -> fm_core::Result<()> {
+        let _session = login(config, password).await?;
+        Ok(())
+    }
+
+    async fn mark_mdn_sent(
+        &self,
+        config: ImapConnectionConfig,
+        password: &str,
+        folder: &str,
+        uid: u32,
+    ) -> fm_core::Result<()> {
+        store_message_flag(
+            config,
+            password,
+            folder,
+            &uid.to_string(),
+            ImapMessageFlag::MdnSentKeyword,
+            true,
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
 trait LegacySentAppender: Sync {
     #[allow(clippy::too_many_arguments)]
     async fn append_sent(
@@ -1780,6 +1824,398 @@ async fn native_send_message(
             legacy_action_error(original_action, code, message)
         }
     }
+}
+
+/// Sends the legacy Message Disposition Notification receipt and then marks
+/// the source message `$MDNSent`.  MailSo treats a post-delivery flag failure
+/// as best effort, so the SMTP success response is never downgraded by it.
+async fn native_send_read_receipt_message(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    match tokio::time::timeout(
+        SEND_MESSAGE_ACTION_DEADLINE,
+        native_send_read_receipt_message_inner(state, original_action, payload, session),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => legacy_action_error(
+            original_action,
+            CANT_SEND_MESSAGE,
+            "Read receipt processing timed out before SMTP delivery completed",
+        ),
+    }
+}
+
+async fn native_send_read_receipt_message_inner(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_send_read_receipt_message_inner_with_clients(
+        state,
+        original_action,
+        payload,
+        session,
+        &ProductionLegacySmtpSender,
+        &ProductionLegacyReadReceiptImap,
+    )
+    .await
+}
+
+async fn native_send_read_receipt_message_inner_with_clients(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    smtp_sender: &dyn LegacySmtpSender,
+    imap_client: &dyn LegacyReadReceiptImap,
+) -> Response {
+    let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+    let account_id = match resolve_message_body_account_id(payload, session, original_action).await
+    {
+        Ok(account_id) => account_id,
+        Err(response) => return response,
+    };
+    let account = match SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => return json_result_error(original_action, "Account not found"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let password = match account_password(&account, &credential_key) {
+        Ok(password) => password,
+        Err(_) => return json_result_error(original_action, "Missing account password"),
+    };
+    let mut public_account =
+        match SqlxUserRepository::get_mail_account(pool, user.user_id, account_id).await {
+            Ok(Some(account)) => account,
+            Ok(None) => return json_result_error(original_action, "Account not found"),
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        };
+    public_account.identities =
+        match SqlxUserRepository::list_mail_identities(pool, user.user_id, account_id).await {
+            Ok(identities) => identities,
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        };
+    let build_input = match legacy_read_receipt_build_input(payload) {
+        Ok(input) => input,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+    let recipients = build_input.recipients.clone();
+    // Formatting/quoted-printable encoding can copy the bounded plain body.
+    // Keep it in the same retained blocking lane used by normal compose MIME
+    // construction so receipt requests cannot occupy Tokio workers.
+    let message = match legacy_run_mime_build(move || {
+        legacy_build_read_receipt_message(&build_input, &public_account)
+    })
+    .await
+    {
+        Ok(message) => message,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+    let folder = payload
+        .get("messageFolder")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let uid = u32::try_from(payload_i64(payload, "messageUid").max(0)).unwrap_or(0);
+    if !folder.is_empty() && (folder.len() > 1_024 || folder.chars().any(char::is_control)) {
+        return json_result_error(original_action, "Invalid read receipt message folder");
+    }
+    let folder = folder.to_string();
+    if !folder.is_empty()
+        && uid > 0
+        && legacy_read_receipt_cached(pool, user.user_id, account_id, &folder, uid).await
+            == Some(true)
+    {
+        return json_value_envelope(StatusCode::OK, original_action, json!({"Result": true}));
+    }
+    let envelope = match fm_smtp::build_envelope(&message.from, &recipients) {
+        Ok(envelope) => envelope,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let settings = match legacy_smtp_send_settings(
+        state,
+        pool,
+        user.user_id,
+        account_id,
+        &account,
+        &password,
+        &credential_key,
+    )
+    .await
+    {
+        Ok(settings) => settings,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+    // PHP initializes the selected IMAP account before it sends the receipt.
+    // Keep that ordering: a disconnected source mailbox must not result in an
+    // SMTP receipt that cannot be marked or cached afterwards.
+    let imap_config = match imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    match tokio::time::timeout(
+        MESSAGE_MUTATION_DEADLINE,
+        imap_client.preflight(imap_config.clone(), &password),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return json_result_error(original_action, &err.public_message()),
+        Err(_) => {
+            return json_result_error(original_action, "Read receipt IMAP preflight timed out")
+        }
+    }
+    let delivered = tokio::time::timeout(
+        SEND_MESSAGE_SMTP_DEADLINE,
+        smtp_sender.send(
+            &settings,
+            &envelope,
+            &message.wire,
+            fm_smtp::SmtpDeliveryOptions {
+                dsn: false,
+                require_tls: false,
+            },
+        ),
+    )
+    .await;
+    match delivered {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            return legacy_action_error(original_action, CANT_SEND_MESSAGE, err.public_message())
+        }
+        Err(_) => {
+            return legacy_action_error(
+                original_action,
+                CANT_SEND_MESSAGE,
+                "SMTP timed out with an unknown delivery outcome; check before retrying",
+            )
+        }
+    }
+
+    if !folder.is_empty() && uid > 0 {
+        {
+            let result = tokio::time::timeout(
+                MESSAGE_MUTATION_DEADLINE,
+                imap_client.mark_mdn_sent(imap_config, &password, &folder, uid),
+            )
+            .await;
+            if let Err(message) = result {
+                tracing::warn!(
+                    "SendReadReceiptMessage: source MDNSent update timed out for {folder}:{uid}: {message}"
+                );
+                legacy_cache_read_receipt(pool, user.user_id, account_id, &folder, uid).await;
+            } else if let Ok(Err(err)) = result {
+                tracing::warn!(
+                    "SendReadReceiptMessage: source MDNSent update failed for {folder}:{uid}: {}",
+                    err.public_message()
+                );
+                legacy_cache_read_receipt(pool, user.user_id, account_id, &folder, uid).await;
+            }
+        }
+    }
+    json_value_envelope(StatusCode::OK, original_action, json!({"Result": true}))
+}
+
+fn legacy_read_receipt_folder_hash(folder: &str) -> String {
+    hex::encode(Sha1::digest(folder.as_bytes()))
+}
+
+async fn legacy_read_receipt_cached(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_id: i64,
+    folder: &str,
+    uid: u32,
+) -> Option<bool> {
+    match tokio::time::timeout(
+        Duration::from_millis(750),
+        fm_user::SqlxUserRepository::read_receipt_cached(
+            pool,
+            user_id,
+            account_id,
+            &legacy_read_receipt_folder_hash(folder),
+            uid,
+            current_epoch() as i64,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(cached)) => Some(cached),
+        Ok(Err(err)) => {
+            tracing::warn!("read-receipt cache lookup failed: {}", err.public_message());
+            None
+        }
+        Err(_) => {
+            tracing::warn!("read-receipt cache lookup timed out");
+            None
+        }
+    }
+}
+
+async fn legacy_read_receipt_cache_has_folder(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_id: i64,
+    folder: &str,
+) -> Option<bool> {
+    match tokio::time::timeout(
+        Duration::from_millis(750),
+        fm_user::SqlxUserRepository::read_receipt_cache_has_folder(
+            pool,
+            user_id,
+            account_id,
+            &legacy_read_receipt_folder_hash(folder),
+            current_epoch() as i64,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(cached)) => Some(cached),
+        Ok(Err(err)) => {
+            tracing::warn!(
+                "read-receipt cache folder lookup failed: {}",
+                err.public_message()
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!("read-receipt cache folder lookup timed out");
+            None
+        }
+    }
+}
+
+async fn legacy_cache_read_receipt(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_id: i64,
+    folder: &str,
+    uid: u32,
+) {
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        fm_user::SqlxUserRepository::cache_read_receipt(
+            pool,
+            user_id,
+            account_id,
+            &legacy_read_receipt_folder_hash(folder),
+            uid,
+            current_epoch() as i64 + READ_RECEIPT_CACHE_TTL_SECONDS as i64,
+        ),
+    )
+    .await;
+    if !matches!(result, Ok(Ok(()))) {
+        tracing::warn!("SendReadReceiptMessage: durable receipt-suppression cache write failed");
+    }
+}
+
+struct LegacyReadReceiptMessage {
+    from: String,
+    wire: Vec<u8>,
+}
+
+struct LegacyReadReceiptBuildInput {
+    subject: String,
+    plain: String,
+    recipients: Vec<String>,
+}
+
+fn legacy_read_receipt_build_input(payload: &Value) -> Result<LegacyReadReceiptBuildInput, String> {
+    let receipt_to = payload_optional_string(payload, "readReceipt").unwrap_or_default();
+    let subject = payload_optional_string(payload, "subject").unwrap_or_default();
+    let plain = payload_optional_string(payload, "plain").unwrap_or_default();
+    if !legacy_compose_string_is_php_truthy(&receipt_to)
+        || !legacy_compose_string_is_php_truthy(&subject)
+        || !legacy_compose_string_is_php_truthy(&plain)
+    {
+        return Err("Read receipt recipient, subject, and text are required".to_string());
+    }
+    if receipt_to.len() > COMPOSE_HEADER_LIMIT_BYTES
+        || subject.len() > COMPOSE_HEADER_LIMIT_BYTES
+        || plain.len() > COMPOSE_BODY_LIMIT_BYTES
+    {
+        return Err("Read receipt content exceeds the compose limit".to_string());
+    }
+    if legacy_address_items(&receipt_to).len() > COMPOSE_RECIPIENT_LIMIT {
+        return Err("Too many read receipt recipients".to_string());
+    }
+    let recipients = legacy_parse_address_list(&receipt_to)?;
+    if recipients.is_empty() {
+        return Err("Read receipt recipient required".to_string());
+    }
+    if recipients.len() > COMPOSE_RECIPIENT_LIMIT {
+        return Err("Too many read receipt recipients".to_string());
+    }
+    Ok(LegacyReadReceiptBuildInput {
+        subject,
+        plain,
+        recipients,
+    })
+}
+
+fn legacy_build_read_receipt_message(
+    input: &LegacyReadReceiptBuildInput,
+    account: &MailAccount,
+) -> Result<LegacyReadReceiptMessage, String> {
+    let identity = account
+        .identities
+        .first()
+        .ok_or_else(|| "Read receipt identity required".to_string())?;
+    let from = if identity.name.trim().is_empty() {
+        identity.email.clone()
+    } else {
+        format!("{} <{}>", identity.name, identity.email)
+    };
+    let envelope_from = legacy_parse_single_address(&from)
+        .ok_or_else(|| "Invalid read receipt sender".to_string())?;
+    let parse_mailbox = |value: &str| {
+        value
+            .parse::<lettre::message::Mailbox>()
+            .map_err(|err| format!("Invalid read receipt address: {err}"))
+    };
+    let mut builder = lettre::Message::builder()
+        .from(parse_mailbox(&from)?)
+        .subject(&input.subject)
+        .message_id(Some(legacy_generate_draft_message_id(&envelope_from)))
+        .header(lettre::message::header::MIME_VERSION_1_0);
+    for recipient in &input.recipients {
+        builder = builder.to(parse_mailbox(recipient)?);
+    }
+    if let Some(reply_to) = identity.reply_to.as_deref() {
+        for address in legacy_parse_address_list(reply_to)? {
+            builder = builder.reply_to(parse_mailbox(&address)?);
+        }
+    }
+    let normalized = legacy_normalize_pgp_crlf(input.plain.trim());
+    let message = builder
+        .header(
+            lettre::message::header::ContentType::parse("text/plain; charset=utf-8")
+                .map_err(|_| "Invalid read receipt content type".to_string())?,
+        )
+        .header(lettre::message::header::ContentTransferEncoding::QuotedPrintable)
+        .body(normalized)
+        .map_err(|err| format!("Read receipt build failed: {err}"))?;
+    Ok(LegacyReadReceiptMessage {
+        from: envelope_from,
+        wire: message.formatted(),
+    })
 }
 
 fn legacy_send_deadline_error(delivery_phase: u8) -> (u16, &'static str) {
@@ -11106,6 +11542,15 @@ where
             Ok(connection) => connection,
             Err(response) => return response,
         };
+    let (cache_user, _) = match imap_action_auth(state, original_action, session).await {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let cache_account_id =
+        match resolve_message_body_account_id(payload, session, original_action).await {
+            Ok(account_id) => account_id,
+            Err(response) => return response,
+        };
     let message_request = match legacy_message_request_from_payload(payload) {
         Ok(request) => request,
         Err(message) => return json_result_error(original_action, message),
@@ -11203,17 +11648,41 @@ where
                 .first()
                 .map(|part| part.flags.as_slice())
                 .unwrap_or(&[]);
+            let durable_receipt_suppressed = match state.db_pool() {
+                Some(pool) => {
+                    legacy_read_receipt_cached(
+                        pool,
+                        cache_user.user_id,
+                        cache_account_id,
+                        &message_request.folder,
+                        message_request.uid,
+                    )
+                    .await
+                }
+                None => Some(false),
+            };
+            let cache_hash = format!(
+                "{client_hash}:rr={}",
+                durable_receipt_suppressed
+                    .map(|value| value as u8)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
             let cache_key = legacy_message_cache_key(
                 &message_request.folder,
                 message_request.uid,
                 flags,
-                &client_hash,
+                &cache_hash,
             );
 
-            if let Some(response) =
-                legacy_http_cache_validation_response(headers, &state.config().cache, &cache_key)
-            {
-                return response;
+            if durable_receipt_suppressed.is_some() {
+                if let Some(response) = legacy_http_cache_validation_response(
+                    headers,
+                    &state.config().cache,
+                    &cache_key,
+                ) {
+                    return response;
+                }
             }
 
             let mut response = legacy_message_body_response(
@@ -11223,12 +11692,15 @@ where
                 parts,
                 &thread_uids,
                 &thread_unseen_uids,
+                durable_receipt_suppressed.unwrap_or(false),
             );
-            legacy_apply_http_cache_headers(
-                response.headers_mut(),
-                &state.config().cache,
-                &cache_key,
-            );
+            if durable_receipt_suppressed.is_some() {
+                legacy_apply_http_cache_headers(
+                    response.headers_mut(),
+                    &state.config().cache,
+                    &cache_key,
+                );
+            }
             response
         }
         Ok(Ok(None)) => json_result_error(original_action, "Message not found"),
@@ -11364,6 +11836,11 @@ where
         Ok(auth) => auth,
         Err(_) => return legacy_action_error(original_action, AUTH_ERROR, "Not authenticated"),
     };
+    let receipt_account_id =
+        match resolve_message_body_account_id(payload, session, original_action).await {
+            Ok(account_id) => account_id,
+            Err(response) => return response,
+        };
     let hide_deleted = match legacy_message_list_hide_deleted_setting(
         state,
         original_action,
@@ -11436,16 +11913,36 @@ where
             .unwrap_or_else(|| account_email.clone()),
         None => account_email.clone(),
     };
-    let conditional_cache = raw_cache_hash.as_deref().and_then(|cache_hash| {
-        let folder_etag = legacy_message_list_request_hash_validator(cache_hash)?;
-        let cache_state = legacy_message_list_raw_cache_state(cache_hash, &request, &folder_etag)?;
-        let response = legacy_message_list_cache_validation_response(
-            headers,
-            &state.config().cache,
-            &cache_state,
-        )?;
-        Some((folder_etag, response.status()))
-    });
+    // A durable receipt marker is external to IMAP folder ETags. If this
+    // folder has one, do not return a 304 that could resurrect a prior prompt;
+    // ordinary RawKey cache validation remains available in other folders.
+    let receipt_marker_active = match state.db_pool() {
+        Some(pool) => {
+            legacy_read_receipt_cache_has_folder(
+                pool,
+                user.user_id,
+                receipt_account_id,
+                &request.mailbox,
+            )
+            .await
+        }
+        None => Some(false),
+    };
+    let conditional_cache = matches!(receipt_marker_active, Some(false))
+        .then(|| {
+            raw_cache_hash.as_deref().and_then(|cache_hash| {
+                let folder_etag = legacy_message_list_request_hash_validator(cache_hash)?;
+                let cache_state =
+                    legacy_message_list_raw_cache_state(cache_hash, &request, &folder_etag)?;
+                let response = legacy_message_list_cache_validation_response(
+                    headers,
+                    &state.config().cache,
+                    &cache_state,
+                )?;
+                Some((folder_etag, response.status()))
+            })
+        })
+        .flatten();
     let unchanged_folder_etag = conditional_cache
         .as_ref()
         .map(|(folder_etag, _)| folder_etag.clone());
@@ -11464,10 +11961,52 @@ where
     .map_err(|_| FrickmailError::Upstream("Message list fetch timed out".to_string()));
 
     match result {
-        Ok(Ok(Some(list))) => {
-            let raw_cache_state = raw_cache_hash.as_deref().and_then(|cache_hash| {
-                legacy_message_list_raw_cache_state(cache_hash, &request, &list.folder.etag)
-            });
+        Ok(Ok(Some(mut list))) => {
+            if let Some(pool) = state.db_pool() {
+                let uids = list
+                    .messages
+                    .iter()
+                    .map(|message| message.uid)
+                    .collect::<Vec<_>>();
+                if let Ok(Ok(cached)) = tokio::time::timeout(
+                    Duration::from_millis(750),
+                    fm_user::SqlxUserRepository::read_receipt_cached_uids(
+                        pool,
+                        user.user_id,
+                        receipt_account_id,
+                        &legacy_read_receipt_folder_hash(&request.mailbox),
+                        &uids,
+                        current_epoch() as i64,
+                    ),
+                )
+                .await
+                {
+                    for message in &mut list.messages {
+                        if cached.contains(&message.uid) {
+                            message.read_receipt.clear();
+                        }
+                    }
+                }
+            }
+            let receipt_marker_active = match state.db_pool() {
+                Some(pool) => {
+                    legacy_read_receipt_cache_has_folder(
+                        pool,
+                        user.user_id,
+                        receipt_account_id,
+                        &request.mailbox,
+                    )
+                    .await
+                }
+                None => Some(false),
+            };
+            let raw_cache_state = matches!(receipt_marker_active, Some(false))
+                .then(|| {
+                    raw_cache_hash.as_deref().and_then(|cache_hash| {
+                        legacy_message_list_raw_cache_state(cache_hash, &request, &list.folder.etag)
+                    })
+                })
+                .flatten();
             if let Some(response) = raw_cache_state.as_ref().and_then(|cache_state| {
                 legacy_message_list_cache_validation_response(
                     headers,
@@ -13448,6 +13987,11 @@ fn legacy_message_list_json(list: &fm_imap::LegacyMessageList) -> Value {
 }
 
 fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value {
+    let read_receipt = if legacy_read_receipt_is_suppressed_by_flags(&message.flags) {
+        ""
+    } else {
+        &message.read_receipt
+    };
     let mut value = json!({
         "@Object": "Object/Message",
         "folder": message.folder,
@@ -13468,7 +14012,7 @@ fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value
         "bcc": legacy_email_collection(&message.bcc),
         "sender": legacy_email_collection(&message.sender),
         "deliveredTo": legacy_email_collection(&message.delivered_to),
-        "readReceipt": message.read_receipt,
+        "readReceipt": read_receipt,
         "attachments": message.attachments,
         "spf": [],
         "dkim": [],
@@ -13492,6 +14036,12 @@ fn legacy_message_summary_json(message: &fm_imap::LegacyMessageSummary) -> Value
     }
 
     value
+}
+
+fn legacy_read_receipt_is_suppressed_by_flags(flags: &[String]) -> bool {
+    flags.iter().any(|flag| {
+        flag.eq_ignore_ascii_case("$MDNSent") || flag.eq_ignore_ascii_case("\\Answered")
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13699,6 +14249,7 @@ fn legacy_message_body_response(
     parts: Vec<BodyPreviewPart>,
     thread_uids: &[u32],
     thread_unseen_uids: &[u32],
+    durable_receipt_suppressed: bool,
 ) -> Response {
     let flags = parts
         .first()
@@ -13917,6 +14468,13 @@ fn legacy_message_body_response(
     }
 
     plain = legacy_message_body_trim(&plain).to_string();
+    // A disposition-notification header is enough to establish that the
+    // source message parsed successfully. Keep that fact after suppressing
+    // the outward-facing prompt for `$MDNSent`/durable-cache state.
+    let had_read_receipt = !read_receipt.is_empty();
+    if durable_receipt_suppressed || legacy_read_receipt_is_suppressed_by_flags(flags) {
+        read_receipt.clear();
+    }
 
     if html.is_empty()
         && plain.is_empty()
@@ -13924,7 +14482,7 @@ fn legacy_message_body_response(
         && message_id.is_empty()
         && in_reply_to.is_empty()
         && references.is_empty()
-        && read_receipt.is_empty()
+        && !had_read_receipt
         && date_timestamp == 0
         && size == 0
         && attachments.is_none()
@@ -16701,7 +17259,7 @@ mod tests {
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
         USER_SESSION_KEY,
     };
-    use fm_user::{PushSubscription, CREDENTIAL_KEY_BYTES};
+    use fm_user::{MailAccount, MailIdentity, PushSubscription, CREDENTIAL_KEY_BYTES};
     use hmac::{Hmac, Mac};
     use openssl::{
         asn1::Asn1Time,
@@ -16740,6 +17298,85 @@ mod tests {
         "fjjlnQAQDFHUs6TIcxrNTtEZFjUFm1M0PJ1Dng/cDW4xN80fsn0QEA22Kr7VkCjeAEC08VSTeV+",
         "QFsmz55/lntWkwYWhmvOgE="
     );
+
+    fn read_receipt_test_account() -> MailAccount {
+        MailAccount {
+            id: 7,
+            label: "Receipt".to_string(),
+            email: "account@example.com".to_string(),
+            account_type: "imap".to_string(),
+            imap_host: None,
+            imap_port: None,
+            imap_secure: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_secure: None,
+            login: None,
+            is_primary: true,
+            identities: vec![MailIdentity {
+                id: 9,
+                account_id: 7,
+                name: "Receipt Sender".to_string(),
+                email: "sender@example.com".to_string(),
+                reply_to: Some("reply@example.com".to_string()),
+                is_default: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn read_receipt_build_matches_legacy_mime_basics_and_limits_work_before_parse() {
+        let input = super::legacy_read_receipt_build_input(&json!({
+            "readReceipt": "recipient@example.com",
+            "subject": "Read receipt",
+            "plain": "first\nsecond"
+        }))
+        .expect("receipt input");
+        let message =
+            super::legacy_build_read_receipt_message(&input, &read_receipt_test_account())
+                .expect("receipt MIME");
+        let wire = String::from_utf8(message.wire).expect("ASCII receipt wire");
+        assert!(wire.contains("From: \"Receipt Sender\" <sender@example.com>\r\n"));
+        assert!(wire.contains("To: recipient@example.com\r\n"));
+        assert!(wire.contains("Reply-To: reply@example.com\r\n"));
+        assert!(wire.contains("MIME-Version: 1.0\r\n"));
+        assert!(wire.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+        assert!(wire.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
+        assert!(wire.contains("Message-ID: "));
+        assert!(wire.contains("@example.com\r\n"));
+        assert!(wire.contains("first\r\nsecond"));
+
+        let too_many = std::iter::repeat_n("a@example.com", super::COMPOSE_RECIPIENT_LIMIT + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = match super::legacy_read_receipt_build_input(&json!({
+            "readReceipt": too_many,
+            "subject": "s",
+            "plain": "p"
+        })) {
+            Ok(_) => panic!("over-limit receipt must fail before address parsing"),
+            Err(err) => err,
+        };
+        assert_eq!(err, "Too many read receipt recipients");
+        let input = super::legacy_read_receipt_build_input(&json!({
+            "readReceipt": "recipient@example.com",
+            "subject": "s",
+            "plain": "p",
+            "unrelated": "x".repeat(2 * 1024 * 1024)
+        }))
+        .expect("unrelated request data must not affect receipt input");
+        assert_eq!(input.recipients, ["recipient@example.com"]);
+        assert_eq!(input.plain, "p");
+        assert!(super::legacy_read_receipt_is_suppressed_by_flags(&[
+            "$MDNSent".to_string()
+        ]));
+        assert!(super::legacy_read_receipt_is_suppressed_by_flags(&[
+            "\\Answered".to_string()
+        ]));
+        assert!(!super::legacy_read_receipt_is_suppressed_by_flags(&[
+            "\\MDNSent".to_string()
+        ]));
+    }
 
     fn autocrypt_revoked_subkey_fixture() -> Vec<u8> {
         use pgp::{
@@ -23879,6 +24516,119 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[tokio::test]
+    async fn native_message_list_hides_durably_suppressed_read_receipts() {
+        let key = [94_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(15_942, 15_943, &key).await;
+        let pool = state.db_pool().unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (
+                user_id INTEGER NOT NULL, account_id INTEGER NOT NULL,
+                folder_hash TEXT NOT NULL, imap_uid INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        fm_user::SqlxUserRepository::cache_read_receipt(
+            pool,
+            15_942,
+            15_943,
+            &super::legacy_read_receipt_folder_hash("INBOX"),
+            44,
+            super::current_epoch() as i64 + 60,
+        )
+        .await
+        .unwrap();
+        let response = super::native_legacy_message_list_with_fetcher(
+            &state,
+            "MessageList",
+            &json!({"account_id": 15_943, "folder": "INBOX"}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, request, _cache_account_email, _unchanged| async move {
+                Ok(Some(LegacyMessageList {
+                    folder: legacy_test_folder_information(),
+                    total_emails: 1,
+                    total_threads: None,
+                    offset: request.offset,
+                    limit: request.limit,
+                    search: request.search,
+                    sort: request.sort,
+                    limited: false,
+                    thread_uid: request.thread_uid,
+                    messages: vec![legacy_test_message_summary()],
+                }))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["@Collection"][0]["readReceipt"], "");
+    }
+
+    #[tokio::test]
+    async fn native_message_hides_durably_suppressed_read_receipt() {
+        let key = [95_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(16_942, 16_943, &key).await;
+        let pool = state.db_pool().unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (
+                user_id INTEGER NOT NULL, account_id INTEGER NOT NULL,
+                folder_hash TEXT NOT NULL, imap_uid INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        fm_user::SqlxUserRepository::cache_read_receipt(
+            pool,
+            16_942,
+            16_943,
+            &super::legacy_read_receipt_folder_hash("INBOX"),
+            51,
+            super::current_epoch() as i64 + 60,
+        )
+        .await
+        .unwrap();
+        let cache_key =
+            fm_imap::legacy_message_cache_key("INBOX", 51, &[], "work@example.com:rr=0");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            IF_NONE_MATCH,
+            HeaderValue::from_str(&super::legacy_http_cache_etag(
+                &cache_key,
+                &state.config().cache,
+            ))
+            .unwrap(),
+        );
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 16_943, "folder": "INBOX", "uid": 51}),
+            &session,
+            &headers,
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"Disposition-Notification-To: receipt@example.com\r\n\r\n".to_vec(),
+                    is_complete: true,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: Default::default(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["readReceipt"], "");
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_list_uses_hide_deleted_setting() {
         let key = [51_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) =
@@ -28392,6 +29142,20 @@ Subject: Empty body metadata\r\n\r\n"
         .await
         .unwrap();
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                folder_hash TEXT NOT NULL,
+                imap_uid INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool
     }
 
@@ -29342,7 +30106,8 @@ Subject: Empty body metadata\r\n\r\n"
         uid: u32,
         flags: &[String],
     ) -> String {
-        let cache_key = fm_imap::legacy_message_cache_key("INBOX", uid, flags, "work@example.com");
+        let cache_key =
+            fm_imap::legacy_message_cache_key("INBOX", uid, flags, "work@example.com:rr=0");
         super::legacy_http_cache_etag(&cache_key, cache_config)
     }
 
@@ -30100,6 +30865,243 @@ Subject: Empty body metadata\r\n\r\n"
                 ))
             }
         }
+    }
+
+    struct RecordingReadReceiptImap {
+        preflight_succeeds: bool,
+        mark_succeeds: bool,
+        marked: Arc<Mutex<Vec<(String, u32)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::LegacyReadReceiptImap for RecordingReadReceiptImap {
+        async fn preflight(
+            &self,
+            _config: ImapConnectionConfig,
+            _password: &str,
+        ) -> fm_core::Result<()> {
+            if self.preflight_succeeds {
+                Ok(())
+            } else {
+                Err(FrickmailError::Upstream(
+                    "scripted IMAP preflight failure".to_string(),
+                ))
+            }
+        }
+
+        async fn mark_mdn_sent(
+            &self,
+            _config: ImapConnectionConfig,
+            _password: &str,
+            folder: &str,
+            uid: u32,
+        ) -> fm_core::Result<()> {
+            self.marked.lock().unwrap().push((folder.to_string(), uid));
+            if self.mark_succeeds {
+                Ok(())
+            } else {
+                Err(FrickmailError::Upstream(
+                    "scripted IMAP STORE failure".to_string(),
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn send_read_receipt_action_sends_legacy_wire_only_after_imap_preflight_and_marks_mdn() {
+        let key = [93_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(14_942, 14_943, &key).await;
+        let pool = state.db_pool().unwrap();
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts SET smtp_host = ?, smtp_port = ?, smtp_secure = ? WHERE id = ?",
+        )
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(14_943_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO frickmail_identities (id, account_id, user_id, name, email, reply_to, is_default)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(14_944_i64)
+        .bind(14_943_i64)
+        .bind(14_942_i64)
+        .bind("Receipt Sender")
+        .bind("sender@example.com")
+        .bind("reply@example.com")
+        .bind(false)
+        .execute(pool)
+        .await
+        .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&captured),
+        };
+        let marked = Arc::new(Mutex::new(Vec::new()));
+        let imap = RecordingReadReceiptImap {
+            preflight_succeeds: true,
+            mark_succeeds: true,
+            marked: Arc::clone(&marked),
+        };
+        let payload = json!({
+            "account_id": 14_943,
+            "readReceipt": "recipient@example.net",
+            "subject": "Receipt",
+            "plain": "received\nthanks",
+            "messageFolder": "INBOX",
+            "messageUid": 42
+        });
+        let body = read_json(
+            super::native_send_read_receipt_message_inner_with_clients(
+                &state,
+                "SendReadReceiptMessage",
+                &payload,
+                &session,
+                &sender,
+                &imap,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], true);
+        let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(wire.contains("MIME-Version: 1.0\r\n"));
+        assert!(wire.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+        assert!(wire.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
+        assert!(wire.contains("Message-ID: "));
+        assert_eq!(*marked.lock().unwrap(), vec![("INBOX".to_string(), 42)]);
+
+        let blocked_capture = Arc::new(Mutex::new(None));
+        let blocked_sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&blocked_capture),
+        };
+        let blocked_imap = RecordingReadReceiptImap {
+            preflight_succeeds: false,
+            mark_succeeds: true,
+            marked: Arc::new(Mutex::new(Vec::new())),
+        };
+        let body = read_json(
+            super::native_send_read_receipt_message_inner_with_clients(
+                &state,
+                "SendReadReceiptMessage",
+                &payload,
+                &session,
+                &blocked_sender,
+                &blocked_imap,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert!(blocked_capture.lock().unwrap().is_none());
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (
+                user_id INTEGER NOT NULL, account_id INTEGER NOT NULL,
+                folder_hash TEXT NOT NULL, imap_uid INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let failed_smtp_marks = Arc::new(Mutex::new(Vec::new()));
+        let failed_smtp_imap = RecordingReadReceiptImap {
+            preflight_succeeds: true,
+            mark_succeeds: true,
+            marked: Arc::clone(&failed_smtp_marks),
+        };
+        let failed_smtp_sender = RecordingSmtpSender {
+            succeed: false,
+            message: Arc::new(Mutex::new(None)),
+        };
+        let body = read_json(
+            super::native_send_read_receipt_message_inner_with_clients(
+                &state,
+                "SendReadReceiptMessage",
+                &payload,
+                &session,
+                &failed_smtp_sender,
+                &failed_smtp_imap,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], false);
+        assert!(failed_smtp_marks.lock().unwrap().is_empty());
+        let cache_count: i64 =
+            sqlx::query("SELECT COUNT(*) AS count FROM frickmail_read_receipt_cache")
+                .fetch_one(pool)
+                .await
+                .unwrap()
+                .try_get("count")
+                .unwrap();
+        assert_eq!(cache_count, 0);
+
+        let oversized_folder = "x".repeat(1_025);
+        let oversized_folder_payload = json!({
+            "account_id": 14_943,
+            "readReceipt": "recipient@example.net",
+            "subject": "Receipt",
+            "plain": "received",
+            "messageFolder": oversized_folder,
+            "messageUid": 44
+        });
+        let rejected_marks = Arc::new(Mutex::new(Vec::new()));
+        let rejected_imap = RecordingReadReceiptImap {
+            preflight_succeeds: true,
+            mark_succeeds: true,
+            marked: Arc::clone(&rejected_marks),
+        };
+        let rejected_sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::new(Mutex::new(None)),
+        };
+        let body = read_json(
+            super::native_send_read_receipt_message_inner_with_clients(
+                &state,
+                "SendReadReceiptMessage",
+                &oversized_folder_payload,
+                &session,
+                &rejected_sender,
+                &rejected_imap,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert!(rejected_marks.lock().unwrap().is_empty());
+        let failed_store_imap = RecordingReadReceiptImap {
+            preflight_succeeds: true,
+            mark_succeeds: false,
+            marked: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut failed_store_payload = payload.clone();
+        failed_store_payload["messageUid"] = json!(43);
+        let body = read_json(
+            super::native_send_read_receipt_message_inner_with_clients(
+                &state,
+                "SendReadReceiptMessage",
+                &failed_store_payload,
+                &session,
+                &sender,
+                &failed_store_imap,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], true);
+        assert_eq!(
+            super::legacy_read_receipt_cached(pool, 14_942, 14_943, "INBOX", 43).await,
+            Some(true)
+        );
     }
 
     struct RecordingSentAppender {

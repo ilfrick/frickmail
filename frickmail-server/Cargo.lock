@@ -1290,6 +1290,7 @@ version = "0.1.0"
 dependencies = [
  "fm-core",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]

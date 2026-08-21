@@ -233,6 +233,15 @@ if command -v php >/dev/null 2>&1 && [ -n "${FRICKMAIL_DB_HOST}" ]; then
             setting_value TEXT NOT NULL,
             updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (
+            user_id BIGINT NOT NULL REFERENCES frickmail_users(id) ON DELETE CASCADE,
+            account_id BIGINT NOT NULL REFERENCES frickmail_mail_accounts(id) ON DELETE CASCADE,
+            folder_hash CHAR(40) NOT NULL,
+            imap_uid BIGINT NOT NULL,
+            expires_at BIGINT NOT NULL,
+            PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_fm_read_receipt_cache_expiry ON frickmail_read_receipt_cache(user_id, account_id, expires_at)");
         $legacyVapidConfig = "/var/lib/snappymail/_data_/_default_/configs/plugin-frickmail-user.json";
         if (is_file($legacyVapidConfig)) {
             $legacyConfig = json_decode((string) file_get_contents($legacyVapidConfig), true);

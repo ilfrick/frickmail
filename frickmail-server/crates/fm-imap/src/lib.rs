@@ -827,6 +827,7 @@ pub enum ImapMessageFlag {
     Seen,
     Flagged,
     Deleted,
+    MdnSentKeyword,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8995,6 +8996,8 @@ fn store_flag_query(flag: ImapMessageFlag, set: bool) -> &'static str {
         (ImapMessageFlag::Flagged, false) => "-FLAGS.SILENT (\\Flagged)",
         (ImapMessageFlag::Deleted, true) => "+FLAGS.SILENT (\\Deleted)",
         (ImapMessageFlag::Deleted, false) => "-FLAGS.SILENT (\\Deleted)",
+        (ImapMessageFlag::MdnSentKeyword, true) => "+FLAGS.SILENT ($MDNSent)",
+        (ImapMessageFlag::MdnSentKeyword, false) => "-FLAGS.SILENT ($MDNSent)",
     }
 }
 
@@ -11569,6 +11572,10 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         assert_eq!(
             store_flag_query(ImapMessageFlag::Deleted, false),
             "-FLAGS.SILENT (\\Deleted)"
+        );
+        assert_eq!(
+            store_flag_query(ImapMessageFlag::MdnSentKeyword, true),
+            "+FLAGS.SILENT ($MDNSent)"
         );
         assert_eq!(
             store_keyword_query("$label1", true),

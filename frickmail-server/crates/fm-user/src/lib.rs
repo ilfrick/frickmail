@@ -36,8 +36,11 @@ use serde_json::{json, Map, Number, Value};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use sqlx::{AnyPool, Connection, Row};
+
+const READ_RECEIPT_CACHE_ACCOUNT_LIMIT: i64 = 1_024;
+const READ_RECEIPT_CACHE_USER_LIMIT: i64 = 4_096;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
     sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -609,6 +612,191 @@ impl SqlxUserRepository {
         account_id: i64,
     ) -> Result<Option<MailAccountConnectionSecret>> {
         fetch_mail_account_connection_secret(pool, user_id, account_id).await
+    }
+
+    pub async fn read_receipt_cached(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder_hash: &str,
+        uid: u32,
+        now: i64,
+    ) -> Result<bool> {
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        let row = sqlx::query(read_receipt_cache_select_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .bind(folder_hash)
+            .bind(i64::from(uid))
+            .bind(now)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        Ok(row.is_some())
+    }
+
+    pub async fn read_receipt_cached_uids(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder_hash: &str,
+        uids: &[u32],
+        now: i64,
+    ) -> Result<HashSet<u32>> {
+        const READ_RECEIPT_CACHE_UID_QUERY_BATCH: usize = 500;
+        let uids = uids.iter().copied().collect::<HashSet<_>>();
+        if uids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        let mut cached = HashSet::new();
+        let uids = uids.into_iter().collect::<Vec<_>>();
+        for batch in uids.chunks(READ_RECEIPT_CACHE_UID_QUERY_BATCH) {
+            let placeholders = (0..batch.len())
+                .map(|index| {
+                    if backend == "PostgreSQL" {
+                        format!("${}", index + 5)
+                    } else {
+                        "?".to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let prefix = if backend == "PostgreSQL" {
+                "user_id=$1 AND account_id=$2 AND folder_hash=$3 AND expires_at > $4"
+            } else {
+                "user_id=? AND account_id=? AND folder_hash=? AND expires_at > ?"
+            };
+            let query = format!("SELECT imap_uid FROM frickmail_read_receipt_cache WHERE {prefix} AND imap_uid IN ({placeholders})");
+            let mut query = sqlx::query(&query)
+                .bind(user_id)
+                .bind(account_id)
+                .bind(folder_hash)
+                .bind(now);
+            for uid in batch {
+                query = query.bind(i64::from(*uid));
+            }
+            let rows = query.fetch_all(&mut *conn).await.map_err(db_error)?;
+            for row in rows {
+                let uid = row.try_get::<i64, _>("imap_uid").map_err(db_error)?;
+                cached.insert(u32::try_from(uid).map_err(|_| {
+                    FrickmailError::Upstream("invalid cached IMAP uid".to_string())
+                })?);
+            }
+        }
+        Ok(cached)
+    }
+
+    pub async fn read_receipt_cache_has_folder(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder_hash: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        let row = sqlx::query(read_receipt_cache_folder_exists_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .bind(folder_hash)
+            .bind(now)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        Ok(row.is_some())
+    }
+
+    pub async fn cache_read_receipt(
+        pool: &AnyPool,
+        user_id: i64,
+        account_id: i64,
+        folder_hash: &str,
+        uid: u32,
+        expires_at: i64,
+    ) -> Result<()> {
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        let mut transaction = conn
+            .begin_with(begin_account_primary_transaction_query(&backend))
+            .await
+            .map_err(db_error)?;
+        sqlx::query(lock_user_account_mutations_query(&backend))
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(db_error)?;
+        sqlx::query(read_receipt_cache_delete_expired_for_user_query(&backend))
+            .bind(user_id)
+            .bind(expires_at - 172_800)
+            .execute(&mut *transaction)
+            .await
+            .map_err(db_error)?;
+        sqlx::query(read_receipt_cache_delete_expired_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .bind(expires_at - 172_800)
+            .execute(&mut *transaction)
+            .await
+            .map_err(db_error)?;
+        let existing = sqlx::query(read_receipt_cache_key_exists_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .bind(folder_hash)
+            .bind(i64::from(uid))
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(db_error)?
+            .is_some();
+        if existing {
+            sqlx::query(read_receipt_cache_upsert_query(&backend))
+                .bind(user_id)
+                .bind(account_id)
+                .bind(folder_hash)
+                .bind(i64::from(uid))
+                .bind(expires_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(db_error)?;
+            return transaction.commit().await.map_err(db_error);
+        }
+        let count = sqlx::query(read_receipt_cache_count_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(db_error)?
+            .try_get::<i64, _>("cache_count")
+            .map_err(db_error)?;
+        if count >= READ_RECEIPT_CACHE_ACCOUNT_LIMIT {
+            return Err(FrickmailError::BadRequest(
+                "read receipt suppression cache quota reached".to_string(),
+            ));
+        }
+        let user_count = sqlx::query(read_receipt_cache_count_for_user_query(&backend))
+            .bind(user_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(db_error)?
+            .try_get::<i64, _>("cache_count")
+            .map_err(db_error)?;
+        if user_count >= READ_RECEIPT_CACHE_USER_LIMIT {
+            return Err(FrickmailError::BadRequest(
+                "read receipt suppression cache user quota reached".to_string(),
+            ));
+        }
+        sqlx::query(read_receipt_cache_upsert_query(&backend))
+            .bind(user_id)
+            .bind(account_id)
+            .bind(folder_hash)
+            .bind(i64::from(uid))
+            .bind(expires_at)
+            .execute(&mut *transaction)
+            .await
+            .map_err(db_error)?;
+        transaction.commit().await.map_err(db_error)
     }
 
     pub async fn add_mail_account(
@@ -4318,6 +4506,67 @@ fn mail_accounts_query(backend: &str) -> &'static str {
     }
 }
 
+fn read_receipt_cache_select_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "SELECT 1 FROM frickmail_read_receipt_cache WHERE user_id=$1 AND account_id=$2 AND folder_hash=$3 AND imap_uid=$4 AND expires_at > $5",
+        _ => "SELECT 1 FROM frickmail_read_receipt_cache WHERE user_id=? AND account_id=? AND folder_hash=? AND imap_uid=? AND expires_at > ?",
+    }
+}
+
+fn read_receipt_cache_key_exists_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "SELECT 1 FROM frickmail_read_receipt_cache WHERE user_id=$1 AND account_id=$2 AND folder_hash=$3 AND imap_uid=$4",
+        _ => "SELECT 1 FROM frickmail_read_receipt_cache WHERE user_id=? AND account_id=? AND folder_hash=? AND imap_uid=?",
+    }
+}
+
+fn read_receipt_cache_folder_exists_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "SELECT 1 FROM frickmail_read_receipt_cache WHERE user_id=$1 AND account_id=$2 AND folder_hash=$3 AND expires_at > $4 LIMIT 1",
+        _ => "SELECT 1 FROM frickmail_read_receipt_cache WHERE user_id=? AND account_id=? AND folder_hash=? AND expires_at > ? LIMIT 1",
+    }
+}
+
+fn read_receipt_cache_upsert_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "INSERT INTO frickmail_read_receipt_cache (user_id,account_id,folder_hash,imap_uid,expires_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (user_id,account_id,folder_hash,imap_uid) DO UPDATE SET expires_at=EXCLUDED.expires_at",
+        "MySQL" => "INSERT INTO frickmail_read_receipt_cache (user_id,account_id,folder_hash,imap_uid,expires_at) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE expires_at=VALUES(expires_at)",
+        _ => "INSERT INTO frickmail_read_receipt_cache (user_id,account_id,folder_hash,imap_uid,expires_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id,account_id,folder_hash,imap_uid) DO UPDATE SET expires_at=excluded.expires_at",
+    }
+}
+
+fn read_receipt_cache_delete_expired_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_read_receipt_cache WHERE user_id=$1 AND account_id=$2 AND expires_at <= $3",
+        _ => "DELETE FROM frickmail_read_receipt_cache WHERE user_id=? AND account_id=? AND expires_at <= ?",
+    }
+}
+
+fn read_receipt_cache_delete_expired_for_user_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "DELETE FROM frickmail_read_receipt_cache WHERE user_id=$1 AND expires_at <= $2"
+        }
+        _ => "DELETE FROM frickmail_read_receipt_cache WHERE user_id=? AND expires_at <= ?",
+    }
+}
+
+fn read_receipt_cache_count_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "SELECT COUNT(*) AS cache_count FROM frickmail_read_receipt_cache WHERE user_id=$1 AND account_id=$2",
+        _ => "SELECT COUNT(*) AS cache_count FROM frickmail_read_receipt_cache WHERE user_id=? AND account_id=?",
+    }
+}
+
+fn read_receipt_cache_count_for_user_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT COUNT(*) AS cache_count FROM frickmail_read_receipt_cache WHERE user_id=$1"
+        }
+        _ => "SELECT COUNT(*) AS cache_count FROM frickmail_read_receipt_cache WHERE user_id=?",
+    }
+}
+
 fn mail_account_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -5828,6 +6077,90 @@ mod tests {
                 username: Some("nicola".to_string()),
                 email: Some("nicola@example.com".to_string()),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn read_receipt_cache_is_scoped_expiring_and_chunks_large_uid_lists() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_read_receipt_cache_table(&pool).await;
+        sqlx::query("INSERT INTO frickmail_users (id, username, password_hash, kdf_salt, settings) VALUES (1, 'receipt', 'hash', X'01', '{}')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        SqlxUserRepository::cache_read_receipt(&pool, 1, 7, "folder-a", 1_001, 500)
+            .await
+            .unwrap();
+        SqlxUserRepository::cache_read_receipt(&pool, 1, 7, "folder-a", 1_500, 500)
+            .await
+            .unwrap();
+        SqlxUserRepository::cache_read_receipt(&pool, 1, 8, "folder-a", 1_700, 500)
+            .await
+            .unwrap();
+
+        assert!(
+            SqlxUserRepository::read_receipt_cached(&pool, 1, 7, "folder-a", 1_001, 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            SqlxUserRepository::read_receipt_cache_has_folder(&pool, 1, 7, "folder-a", 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !SqlxUserRepository::read_receipt_cache_has_folder(&pool, 1, 7, "folder-a", 500)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !SqlxUserRepository::read_receipt_cached(&pool, 1, 8, "folder-a", 1_001, 100)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !SqlxUserRepository::read_receipt_cached(&pool, 1, 7, "folder-a", 1_001, 500)
+                .await
+                .unwrap()
+        );
+
+        let uids = (1..=1_500).collect::<Vec<_>>();
+        let cached =
+            SqlxUserRepository::read_receipt_cached_uids(&pool, 1, 7, "folder-a", &uids, 100)
+                .await
+                .unwrap();
+        assert_eq!(cached, [1_001, 1_500].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn read_receipt_cache_refreshes_existing_marker_at_account_quota() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_read_receipt_cache_table(&pool).await;
+        sqlx::query("INSERT INTO frickmail_users (id, username, password_hash, kdf_salt, settings) VALUES (1, 'receipt', 'hash', X'01', '{}')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for uid in 1..=super::READ_RECEIPT_CACHE_ACCOUNT_LIMIT {
+            sqlx::query("INSERT INTO frickmail_read_receipt_cache (user_id, account_id, folder_hash, imap_uid, expires_at) VALUES (1, 7, 'folder-a', ?, 500)")
+                .bind(uid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        SqlxUserRepository::cache_read_receipt(&pool, 1, 7, "folder-a", 1, 900)
+            .await
+            .unwrap();
+        let refreshed: i64 = sqlx::query("SELECT expires_at FROM frickmail_read_receipt_cache WHERE user_id=1 AND account_id=7 AND folder_hash='folder-a' AND imap_uid=1")
+            .fetch_one(&pool).await.unwrap().try_get("expires_at").unwrap();
+        assert_eq!(refreshed, 900);
+        assert!(
+            SqlxUserRepository::cache_read_receipt(&pool, 1, 7, "folder-a", 2_000, 900)
+                .await
+                .is_err()
         );
     }
 
@@ -8204,6 +8537,22 @@ mod tests {
             )"
         );
         sqlx::query(&sql).execute(pool).await.unwrap();
+    }
+
+    async fn create_read_receipt_cache_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_read_receipt_cache (
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                folder_hash TEXT NOT NULL,
+                imap_uid INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn create_mail_account_tables(pool: &AnyPool) {

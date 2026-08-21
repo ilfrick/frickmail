@@ -21,6 +21,9 @@ async fn main() -> anyhow::Result<()> {
             fm_db::verify_connection(&pool)
                 .await
                 .context("verify database connection")?;
+            fm_db::ensure_runtime_schema(&pool)
+                .await
+                .context("apply Rust runtime schema migrations")?;
             info!("verified Frickmail database connection");
             Some(pool)
         }
