@@ -63,6 +63,7 @@ use fm_user::{
     NewSmimeCert, NewSmimeP12, PushSubscription, SqlxUserRepository, TaskFilter, UpdateMailAccount,
     UpdateMailTask, VapidKeyBundle, CREDENTIAL_KEY_BYTES,
 };
+use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use html5ever::{
     ns,
@@ -85,6 +86,7 @@ use serde::{
 };
 use serde_json::{json, Map, Value};
 use sha1::Sha1;
+use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
@@ -131,6 +133,7 @@ const COMPOSE_ATTACHMENT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 const COMPOSE_UPLOAD_REQUEST_OVERHEAD_BYTES: usize = 64 * 1024;
 const COMPOSE_ATTACHMENT_TOTAL_LIMIT_BYTES: usize = 20 * 1024 * 1024;
 const COMPOSE_ATTACHMENT_USER_LIMIT_BYTES: usize = 20 * 1024 * 1024;
+const COMPOSE_ATTACHMENT_FETCH_CONCURRENCY: usize = 2;
 const COMPOSE_ATTACHMENT_USER_FILE_LIMIT: usize = 100;
 const COMPOSE_ATTACHMENT_GLOBAL_LIMIT_BYTES: usize = 60 * 1024 * 1024;
 const COMPOSE_ATTACHMENT_GLOBAL_FILE_LIMIT: usize = 300;
@@ -1351,7 +1354,7 @@ fn compose_attachment_staging_semaphore() -> &'static Semaphore {
 
 fn compose_attachment_fetch_semaphore() -> &'static Semaphore {
     static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
-    SEMAPHORE.get_or_init(|| Semaphore::new(2))
+    SEMAPHORE.get_or_init(|| Semaphore::new(COMPOSE_ATTACHMENT_FETCH_CONCURRENCY))
 }
 
 fn compose_attachment_memory_semaphore() -> &'static Arc<Semaphore> {
@@ -11288,140 +11291,40 @@ where
         return json_value_envelope(StatusCode::OK, original_action, json!({"Result": []}));
     }
 
-    // The 52 MiB worst-case fetch reservation makes one item the intentional
-    // per-request concurrency. Schedule lazily so later items do not spend
-    // their admission/fetch deadlines waiting behind earlier items, and so a
-    // single request cannot enqueue 100 global-semaphore waiters at once.
-    let results = futures::stream::iter(attachments.iter())
-        .then(|attachment| {
-            let raw_key_str = attachment.as_str().unwrap_or_default().to_string();
-            let scope = scope.clone();
-            let config = config.clone();
-            let password = password.clone();
-            let fetcher = &fetcher;
+    // Independent attachment fetches are parallelized via `FuturesUnordered`
+    // up to `COMPOSE_ATTACHMENT_FETCH_CONCURRENCY`, bounded by the IMAP fetch
+    // semaphore and the aggregate memory budget. Order is recovered via
+    // position tags so results map back to the original attachment list.
+    #[allow(clippy::type_complexity)]
+    let mut in_flight: FuturesUnordered<
+        Pin<Box<dyn std::future::Future<Output = (usize, Value)> + Send + '_>>,
+    > = FuturesUnordered::new();
 
-            async move {
-                let Some(raw_values) = legacy_raw_key_json(&raw_key_str) else {
-                    return json!(false);
-                };
+    for (index, attachment) in attachments.iter().enumerate() {
+        let raw_key_str = attachment.as_str().unwrap_or_default().to_string();
+        let scope = scope.clone();
+        let config = config.clone();
+        let password = password.clone();
+        let fetcher = &fetcher;
 
-                let folder = raw_values
-                    .get("folder")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let mime_index = raw_values
-                    .get("mimeIndex")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let mime_type_hint = raw_values
-                    .get("mimeType")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let file_name = raw_values
-                    .get("fileName")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+        in_flight.push(Box::pin(async move {
+            let value = upload_single_attachment(
+                &raw_key_str,
+                &scope,
+                &config,
+                &password,
+                fetcher,
+                fetch_deadline,
+            )
+            .await;
+            (index, value)
+        }));
+    }
 
-                if uid == 0 || folder.is_empty() {
-                    return json!(false);
-                }
-
-                // tempName = sha1(raw_key_string)
-                let temp_name = hex::encode(Sha1::digest(raw_key_str.as_bytes()));
-                let Some(file_path) = scope.path(&temp_name) else {
-                    return json!(false);
-                };
-
-                // Validate without creating on cache reads. A miss proceeds to
-                // the write path, which creates and revalidates private dirs.
-                match legacy_validate_compose_staging_scope(&scope).await {
-                    Ok(true) => {
-                        if let Ok(metadata) = tokio::fs::symlink_metadata(&file_path).await {
-                            if metadata.file_type().is_file()
-                                && usize::try_from(metadata.len()).unwrap_or(usize::MAX)
-                                    <= COMPOSE_ATTACHMENT_LIMIT_BYTES
-                            {
-                                let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
-                                return json!({
-                                    "tempName": temp_name,
-                                    "mimeType": mime_type,
-                                });
-                            }
-                            return json!(false);
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(err) => {
-                        tracing::warn!("Rejected untrusted attachment cache tree: {err}");
-                        return json!(false);
-                    }
-                }
-
-                // Fetch via IMAP
-                let _fetch_permit = match tokio::time::timeout(
-                    Duration::from_secs(10),
-                    compose_attachment_fetch_semaphore().acquire(),
-                )
-                .await
-                {
-                    Ok(Ok(permit)) => permit,
-                    _ => return json!(false),
-                };
-                // Hold admission for the four-times decoded quoted-printable wire
-                // ceiling (including soft line breaks) plus the decoded staging
-                // Vec until the fetch result is written.
-                let fetch_memory_units = compose_attachment_fetch_memory_permit_units();
-                let _fetch_memory_permit = match tokio::time::timeout(
-                    Duration::from_secs(10),
-                    Arc::clone(compose_attachment_memory_semaphore())
-                        .acquire_many_owned(fetch_memory_units),
-                )
-                .await
-                {
-                    Ok(Ok(permit)) => permit,
-                    _ => return json!(false),
-                };
-                let data = match tokio::time::timeout(
-                    fetch_deadline,
-                    fetcher(config, password, folder, uid, mime_index),
-                )
-                .await
-                {
-                    Ok(Ok(Some(data))) => data,
-                    Ok(Ok(None)) => {
-                        return json!(false);
-                    }
-                    Ok(Err(err)) => {
-                        tracing::warn!("Failed to fetch attachment for upload: {err}");
-                        return json!(false);
-                    }
-                    Err(_) => {
-                        tracing::warn!("Attachment upload fetch timed out");
-                        return json!(false);
-                    }
-                };
-
-                if let Err(err) =
-                    legacy_stage_compose_attachment(&scope, &temp_name, &data, true).await
-                {
-                    tracing::warn!("Failed to stage fetched attachment: {err}");
-                    return json!(false);
-                }
-
-                let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
-                json!({
-                    "tempName": temp_name,
-                    "mimeType": mime_type,
-                })
-            }
-        })
-        .collect::<Vec<_>>()
-        .await;
+    let mut results = vec![json!(false); attachments.len()];
+    while let Some((index, value)) = in_flight.next().await {
+        results[index] = value;
+    }
 
     json_value_envelope(
         StatusCode::OK,
@@ -11430,6 +11333,142 @@ where
             "Result": results
         }),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_single_attachment<F, Fut>(
+    raw_key_str: &str,
+    scope: &LegacyComposeStagingScope,
+    config: &ImapConnectionConfig,
+    password: &str,
+    fetcher: &F,
+    fetch_deadline: Duration,
+) -> Value
+where
+    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>> + Send,
+{
+    let raw_key_str = raw_key_str.to_string();
+    let Some(raw_values) = legacy_raw_key_json(&raw_key_str) else {
+        return json!(false);
+    };
+
+    let folder = raw_values
+        .get("folder")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let uid = raw_values.get("uid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let mime_index = raw_values
+        .get("mimeIndex")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mime_type_hint = raw_values
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let file_name = raw_values
+        .get("fileName")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    if uid == 0 || folder.is_empty() {
+        return json!(false);
+    }
+
+    // tempName = sha1(raw_key_string)
+    let temp_name = hex::encode(Sha1::digest(raw_key_str.as_bytes()));
+    let Some(file_path) = scope.path(&temp_name) else {
+        return json!(false);
+    };
+
+    // Validate without creating on cache reads. A miss proceeds to
+    // the write path, which creates and revalidates private dirs.
+    match legacy_validate_compose_staging_scope(scope).await {
+        Ok(true) => {
+            if let Ok(metadata) = tokio::fs::symlink_metadata(&file_path).await {
+                if metadata.file_type().is_file()
+                    && usize::try_from(metadata.len()).unwrap_or(usize::MAX)
+                        <= COMPOSE_ATTACHMENT_LIMIT_BYTES
+                {
+                    let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
+                    return json!({
+                        "tempName": temp_name,
+                        "mimeType": mime_type,
+                    });
+                }
+                return json!(false);
+            }
+        }
+        Ok(false) => {}
+        Err(err) => {
+            tracing::warn!("Rejected untrusted attachment cache tree: {err}");
+            return json!(false);
+        }
+    }
+
+    // Fetch via IMAP
+    let _fetch_permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        compose_attachment_fetch_semaphore().acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => return json!(false),
+    };
+    // Hold admission for the four-times decoded quoted-printable wire
+    // ceiling (including soft line breaks) plus the decoded staging
+    // Vec until the fetch result is written.
+    let fetch_memory_units = compose_attachment_fetch_memory_permit_units();
+    let _fetch_memory_permit = match tokio::time::timeout(
+        Duration::from_secs(10),
+        Arc::clone(compose_attachment_memory_semaphore()).acquire_many_owned(fetch_memory_units),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => return json!(false),
+    };
+    let data = match tokio::time::timeout(
+        fetch_deadline,
+        fetcher(
+            config.clone(),
+            password.to_string(),
+            folder,
+            uid,
+            mime_index,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(Some(data))) => data,
+        Ok(Ok(None)) => {
+            return json!(false);
+        }
+        Ok(Err(err)) => {
+            tracing::warn!("Failed to fetch attachment for upload: {err}");
+            return json!(false);
+        }
+        Err(_) => {
+            tracing::warn!("Attachment upload fetch timed out");
+            return json!(false);
+        }
+    };
+
+    if let Err(err) = legacy_stage_compose_attachment(scope, &temp_name, &data, true).await {
+        tracing::warn!("Failed to stage fetched attachment: {err}");
+        return json!(false);
+    }
+
+    let mime_type = mime_type_from_hint(&mime_type_hint, &file_name);
+    json!({
+        "tempName": temp_name,
+        "mimeType": mime_type,
+    })
 }
 
 fn legacy_message_upload_raw_keys(payload: &Value) -> Result<&[Value], String> {
