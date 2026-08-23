@@ -24,10 +24,15 @@ allowing reordered starts/completions.
 Local validation for the remediation passed at the timestamp above: 12 focused
 runs of the corrected test, `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, and
-`cargo test --workspace`; every workspace test passed. This slice changes only
-a unit test and migration documentation; no runtime or release-image behavior
-changed, so the prior production canary remains applicable. Exact-SHA dual-branch
-publication and CI monitoring remain pending in this commit.
+`cargo test --workspace`; every workspace test passed. Commit `af34de649`
+changed only a unit test and migration documentation; no runtime or
+release-image behavior changed, so the prior production canary remains
+applicable. It is present on both branches on both remotes. Exact-SHA GitHub
+CI passed for [`master`](https://github.com/ilfrick/frickmail/actions/runs/32649569879)
+(run `32649569879`) and
+[`rust-full-migration`](https://github.com/ilfrick/frickmail/actions/runs/32649569883)
+(run `32649569883`), including the full Docker workspace gates and production
+image smoke test.
 
 ### Required Per-Slice Workflow
 
