@@ -5,70 +5,29 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-21 10:09:21 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-23 17:44:21 CEST (UTC+02:00)
 
 ### Current Branch And Publication State
 
-The reviewed direct-S/MIME compose code commit `19ec4840e` was pushed to both
-`master` and `rust-full-migration` on both remotes. It follows the earlier
-selected-account S/MIME parity commit `0c1a5de99`, alongside recent native
-`Message` thread parity, OAuth SMTP, staged-attachment/data-image compose work,
-and client-provided OpenPGP MIME support.
+The OpenPGP compose/keyring slice `73c6a429a` was published to `master` on both
+GitHub and Gitea, but `rust-full-migration` still pointed at `bb8de1330`. Its
+GitHub run [`32648000254`](https://github.com/ilfrick/frickmail/actions/runs/32648000254)
+failed only in
+`upload_attachments_schedule_multiple_slow_fetches_lazily_in_order`: CI observed
+fetch calls `[58, 57]`. Production permits parallel attachment tasks and each
+task has independent filesystem/semaphore awaits before the fetcher call, so the
+test incorrectly asserted scheduler-dependent start order rather than a product
+contract. The pending remediation renames the test to assert that completed
+results remain mapped to their original payload indexes while deliberately
+allowing reordered starts/completions.
 
-The newly published direct-S/MIME correction makes SendMessage and SaveMessage accept
-bounded direct `signCertificate`/`signPrivateKey` material, including encrypted
-PKCS#8 keys with a bounded passphrase. It matches MailSo precedence: a usable
-selected-account `sign: "S/MIME"` identity wins; otherwise a complete direct
-pair signs; otherwise compose remains unsigned. The single transformed MIME
-root still retains outer delivery headers and is shared by SMTP/Sent. Focused
-OpenSSL/action regressions, independent review, Docker validation, and
-dual-remote publication are complete; exact-SHA CI remains pending at this
-timestamp.
-
-The published ZIP attachment-export correction `41b0a41b9` makes the legacy
-`AttachmentsActions` `target=zip` flow native, including its exact RawDownload
-follow-up route. It uses account-scoped opaque archive capabilities, bounded
-decoded IMAP part fetches, serialized private archive construction, expiry and
-user/global file-and-byte quotas, and bounded streamed downloads. Archive entry
-names, PHP truthiness, and visible timestamped download names follow MailSo;
-non-ZIP plugin targets remain on their compatibility-hook path. Independent
-review and the production canary below passed. The same SHA was pushed to both
-`master` and `rust-full-migration` on both remotes; exact-SHA CI remains pending
-at this timestamp.
-
-The reviewed native `SendReadReceiptMessage` slice was published as
-`9d1cc2895` to both `master` and `rust-full-migration` on both remotes. It preflights the selected IMAP account before SMTP delivery,
-emits a bounded MailSo-compatible quoted-printable text receipt, records the
-exact `$MDNSent` keyword after successful delivery, and uses a bounded durable
-48-hour account/folder/UID suppression cache when that post-send STORE fails.
-Native `Message` and `MessageList` responses hide such prompts without stale
-HTTP-validator reuse; the cache schema is provisioned by both Rust and legacy
-container startup. Legacy PHP receipt/build/SMTP filters remain an explicit
-native-plugin-hook migration boundary.
-
-### Latest Docker Validation
-
-For the pending receipt slice, image `frickmail-rust:read-receipt-canary`
-(`sha256:46b1d9db6883c4de5c1ff2f6d0fde2b3d38bd7f49a5b2f0f56fab1ab474c307d`)
-was built and started as the Compose canary at this timestamp. It is healthy
-with zero restarts and no OOM kill; `/health` and `/` both return HTTP 200.
-It runs as `frickmail:frickmail` with a read-only root filesystem, `CapDrop=ALL`,
-and `no-new-privileges`; startup logs show successful database verification and
-no error/panic/fatal entries. Exact-SHA CI is pending.
-
-For the published ZIP attachment-export slice, the release image
-`frickmail-rust:attachment-export-canary` is
-`sha256:d19406e1f04d1771df8e19317688b2647dc692f08345004bdada2953cca129ae`.
-Its Compose canary is healthy with zero restarts and no OOM kill, runs as
-`frickmail:frickmail` on a read-only root filesystem with all capabilities
-dropped and `no-new-privileges`, serves both `/health` and `/` with HTTP 200,
-and logs a verified database connection and server startup with no error,
-panic, fatal, or OOM entry. The general 64 MiB `/tmp` tmpfs, private 72 MiB
-compose-staging tmpfs, and new private 96 MiB archive-export tmpfs were
-verified; private mounts are UID/GID 10001 and mode 0700. Focused ZIP/action
-tests, formatting, checks, strict Clippy, and independent review passed before
-this canary. The image is from the reviewed pending code; follow the exact-SHA
-CI run after publication before considering this evidence complete.
+Local validation for the remediation passed at the timestamp above: 12 focused
+runs of the corrected test, `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace`; every workspace test passed. This slice changes only
+a unit test and migration documentation; no runtime or release-image behavior
+changed, so the prior production canary remains applicable. Exact-SHA dual-branch
+publication and CI monitoring remain pending in this commit.
 
 ### Required Per-Slice Workflow
 
@@ -77,8 +36,12 @@ implementation, independent senior review, remediation and re-review, Docker
 production-image/container/log validation, intentional commit, explicit push of
 the same SHA to `master` and `rust-full-migration` on both remotes, then
 remote-tip and applicable exact-SHA CI verification. The timestamp, reviewed
-scope, image ID, canary evidence, commit, remote tips, and CI result are added
-here before the slice is considered complete.
+scope, image ID (or explicit applicability rationale for non-runtime slices),
+commit, remote tips, and CI result are added here before the slice is considered
+complete. Publication is not complete until the applicable GitHub Actions run is
+polled to a terminal result. On failure, retrieve the failing job logs, reproduce
+or diagnose locally, apply a focused correction, revalidate, publish a new SHA,
+and repeat CI monitoring until success or an operator decision is required.
 
 ### Still Missing Before The Final Rust-Only Goal
 

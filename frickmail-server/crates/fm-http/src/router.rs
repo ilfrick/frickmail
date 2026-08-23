@@ -18359,7 +18359,7 @@ mod tests {
         x509::{extension::SubjectAlternativeName, store::X509StoreBuilder, X509NameBuilder, X509},
     };
     use serde_json::{json, Value};
-    use sha1::Sha1;
+    use sha1::{Digest, Sha1};
     use sqlx::{any::AnyPoolOptions, AnyPool, Row};
     use tokio::net::TcpListener;
     use tower::ServiceExt;
@@ -18529,7 +18529,7 @@ mod tests {
         body: String,
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn root_get_serves_shell_for_non_json_requests() {
         let response = app()
             .oneshot(
@@ -32983,7 +32983,7 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[tokio::test]
-    async fn upload_attachments_schedule_multiple_slow_fetches_lazily_in_order() {
+    async fn upload_attachments_map_parallel_fetch_results_in_input_order() {
         let key = [55_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let temp_root = std::env::temp_dir().join(format!(
             "frickmail-upload-sequential-{}",
@@ -33026,7 +33026,8 @@ Subject: Empty body metadata\r\n\r\n"
                         let calls = Arc::clone(&calls);
                         async move {
                             calls.lock().unwrap().push(uid);
-                            tokio::time::sleep(Duration::from_millis(40)).await;
+                            let delay = if uid == 57 { 60 } else { 5 };
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
                             Ok(Some(format!("part-{uid}").into_bytes()))
                         }
                     }
@@ -33034,15 +33035,37 @@ Subject: Empty body metadata\r\n\r\n"
             ),
         )
         .await
-        .expect("per-item deadlines must begin only when each fetch is scheduled");
+        .expect("parallel attachment fetches must complete within the deadline");
         let body = read_json(response).await;
 
-        assert_eq!(calls.lock().unwrap().as_slice(), &[57, 58]);
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            2,
+            "every attachment must be fetched exactly once"
+        );
         assert!(body["Result"]
             .as_array()
             .unwrap()
             .iter()
             .all(Value::is_object));
+        let result_temp_names = body["Result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["tempName"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let expected_temp_names = [(57, &raw_keys[0]), (58, &raw_keys[1])]
+            .into_iter()
+            .map(|(uid, raw_key)| {
+                assert!(calls.contains(&uid));
+                hex::encode(Sha1::digest(raw_key.as_bytes()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            result_temp_names, expected_temp_names,
+            "completed attachment results must retain their original payload indexes"
+        );
         tokio::fs::remove_dir_all(&temp_root).await.unwrap();
     }
 
