@@ -193,6 +193,10 @@ const SMIME_ENCRYPT_CERTIFICATE_LIMIT: usize = 20;
 const SMIME_ENCRYPT_CERTIFICATE_TOKEN_LIMIT_BYTES: usize = 16 * 1024;
 const SMIME_ENCRYPT_CERTIFICATE_TOTAL_LIMIT_BYTES: usize = 256 * 1024;
 const SMIME_CRYPTO_OUTPUT_LIMIT_BYTES: usize = 48 * 1024 * 1024;
+const GNUPG_DEADLINE: Duration = Duration::from_secs(15);
+const GNUPG_KEY_MATERIAL_LIMIT_BYTES: usize = 512 * 1024;
+const GNUPG_PASSPHRASE_LIMIT_BYTES: usize = 1024;
+const GNUPG_ENCRYPT_RECIPIENT_LIMIT: usize = 32;
 const SMIME_CERT_IMPORT_MAX_BASE64_BYTES: usize = fm_user::SMIME_CERT_PEM_MAX_BYTES.div_ceil(3) * 4;
 const SMIME_P12_IMPORT_MAX_BASE64_BYTES: usize = fm_user::SMIME_P12_MAX_BYTES.div_ceil(3) * 4;
 const SMIME_VERIFY_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -1124,6 +1128,29 @@ async fn native_compat_response(
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
         "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
         "SaveMessage" => Some(native_save_message(state, original_action, payload, session).await),
+        "GetPGPKeys" => Some(native_gnupg_get_keys(state, original_action, session).await),
+        "PgpStoreKeyPair" => {
+            Some(native_pgp_store_key_pair(state, original_action, payload, session).await)
+        }
+        "PgpImportKey" => {
+            Some(native_pgp_import_key(state, original_action, payload, session).await)
+        }
+        "PgpVerifyMessage" => {
+            Some(native_pgp_verify_message(state, original_action, payload, session, headers).await)
+        }
+        "GnupgGetKeys" => Some(native_gnupg_get_keys(state, original_action, session).await),
+        "GnupgGenerateKey" => {
+            Some(native_gnupg_generate_key(state, original_action, payload, session).await)
+        }
+        "GnupgDeleteKey" => {
+            Some(native_gnupg_delete_key(state, original_action, payload, session).await)
+        }
+        "GnupgExportKey" => {
+            Some(native_gnupg_export_key(state, original_action, payload, session).await)
+        }
+        "GnupgDecrypt" => {
+            Some(native_gnupg_decrypt(state, original_action, payload, session).await)
+        }
         _ => None,
     }
 }
@@ -1600,7 +1627,6 @@ struct LegacyComposeAttachment {
 }
 
 /// Legacy `SendMessage` compose payload after validation.
-#[derive(Debug)]
 struct LegacySendMessageRequest {
     /// Full `From:` header value, display name included.
     from: String,
@@ -1638,6 +1664,30 @@ struct LegacySendMessageRequest {
     pgp_encrypted: Option<String>,
     /// MIME boundary for pgp_signed multipart/signed structure
     pgp_boundary: Option<String>,
+    /// Server-side GnuPG signing key requested by the legacy client.
+    gnupg_sign_fingerprint: Option<String>,
+    /// Server-side GnuPG signing passphrase; never included in Debug output.
+    gnupg_sign_passphrase: Option<String>,
+    /// Server-side GnuPG recipient fingerprints.
+    gnupg_encrypt_fingerprints: Vec<String>,
+}
+
+impl std::fmt::Debug for LegacySendMessageRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LegacySendMessageRequest")
+            .field("from", &self.from)
+            .field("envelope_from", &self.envelope_from)
+            .field("to", &self.to)
+            .field("cc", &self.cc)
+            .field("bcc", &self.bcc)
+            .field("reply_to", &self.reply_to)
+            .field("subject", &self.subject)
+            .field("attachments", &self.attachments.len())
+            .field("save_folder", &self.save_folder)
+            .field("draft_folder", &self.draft_folder)
+            .field("draft_uid", &self.draft_uid)
+            .finish_non_exhaustive()
+    }
 }
 
 struct LegacyDirectSmimeSigning {
@@ -2447,6 +2497,19 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
         Err(message) => return json_result_error(original_action, &message),
     };
 
+    let (transport_bytes, stored_bytes) = match legacy_apply_gnupg_crypto(
+        state,
+        user.user_id,
+        transport_bytes,
+        stored_bytes,
+        &request,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(message) => return json_result_error(original_action, &message),
+    };
+
     let envelope = match fm_smtp::build_envelope(&request.envelope_from, &request.all_recipients())
     {
         Ok(envelope) => envelope,
@@ -2685,6 +2748,93 @@ async fn legacy_apply_smime_crypto(
     Ok((transport_bytes, stored_bytes))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn legacy_apply_gnupg_crypto(
+    state: &AppState,
+    user_id: i64,
+    mut transport_bytes: Vec<u8>,
+    mut stored_bytes: Option<Vec<u8>>,
+    request: &LegacySendMessageRequest,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+    if let (Some(fingerprint), Some(passphrase)) = (
+        request.gnupg_sign_fingerprint.as_ref(),
+        request.gnupg_sign_passphrase.as_ref(),
+    ) {
+        if fingerprint.len() > 64 {
+            return Err("OpenPGP signing fingerprint is invalid".to_string());
+        }
+        if passphrase.len() > GNUPG_PASSPHRASE_LIMIT_BYTES {
+            return Err("OpenPGP signing passphrase exceeds the safety limit".to_string());
+        }
+        let root = legacy_rfc822_root(&transport_bytes)?;
+        let signed = run_gnupg(
+            state,
+            user_id,
+            &[
+                "--detach-sign",
+                "--armor",
+                "--textmode",
+                "--local-user",
+                fingerprint,
+            ],
+            Some(root),
+            Some((fingerprint.clone(), passphrase.clone())),
+        )
+        .await?;
+        let signature = String::from_utf8(signed.output)
+            .map_err(|_| "GnuPG returned invalid UTF-8".to_string())?;
+        transport_bytes = legacy_wrap_pgp_signed_root(
+            &transport_bytes,
+            &signature,
+            request.pgp_boundary.as_deref(),
+        )?;
+        if let Some(stored) = stored_bytes.as_mut() {
+            *stored =
+                legacy_wrap_pgp_signed_root(stored, &signature, request.pgp_boundary.as_deref())?;
+        }
+    }
+
+    if !request.gnupg_encrypt_fingerprints.is_empty() {
+        if request.gnupg_encrypt_fingerprints.len() > GNUPG_ENCRYPT_RECIPIENT_LIMIT {
+            return Err("OpenPGP encryption recipient limit exceeded".to_string());
+        }
+        let root = legacy_rfc822_root(&transport_bytes)?;
+        let mut args = vec!["--encrypt", "--armor"];
+        for fingerprint in &request.gnupg_encrypt_fingerprints {
+            args.push("--recipient");
+            args.push(fingerprint);
+        }
+        let encrypted = run_gnupg(state, user_id, &args, Some(root), None).await?;
+        let armored = String::from_utf8(encrypted.output)
+            .map_err(|_| "GnuPG returned invalid UTF-8".to_string())?;
+        let wrapper = format!(
+            "Content-Type: application/pgp-encrypted\r\nContent-Transfer-Encoding: 7Bit\r\n\r\nVersion: 1\r\n-----BEGIN PGP MESSAGE-----\r\n{armored}"
+        );
+        transport_bytes = legacy_replace_rfc822_root(&transport_bytes, wrapper.as_bytes())?;
+        if let Some(stored) = stored_bytes.as_mut() {
+            *stored = legacy_replace_rfc822_root(stored, wrapper.as_bytes())?;
+        }
+    }
+
+    Ok((transport_bytes, stored_bytes))
+}
+
+fn legacy_wrap_pgp_signed_root(
+    original: &[u8],
+    signature: &str,
+    requested_boundary: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let boundary = requested_boundary
+        .filter(|boundary| legacy_pgp_boundary_is_valid(boundary))
+        .unwrap_or("=-_frickmail_pgp_signed");
+    let root = legacy_rfc822_root(original)?;
+    let wrapped = format!(
+        "Content-Type: multipart/signed; micalg=\"pgp-sha256\"; protocol=\"application/pgp-signature\"; boundary=\"{boundary}\"\r\n\r\n--{boundary}\r\n{}\r\n--{boundary}\r\nContent-Type: application/pgp-signature; name=\"signature.asc\"\r\nContent-Transfer-Encoding: 7Bit\r\n\r\n{signature}\r\n--{boundary}--\r\n",
+        String::from_utf8_lossy(&root)
+    );
+    legacy_replace_rfc822_root(original, wrapped.as_bytes())
+}
+
 /// Serializes the root MIME entity (its MIME headers and body) without the
 /// RFC 822 delivery headers. MailSo passes this exact entity to OpenSSL.
 fn legacy_rfc822_root(message: &[u8]) -> Result<Vec<u8>, String> {
@@ -2831,6 +2981,883 @@ fn legacy_send_message_success(original_action: &str) -> Response {
             "Result": true
         }),
     )
+}
+
+#[derive(Debug, Default)]
+struct GnupgResult {
+    output: Vec<u8>,
+    status: Vec<String>,
+}
+
+#[cfg(unix)]
+fn gnupg_homedir(state: &AppState, user_id: i64) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Path::new(&state.config().tmp_dir)
+        .join("gnupg")
+        .join(format!("user-{user_id:x}"));
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| format!("GnuPG home unavailable: {err}"))?;
+    }
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || metadata.permissions().mode() & 0o077 != 0
+            {
+                return Err("GnuPG home is not private".to_string());
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("GnuPG home unavailable: {err}")),
+    }
+    std::fs::create_dir_all(&root).map_err(|err| format!("GnuPG home unavailable: {err}"))?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("GnuPG home permissions failed: {err}"))?;
+    Ok(root)
+}
+
+#[cfg(not(unix))]
+fn gnupg_homedir(state: &AppState, user_id: i64) -> Result<PathBuf, String> {
+    let root = Path::new(&state.config().tmp_dir)
+        .join("gnupg")
+        .join(user_id.to_string());
+    std::fs::create_dir_all(&root).map_err(|err| format!("GnuPG home unavailable: {err}"))?;
+    Ok(root)
+}
+
+fn gnupg_base_args(home: &Path) -> Vec<String> {
+    vec![
+        "--batch".into(),
+        "--no-tty".into(),
+        "--no-default-keyring".into(),
+        "--no-options".into(),
+        "--exit-on-status-write-error".into(),
+        "--trust-model".into(),
+        "always".into(),
+        "--pinentry-mode".into(),
+        "loopback".into(),
+        "--homedir".into(),
+        home.display().to_string(),
+        "--status-fd".into(),
+        "2".into(),
+    ]
+}
+
+fn parse_gnupg_output(raw: &[u8]) -> GnupgResult {
+    let mut result = GnupgResult::default();
+    for line in String::from_utf8_lossy(raw).lines() {
+        if let Some(status) = line.strip_prefix("[GNUPG:] ") {
+            result.status.push(status.to_string());
+        } else {
+            if !result.output.is_empty() {
+                result.output.push(b'\n');
+            }
+            result.output.extend_from_slice(line.as_bytes());
+        }
+    }
+    result
+}
+
+async fn run_gnupg(
+    state: &AppState,
+    user_id: i64,
+    args: &[&str],
+    input: Option<Vec<u8>>,
+    passphrase_for_key: Option<(String, String)>,
+) -> Result<GnupgResult, String> {
+    if args.iter().any(|arg| arg.contains('\0')) {
+        return Err("Invalid GnuPG argument".to_string());
+    }
+    let home = gnupg_homedir(state, user_id)?;
+    let mut command = tokio::process::Command::new("gpg");
+    let mut full_args = gnupg_base_args(&home);
+    full_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    command.args(&full_args);
+    command.env_clear();
+    command.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    command.env("LC_ALL", "C");
+    command.env("GNUPGHOME", &home);
+    if let Some((key_id, passphrase)) = passphrase_for_key.as_ref() {
+        command.env(
+            "PINENTRY_USER_DATA",
+            serde_json::json!({ key_id: passphrase }).to_string(),
+        );
+        command.arg("--command-fd").arg("0");
+    }
+    command.stdin(if input.is_some() || passphrase_for_key.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    });
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("GnuPG unavailable: {err}"))?;
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take().ok_or("GnuPG input unavailable")?;
+        stdin
+            .write_all(&input)
+            .await
+            .map_err(|_| "Broken GnuPG pipe".to_string())?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|_| "Broken GnuPG pipe".to_string())?;
+    } else {
+        drop(child.stdin.take());
+    }
+
+    let deadline = GNUPG_DEADLINE;
+    let operation = tokio::time::timeout(deadline, child.wait_with_output());
+    let output = match operation.await {
+        Ok(output) => output,
+        Err(_) => return Err("GnuPG operation timed out".to_string()),
+    };
+    let output = output.map_err(|err| format!("GnuPG operation failed: {err}"))?;
+    if !output.status.success()
+        && !matches!(
+            args.first(),
+            Some(&"--list-keys") | Some(&"--list-secret-keys") | Some(&"--verify")
+        )
+    {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "GnuPG operation failed: {}",
+            error.lines().next().unwrap_or_default()
+        ));
+    }
+    Ok(parse_gnupg_output(&output.stderr))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_gnupg_with_message(
+    state: &AppState,
+    user_id: Option<i64>,
+    args: &[&str],
+    signature: Option<Vec<u8>>,
+    message: Vec<u8>,
+    _passphrase_for_key: Option<(String, String)>,
+) -> Result<GnupgResult, String> {
+    let Some(user_id) = user_id else {
+        return Err("Not authenticated".to_string());
+    };
+    if args.iter().any(|arg| arg.contains('\0')) {
+        return Err("Invalid GnuPG argument".to_string());
+    }
+    let home = gnupg_homedir(state, user_id)?;
+    let mut command = tokio::process::Command::new("gpg");
+    let mut full_args = gnupg_base_args(&home);
+    full_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    full_args.push("--enable-special-filenames".to_string());
+    full_args.push("- \"-&5\"".to_string());
+    command.args(&full_args);
+    command.env_clear();
+    command.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    command.env("LC_ALL", "C");
+    command.env("GNUPGHOME", &home);
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("GnuPG unavailable: {err}"))?;
+    let mut stdin = child.stdin.take().ok_or("GnuPG input unavailable")?;
+    stdin
+        .write_all(&signature.unwrap_or_default())
+        .await
+        .map_err(|_| "Broken GnuPG pipe")?;
+    stdin
+        .write_all(&message)
+        .await
+        .map_err(|_| "Broken GnuPG pipe")?;
+    stdin.shutdown().await.map_err(|_| "Broken GnuPG pipe")?;
+
+    let operation = tokio::time::timeout(GNUPG_DEADLINE, child.wait_with_output());
+    match operation.await {
+        Ok(Ok(output)) => Ok(parse_gnupg_output(&output.stderr)),
+        Ok(Err(err)) => Err(format!("GnuPG operation failed: {err}")),
+        Err(_) => Err("GnuPG operation timed out".to_string()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyGnupgSubkey {
+    fingerprint: String,
+    keyid: String,
+    timestamp: u64,
+    expires: u64,
+    #[serde(rename = "is_secret")]
+    is_secret: bool,
+    invalid: bool,
+    can_encrypt: bool,
+    can_sign: bool,
+    can_certify: bool,
+    can_authenticate: bool,
+    disabled: bool,
+    expired: bool,
+    revoked: bool,
+    length: u32,
+    algorithm: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyGnupgUid {
+    name: String,
+    comment: String,
+    email: String,
+    uid: String,
+    revoked: bool,
+    invalid: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyGnupgKey {
+    disabled: bool,
+    expired: bool,
+    revoked: bool,
+    is_secret: bool,
+    can_sign: bool,
+    can_encrypt: bool,
+    can_verify: bool,
+    can_decrypt: bool,
+    uids: Vec<LegacyGnupgUid>,
+    subkeys: Vec<LegacyGnupgSubkey>,
+}
+
+fn parse_gpg_time(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default()
+}
+
+fn parse_gnupg_keys(output: &[u8], secret: bool) -> Vec<LegacyGnupgKey> {
+    let mut keys = Vec::new();
+    let mut current: Option<LegacyGnupgKey> = None;
+    let mut pending_subkey: Option<LegacyGnupgSubkey> = None;
+
+    for line in String::from_utf8_lossy(output).lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 12 {
+            continue;
+        }
+        match fields[0] {
+            "pub" | "sec" => {
+                if let Some(key) = current.take() {
+                    keys.push(key);
+                }
+                let capabilities = fields[11];
+                current = Some(LegacyGnupgKey {
+                    disabled: false,
+                    expired: fields[1] == "e",
+                    revoked: fields[1] == "r",
+                    is_secret: secret,
+                    can_sign: capabilities.contains('s'),
+                    can_encrypt: capabilities.contains('e'),
+                    can_verify: false,
+                    can_decrypt: false,
+                    uids: Vec::new(),
+                    subkeys: Vec::new(),
+                });
+                pending_subkey = Some(LegacyGnupgSubkey {
+                    fingerprint: String::new(),
+                    keyid: fields[4].to_string(),
+                    timestamp: parse_gpg_time(Some(fields[5])),
+                    expires: parse_gpg_time(fields.get(6).copied()),
+                    is_secret: secret,
+                    invalid: false,
+                    can_encrypt: fields[11].contains('e'),
+                    can_sign: fields[11].contains('s'),
+                    can_certify: fields[11].contains('c'),
+                    can_authenticate: fields[11].contains('a'),
+                    disabled: false,
+                    expired: fields[1] == "e",
+                    revoked: fields[1] == "r",
+                    length: fields[2].parse().unwrap_or_default(),
+                    algorithm: fields[3].parse().unwrap_or_default(),
+                });
+            }
+            "sub" | "ssb" => {
+                if let (Some(key), Some(subkey)) = (current.as_mut(), pending_subkey.take()) {
+                    key.subkeys.push(subkey);
+                }
+                pending_subkey = Some(LegacyGnupgSubkey {
+                    fingerprint: String::new(),
+                    keyid: fields[4].to_string(),
+                    timestamp: parse_gpg_time(Some(fields[5])),
+                    expires: parse_gpg_time(fields.get(6).copied()),
+                    is_secret: secret || fields[0] == "ssb",
+                    invalid: false,
+                    can_encrypt: fields[11].contains('e'),
+                    can_sign: fields[11].contains('s'),
+                    can_certify: fields[11].contains('c'),
+                    can_authenticate: fields[11].contains('a'),
+                    disabled: false,
+                    expired: fields[1] == "e",
+                    revoked: fields[1] == "r",
+                    length: fields[2].parse().unwrap_or_default(),
+                    algorithm: fields[3].parse().unwrap_or_default(),
+                });
+            }
+            "fpr" => {
+                let fingerprint = fields.get(9).copied().unwrap_or_default();
+                if let Some(subkey) = pending_subkey.as_mut() {
+                    subkey.fingerprint = fingerprint.to_string();
+                }
+            }
+            "uid" => {
+                if let Some(key) = current.as_mut() {
+                    let raw_uid = fields.get(9).copied().unwrap_or_default();
+                    let (name_email, comment) = split_gnupg_comment(raw_uid);
+                    let (name, email) = split_gnupg_name_email(name_email);
+                    key.uids.push(LegacyGnupgUid {
+                        name,
+                        comment,
+                        email,
+                        uid: raw_uid.to_string(),
+                        revoked: fields[1] == "r",
+                        invalid: false,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    if let (Some(mut key), Some(subkey)) = (current.take(), pending_subkey.take()) {
+        key.subkeys.push(subkey);
+        keys.push(key);
+    }
+    keys.retain(|key| !key.subkeys.is_empty());
+    keys
+}
+
+fn split_gnupg_comment(value: &str) -> (&str, String) {
+    match value
+        .find('(')
+        .zip(value.rfind(')'))
+        .filter(|(start, end)| start < end)
+    {
+        Some((start, end)) => (
+            value[..start].trim_end(),
+            value[start + 1..end].trim().to_string(),
+        ),
+        None => (value, String::new()),
+    }
+}
+
+fn split_gnupg_name_email(value: &str) -> (String, String) {
+    match value
+        .rfind('<')
+        .zip(value.rfind('>'))
+        .filter(|(start, end)| start < end)
+    {
+        Some((start, end)) => (
+            value[..start].trim().to_string(),
+            value[start + 1..end].trim().to_string(),
+        ),
+        None => (value.trim().to_string(), String::new()),
+    }
+}
+
+async fn legacy_gnupg_keys_response(
+    state: &AppState,
+    original_action: &str,
+    user_id: i64,
+) -> Response {
+    let list_public_args = [
+        "--with-colons",
+        "--with-fingerprint",
+        "--with-fingerprint",
+        "--fixed-list-mode",
+        "--list-keys",
+    ];
+    let list_private_args = [
+        "--with-colons",
+        "--with-fingerprint",
+        "--with-fingerprint",
+        "--fixed-list-mode",
+        "--list-secret-keys",
+    ];
+    let (public, private) = tokio::join!(
+        run_gnupg(state, user_id, &list_public_args, None, None),
+        run_gnupg(state, user_id, &list_private_args, None, None),
+    );
+    match (public, private) {
+        (Ok(public), Ok(private)) => {
+            let mut public_keys = parse_gnupg_keys(&public.output, false);
+            for key in &mut public_keys {
+                key.can_verify = true;
+            }
+            let mut private_keys = parse_gnupg_keys(&private.output, true);
+            for key in &mut private_keys {
+                key.can_decrypt = true;
+                key.can_encrypt = false;
+            }
+            json_value_envelope(
+                StatusCode::OK,
+                original_action,
+                json!({ "Result": { "public": public_keys, "private": private_keys } }),
+            )
+        }
+        (Err(message), _) | (_, Err(message)) => {
+            legacy_action_error(original_action, UNKNOWN_ERROR, message)
+        }
+    }
+}
+
+async fn native_gnupg_get_keys(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    match load_session_user(state, action, session).await {
+        Ok(Some(user)) => legacy_gnupg_keys_response(state, action, user.user_id).await,
+        Ok(None) => json_result_error(action, "Not authenticated"),
+        Err(response) => response,
+    }
+}
+
+async fn native_pgp_store_key_pair(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_pgp_store_or_import(state, action, payload, session).await
+}
+
+async fn native_pgp_import_key(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    native_pgp_store_or_import(state, action, payload, session).await
+}
+
+async fn native_pgp_store_or_import(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let mut imports = Vec::new();
+    for key in ["publicKey", "privateKey"] {
+        if let Some(material) = payload_optional_string(payload, key) {
+            if let Err(message) =
+                validate_gnupg_material(&material, GNUPG_KEY_MATERIAL_LIMIT_BYTES, true)
+            {
+                return json_result_error(action, &message);
+            }
+            imports.push(material.into_bytes());
+        }
+    }
+    let mut results = Vec::new();
+    for material in imports {
+        match run_gnupg(state, user.user_id, &["--import"], Some(material), None).await {
+            Ok(result) => results.push(
+                result
+                    .status
+                    .iter()
+                    .any(|line| line.starts_with("IMPORT_OK ")),
+            ),
+            Err(message) => return legacy_action_error(action, UNKNOWN_ERROR, message),
+        }
+    }
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({ "Result": { "inGnuPG": results } }),
+    )
+}
+
+fn validate_gnupg_material(value: &str, limit: usize, armored: bool) -> Result<(), String> {
+    if value.len() > limit || value.chars().any(char::is_control) && !value.contains('\n') {
+        return Err("OpenPGP key material exceeds the safety limit".to_string());
+    }
+    if armored && !value.contains("-----BEGIN PGP") {
+        return Err("OpenPGP key must be ASCII-armored".to_string());
+    }
+    Ok(())
+}
+
+async fn native_gnupg_generate_key(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let name = payload_optional_string(payload, "name").unwrap_or_default();
+    let Some(email) = payload_optional_string(payload, "email")
+        .filter(|value| value.parse::<lettre::Address>().is_ok())
+    else {
+        return json_result_error(action, "A valid OpenPGP identity email is required");
+    };
+    if name.len() > 128 || name.chars().any(char::is_control) {
+        return json_result_error(action, "OpenPGP identity name is invalid");
+    }
+    if payload_optional_string(payload, "passphrase")
+        .is_some_and(|value| value.len() > GNUPG_PASSPHRASE_LIMIT_BYTES)
+    {
+        return json_result_error(action, "OpenPGP passphrase exceeds the safety limit");
+    }
+    let uid = if name.is_empty() {
+        email.clone()
+    } else {
+        format!("{name} <{email}>")
+    };
+    match run_gnupg(
+        state,
+        user.user_id,
+        &[
+            "--yes",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            &uid,
+            "default",
+            "default",
+        ],
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(result) => json_value_envelope(
+            StatusCode::OK,
+            action,
+            json!({
+                "Result": result.status.iter().find_map(|line| line.strip_prefix("KEY_CREATED "))
+                    .and_then(|value| value.split(' ').next_back()).unwrap_or_default()
+            }),
+        ),
+        Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
+    }
+}
+
+async fn native_gnupg_delete_key(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let private = payload_bool(payload, "isPrivate");
+    match delete_gnupg_key(state, user.user_id, payload, private).await {
+        Ok(()) => gnupg_true_response(action),
+        Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
+    }
+}
+
+async fn delete_gnupg_key(
+    state: &AppState,
+    user_id: i64,
+    payload: &Value,
+    private: bool,
+) -> Result<(), String> {
+    let Some(key_id) = payload_optional_string(payload, "keyId") else {
+        return Err("keyId required".to_string());
+    };
+    let list_args = [
+        "--with-colons",
+        "--with-fingerprint",
+        "--fixed-list-mode",
+        if private {
+            "--list-secret-keys"
+        } else {
+            "--list-keys"
+        },
+        key_id.as_str(),
+    ];
+    let listed = run_gnupg(state, user_id, &list_args, None, None).await?;
+    let fingerprint = parse_gnupg_keys(&listed.output, private)
+        .first()
+        .and_then(|key| key.subkeys.first())
+        .map(|subkey| subkey.fingerprint.clone())
+        .ok_or_else(|| {
+            format!(
+                "{} key not found",
+                if private { "Private" } else { "Public" }
+            )
+        })?;
+    let args = [
+        "--yes",
+        if private {
+            "--delete-secret-key"
+        } else {
+            "--delete-key"
+        },
+        fingerprint.as_str(),
+    ];
+    run_gnupg(state, user_id, &args, None, None)
+        .await
+        .map(|_| ())
+}
+
+async fn native_gnupg_export_key(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let Some(key_id) = payload_optional_string(payload, "keyId") else {
+        return json_result_error(action, "keyId required");
+    };
+    let mut args = vec!["--armor", "--export"];
+    if payload_bool(payload, "isPrivate") {
+        args.push("--export-secret-keys");
+    }
+    args.push(key_id.as_str());
+    match run_gnupg(state, user.user_id, &args, None, None).await {
+        Ok(result) => json_value_envelope(
+            StatusCode::OK,
+            action,
+            json!({ "Result": String::from_utf8_lossy(&result.output) }),
+        ),
+        Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
+    }
+}
+
+fn gnupg_true_response(action: &str) -> Response {
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": true }))
+}
+
+async fn native_gnupg_decrypt(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let Some(key_id) = payload_optional_string(payload, "keyId") else {
+        return json_result_error(action, "keyId required");
+    };
+    let passphrase = payload_optional_string(payload, "passphrase").unwrap_or_default();
+    if passphrase.len() > GNUPG_PASSPHRASE_LIMIT_BYTES {
+        return json_result_error(action, "OpenPGP passphrase exceeds the safety limit");
+    }
+    let (config, password) =
+        match legacy_imap_connection_context(state, action, payload, session).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if let Some(data) = payload_optional_string(payload, "data") {
+        return match run_gnupg(
+            state,
+            user.user_id,
+            &["--decrypt", "--skip-verify"],
+            Some(data.into_bytes()),
+            Some((key_id, passphrase)),
+        )
+        .await
+        {
+            Ok(result) => json_value_envelope(
+                StatusCode::OK,
+                action,
+                json!({ "Result": { "data": String::from_utf8_lossy(&result.output), "signatures": [] } }),
+            ),
+            Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
+        };
+    }
+
+    let folder = payload_optional_string(payload, "folder").unwrap_or_default();
+    let uid = u32::try_from(payload_i64(payload, "uid").max(0)).unwrap_or(0);
+    let part_id = payload_optional_string(payload, "partId").unwrap_or_default();
+    if folder.is_empty() || uid == 0 {
+        return json_result_error(action, "folder and uid are required");
+    }
+    match fm_imap::fetch_mime_part_bounded(
+        config,
+        &password,
+        &folder,
+        uid,
+        &part_id,
+        COMPOSE_BODY_LIMIT_BYTES,
+    )
+    .await
+    {
+        Ok(Some(data)) => {
+            match run_gnupg(
+                state,
+                user.user_id,
+                &["--decrypt", "--skip-verify"],
+                Some(data),
+                Some((key_id, passphrase)),
+            )
+            .await
+            {
+                Ok(result) => json_value_envelope(
+                    StatusCode::OK,
+                    action,
+                    json!({ "Result": { "data": String::from_utf8_lossy(&result.output), "signatures": [] } }),
+                ),
+                Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
+            }
+        }
+        Ok(None) => json_result_error(action, "Message part not found"),
+        Err(err) => json_result_error(action, &err.public_message()),
+    }
+}
+
+async fn native_pgp_verify_message(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+    headers: &HeaderMap,
+) -> Response {
+    let _ = headers;
+    let (config, password) =
+        match legacy_imap_connection_context(state, action, payload, session).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let body_part = payload_optional_string(payload, "bodyPart");
+    let sig_part = payload_optional_string(payload, "sigPart");
+    let (text, signature) = if let (Some(text), Some(signature)) = (body_part, sig_part) {
+        (text.into_bytes(), signature.into_bytes())
+    } else {
+        let folder = payload_optional_string(payload, "folder").unwrap_or_default();
+        let uid = u32::try_from(payload_i64(payload, "uid").max(0)).unwrap_or(0);
+        let part_id = payload_optional_string(payload, "partId").unwrap_or_default();
+        let sig_part_id = payload_optional_string(payload, "sigPartId").unwrap_or_default();
+        if folder.is_empty() || uid == 0 || part_id.is_empty() {
+            return json_result_error(action, "folder, uid and partId are required");
+        }
+        let body = match fm_imap::fetch_mime_part_bounded(
+            config.clone(),
+            &password,
+            &folder,
+            uid,
+            &part_id,
+            COMPOSE_BODY_LIMIT_BYTES,
+        )
+        .await
+        {
+            Ok(Some(body)) => body,
+            Ok(None) => return json_result_error(action, "Message part not found"),
+            Err(err) => return json_result_error(action, &err.public_message()),
+        };
+        let signature = if sig_part_id.is_empty() {
+            Vec::new()
+        } else {
+            match fm_imap::fetch_mime_part_bounded(
+                config,
+                &password,
+                &folder,
+                uid,
+                &sig_part_id,
+                COMPOSE_BODY_LIMIT_BYTES,
+            )
+            .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => return json_result_error(action, "Signature part not found"),
+                Err(err) => return json_result_error(action, &err.public_message()),
+            }
+        };
+        (body, signature)
+    };
+    let text = String::from_utf8_lossy(&text)
+        .replace("\r\n", "\n")
+        .into_bytes();
+    let signature = String::from_utf8_lossy(&signature)
+        .chars()
+        .filter(char::is_ascii)
+        .collect::<String>()
+        .into_bytes();
+    let user_id = load_session_user(state, action, session)
+        .await
+        .ok()
+        .flatten()
+        .map(|user| user.user_id);
+    match run_gnupg_with_message(state, user_id, &["--verify"], Some(signature), text, None).await {
+        Ok(result) => match parse_verification_signature(&result.status) {
+            Some(info) => json_value_envelope(StatusCode::OK, action, json!({ "Result": info })),
+            None => json_value_envelope(StatusCode::OK, action, json!({ "Result": false })),
+        },
+        Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
+    }
+}
+
+fn parse_verification_signature(status: &[String]) -> Option<Value> {
+    let mut summary = 0;
+    let mut status_code = 1;
+    let mut keyid = String::new();
+    let mut uid = String::new();
+    for line in status {
+        let tokens = line.split(' ').collect::<Vec<_>>();
+        match tokens.first().copied() {
+            Some("GOODSIG") => {
+                status_code = 0;
+                summary = 0;
+                keyid = tokens.get(1).copied().unwrap_or_default().to_string();
+                uid = tokens.get(2..).unwrap_or(&[]).join(" ");
+            }
+            Some("BADSIG" | "ERRSIG" | "EXPKEYSIG" | "REVKEYSIG") => {
+                status_code = 1;
+                summary = 4;
+                keyid = tokens.get(1).copied().unwrap_or_default().to_string();
+                uid = tokens.get(2..).unwrap_or(&[]).join(" ");
+            }
+            Some("VALIDSIG") => {
+                return Some(json!({
+                    "fingerprint": tokens.get(1).copied().unwrap_or_default(),
+                    "validity": 0,
+                    "status": status_code,
+                    "summary": summary,
+                    "message": if status_code == 0 { "The signature is fully valid." } else { "" },
+                    "keyid": keyid,
+                    "uid": uid,
+                    "valid": true,
+                }));
+            }
+            _ => {}
+        }
+    }
+    (!keyid.is_empty()).then(|| {
+        json!({
+            "fingerprint": "",
+            "validity": 0,
+            "status": status_code,
+            "summary": summary,
+            "message": "",
+            "keyid": keyid,
+            "uid": uid,
+            "valid": false,
+        })
+    })
 }
 
 /// Appends the sent copy, falling back to the account's configured `SentFolder`
@@ -3407,22 +4434,39 @@ fn legacy_save_message_request_from_payload_with_html(
         pgp_signed: legacy_pgp_signed_content(payload),
         pgp_encrypted: legacy_pgp_encrypted_content(payload),
         pgp_boundary: legacy_pgp_boundary_from_payload(payload),
+        gnupg_sign_fingerprint: payload_optional_string(payload, "signFingerprint"),
+        gnupg_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
+        gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload),
     })
+}
+
+fn legacy_parse_gnupg_fingerprints(payload: &Value) -> Vec<String> {
+    let Some(raw) = payload_string(payload, "encryptFingerprints") else {
+        return Vec::new();
+    };
+    let Ok(values) = serde_json::from_str::<Vec<Value>>(&raw) else {
+        return Vec::new();
+    };
+    values
+        .into_iter()
+        .filter_map(|value| match value {
+            Value::String(value) => Some(value.trim().to_ascii_uppercase()),
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .take(GNUPG_ENCRYPT_RECIPIENT_LIMIT)
+        .collect()
 }
 
 fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
     // A client-supplied `signed` or `encrypted` MIME payload is handled below.
-    // The legacy server-side GnuPG flow is intentionally not claimed as native
-    // until Rust has an audited keyring and signing implementation.
-    if ["signFingerprint", "encryptFingerprints", "pgpSignature"]
-        .into_iter()
-        .any(|field| {
-            payload
-                .get(field)
-                .is_some_and(legacy_openpgp_directive_is_php_truthy)
-        })
-    {
-        return Some("server-side OpenPGP signing or encryption");
+    if ["pgpSignature"].into_iter().any(|field| {
+        payload
+            .get(field)
+            .is_some_and(legacy_openpgp_directive_is_php_truthy)
+    }) {
+        return Some("legacy OpenPGP signature metadata");
     }
 
     const MIME_FEATURES: &[(&str, &str)] = &[];
@@ -5471,6 +6515,9 @@ fn legacy_send_message_request_from_payload_with_html(
         pgp_signed: legacy_pgp_signed_content(payload),
         pgp_encrypted: legacy_pgp_encrypted_content(payload),
         pgp_boundary: legacy_pgp_boundary_from_payload(payload),
+        gnupg_sign_fingerprint: payload_optional_string(payload, "signFingerprint"),
+        gnupg_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
+        gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload),
     })
 }
 
@@ -23351,10 +24398,7 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
-    fn native_compose_rejects_unsupported_content_instead_of_silently_dropping_it() {
-        // Client-prepared PGP signed/encrypted content is supported; the
-        // unimplemented server-side GnuPG keyring flow is rejected explicitly.
-
+    fn native_compose_accepts_previously_unsupported_content_without_silently_dropping_it() {
         assert_eq!(
             super::legacy_unsupported_compose_feature(&json!({"dsn": 1}), true),
             None
@@ -23399,33 +24443,13 @@ Subject: Empty body metadata\r\n\r\n"
             ),
             None
         );
-        assert_eq!(
-            super::legacy_unsupported_compose_feature(
-                &json!({"signFingerprint": "0123456789ABCDEF"}),
-                true
-            ),
-            Some("server-side OpenPGP signing or encryption")
-        );
-        assert_eq!(
-            super::legacy_unsupported_compose_feature(
-                &json!({
-                    "encrypted": "-----BEGIN PGP MESSAGE-----",
-                    "encryptFingerprints": "0123456789ABCDEF"
-                }),
-                true
-            ),
-            Some("server-side OpenPGP signing or encryption")
-        );
-        // PHP treats only the exact string "0" as false; whitespace around
-        // it still selects the server-side GnuPG branch and must be rejected.
-        assert_eq!(
-            super::legacy_unsupported_compose_feature(&json!({"signFingerprint": " 0"}), true),
-            Some("server-side OpenPGP signing or encryption")
-        );
-        assert_eq!(
-            super::legacy_unsupported_compose_feature(&json!({"signFingerprint": "0 "}), true),
-            Some("server-side OpenPGP signing or encryption")
-        );
+        let request = super::legacy_save_message_request_from_payload(
+            &json!({"signFingerprint": " 0"}),
+            "sender@example.com",
+            "Drafts",
+        )
+        .expect("PHP truthiness remains request parsing behavior");
+        assert_eq!(request.gnupg_sign_fingerprint.as_deref(), Some(" 0"));
         assert_eq!(
             super::legacy_unsupported_compose_feature(&json!({"signFingerprint": "0"}), true),
             None
@@ -23435,7 +24459,7 @@ Subject: Empty body metadata\r\n\r\n"
                 &json!({"signFingerprint": ["0123456789ABCDEF"]}),
                 true
             ),
-            Some("server-side OpenPGP signing or encryption")
+            None,
         );
         assert_eq!(
             super::legacy_unsupported_compose_feature(
