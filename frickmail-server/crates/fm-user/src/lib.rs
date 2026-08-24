@@ -1197,7 +1197,7 @@ pub fn normalize_username(username: &str) -> String {
     username.trim().to_ascii_lowercase()
 }
 
-pub fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
+pub fn verify_password_hash(password: &str, password_hash: &str) -> Result<bool> {
     let parsed_hash = PasswordHash::new(password_hash).map_err(|err| {
         FrickmailError::Upstream(format!("frickmail password hash is invalid: {err}"))
     })?;
@@ -1205,6 +1205,10 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok())
+}
+
+pub fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
+    verify_password_hash(password, password_hash)
 }
 
 pub fn verify_login_password(password: &str, user: Option<&FrickmailUser>) -> Result<bool> {
@@ -1244,6 +1248,10 @@ fn generic_password_reset_request_result() -> PasswordResetRequestResult {
             .to_string(),
         delivery: None,
     }
+}
+
+pub fn hash_admin_token(token: &str) -> Result<String> {
+    hash_login_password(token)
 }
 
 fn generate_password_reset_token() -> String {

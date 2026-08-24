@@ -16,6 +16,8 @@ pub struct FrickmailConfig {
     #[serde(default = "default_tmp_dir")]
     pub tmp_dir: String,
     #[serde(default)]
+    pub private_data_dir: Option<String>,
+    #[serde(default)]
     pub php_bridge_url: Option<String>,
     #[serde(default = "default_database_url")]
     pub database_url: Option<String>,
@@ -39,6 +41,13 @@ pub struct FrickmailConfig {
     pub demo_account: DemoAccountConfig,
     #[serde(default)]
     pub change_password: ChangePasswordConfig,
+    #[serde(default)]
+    pub admin: AdminConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AdminConfig {
+    pub token_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

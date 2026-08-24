@@ -155,6 +155,10 @@ const ATTACHMENT_EXPORT_GLOBAL_FILE_LIMIT: usize = 4;
 const ATTACHMENT_EXPORT_MAX_AGE: Duration = Duration::from_secs(15 * 60);
 const ATTACHMENT_EXPORT_DEADLINE: Duration = Duration::from_secs(120);
 const ATTACHMENT_EXPORT_DOWNLOAD_CONCURRENCY: usize = 4;
+const BACKUP_ARCHIVE_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+const BACKUP_UPLOAD_LIMIT_BYTES: usize = 192 * 1024 * 1024;
+const BACKUP_ENTRY_LIMIT: usize = 20_000;
+const BACKUP_DEADLINE: Duration = Duration::from_secs(120);
 const READ_RECEIPT_CACHE_TTL_SECONDS: u64 = 172_800;
 const COMPOSE_ATTACHMENT_MEMORY_BUDGET_MIB: usize = 64;
 const COMPOSE_MIME_BUILD_CONCURRENCY: usize = 2;
@@ -493,7 +497,7 @@ async fn json_api_request(
                         INVALID_INPUT_ARGUMENT,
                         format!("Invalid or oversized request body: {err}"),
                     ),
-                );
+                )
             }
         };
         (body, None)
@@ -583,6 +587,7 @@ async fn json_api_request(
             &request.payload,
             &session,
             &headers,
+            &body,
         )
         .await
         {
@@ -787,6 +792,7 @@ async fn native_compat_response(
     payload: &Value,
     session: &fm_session::Session,
     headers: &HeaderMap,
+    body_bytes: &[u8],
 ) -> Option<Response> {
     match action {
         "FrickmailMe" => Some(native_frickmail_me(state, original_action, session).await),
@@ -831,6 +837,12 @@ async fn native_compat_response(
         }
         "FrickmailSetPrefs" => {
             Some(native_frickmail_set_prefs(state, original_action, payload, session).await)
+        }
+        "JsonAdminBackupData" => {
+            Some(native_admin_backup_data(state, original_action, headers).await)
+        }
+        "JsonAdminRestoreData" => {
+            Some(native_admin_restore_data(state, original_action, headers, body_bytes).await)
         }
         "FrickmailListAccounts" => {
             Some(native_frickmail_list_accounts(state, original_action, session).await)
@@ -1523,11 +1535,11 @@ async fn native_search_filters_add_edit(
             return None;
         }
         filters.retain(|filter| {
-            !(filter.get("searchQ").and_then(Value::as_str) == Some(query)
-                && !search_filter_priority_equals(
+            filter.get("searchQ").and_then(Value::as_str) != Some(query)
+                || search_filter_priority_equals(
                     filter.get("priority").unwrap_or(&Value::Null),
                     &new_filter["priority"],
-                ))
+                )
         });
         if let Some(index) = filters
             .iter()
@@ -17008,6 +17020,442 @@ where
     }
 }
 
+fn admin_backup_error(original_action: &str) -> Response {
+    json_value_envelope(StatusCode::OK, original_action, json!({"Result": false}))
+}
+
+async fn authorize_admin_backup(
+    state: &AppState,
+    original_action: &str,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    let token_hash = state
+        .config()
+        .admin
+        .token_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|token_hash| !token_hash.is_empty());
+    let Some(token_hash) = token_hash else {
+        return Err(admin_backup_error(original_action));
+    };
+    let token = headers
+        .get("x-frickmail-admin-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if token.is_empty() || token.len() > 1024 {
+        return Err(admin_backup_error(original_action));
+    }
+    let authorized = tokio::task::spawn_blocking({
+        let token_hash = token_hash.to_string();
+        let token = token.to_string();
+        move || fm_user::verify_password_hash(&token, &token_hash)
+    })
+    .await
+    .map_err(|_| admin_backup_error(original_action))?
+    .unwrap_or(false);
+    if !authorized {
+        return Err(admin_backup_error(original_action));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn backup_path_contains_symlink(path: &Path) -> bool {
+    let mut current = path.to_path_buf();
+    while let Some(parent) = current.parent() {
+        if std::fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return true;
+        }
+        if current == parent {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn backup_path_contains_symlink(path: &Path) -> bool {
+    !path.is_dir()
+}
+
+struct BackupSource {
+    archive_name: String,
+    source_path: PathBuf,
+}
+
+impl Drop for BackupSource {
+    fn drop(&mut self) {}
+}
+
+impl BackupSource {
+    fn new(private_data_dir: &Path, relative_path: &Path) -> std::io::Result<Option<Self>> {
+        let source_path = private_data_dir.join(relative_path);
+        let metadata = match std::fs::symlink_metadata(&source_path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+        let mut components = Vec::new();
+        for component in relative_path.components() {
+            let component = component.as_os_str().to_string_lossy();
+            if component.is_empty() || component == "." || component == ".." {
+                continue;
+            }
+            components.push(component.into_owned());
+        }
+        if components.is_empty() || components.first().map(String::as_str) == Some("cache") {
+            return Ok(None);
+        }
+        let mut archive_name = components.join("/");
+        if metadata.is_dir() && !archive_name.ends_with('/') {
+            archive_name.push('/');
+        }
+        Ok(Some(Self {
+            archive_name,
+            source_path,
+        }))
+    }
+}
+
+fn collect_backup_sources(
+    private_data_dir: &Path,
+    directory: &Path,
+    sources: &mut Vec<BackupSource>,
+    depth: usize,
+) -> std::io::Result<()> {
+    if depth > 32 || sources.len() >= BACKUP_ENTRY_LIMIT {
+        return Err(std::io::Error::other("backup entry limit exceeded"));
+    }
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if sources.len() >= BACKUP_ENTRY_LIMIT {
+            return Err(std::io::Error::other("backup entry limit exceeded"));
+        }
+        let relative_path = match entry.path().strip_prefix(private_data_dir) {
+            Ok(relative_path) => relative_path.to_path_buf(),
+            Err(err) => return Err(std::io::Error::other(err)),
+        };
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            if let Some(source) = BackupSource::new(private_data_dir, &relative_path)? {
+                sources.push(source);
+            }
+            collect_backup_sources(private_data_dir, &entry.path(), sources, depth + 1)?;
+        } else if metadata.is_file() {
+            if let Some(source) = BackupSource::new(private_data_dir, &relative_path)? {
+                sources.push(source);
+            }
+        }
+    }
+    Ok(())
+}
+
+struct LimitedFileWriter {
+    file: std::fs::File,
+    written: usize,
+    limit: usize,
+}
+
+async fn backup_staging_directory(state: &AppState) -> Option<PathBuf> {
+    let directory = Path::new(&state.config().tmp_dir).join("admin-backups");
+    tokio::fs::create_dir_all(&directory).await.ok()?;
+    directory.canonicalize().ok()
+}
+
+async fn backup_random_token() -> Option<String> {
+    use rand_core::{OsRng, RngCore};
+    let mut bytes = [0_u8; 20];
+    OsRng.fill_bytes(&mut bytes);
+    Some(hex::encode(bytes))
+}
+
+async fn backup_private_data_dir(state: &AppState) -> Option<PathBuf> {
+    let configured = state.config().private_data_dir.as_deref()?;
+    let directory = PathBuf::from(configured);
+    if !directory.is_absolute() || backup_path_contains_symlink(&directory) {
+        return None;
+    }
+    tokio::fs::metadata(&directory)
+        .await
+        .ok()?
+        .is_dir()
+        .then_some(directory)
+}
+
+fn create_backup_archive_sync(
+    output_path: PathBuf,
+    _private_data_dir: PathBuf,
+    sources: Vec<BackupSource>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::{Read, Seek, Write};
+
+    let writer = LimitedFileWriter::create(&output_path, BACKUP_ARCHIVE_LIMIT_BYTES)?;
+    let mut zip = zip::ZipWriter::new(writer);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o600);
+    let mut buffer = [0_u8; 64 * 1024];
+
+    for source in &sources {
+        if source.archive_name.ends_with('/') {
+            zip.add_directory(source.archive_name.trim_end_matches('/'), options)?;
+            continue;
+        }
+        if backup_path_contains_symlink(&source.source_path) {
+            return Err("backup source contains a symlink".into());
+        }
+        let mut file = std::fs::File::open(&source.source_path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err("backup source disappeared".into());
+        }
+        zip.start_file(source.archive_name.as_str(), options)?;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            zip.write_all(&buffer[..read])?;
+        }
+    }
+
+    let mut writer = zip.finish()?;
+    writer.flush()?;
+    writer.file.sync_all()?;
+    let _ = writer.seek(std::io::SeekFrom::End(0));
+    Ok(())
+}
+
+impl LimitedFileWriter {
+    fn create(path: &Path, limit: usize) -> std::io::Result<Self> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        Ok(Self {
+            file: options.open(path)?,
+            written: 0,
+            limit,
+        })
+    }
+}
+
+impl std::io::Write for LimitedFileWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.written) {
+            return Err(std::io::Error::other("backup exceeds its size limit"));
+        }
+        let count = self.file.write(bytes)?;
+        self.written += count;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl std::io::Seek for LimitedFileWriter {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+async fn native_admin_backup_data(
+    state: &AppState,
+    original_action: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let result = async {
+        if authorize_admin_backup(state, original_action, headers)
+            .await
+            .is_err()
+        {
+            return Err(std::io::Error::other("not authorized"));
+        }
+        let private_data_dir = backup_private_data_dir(state)
+            .await
+            .ok_or_else(|| std::io::Error::other("private data directory unavailable"))?;
+        let staging_directory = backup_staging_directory(state)
+            .await
+            .ok_or_else(|| std::io::Error::other("backup staging unavailable"))?;
+        let token = backup_random_token()
+            .await
+            .ok_or_else(|| std::io::Error::other("backup token unavailable"))?;
+        let output_path = staging_directory.join(format!(".{token}.partial"));
+        let archive_output_path = output_path.clone();
+
+        let collect_result = tokio::task::spawn_blocking({
+            let private_data_dir = private_data_dir.clone();
+            move || {
+                let mut sources = Vec::new();
+                collect_backup_sources(&private_data_dir, &private_data_dir, &mut sources, 0)
+                    .map(|_| sources)
+            }
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+        let sources = collect_result?;
+        if sources.is_empty() || sources.len() > BACKUP_ENTRY_LIMIT {
+            return Err(std::io::Error::other("backup entry limit exceeded"));
+        }
+
+        let archive_result = tokio::time::timeout(
+            BACKUP_DEADLINE,
+            tokio::task::spawn_blocking(move || {
+                create_backup_archive_sync(archive_output_path, private_data_dir, sources)
+            }),
+        )
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "backup timed out"))?
+        .map_err(std::io::Error::other)?;
+        archive_result.map_err(std::io::Error::other)?;
+
+        let final_path = staging_directory.join(&token);
+        tokio::fs::rename(&output_path, &final_path).await?;
+        let bytes = tokio::fs::read(&final_path).await?;
+        let _ = tokio::fs::remove_file(&final_path).await;
+        if bytes.len() > BACKUP_ARCHIVE_LIMIT_BYTES {
+            return Err(std::io::Error::other("backup exceeds its size limit"));
+        }
+        let data = STANDARD.encode(&bytes);
+        Ok(Some(json!({
+            "name": format!("{token}.zip"),
+            "data": format!("data:application/zip;base64,{data}"),
+        })))
+    };
+    match result.await {
+        Ok(Some(result)) => {
+            json_value_envelope(StatusCode::OK, original_action, json!({"Result": result}))
+        }
+        _ => admin_backup_error(original_action),
+    }
+}
+
+async fn native_admin_restore_data(
+    state: &AppState,
+    original_action: &str,
+    headers: &HeaderMap,
+    body_bytes: &[u8],
+) -> Response {
+    let result = async {
+        if authorize_admin_backup(state, original_action, headers)
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        let content_type = headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let parts = multipart_parts(content_type, body_bytes)?;
+        let upload = parts.into_iter().find_map(|part| {
+            (multipart_field_name(&part.headers) == Some("backup")).then_some(part.value)
+        })?;
+        if upload.len() > BACKUP_UPLOAD_LIMIT_BYTES {
+            return None;
+        }
+        let private_data_dir = backup_private_data_dir(state).await?;
+        let staging_directory = backup_staging_directory(state).await?;
+        let token = backup_random_token().await?;
+        let archive_path = staging_directory.join(token);
+        legacy_write_private_temporary_file(&archive_path, &upload)
+            .await
+            .ok()?;
+
+        let restore = tokio::time::timeout(
+            BACKUP_DEADLINE,
+            tokio::task::spawn_blocking(move || {
+                extract_backup_archive_sync(archive_path, &private_data_dir)
+            }),
+        )
+        .await
+        .ok()?;
+        if restore.is_err() {
+            return None;
+        }
+        Some(true)
+    };
+    match result.await {
+        Some(result) => {
+            json_value_envelope(StatusCode::OK, original_action, json!({"Result": result}))
+        }
+        None => admin_backup_error(original_action),
+    }
+}
+
+fn extract_backup_archive_sync(
+    archive_path: PathBuf,
+    destination: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::{Read, Write};
+
+    if backup_path_contains_symlink(destination) {
+        return Err("restore destination contains a symlink".into());
+    }
+    let canonical_destination = destination.canonicalize()?;
+    let file = std::fs::File::open(&archive_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    if archive.len() > BACKUP_ENTRY_LIMIT {
+        return Err("backup entry limit exceeded".into());
+    }
+    let mut total_bytes = 0_usize;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if entry.is_symlink() {
+            return Err("backup archives must not contain symlinks".into());
+        }
+        let Some(relative_path) = entry.enclosed_name() else {
+            return Err("unsafe ZIP entry path".into());
+        };
+        let target = canonical_destination.join(&relative_path);
+        if !target.starts_with(&canonical_destination) {
+            return Err("unsafe ZIP entry path".into());
+        }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        total_bytes += usize::try_from(entry.size()).unwrap_or(usize::MAX);
+        if total_bytes > BACKUP_ARCHIVE_LIMIT_BYTES {
+            return Err("backup exceeds its size limit".into());
+        }
+        let mut output_options = std::fs::OpenOptions::new();
+        output_options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            output_options.mode(0o600);
+        }
+        let mut output = output_options.open(&target)?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = entry.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buffer[..read])?;
+        }
+        output.sync_all()?;
+    }
+    Ok(())
+}
+
 async fn load_session_user(
     state: &AppState,
     original_action: &str,
@@ -19288,11 +19736,7 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["Action"], "PluginJsonAdminRestoreData");
         assert_eq!(body["Result"], false);
-        assert_eq!(body["code"], 501);
-        assert_eq!(
-            body["message"],
-            "Frickmail compatibility hook 'JsonAdminRestoreData' is not migrated yet"
-        );
+        assert_eq!(body["message"], Value::Null);
     }
 
     #[tokio::test]
@@ -20877,6 +21321,112 @@ mod tests {
         assert_eq!(
             user.settings["Plugins"][super::SEARCH_FILTER_PLUGIN_NAME]["SFilters"][0]["fFolder"],
             "Changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_admin_backup_requires_configured_token_and_private_dir() {
+        let state = AppState::new(admin_backup_config(None, None));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-frickmail-admin-token", "secret".parse().unwrap());
+        let response =
+            super::native_admin_backup_data(&state, "JsonAdminBackupData", &headers).await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+    }
+
+    #[tokio::test]
+    async fn native_admin_backup_creates_bounded_legacy_archive() {
+        let root = std::env::temp_dir().join(format!(
+            "frickmail-backup-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let private = root.join("private");
+        tokio::fs::create_dir_all(private.join("configs"))
+            .await
+            .unwrap();
+        tokio::fs::write(private.join("configs/application.ini"), b"test")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(private.join("cache"))
+            .await
+            .unwrap();
+        tokio::fs::write(private.join("cache/skip"), b"skip")
+            .await
+            .unwrap();
+
+        let token_hash = fm_user::hash_admin_token("backup-secret").unwrap();
+        let state = AppState::new(admin_backup_config(
+            Some(private.to_string_lossy().into_owned()),
+            Some(token_hash),
+        ));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-frickmail-admin-token", "wrong".parse().unwrap());
+        let response =
+            super::native_admin_backup_data(&state, "JsonAdminBackupData", &headers).await;
+        assert_eq!(read_json(response).await["Result"], false);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-frickmail-admin-token", "backup-secret".parse().unwrap());
+        let response =
+            super::native_admin_backup_data(&state, "JsonAdminBackupData", &headers).await;
+        let result = read_json(response).await["Result"].clone();
+        let data = result["data"].as_str().unwrap();
+        let encoded = data.strip_prefix("data:application/zip;base64,").unwrap();
+        let bytes = STANDARD.decode(encoded).unwrap();
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        assert_eq!(archive.len(), 2);
+        assert!(archive.by_name("configs/").is_ok());
+        use std::io::Read;
+        let mut file = archive.by_name("configs/application.ini").unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "test");
+        assert!(result["name"].as_str().unwrap().ends_with(".zip"));
+    }
+
+    #[tokio::test]
+    async fn native_admin_restore_extracts_safely_within_private_data() {
+        let root = std::env::temp_dir().join(format!(
+            "frickmail-restore-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let private = root.join("private");
+        tokio::fs::create_dir_all(&private).await.unwrap();
+        let archive_path = root.join("backup.zip");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("domains/example.com", options).unwrap();
+            std::io::Write::write_all(&mut zip, b"domain").unwrap();
+            zip.finish().unwrap();
+        }
+        let archive = std::fs::read(&archive_path).unwrap();
+        let token_hash = fm_user::hash_admin_token("backup-secret").unwrap();
+        let state = AppState::with_db_pool(
+            admin_backup_config(
+                Some(private.to_string_lossy().into_owned()),
+                Some(token_hash),
+            ),
+            None,
+        );
+        let (headers, body) = backup_multipart_body(&archive).await;
+        let response =
+            super::native_admin_restore_data(&state, "JsonAdminRestoreData", &headers, &body).await;
+        assert_eq!(read_json(response).await["Result"], true);
+        assert_eq!(
+            std::fs::read(private.join("domains/example.com")).unwrap(),
+            b"domain"
         );
     }
 
@@ -30565,7 +31115,6 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
         assert_eq!(body["Result"], false);
-        assert_eq!(body["code"], 501);
         assert_eq!(body["Action"], "PluginJsonAdminRestoreData");
     }
 
@@ -30798,6 +31347,8 @@ Subject: Empty body metadata\r\n\r\n"
             hibp: Default::default(),
             demo_account: Default::default(),
             change_password: Default::default(),
+            private_data_dir: None,
+            admin: Default::default(),
         }
     }
 
@@ -30805,6 +31356,31 @@ Subject: Empty body metadata\r\n\r\n"
         let mut config = test_config(None);
         config.frickmail_user.allow_message_append = allow_message_append;
         config
+    }
+
+    fn admin_backup_config(
+        private_data_dir: Option<String>,
+        token_hash: Option<String>,
+    ) -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.private_data_dir = private_data_dir;
+        config.admin.token_hash = token_hash;
+        config
+    }
+
+    async fn backup_multipart_body(archive_bytes: &[u8]) -> (axum::http::HeaderMap, Vec<u8>) {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "multipart/form-data; boundary=frickmail".parse().unwrap(),
+        );
+        headers.insert("x-frickmail-admin-token", "backup-secret".parse().unwrap());
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--frickmail\r\nContent-Disposition: form-data; name=\"backup\"; filename=\"backup.zip\"\r\nContent-Type: application/zip\r\n\r\n");
+        body.extend_from_slice(archive_bytes);
+        body.extend_from_slice(b"\r\n--frickmail--\r\n");
+        (headers, body)
     }
 
     fn folder_append_headers() -> axum::http::HeaderMap {
