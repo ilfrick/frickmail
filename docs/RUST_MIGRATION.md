@@ -5,34 +5,48 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-23 17:44:21 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-24 10:25:00 CEST (UTC+02:00)
+
+The pending slice migrates the active `demo-account` plugin's external recipient
+policy natively for `SendMessage` and `SendReadReceiptMessage`. It adds bounded
+`FRICKMAIL__DEMO_ACCOUNT__EMAIL` / `RECIPIENT_DELIMITER` configuration, rejects a
+different sender identity on the configured demo account, preserves the legacy
+demo error code and message behavior, exposes production Compose settings, and
+updates the action inventory. The independent senior review first required
+changes; the security finding was remediated by binding the demo sender to the
+selected account, empty-email disablement was made explicit/tested, endpoint
+regression coverage was added for both send paths, and documentation was
+updated. The closing independent review approved the diff with no high or
+medium findings; its endpoint-test advisory was addressed with a direct
+SendMessage/SendReadReceiptMessage regression proving external delivery is
+blocked before SMTP/IMAP side effects.
+
+Docker-only validation passed after all remediation: `cargo fmt --all --
+--check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets --
+-D warnings`, and `cargo test --workspace` (603 tests). Production-image
+validation built `frickmail-rust:demo-policy-test` at digest
+`sha256:58ff021c571010e44bc2d72b4d979f9507861ff1ef5aae7bd731ea0cb8ec41ec`; the
+read-only container started without a database, `/health` returned `ok`, the
+migration shell responded, logs showed no startup or runtime errors, and the
+temporary container stopped cleanly.
+
+After operator publication approval, commit `f93151520b28dcc642c112a38a1437e3b
+56ff072` was pushed to `master` and `rust-full-migration` on both `origin`
+(GitHub) and `gitea`. Live `git ls-remote` checks verified all four remote tips
+resolve to that exact SHA. Exact-SHA GitHub `rust-ci` passed for `master` run
+[`32715077552`](https://github.com/ilfrick/frickmail/actions/runs/32715077552)
+and `rust-full-migration` run
+[`32715080095`](https://github.com/ilfrick/frickmail/actions/runs/32715080095),
+including Docker workspace gates and production-image smoke tests. This slice
+is now published and verified; only the nonblocking Node.js 20 deprecation
+warning was reported by both runs.
 
 ### Current Branch And Publication State
 
-The OpenPGP compose/keyring slice `73c6a429a` was published to `master` on both
-GitHub and Gitea, but `rust-full-migration` still pointed at `bb8de1330`. Its
-GitHub run [`32648000254`](https://github.com/ilfrick/frickmail/actions/runs/32648000254)
-failed only in
-`upload_attachments_schedule_multiple_slow_fetches_lazily_in_order`: CI observed
-fetch calls `[58, 57]`. Production permits parallel attachment tasks and each
-task has independent filesystem/semaphore awaits before the fetcher call, so the
-test incorrectly asserted scheduler-dependent start order rather than a product
-contract. The pending remediation renames the test to assert that completed
-results remain mapped to their original payload indexes while deliberately
-allowing reordered starts/completions.
-
-Local validation for the remediation passed at the timestamp above: 12 focused
-runs of the corrected test, `cargo fmt --all -- --check`,
-`cargo clippy --workspace --all-targets -- -D warnings`, and
-`cargo test --workspace`; every workspace test passed. Commit `af34de649`
-changed only a unit test and migration documentation; no runtime or
-release-image behavior changed, so the prior production canary remains
-applicable. It is present on both branches on both remotes. Exact-SHA GitHub
-CI passed for [`master`](https://github.com/ilfrick/frickmail/actions/runs/32649569879)
-(run `32649569879`) and
-[`rust-full-migration`](https://github.com/ilfrick/frickmail/actions/runs/32649569883)
-(run `32649569883`), including the full Docker workspace gates and production
-image smoke test.
+The prior snapshot's completed state remains recorded by commit history:
+OpenPGP compose/keyring slice `73c6a429a`, scheduler-test remediation
+`af34de649`, and exact-SHA CI runs `32649569879` / `32649569883` passed on both
+branches. See git history for that auditable publication record.
 
 ### Required Per-Slice Workflow
 

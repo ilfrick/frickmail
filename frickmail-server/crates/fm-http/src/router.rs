@@ -102,6 +102,7 @@ const CONNECTION_ERROR: u16 = 104;
 const CANT_GET_MESSAGE_LIST: u16 = 201;
 const CANT_SAVE_MESSAGE: u16 = 301;
 const CANT_SEND_MESSAGE: u16 = 302;
+const DEMO_SEND_MESSAGE_ERROR: u16 = 750;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const COMPOSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const COMPOSE_HTML_RAW_LIMIT_BYTES: usize = 4 * 1024 * 1024;
@@ -1970,6 +1971,18 @@ async fn native_send_read_receipt_message_inner_with_clients(
         Ok(input) => input,
         Err(message) => return json_result_error(original_action, &message),
     };
+    if state.config().demo_account.is_demo_sender(&account.email)
+        && !build_input
+            .recipients
+            .iter()
+            .all(|recipient| state.config().demo_account.allows_recipient(recipient))
+    {
+        return legacy_action_error(
+            original_action,
+            DEMO_SEND_MESSAGE_ERROR,
+            "For security purposes, this demo account is not allowed to send messages to external e-mail addresses",
+        );
+    }
     let recipients = build_input.recipients.clone();
     // Formatting/quoted-printable encoding can copy the bounded plain body.
     // Keep it in the same retained blocking lane used by normal compose MIME
@@ -2509,6 +2522,27 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
         Ok(result) => result,
         Err(message) => return json_result_error(original_action, &message),
     };
+
+    let demo_account = state.config().demo_account.is_demo_sender(&account.email);
+    if demo_account && !request.envelope_from.eq_ignore_ascii_case(&account.email) {
+        return legacy_action_error(
+            original_action,
+            DEMO_SEND_MESSAGE_ERROR,
+            "The demo account cannot use a different sender identity",
+        );
+    }
+    let demo_recipients = request.all_recipients();
+    if demo_account
+        && !demo_recipients
+            .iter()
+            .all(|recipient| state.config().demo_account.allows_recipient(recipient))
+    {
+        return legacy_action_error(
+            original_action,
+            DEMO_SEND_MESSAGE_ERROR,
+            "For security purposes, this demo account is not allowed to send messages to external e-mail addresses",
+        );
+    }
 
     let envelope = match fm_smtp::build_envelope(&request.envelope_from, &request.all_recipients())
     {
@@ -29969,6 +30003,7 @@ Subject: Empty body metadata\r\n\r\n"
             frickmail_user: Default::default(),
             transactional_smtp: Default::default(),
             hibp: Default::default(),
+            demo_account: Default::default(),
         }
     }
 
@@ -32167,6 +32202,86 @@ Subject: Empty body metadata\r\n\r\n"
         );
     }
 
+    #[tokio::test]
+    async fn demo_account_policy_blocks_external_send_and_receipt_before_delivery() {
+        let key = [94_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let mut config = test_config(None);
+        config.demo_account.email = "work@example.com".to_string();
+        let (state, session) =
+            message_body_test_state_with_config(15_042, 15_043, &key, config).await;
+        let pool = state.db_pool().unwrap();
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts SET smtp_host = ?, smtp_port = ?, smtp_secure = ? WHERE id = ?",
+        )
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(15_043_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let sent_message = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&sent_message),
+        };
+        let response = super::native_send_message_inner_with_sender_and_sent_appender(
+            &state,
+            "SendMessage",
+            &json!({
+                "account_id": 15_043,
+                "from": "work@example.com",
+                "to": "internal@example.com",
+                "cc": "external@example.net",
+                "subject": "External",
+                "plain": "Blocked"
+            }),
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+            &RecordingSentAppender {
+                message: Arc::new(Mutex::new(None)),
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], super::DEMO_SEND_MESSAGE_ERROR);
+        assert!(sent_message.lock().unwrap().is_none());
+
+        let receipt_message = Arc::new(Mutex::new(None));
+        let marked = Arc::new(Mutex::new(Vec::new()));
+        let response = super::native_send_read_receipt_message_inner_with_clients(
+            &state,
+            "SendReadReceiptMessage",
+            &json!({
+                "account_id": 15_043,
+                "readReceipt": "recipient@example.net",
+                "subject": "Read receipt",
+                "plain": "Received",
+                "messageFolder": "INBOX",
+                "messageUid": 42
+            }),
+            &session,
+            &RecordingSmtpSender {
+                succeed: true,
+                message: Arc::clone(&receipt_message),
+            },
+            &RecordingReadReceiptImap {
+                preflight_succeeds: true,
+                mark_succeeds: true,
+                marked: Arc::clone(&marked),
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], super::DEMO_SEND_MESSAGE_ERROR);
+        assert!(receipt_message.lock().unwrap().is_none());
+        assert!(marked.lock().unwrap().is_empty());
+    }
+
     struct RecordingSentAppender {
         message: Arc<Mutex<Option<Vec<u8>>>>,
     }
@@ -33127,5 +33242,21 @@ Subject: Empty body metadata\r\n\r\n"
         }))
         .unwrap_err()
         .contains("aggregate"));
+    }
+
+    #[test]
+    fn demo_recipient_policy_rejects_only_external_addresses() {
+        let demo = fm_core::DemoAccountConfig {
+            email: "demo@example.com".to_string(),
+            recipient_delimiter: "+".to_string(),
+        };
+
+        for address in ["demo@example.com", "demo+tag@example.com"] {
+            assert!(demo.allows_recipient(address), "{address} allowed");
+        }
+
+        assert!(!demo.allows_recipient("external@example.net"));
+
+        assert!(!fm_core::DemoAccountConfig::default().is_demo_sender("demo@example.com"));
     }
 }

@@ -35,6 +35,8 @@ pub struct FrickmailConfig {
     pub transactional_smtp: TransactionalSmtpConfig,
     #[serde(default)]
     pub hibp: HibpConfig,
+    #[serde(default)]
+    pub demo_account: DemoAccountConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -112,6 +114,48 @@ pub struct TransactionalSmtpConfig {
 pub struct HibpConfig {
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DemoAccountConfig {
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub recipient_delimiter: String,
+}
+
+impl DemoAccountConfig {
+    pub fn is_demo_sender(&self, account_email: &str) -> bool {
+        !self.email.trim().is_empty()
+            && self.email.trim().eq_ignore_ascii_case(account_email.trim())
+    }
+
+    fn recipient_pattern(&self) -> Option<String> {
+        let email = self.email.trim();
+        if email.is_empty()
+            || !email.bytes().all(|byte| byte.is_ascii())
+            || email.chars().any(char::is_control)
+        {
+            return None;
+        }
+
+        let escaped_email = regex::escape(email);
+        let delimiter = self.recipient_delimiter.trim();
+        let pattern = if delimiter.is_empty() || !delimiter.bytes().all(|byte| byte.is_ascii()) {
+            escaped_email
+        } else {
+            let escaped_delimiter = regex::escape(delimiter);
+            escaped_email.replacen('@', &format!("({escaped_delimiter}.+)?@"), 1)
+        };
+
+        Some(format!("^{pattern}$"))
+    }
+
+    pub fn allows_recipient(&self, address: &str) -> bool {
+        self.recipient_pattern()
+            .and_then(|pattern| regex::Regex::new(&pattern).ok())
+            .is_some_and(|regex| regex.is_match(address))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -517,7 +561,7 @@ fn default_export_folder_max_bytes() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrickmailCacheConfig, MailDefaults, MessageListDomainOverride};
+    use super::{DemoAccountConfig, FrickmailCacheConfig, MailDefaults, MessageListDomainOverride};
     use std::collections::HashMap;
 
     #[test]
@@ -614,5 +658,29 @@ mod tests {
         assert!(cache.enable);
         assert_eq!(cache.fast_cache_index, "v1");
         assert!(cache.server_uids);
+    }
+
+    #[test]
+    fn demo_account_recipient_pattern_matches_legacy_plugin() {
+        let config = DemoAccountConfig {
+            email: "demo@example.com".to_string(),
+            recipient_delimiter: String::new(),
+        };
+        assert!(config.allows_recipient("demo@example.com"));
+        assert!(!config.allows_recipient("Demo+tag@example.com"));
+
+        let delimited = DemoAccountConfig {
+            email: "demo@example.com".to_string(),
+            recipient_delimiter: "+".to_string(),
+        };
+        assert!(delimited.allows_recipient("demo@example.com"));
+        assert!(delimited.allows_recipient("demo+anything@example.com"));
+        assert!(!delimited.allows_recipient("other@example.com"));
+
+        let unsafe_config = DemoAccountConfig {
+            email: "demo\n@example.com".to_string(),
+            recipient_delimiter: String::new(),
+        };
+        assert_eq!(unsafe_config.recipient_pattern(), None);
     }
 }
