@@ -5,7 +5,48 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-24 17:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-24 19:52:00 CEST (UTC+02:00)
+
+The pending slice adds native settings CRUD for bundled plugin actions
+`SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, and `SDeleteFilter`. It uses
+the legacy `settings.Plugins["Search Filters"].SFilters` namespace, preserves
+sibling plugin settings, reproduces PHP loose priority equality/ordering,
+stores submitted priority values verbatim, selects the last matching duplicate,
+and removes every differing-priority duplicate during add/edit. Invalid add/edit
+input and empty renamed queries return explicit errors as an intentional safety
+boundary. Login-time application of filters through IMAP remains a separate
+migration boundary.
+
+Independent senior review initially blocked the slice for storage-namespace
+incompatibility, combined response fields, incomplete duplicate handling,
+invented priority clamping/coercion, malformed-input success, broad raw-settings
+access, and two PHP comparison edge cases. All findings were remediated and the
+closing review approved the runtime diff.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo check --workspace`, `cargo clippy --workspace --all-targets -D warnings`,
+and `cargo test --workspace`. Production-image validation built
+`frickmail-rust:search-filters-test` at immutable image ID
+`sha256:ff55b5e1fa9c0c4957337fbdbbb7ba0738eea2b95082bccd673267e4394a9aa5`. A
+hardened read-only container without a database started on its configured port
+`8888`; `/health` returned `ok`, and startup logs contained only expected
+messages.
+
+After publication, commit
+`25479444ee1123ab3f7d0e2617f33b8c66e45c2c` was pushed to `master` and
+`rust-full-migration` on both remotes. Live `git ls-remote` checks verified all
+four tips. Exact-SHA GitHub `rust-ci` passed for `master` run
+[`32763194987`](https://github.com/ilfrick/frickmail/actions/runs/32763194987)
+and `rust-full-migration` run
+[`32763194553`](https://github.com/ilfrick/frickmail/actions/runs/32763194553).
+Only the known nonblocking Node.js 20 deprecation annotation was reported.
+
+The prior approved-and-published `ChangePassword` slice remains recorded by
+commit `bd0558831746d93a7b12ecdcde139977b751e5a8` at the preceding remote tips;
+its GitHub CI runs `32745096943` (`master`) and `32745101444`
+(`rust-full-migration`) passed exact-SHA checks on both branches.
+
+## Previous Snapshot — 2026-08-24 17:30:00 CEST (UTC+02:00)
 
 The pending slice adds native, opt-in `ChangePassword`. It preserves the legacy
 minimum length, strength scoring, optional HIBP check, and error codes; verifies

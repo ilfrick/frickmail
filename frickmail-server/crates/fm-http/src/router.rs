@@ -1132,6 +1132,18 @@ async fn native_compat_response(
             Some(native_send_read_receipt_message(state, original_action, payload, session).await)
         }
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
+        "SGetFilters" => {
+            Some(native_search_filters_get(state, original_action, payload, session).await)
+        }
+        "SAddEditFilter" => {
+            Some(native_search_filters_add_edit(state, original_action, payload, session).await)
+        }
+        "SUpdateSearchQ" => {
+            Some(native_search_filters_update(state, original_action, payload, session).await)
+        }
+        "SDeleteFilter" => {
+            Some(native_search_filters_delete(state, original_action, payload, session).await)
+        }
         "ChangePassword" => {
             Some(native_change_password(state, original_action, payload, session).await)
         }
@@ -1304,6 +1316,291 @@ fn legacy_password_strength(password: &str) -> u32 {
     } else {
         (score as u32).min(max)
     }
+}
+
+const SEARCH_FILTER_PLUGIN_NAME: &str = "Search Filters";
+const SEARCH_FILTER_SETTINGS_KEY: &str = "SFilters";
+
+enum SearchFilterPriority {
+    Number(f64),
+    String(String),
+    Null,
+}
+
+fn search_filter_priority_kind(value: &Value) -> SearchFilterPriority {
+    match value {
+        Value::Number(number) => SearchFilterPriority::Number(number.as_f64().unwrap_or_default()),
+        Value::Bool(enabled) => SearchFilterPriority::Number(u8::from(*enabled).into()),
+        Value::String(text) => text.trim().parse::<f64>().map_or_else(
+            |_| SearchFilterPriority::String(text.trim().to_string()),
+            SearchFilterPriority::Number,
+        ),
+        _ => SearchFilterPriority::Null,
+    }
+}
+
+fn search_filter_priority_equals(stored: &Value, submitted: &Value) -> bool {
+    match (
+        search_filter_priority_kind(stored),
+        search_filter_priority_kind(submitted),
+    ) {
+        (SearchFilterPriority::Null, other) | (other, SearchFilterPriority::Null) => match other {
+            SearchFilterPriority::Number(0.0) => true,
+            SearchFilterPriority::String(text) => text.is_empty(),
+            _ => false,
+        },
+        (SearchFilterPriority::Number(left), SearchFilterPriority::Number(right)) => left == right,
+        (SearchFilterPriority::String(left), SearchFilterPriority::String(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn search_filter_priority_less_or_equal(stored: &Value, submitted: &Value) -> bool {
+    let stored = search_filter_priority_kind(stored);
+    let submitted = search_filter_priority_kind(submitted);
+    let number = |value| match value {
+        SearchFilterPriority::Null => Some(0.0),
+        SearchFilterPriority::String(text) if text.is_empty() => Some(0.0),
+        SearchFilterPriority::Number(number) if number.is_finite() => Some(number),
+        _ => None,
+    };
+    number(stored).is_some_and(|stored| stored >= number(submitted).unwrap_or_default())
+}
+
+fn search_filter_from_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let query = object.get("searchQ")?.as_str()?.trim();
+    if query.is_empty() || !object.get("fFolder").is_some_and(Value::is_string) {
+        return None;
+    }
+    Some(json!({
+        "searchQ": query,
+        "priority": object.get("priority").unwrap_or(&Value::Null),
+        "fFolder": object["fFolder"],
+        "fSeen": legacy_php_truthy(
+            object
+                .get("fSeen")
+                .unwrap_or(&Value::Bool(false)),
+        ),
+        "fFlag": legacy_php_truthy(
+            object
+                .get("fFlag")
+                .unwrap_or(&Value::Bool(false)),
+        ),
+    }))
+}
+
+async fn load_search_filters(
+    state: &AppState,
+    original_action: &str,
+    session: &fm_session::Session,
+) -> Result<(sqlx::AnyPool, Vec<Value>), Response> {
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return Err(response),
+    }) else {
+        return Err(json_result_error(original_action, "Not authenticated"));
+    };
+    let Some(pool) = state.db_pool().cloned() else {
+        return Err(json_result_error(
+            original_action,
+            "Frickmail database is not configured",
+        ));
+    };
+
+    let settings = match SqlxUserRepository::find_by_id(&pool, user.user_id).await {
+        Ok(Some(user)) => user.settings,
+        Ok(None) => return Err(json_result_error(original_action, "Not authenticated")),
+        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
+    };
+    let filters = settings
+        .get("Plugins")
+        .and_then(|plugins| plugins.get(SEARCH_FILTER_PLUGIN_NAME))
+        .and_then(|plugin| plugin.get(SEARCH_FILTER_SETTINGS_KEY))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok((pool, filters))
+}
+
+async fn save_search_filters_for_plugin(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    mut plugin_settings: serde_json::Map<String, Value>,
+    filters: Vec<Value>,
+) -> fm_core::Result<()> {
+    plugin_settings.insert(SEARCH_FILTER_SETTINGS_KEY.to_string(), json!(filters));
+    SqlxUserRepository::replace_user_settings_key(
+        pool,
+        user_id,
+        "Plugins",
+        &json!({
+            SEARCH_FILTER_PLUGIN_NAME: Value::Object(plugin_settings),
+        }),
+    )
+    .await
+}
+
+async fn native_search_filters_get(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let (_, filters) = match load_search_filters(state, original_action, session).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
+    let result = match payload_string(payload, "SSearchQ") {
+        Some(search_query) => {
+            let selected = filters
+                .iter()
+                .rev()
+                .find(|filter| {
+                    filter.get("searchQ").and_then(Value::as_str) == Some(search_query.as_str())
+                })
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({"SFilter": selected})
+        }
+        None => json!({"SFilters": filters}),
+    };
+    json_value_envelope(StatusCode::OK, original_action, json!({"Result": result}))
+}
+
+async fn mutate_search_filters<F>(
+    state: &AppState,
+    original_action: &str,
+    _payload: &Value,
+    session: &fm_session::Session,
+    mutation: F,
+) -> Response
+where
+    F: FnOnce(Vec<Value>) -> Option<Vec<Value>>,
+{
+    let (pool, filters) = match load_search_filters(state, original_action, session).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
+    let Some(updated) = mutation(filters) else {
+        return json_result_error(original_action, "Invalid filter");
+    };
+    let Some(user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+    let settings = match SqlxUserRepository::find_by_id(&pool, user.user_id).await {
+        Ok(Some(user)) => user.settings,
+        Ok(None) => return json_result_error(original_action, "Not authenticated"),
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    };
+    let plugin_settings = settings
+        .get("Plugins")
+        .and_then(|plugins| plugins.get(SEARCH_FILTER_PLUGIN_NAME))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    match save_search_filters_for_plugin(&pool, user.user_id, plugin_settings, updated).await {
+        Ok(()) => json_value_envelope(StatusCode::OK, original_action, json!({"Result": true})),
+        Err(err) => json_result_error(original_action, &err.public_message()),
+    }
+}
+
+async fn native_search_filters_add_edit(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(new_filter) = payload.get("SFilter").and_then(search_filter_from_value) else {
+        return json_result_error(original_action, "Invalid filter");
+    };
+    mutate_search_filters(state, original_action, payload, session, |mut filters| {
+        let query = new_filter["searchQ"].as_str().unwrap_or_default();
+        if query.is_empty() {
+            return None;
+        }
+        filters.retain(|filter| {
+            !(filter.get("searchQ").and_then(Value::as_str) == Some(query)
+                && !search_filter_priority_equals(
+                    filter.get("priority").unwrap_or(&Value::Null),
+                    &new_filter["priority"],
+                ))
+        });
+        if let Some(index) = filters
+            .iter()
+            .position(|filter| filter.get("searchQ").and_then(Value::as_str) == Some(query))
+        {
+            filters[index] = new_filter.clone();
+            return Some(filters);
+        }
+
+        let mut insert_index = 0_usize;
+        for (index, filter) in filters.iter().enumerate() {
+            if search_filter_priority_less_or_equal(
+                filter.get("priority").unwrap_or(&Value::Null),
+                &new_filter["priority"],
+            ) {
+                insert_index = index + 1;
+            } else {
+                break;
+            }
+        }
+        filters.insert(insert_index, new_filter.clone());
+        Some(filters)
+    })
+    .await
+}
+
+async fn native_search_filters_update(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let input = payload.get("SFilter").cloned().unwrap_or(Value::Null);
+    mutate_search_filters(state, original_action, payload, session, |mut filters| {
+        let old_query = input["oldSearchQ"].as_str().unwrap_or_default();
+        let Some(new_query) = input["searchQ"]
+            .as_str()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            return Some(filters);
+        };
+        if let Some(filter) = filters
+            .iter_mut()
+            .find(|filter| filter.get("searchQ").and_then(Value::as_str) == Some(old_query))
+        {
+            if let Some(object) = filter.as_object_mut() {
+                object.insert("searchQ".to_string(), Value::String(new_query.to_string()));
+            }
+        }
+        Some(filters)
+    })
+    .await
+}
+
+async fn native_search_filters_delete(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let search_query = payload_string(payload, "SSearchQ").unwrap_or_default();
+    mutate_search_filters(state, original_action, payload, session, move |filters| {
+        Some(
+            filters
+                .into_iter()
+                .filter(|filter| {
+                    filter.get("searchQ").and_then(Value::as_str) != Some(search_query.as_str())
+                })
+                .collect(),
+        )
+    })
+    .await
 }
 
 async fn native_change_password(
@@ -20446,6 +20743,141 @@ mod tests {
     #[test]
     fn legacy_password_strength_matches_php_for_repeated_characters() {
         assert_eq!(super::legacy_password_strength("aaaaaaaaaaaaaaaaaaaaa"), 0);
+    }
+
+    #[tokio::test]
+    async fn native_search_filters_crud_matches_plugin_settings_shape() {
+        let pool = user_db_pool().await;
+        seed_user(&pool, 1800, "search-filters", Some("filters@example.com")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session =
+            authenticated_session(1800, "search-filters", Some("filters@example.com")).await;
+
+        let response =
+            super::native_search_filters_get(&state, "SGetFilters", &json!({}), &session).await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["SFilters"], json!([]));
+        assert!(body["Result"].get("SFilter").is_none());
+
+        let response = super::native_search_filters_add_edit(
+            &state,
+            "SAddEditFilter",
+            &json!({"SFilter": {"searchQ": "invalid"}}),
+            &session,
+        )
+        .await;
+        assert_ne!(read_json(response).await["Result"], true);
+
+        let response = super::native_search_filters_add_edit(
+            &state,
+            "SAddEditFilter",
+            &json!({"SFilter": {"searchQ": "from:old", "priority": 2, "fFolder": "Work", "fSeen": true, "fFlag": false}}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+
+        let response = super::native_search_filters_add_edit(
+            &state,
+            "SAddEditFilter",
+            &json!({"SFilter": {"searchQ": "from:new", "priority": 3, "fFolder": "", "fSeen": false, "fFlag": true}}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+
+        let response =
+            super::native_search_filters_get(&state, "SGetFilters", &json!({}), &session).await;
+        let body = read_json(response).await;
+        assert_eq!(
+            body["Result"]["SFilters"],
+            json!([
+                {"searchQ": "from:new", "priority": 3, "fFolder": "", "fSeen": false, "fFlag": true},
+                {"searchQ": "from:old", "priority": 2, "fFolder": "Work", "fSeen": true, "fFlag": false}
+            ])
+        );
+
+        let response = super::native_search_filters_update(
+            &state,
+            "SUpdateSearchQ",
+            &json!({"SFilter": {"oldSearchQ": "from:new", "searchQ": "from:renamed"}}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+
+        let response = super::native_search_filters_get(
+            &state,
+            "SGetFilters",
+            &json!({"SSearchQ": "from:renamed"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert!(body["Result"].get("SFilters").is_none());
+        assert_eq!(
+            body["Result"]["SFilter"],
+            json!({"searchQ": "from:renamed", "priority": 3, "fFolder": "", "fSeen": false, "fFlag": true})
+        );
+
+        let response = super::native_search_filters_add_edit(
+            &state,
+            "SAddEditFilter",
+            &json!({"SFilter": {"searchQ": "numeric", "priority": "2.5", "fFolder": ""}}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+        let user = SqlxUserRepository::find_by_id(&pool, 1800)
+            .await
+            .unwrap()
+            .unwrap();
+        let filters = user.settings["Plugins"][super::SEARCH_FILTER_PLUGIN_NAME]["SFilters"]
+            .as_array()
+            .unwrap();
+        assert!(filters.contains(&json!({"searchQ": "numeric", "priority": "2.5", "fFolder": "", "fSeen": false, "fFlag": false})));
+
+        let response = super::native_search_filters_delete(
+            &state,
+            "SDeleteFilter",
+            &json!({"SSearchQ": "from:old"}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+
+        let user = SqlxUserRepository::find_by_id(&pool, 1800)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            user.settings["Plugins"][super::SEARCH_FILTER_PLUGIN_NAME]["SFilters"],
+            json!([
+                {"searchQ": "from:renamed", "priority": 3, "fFolder": "", "fSeen": false, "fFlag": true},
+                {"searchQ": "numeric", "priority": "2.5", "fFolder": "", "fSeen": false, "fFlag": false}
+            ])
+        );
+
+        let response = super::native_search_filters_add_edit(
+            &state,
+            "SAddEditFilter",
+            &json!({"SFilter": {"searchQ": "from:renamed", "priority": 7, "fFolder": "Changed", "fSeen": true, "fFlag": false}}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+        let user = SqlxUserRepository::find_by_id(&pool, 1800)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            user.settings["Plugins"][super::SEARCH_FILTER_PLUGIN_NAME]["SFilters"][0]["priority"],
+            7
+        );
+        assert_eq!(
+            user.settings["Plugins"][super::SEARCH_FILTER_PLUGIN_NAME]["SFilters"][0]["fFolder"],
+            "Changed"
+        );
     }
 
     #[tokio::test]

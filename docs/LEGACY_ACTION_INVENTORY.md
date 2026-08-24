@@ -164,7 +164,7 @@ features unless noted elsewhere.
 | Plugin area | Actions |
 |---|---|
 | Avatars | `Avatar` |
-| Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` |
+| Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` (native settings CRUD under the legacy `Plugins["Search Filters"]` namespace; invalid add/edit and empty renamed queries are rejected as an intentional safety boundary, while login-time IMAP application remains pending) |
 | Kolab | `KolabFolder` |
 | Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` |
 | Contacts sync | `JsonContactsSync`, `JsonDeduplicateContacts`, `JsonAddContact` |

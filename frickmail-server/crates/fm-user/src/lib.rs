@@ -520,6 +520,20 @@ impl SqlxUserRepository {
         Self::preferences(pool, user_id).await
     }
 
+    pub async fn replace_user_settings_key(
+        pool: &AnyPool,
+        user_id: i64,
+        key: &str,
+        value: &Value,
+    ) -> Result<()> {
+        if key.is_empty() {
+            return Err(FrickmailError::BadRequest(
+                "Settings key must not be empty".to_string(),
+            ));
+        }
+        update_settings_patch(pool, user_id, &json!({key: value})).await
+    }
+
     pub async fn list_mail_accounts(pool: &AnyPool, user_id: i64) -> Result<Vec<MailAccount>> {
         let mut accounts = fetch_mail_accounts(pool, user_id).await?;
         let identities = fetch_mail_identities(pool, user_id).await?;
