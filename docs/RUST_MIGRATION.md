@@ -5,30 +5,35 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-24 10:25:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-24 17:30:00 CEST (UTC+02:00)
 
-The pending slice migrates the active `demo-account` plugin's external recipient
-policy natively for `SendMessage` and `SendReadReceiptMessage`. It adds bounded
-`FRICKMAIL__DEMO_ACCOUNT__EMAIL` / `RECIPIENT_DELIMITER` configuration, rejects a
-different sender identity on the configured demo account, preserves the legacy
-demo error code and message behavior, exposes production Compose settings, and
-updates the action inventory. The independent senior review first required
-changes; the security finding was remediated by binding the demo sender to the
-selected account, empty-email disablement was made explicit/tested, endpoint
-regression coverage was added for both send paths, and documentation was
-updated. The closing independent review approved the diff with no high or
-medium findings; its endpoint-test advisory was addressed with a direct
-SendMessage/SendReadReceiptMessage regression proving external delivery is
-blocked before SMTP/IMAP side effects.
+The pending slice adds native, opt-in `ChangePassword`. It preserves the legacy
+minimum length, strength scoring, optional HIBP check, and error codes; verifies
+the current login password; atomically rotates the user password/KDF salt and
+every encrypted mail-account password/OAuth refresh token; cycles the session ID;
+and removes the stale credential key. Configuration defaults keep the feature
+disabled for compatibility with deployments where the legacy plugin is disabled.
+HIBP unavailability returns an explicit server error rather than being treated as
+a breached or safe password. Unlike legacy PDO/LDAP drivers, this implementation
+changes only the native Frickmail account database and does not provision external
+directory/database backends, so inventory parity remains partial-native pending a
+generic driver decision.
 
-Docker-only validation passed after all remediation: `cargo fmt --all --
---check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets --
--D warnings`, and `cargo test --workspace` (603 tests). Production-image
-validation built `frickmail-rust:demo-policy-test` at digest
-`sha256:58ff021c571010e44bc2d72b4d979f9507861ff1ef5aae7bd731ea0cb8ec41ec`; the
-read-only container started without a database, `/health` returned `ok`, the
-migration shell responded, logs showed no startup or runtime errors, and the
-temporary container stopped cleanly.
+The independent senior review initially blocked the slice on external-driver
+parity disclosure, HIBP failure semantics, malformed-salt robustness, SQLite-only
+tests, and missing documentation. Required remediation is complete: native-account
+scope and intentional HIBP hardening are documented, malformed KDF salt length now
+fails safely with a no-rotation regression test, and the action inventory records
+partial-native status plus the PDO/LDAP migration boundary. Closing approval is
+awaiting re-review of this remediated diff.
+
+Docker-only validation passed after remediation: `cargo fmt --all -- --check`,
+`cargo check --workspace`, `cargo clippy --workspace --all-targets -D warnings`,
+and `cargo test --workspace` (610 tests total across crates). Production-image
+validation built `frickmail-rust:change-password-test` at image ID
+`sha256:e8f561072eeacbf5fd13f8eab3a2b727ac07f20faea302284251c55858a74e25`. The
+hardened read-only container started without a database, `/health` returned
+`ok`, logs showed only expected startup messages, and it stopped cleanly.
 
 After operator publication approval, commit `f93151520b28dcc642c112a38a1437e3b
 56ff072` was pushed to `master` and `rust-full-migration` on both `origin`
@@ -42,6 +47,16 @@ is now published and verified; only the nonblocking Node.js 20 deprecation
 warning was reported by both runs.
 
 ### Current Branch And Publication State
+
+Commit `8c05206afda3e00cbfca63635eadf36f225fcd7e` is now published to `master`
+and `rust-full-migration` on both `origin` (GitHub) and `gitea`; live
+`git ls-remote` checks confirmed all four tips. Exact-SHA GitHub `rust-ci`
+passed for `master` run
+[`32745096943`](https://github.com/ilfrick/frickmail/actions/runs/32745096943)
+and `rust-full-migration` run
+[`32745101444`](https://github.com/ilfrick/frickmail/actions/runs/32745101444),
+including Docker workspace gates and production-image smoke tests. Only the
+known nonblocking Node.js 20 deprecation annotation was reported.
 
 The prior snapshot's completed state remains recorded by commit history:
 OpenPGP compose/keyring slice `73c6a429a`, scheduler-test remediation

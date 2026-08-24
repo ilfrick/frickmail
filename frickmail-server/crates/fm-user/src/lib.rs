@@ -1140,6 +1140,15 @@ impl SqlxUserRepository {
         reset_password(pool, token, password).await
     }
 
+    pub async fn change_login_password(
+        pool: &AnyPool,
+        user_id: i64,
+        current_password: &str,
+        new_password: String,
+    ) -> Result<bool> {
+        change_login_password(pool, user_id, current_password, new_password).await
+    }
+
     pub async fn register_user(
         pool: &AnyPool,
         signup_open: bool,
@@ -3997,6 +4006,157 @@ async fn reset_password(
     }
 }
 
+async fn change_login_password(
+    pool: &AnyPool,
+    user_id: i64,
+    current_password: &str,
+    new_password: String,
+) -> Result<bool> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(begin_account_primary_transaction_query(&backend))
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error)?;
+
+    let result = async {
+        lock_user_account_mutations_on_conn(&mut conn, &backend, user_id).await?;
+
+        let placeholder = if backend == "PostgreSQL" { "$1" } else { "?" };
+        let settings = if backend == "MySQL" {
+            "CAST(settings AS CHAR)"
+        } else {
+            "CAST(settings AS TEXT)"
+        };
+        let row_lock = if backend == "SQLite" {
+            ""
+        } else {
+            " FOR UPDATE"
+        };
+        let user_select_query = format!(
+            "SELECT id, username, email, password_hash, kdf_salt, {settings} AS settings_json, \
+             totp_secret, oidc_escrow_key FROM frickmail_users WHERE id = {placeholder} \
+            {row_lock}"
+        );
+        let user_row = sqlx::query(&user_select_query)
+            .bind(user_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        let Some(user) = user_row.map(row_to_user).transpose()? else {
+            return Ok(false);
+        };
+        if !verify_password(current_password, &user.password_hash)? {
+            return Err(FrickmailError::Unauthorized);
+        }
+        if user.kdf_salt.len() != KDF_SALT_BYTES {
+            return Err(FrickmailError::Upstream(format!(
+                "invalid Frickmail KDF salt length: expected {KDF_SALT_BYTES}, got {}",
+                user.kdf_salt.len()
+            )));
+        }
+
+        let password_hash = hash_login_password(&new_password)?;
+        let kdf_salt = generate_kdf_salt();
+        let old_credential_key = derive_credential_key(current_password, &user.kdf_salt)?;
+        let new_credential_key = derive_credential_key(&new_password, &kdf_salt)?;
+
+        let account_query = mail_account_connection_secret_for_user_query(&backend);
+        let account_rows = sqlx::query(&account_query)
+            .bind(user_id)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        let mut secrets = Vec::with_capacity(account_rows.len());
+        for row in account_rows {
+            secrets.push((
+                row.try_get::<i64, _>("id").map_err(db_error)?,
+                row.try_get::<Option<Vec<u8>>, _>("encrypted_password")
+                    .map_err(db_error)?,
+                row.try_get::<Option<Vec<u8>>, _>("encrypted_oauth_refresh_token")
+                    .map_err(db_error)?,
+            ));
+        }
+
+        let mut rotated = Vec::with_capacity(secrets.len());
+        for (account_id, encrypted_password, encrypted_token) in secrets {
+            let encrypted_password = match encrypted_password.filter(|blob| !blob.is_empty()) {
+                Some(blob) => {
+                    let plaintext = decrypt_account_secret(&blob, &old_credential_key)?
+                        .ok_or_else(|| {
+                            FrickmailError::Upstream(
+                                "frickmail credential rotation failed: stored secret cannot be decrypted"
+                                    .to_string(),
+                            )
+                        })?;
+                    Some(encrypt_account_secret(&plaintext, &new_credential_key)?)
+                }
+                None => None,
+            };
+            let encrypted_token = match encrypted_token.filter(|blob| !blob.is_empty()) {
+                Some(blob) => {
+                    let plaintext = decrypt_account_secret(&blob, &old_credential_key)?
+                        .ok_or_else(|| {
+                            FrickmailError::Upstream(
+                                "frickmail credential rotation failed: stored OAuth token cannot be decrypted"
+                                    .to_string(),
+                            )
+                        })?;
+                    Some(encrypt_account_secret(&plaintext, &new_credential_key)?)
+                }
+                None => None,
+            };
+            if encrypted_password.is_some() || encrypted_token.is_some() {
+                rotated.push((account_id, encrypted_password, encrypted_token));
+            }
+        }
+
+        sqlx::query(apply_password_reset_user_query(&backend))
+            .bind(&password_hash)
+            .bind(&kdf_salt)
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+        for (account_id, encrypted_password, encrypted_token) in rotated {
+            if let Some(blob) = encrypted_password {
+                sqlx::query(set_mail_account_password_query(&backend))
+                    .bind(blob)
+                    .bind(user_id)
+                    .bind(account_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(db_error)?;
+            }
+            if let Some(blob) = encrypted_token {
+                sqlx::query(save_oauth_refresh_token_blob_query(&backend))
+                    .bind(blob)
+                    .bind(user_id)
+                    .bind(account_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(db_error)?;
+            }
+        }
+
+        Ok(true)
+    }
+    .await;
+
+    match result {
+        Ok(result) => sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map(|_| result)
+            .map_err(db_error),
+        Err(err) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(err)
+        }
+    }
+}
+
 fn validate_rule_conditions(conditions: &[Value]) -> Result<()> {
     for condition in conditions {
         let field = condition.get("field").and_then(Value::as_str).unwrap_or("");
@@ -5242,6 +5402,38 @@ fn save_oauth_refresh_token_query(backend: &str) -> &'static str {
               WHERE user_id = ? AND id = ?"
         }
     }
+}
+
+fn save_oauth_refresh_token_blob_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_mail_accounts \
+                SET encrypted_oauth_refresh_token = $1, updated_at = NOW() \
+              WHERE user_id = $2 AND id = $3"
+        }
+        _ => {
+            "UPDATE frickmail_mail_accounts \
+                SET encrypted_oauth_refresh_token = ?, updated_at = CURRENT_TIMESTAMP \
+              WHERE user_id = ? AND id = ?"
+        }
+    }
+}
+
+fn mail_account_connection_secret_for_user_query(backend: &str) -> String {
+    let placeholder = match backend {
+        "PostgreSQL" => "$1",
+        _ => "?",
+    };
+    format!(
+        "SELECT id, email, type, imap_host, imap_port, imap_secure, login, encrypted_password, \
+         encrypted_oauth_refresh_token, oauth_tenant FROM frickmail_mail_accounts \
+         WHERE user_id = {placeholder}{}",
+        if backend == "SQLite" {
+            ""
+        } else {
+            " FOR UPDATE"
+        }
+    )
 }
 
 fn search_messages_query(backend: &str) -> &'static str {

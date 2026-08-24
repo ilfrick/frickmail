@@ -102,6 +102,11 @@ const CONNECTION_ERROR: u16 = 104;
 const CANT_GET_MESSAGE_LIST: u16 = 201;
 const CANT_SAVE_MESSAGE: u16 = 301;
 const CANT_SEND_MESSAGE: u16 = 302;
+const CHANGE_PASSWORD_FAILED: u16 = 130;
+const CURRENT_PASSWORD_INCORRECT: u16 = 131;
+const NEW_PASSWORD_SHORT: u16 = 132;
+const NEW_PASSWORD_WEAK: u16 = 133;
+const NEW_PASSWORD_HIBP: u16 = 134;
 const DEMO_SEND_MESSAGE_ERROR: u16 = 750;
 const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const COMPOSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
@@ -1127,6 +1132,9 @@ async fn native_compat_response(
             Some(native_send_read_receipt_message(state, original_action, payload, session).await)
         }
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
+        "ChangePassword" => {
+            Some(native_change_password(state, original_action, payload, session).await)
+        }
         "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
         "SaveMessage" => Some(native_save_message(state, original_action, payload, session).await),
         "GetPGPKeys" => Some(native_gnupg_get_keys(state, original_action, session).await),
@@ -1254,6 +1262,171 @@ async fn native_hibp_check(
                 "pwned": pwned,
                 "breaches": breaches
             }
+        }),
+    )
+}
+
+fn legacy_password_strength(password: &str) -> u32 {
+    let bytes = password.as_bytes();
+    let length = bytes.len();
+    let max = (length as u32).saturating_mul(8).min(100);
+    let mut variation_score = 0_f64;
+    for index in 1..length {
+        if bytes[index] != bytes[index - 1] {
+            variation_score += 1.0;
+        } else {
+            variation_score -= 0.5;
+        }
+    }
+
+    let class_patterns: [regex::Regex; 4] = [
+        regex::Regex::new(r"[^0-9A-Za-z]+").unwrap(),
+        regex::Regex::new(r"[0-9]+").unwrap(),
+        regex::Regex::new(r"[A-Z]+").unwrap(),
+        regex::Regex::new(r"[a-z]+").unwrap(),
+    ];
+    let mut classes = 0_u32;
+    for pattern in &class_patterns {
+        if pattern.is_match(password) {
+            classes += 1;
+            if pattern
+                .find_iter(password)
+                .all(|part| part.as_str().len() < 5)
+            {
+                variation_score += 1.0;
+            }
+        }
+    }
+
+    let score = variation_score * f64::from(classes) * 1.5;
+    if score < 0.0 {
+        0
+    } else {
+        (score as u32).min(max)
+    }
+}
+
+async fn native_change_password(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let config = state.config().change_password.clone();
+    if !config.enabled {
+        return legacy_action_error(
+            original_action,
+            CHANGE_PASSWORD_FAILED,
+            "Password change is unavailable",
+        );
+    }
+
+    let Some(user_session) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+    if user_session
+        .email
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return legacy_action_error(
+            original_action,
+            CHANGE_PASSWORD_FAILED,
+            "Change password failed",
+        );
+    }
+
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(original_action, "Frickmail database is not configured");
+    };
+
+    let current_password = payload_string(payload, "PrevPassword").unwrap_or_default();
+    let new_password = payload_string(payload, "NewPassword").unwrap_or_default();
+    if new_password.len() < usize::try_from(config.pass_min_length).unwrap_or(usize::MAX) {
+        return legacy_action_error(
+            original_action,
+            NEW_PASSWORD_SHORT,
+            "New password is too short",
+        );
+    }
+    if config.pass_min_strength > legacy_password_strength(&new_password) {
+        return legacy_action_error(
+            original_action,
+            NEW_PASSWORD_WEAK,
+            "New password is too weak",
+        );
+    }
+    if config.check_hibp {
+        let pwned_count = match hibp_check_password(&new_password).await {
+            Ok(count) => count,
+            Err(message) => {
+                return json_result_error(
+                    original_action,
+                    &format!("Password breach check unavailable: {message}"),
+                );
+            }
+        };
+        if pwned_count > 0 {
+            return legacy_action_error(
+                original_action,
+                NEW_PASSWORD_HIBP,
+                "Password has been breached",
+            );
+        }
+    }
+
+    match fm_user::SqlxUserRepository::change_login_password(
+        pool,
+        user_session.user_id,
+        &current_password,
+        new_password,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return legacy_action_error(
+                original_action,
+                CHANGE_PASSWORD_FAILED,
+                "Change password failed",
+            );
+        }
+        Err(FrickmailError::Unauthorized) => {
+            return legacy_action_error(
+                original_action,
+                CURRENT_PASSWORD_INCORRECT,
+                "Current password is incorrect",
+            );
+        }
+        Err(err) => return json_result_error(original_action, &err.public_message()),
+    }
+
+    if let Err(err) = session.cycle_id().await {
+        return json_result_error(
+            original_action,
+            &format!("Frickmail session rotation failed: {err}"),
+        );
+    }
+    if let Err(err) = session
+        .remove::<String>(fm_session::CREDENTIAL_KEY_SESSION_KEY)
+        .await
+    {
+        return json_result_error(
+            original_action,
+            &format!("Frickmail credential session reset failed: {err}"),
+        );
+    }
+
+    json_value_envelope(
+        StatusCode::OK,
+        original_action,
+        json!({
+            "Result": true
         }),
     )
 }
@@ -20190,6 +20363,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_change_password_rejects_when_disabled_or_unauthenticated() {
+        let (pool, state, session, _) =
+            change_password_test_state(1700, "change-disabled", "correct-horse", false).await;
+        let response = super::native_change_password(
+            &state,
+            "ChangePassword",
+            &json!({"PrevPassword": "correct-horse", "NewPassword": "new-strong-passphrase"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 130);
+
+        session
+            .remove::<fm_core::UserSession>(USER_SESSION_KEY)
+            .await
+            .unwrap();
+        let enabled_state =
+            AppState::with_db_pool(change_password_config(true, 10, 20), Some(pool));
+        let response = super::native_change_password(
+            &enabled_state,
+            "ChangePassword",
+            &json!({"PrevPassword": "correct-horse", "NewPassword": "new-strong-passphrase"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert_eq!(body["Result"]["error"], "Not authenticated");
+    }
+
+    #[tokio::test]
+    async fn native_change_password_validates_current_new_and_strength() {
+        let (_, state, session, _) =
+            change_password_test_state(1710, "change-validation", "correct-horse", true).await;
+        let response = super::native_change_password(
+            &state,
+            "ChangePassword",
+            &json!({
+                "PrevPassword": "wrong-current-pass",
+                "NewPassword": "new-strong-passphrase"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 131);
+
+        let (_, state, session, _) =
+            change_password_test_state(1710, "change-validation", "correct-horse", true).await;
+        let response = super::native_change_password(
+            &state,
+            "ChangePassword",
+            &json!({"PrevPassword": "correct-horse", "NewPassword": "short"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 132);
+
+        let (_, state, session, _) =
+            change_password_test_state(1710, "change-validation", "correct-horse", true).await;
+        let response = super::native_change_password(
+            &state,
+            "ChangePassword",
+            &json!({
+                "PrevPassword": "correct-horse",
+                "NewPassword": "aaaaaaaaaaaaaaaaaaaaa"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 133);
+    }
+
+    #[test]
+    fn legacy_password_strength_matches_php_for_repeated_characters() {
+        assert_eq!(super::legacy_password_strength("aaaaaaaaaaaaaaaaaaaaa"), 0);
+    }
+
+    #[tokio::test]
+    async fn native_change_password_rejects_malformed_kdf_salt_without_rotation() {
+        let user_id = 1725;
+        let (pool, state, session, _) =
+            change_password_test_state(user_id, "change-bad-salt", "correct-horse", true).await;
+        sqlx::query("UPDATE frickmail_users SET kdf_salt = ? WHERE id = ?")
+            .bind(vec![1_u8, 2, 3])
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let response = super::native_change_password(
+            &state,
+            "ChangePassword",
+            &json!({
+                "PrevPassword": "correct-horse",
+                "NewPassword": "new-strong-passphrase"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["ok"], false);
+        assert!(body["Result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid Frickmail KDF salt length"));
+
+        let user = SqlxUserRepository::find_by_id(&pool, user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.kdf_salt, vec![1_u8, 2, 3]);
+        let old_key =
+            fm_user::derive_credential_key("correct-horse", &[7_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let secret =
+            SqlxUserRepository::get_mail_account_connection_secret(&pool, user_id, user_id * 10)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            fm_user::decrypt_account_secret(&secret.encrypted_password.unwrap(), &old_key)
+                .unwrap()
+                .as_deref(),
+            Some("imap-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_change_password_rotates_user_and_account_secrets_atomically() {
+        let user_id = 1720;
+        let account_id = user_id * 10;
+        let (pool, state, session, old_key) =
+            change_password_test_state(user_id, "change-success", "correct-horse", true).await;
+        let response = super::native_change_password(
+            &state,
+            "ChangePassword",
+            &json!({
+                "PrevPassword": "correct-horse",
+                "NewPassword": "new-strong-passphrase"
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], true);
+
+        let user = SqlxUserRepository::find_by_id(&pool, user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(fm_user::verify_password("new-strong-passphrase", &user.password_hash).unwrap());
+        assert_ne!(user.kdf_salt, [7_u8; fm_user::KDF_SALT_BYTES]);
+        let new_key =
+            fm_user::derive_credential_key("new-strong-passphrase", &user.kdf_salt).unwrap();
+        assert_ne!(old_key, new_key);
+        let secret =
+            SqlxUserRepository::get_mail_account_connection_secret(&pool, user_id, account_id)
+                .await
+                .unwrap()
+                .unwrap();
+        let encrypted_password = secret.encrypted_password.unwrap();
+        assert_eq!(
+            fm_user::decrypt_account_secret(&encrypted_password, &new_key)
+                .unwrap()
+                .as_deref(),
+            Some("imap-secret")
+        );
+        assert!(
+            fm_user::decrypt_account_secret(&encrypted_password, &old_key)
+                .unwrap()
+                .is_none()
+        );
+        assert!(session
+            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn native_frickmail_login_selects_primary_account_after_validation() {
         let salt = [11_u8; fm_user::KDF_SALT_BYTES];
         let credential_key = fm_user::derive_credential_key("correct-horse", &salt).unwrap();
@@ -30004,6 +30365,7 @@ Subject: Empty body metadata\r\n\r\n"
             transactional_smtp: Default::default(),
             hibp: Default::default(),
             demo_account: Default::default(),
+            change_password: Default::default(),
         }
     }
 
@@ -30129,6 +30491,73 @@ Subject: Empty body metadata\r\n\r\n"
             .await
             .unwrap();
         session
+    }
+
+    fn change_password_config(
+        enabled: bool,
+        min_length: u32,
+        min_strength: u32,
+    ) -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.change_password = fm_core::ChangePasswordConfig {
+            enabled,
+            pass_min_length: min_length,
+            pass_min_strength: min_strength,
+            check_hibp: false,
+        };
+        config
+    }
+
+    async fn change_password_test_state(
+        user_id: i64,
+        username: &str,
+        password: &str,
+        enabled: bool,
+    ) -> (
+        AnyPool,
+        AppState,
+        Session,
+        [u8; fm_user::CREDENTIAL_KEY_BYTES],
+    ) {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let salt = [7_u8; fm_user::KDF_SALT_BYTES];
+        let credential_key = fm_user::derive_credential_key(password, &salt).unwrap();
+        seed_user(
+            &pool,
+            user_id,
+            username,
+            Some(&format!("{username}@example.com")),
+        )
+        .await;
+        sqlx::query("UPDATE frickmail_users SET password_hash = ?, kdf_salt = ? WHERE id = ?")
+            .bind(fm_user::hash_login_password(password).unwrap())
+            .bind(salt.to_vec())
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed_mail_account(&pool, user_id * 10, user_id, "Primary", true).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            &pool,
+            user_id,
+            user_id * 10,
+            "imap-secret".to_string(),
+            &credential_key,
+        )
+        .await
+        .unwrap());
+
+        let state =
+            AppState::with_db_pool(change_password_config(enabled, 10, 20), Some(pool.clone()));
+        let session = credential_session(
+            user_id,
+            username,
+            Some(&format!("{username}@example.com")),
+            &credential_key,
+        )
+        .await;
+        (pool, state, session, credential_key)
     }
 
     async fn message_body_test_state(

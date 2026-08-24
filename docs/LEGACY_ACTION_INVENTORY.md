@@ -145,6 +145,16 @@ Detailed native `Message` responses also populate the nullable RFC 8970
 `preview` field through a capability-gated, UID-correlated `PREVIEW` fetch;
 unsolicited responses and `NIL` values cannot populate another message.
 
+Native `ChangePassword` is opt-in through
+`FRICKMAIL__CHANGE_PASSWORD__ENABLED`. It preserves the legacy length,
+strength, optional HIBP checks, and error codes, verifies the current login
+password, and atomically rotates the Frickmail user password/KDF salt and all
+encrypted mail-account passwords and OAuth refresh tokens. Unlike the legacy
+PDO/LDAP drivers, it changes only the native Frickmail account database and
+does not provision external directory/database backends. HIBP unavailability
+returns an explicit server error rather than treating it as a breached or safe
+password.
+
 ## Other Bundled Plugin JSON Hooks
 
 These hooks are known by the Rust compatibility layer so existing SnappyMail
@@ -159,7 +169,7 @@ features unless noted elsewhere.
 | Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` |
 | Contacts sync | `JsonContactsSync`, `JsonDeduplicateContacts`, `JsonAddContact` |
 | Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` |
-| Change password | `ChangePassword` |
+| Change password | `ChangePassword` (partial-native) |
 | Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` |
 | Calendar | `JsonCalendarEvents`, `JsonCalendarList`, `JsonCalendarSave`, `JsonCalendarDelete` |
 | Have I Been Pwned | `HibpCheck` (native) |

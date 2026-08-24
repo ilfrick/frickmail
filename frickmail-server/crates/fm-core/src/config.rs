@@ -37,6 +37,8 @@ pub struct FrickmailConfig {
     pub hibp: HibpConfig,
     #[serde(default)]
     pub demo_account: DemoAccountConfig,
+    #[serde(default)]
+    pub change_password: ChangePasswordConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -122,6 +124,37 @@ pub struct DemoAccountConfig {
     pub email: String,
     #[serde(default)]
     pub recipient_delimiter: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChangePasswordConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_change_password_min_length")]
+    pub pass_min_length: u32,
+    #[serde(default = "default_change_password_min_strength")]
+    pub pass_min_strength: u32,
+    #[serde(default)]
+    pub check_hibp: bool,
+}
+
+impl Default for ChangePasswordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pass_min_length: default_change_password_min_length(),
+            pass_min_strength: default_change_password_min_strength(),
+            check_hibp: false,
+        }
+    }
+}
+
+fn default_change_password_min_length() -> u32 {
+    10
+}
+
+fn default_change_password_min_strength() -> u32 {
+    70
 }
 
 impl DemoAccountConfig {

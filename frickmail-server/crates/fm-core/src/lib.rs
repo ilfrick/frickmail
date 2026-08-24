@@ -6,7 +6,9 @@ pub mod json;
 pub mod plugin;
 
 pub use auth::{AuthToken, SelectedMailAccountSession, UserSession};
-pub use config::{DemoAccountConfig, FrickmailCacheConfig, FrickmailConfig, HibpConfig};
+pub use config::{
+    ChangePasswordConfig, DemoAccountConfig, FrickmailCacheConfig, FrickmailConfig, HibpConfig,
+};
 pub use date::legacy_rfc2822_timestamp;
 pub use error::{ErrorBody, FrickmailError, Result};
 pub use json::{ApiEnvelope, HealthResponse};
