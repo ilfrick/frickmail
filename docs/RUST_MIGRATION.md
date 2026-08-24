@@ -5,9 +5,27 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-25 01:05:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-25 01:45:00 CEST (UTC+02:00)
 
-The completed-and-pushed slice adds native bundled-plugin backup and restore for
+The pending OpenPGP slice adds native `PgpSearchKey`, `GetStoredPGPKeys`, and
+`StorePGPKey`, and corrects `GetPGPKeys` to merge encrypted account-backup keys
+with GnuPG-exported armor as legacy PHP did. New private-key backups use the
+existing session credential-key AEAD envelope; public backups remain armored
+text. The bounded keyserver lookup is restricted to HTTPS `keys.openpgp.org`.
+The production runtime image now includes GnuPG, which the existing native
+GnuPG actions require. Focused tests cover encrypted-at-rest storage, private
+round-trip classification, and merged legacy key output.
+
+Independent senior review approved the slice after three remediation rounds.
+Review confirmed the split `GetPGPKeys`/`GnupgGetKeys` contracts,
+GnuPG-unavailable fallback, first-seen global key uniqueness, streamed response
+bounds, and strict single-block armor validation. Local validation passed
+formatting, workspace Clippy with warnings denied, and all workspace tests;
+the final production image was rebuilt after the approved changes for read-only
+container startup, `/health`, and in-container GnuPG execution checks before
+publication.
+
+The completed prior slice adds native bundled-plugin backup and restore for
 `JsonAdminBackupData` and `JsonAdminRestoreData`, preserving the legacy JSON
 response shapes while introducing an explicit Rust admin trust boundary. Both
 actions are disabled unless operators configure an Argon2 PHC token hash with
@@ -21,8 +39,8 @@ entries to 20,000, and work to 120 seconds. It excludes the legacy cache
 directory and symlinks, rejects symlinked roots or source paths, uses protected
 temporary files, and restores only ZIP entries whose paths remain inside the
 configured private-data root. Unlike PHP client-supplied MIME typing, restore
-validates the actual ZIP container. The production image intentionally does not
-add GnuPG; this slice does not depend on it.
+validates the actual ZIP container. That prior image intentionally did not add
+GnuPG; the current pending OpenPGP slice changes that runtime dependency.
 
 Commit `188c7cda232bef69e18c6c22f6757dd47d464ae3` is published to `master` and
 `rust-full-migration` on both remotes. Live `git ls-remote` checks verified all

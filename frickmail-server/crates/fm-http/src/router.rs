@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use axum::body::to_bytes as axum_to_bytes;
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{OriginalUri, Request as AxumRequest, State},
@@ -159,6 +160,9 @@ const BACKUP_ARCHIVE_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const BACKUP_UPLOAD_LIMIT_BYTES: usize = 192 * 1024 * 1024;
 const BACKUP_ENTRY_LIMIT: usize = 20_000;
 const BACKUP_DEADLINE: Duration = Duration::from_secs(120);
+const PGP_KEY_MATERIAL_LIMIT_BYTES: usize = 512 * 1024;
+const PGP_KEYSERVER_SEARCH_LIMIT_BYTES: usize = 256;
+const PGP_KEYSERVER_RESPONSE_LIMIT_BYTES: usize = 512 * 1024;
 const READ_RECEIPT_CACHE_TTL_SECONDS: u64 = 172_800;
 const COMPOSE_ATTACHMENT_MEMORY_BUDGET_MIB: usize = 64;
 const COMPOSE_MIME_BUILD_CONCURRENCY: usize = 2;
@@ -1161,7 +1165,7 @@ async fn native_compat_response(
         }
         "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
         "SaveMessage" => Some(native_save_message(state, original_action, payload, session).await),
-        "GetPGPKeys" => Some(native_gnupg_get_keys(state, original_action, session).await),
+        "GetPGPKeys" => Some(native_get_pgp_keys(state, original_action, session).await),
         "PgpStoreKeyPair" => {
             Some(native_pgp_store_key_pair(state, original_action, payload, session).await)
         }
@@ -1171,6 +1175,11 @@ async fn native_compat_response(
         "PgpVerifyMessage" => {
             Some(native_pgp_verify_message(state, original_action, payload, session, headers).await)
         }
+        "PgpSearchKey" => Some(native_pgp_search_key(state, original_action, payload).await),
+        "GetStoredPGPKeys" => {
+            Some(native_pgp_get_stored_keys(state, original_action, session).await)
+        }
+        "StorePGPKey" => Some(native_pgp_store_key(state, original_action, payload, session).await),
         "GnupgGetKeys" => Some(native_gnupg_get_keys(state, original_action, session).await),
         "GnupgGenerateKey" => {
             Some(native_gnupg_generate_key(state, original_action, payload, session).await)
@@ -3941,6 +3950,99 @@ async fn native_gnupg_get_keys(
     }
 }
 
+async fn native_get_pgp_keys(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+
+    let backup = native_backup_pgp_keys(state, action, session).await;
+    let backup_body = match axum_to_bytes(backup.into_body(), JSON_BODY_LIMIT_BYTES)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|body| body.get("Result").is_some())
+    {
+        Some(body) => body,
+        None => return json_result_error(action, "Not authenticated"),
+    };
+    let mut keys = extract_legacy_pgp_backup_strings(backup_body["Result"].clone());
+
+    let gnupg = legacy_gnupg_keys_response(state, action, user.user_id).await;
+    if let Ok(bytes) = axum_to_bytes(gnupg.into_body(), JSON_BODY_LIMIT_BYTES).await {
+        if let Ok(body) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(result) = body["Result"].as_object() {
+                if let Some(public_keys) = result.get("public").and_then(Value::as_array) {
+                    keys.extend(gnupg_exported_armor(state, user.user_id, public_keys).await);
+                }
+            }
+        }
+    };
+
+    let mut unique_keys = std::collections::HashSet::new();
+    keys.retain(|key| unique_keys.insert(key.clone()));
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": keys }))
+}
+
+async fn gnupg_exported_armor(
+    state: &AppState,
+    user_id: i64,
+    public_keys: &[Value],
+) -> Vec<String> {
+    let fingerprints = public_keys
+        .iter()
+        .filter_map(|key| key.get("subkeys")?.as_array()?.first())
+        .filter_map(|subkey| {
+            subkey
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .or_else(|| subkey.get("keyid").and_then(Value::as_str))
+        });
+    let mut armor = Vec::new();
+    for fingerprint in fingerprints {
+        if let Ok(result) = run_gnupg(
+            state,
+            user_id,
+            &["--armor", "--export", fingerprint],
+            None,
+            None,
+        )
+        .await
+        {
+            let exported = String::from_utf8_lossy(&result.output);
+            if validate_armored_pgp_material(exported.trim()).is_ok() {
+                armor.push(exported.trim().to_string());
+            }
+        }
+    }
+    armor
+}
+
+fn extract_legacy_pgp_backup_strings(result: Value) -> Vec<String> {
+    ["public", "private"]
+        .into_iter()
+        .flat_map(|kind| {
+            result
+                .get(kind)
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|key| key.get("value"))
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 async fn native_pgp_store_key_pair(
     state: &AppState,
     action: &str,
@@ -3998,6 +4100,385 @@ async fn native_pgp_store_or_import(
         action,
         json!({ "Result": { "inGnuPG": results } }),
     )
+}
+
+fn validate_pgp_key_id(value: &str) -> bool {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    (16..=40).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_encrypted_account_secret(value: &Value) -> bool {
+    value
+        .as_str()
+        .and_then(|value| value.strip_prefix("encrypted:"))
+        .map(|encoded| STANDARD.decode(encoded).is_ok())
+        .unwrap_or(false)
+}
+
+fn validate_armored_pgp_material(value: &str) -> Result<(), String> {
+    if value.len() > PGP_KEY_MATERIAL_LIMIT_BYTES {
+        return Err("OpenPGP key material exceeds the safety limit".to_string());
+    }
+
+    let private = value.matches("PGP PRIVATE KEY BLOCK").count() == 2
+        && value
+            .matches("-----BEGIN PGP PRIVATE KEY BLOCK-----")
+            .count()
+            == 1;
+    let public = value.matches("PGP PUBLIC KEY BLOCK").count() == 2
+        && value
+            .matches("-----BEGIN PGP PUBLIC KEY BLOCK-----")
+            .count()
+            == 1;
+    if private && public || !private && !public {
+        return Err("OpenPGP material must contain exactly one armored key".to_string());
+    }
+    let (begin_marker, end_marker) = if private {
+        (
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+            "-----END PGP PRIVATE KEY BLOCK-----",
+        )
+    } else {
+        (
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----",
+            "-----END PGP PUBLIC KEY BLOCK-----",
+        )
+    };
+
+    let begin = value.find(begin_marker).ok_or("Invalid OpenPGP armor")?;
+    let after_begin = begin + begin_marker.len();
+    let end = value[after_begin..]
+        .find(end_marker)
+        .ok_or("Invalid OpenPGP armor")?
+        + after_begin;
+    let armored = &value[after_begin..end];
+    if armored.is_empty()
+        || !armored.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'+' | b'/' | b'=' | b'\r' | b'\n' | b'-' | b':' | b' ' | b'\t'
+                )
+        })
+    {
+        return Err("Invalid OpenPGP armor".to_string());
+    }
+    if value[..begin].trim().is_empty() || value[end + end_marker.len()..].trim().is_empty() {
+        Ok(())
+    } else {
+        Err("OpenPGP armor contains unexpected content".to_string())
+    }
+}
+
+async fn native_backup_pgp_keys(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let credential_key = match load_session_credential_key(action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let mut public_keys = Vec::new();
+    let mut private_keys = Vec::new();
+    if let Some(pool) = state.db_pool() {
+        let account = SqlxUserRepository::list_mail_accounts(pool, user.user_id)
+            .await
+            .ok()
+            .and_then(|accounts| accounts.into_iter().next());
+        if let Some(account) = account {
+            let settings =
+                SqlxUserRepository::get_mail_account_settings(pool, user.user_id, account.id).await;
+            if let Ok(Some(settings)) = settings {
+                for (key_id, material) in settings
+                    .get("PGP")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    if is_encrypted_account_secret(material) {
+                        let encrypted = material
+                            .as_str()
+                            .and_then(|value| value.strip_prefix("encrypted:"))
+                            .and_then(|value| STANDARD.decode(value).ok());
+                        let decrypted = encrypted
+                            .and_then(|blob| decrypt_account_secret(&blob, &credential_key).ok())
+                            .flatten();
+                        if let Some(material) =
+                            decrypted.filter(|material| material.contains("PGP PRIVATE KEY"))
+                        {
+                            private_keys.push(json!({
+                                "id": format!("{key_id}.key"),
+                                "value": material,
+                            }));
+                        }
+                    } else if material
+                        .as_str()
+                        .is_some_and(|material| material.contains("PGP PUBLIC KEY"))
+                    {
+                        public_keys.push(json!({
+                            "id": format!("{key_id}_public.asc"),
+                            "value": material.as_str().unwrap(),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({"Result": {"public": public_keys, "private": private_keys}}),
+    )
+}
+
+async fn fetch_openpgp_keyserver(
+    state: &AppState,
+    operation: &str,
+    query: &str,
+) -> Result<String, String> {
+    if query.is_empty() || query.len() > PGP_KEYSERVER_SEARCH_LIMIT_BYTES {
+        return Err("OpenPGP keyserver query is invalid".to_string());
+    }
+    let encoded_query = url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
+    let endpoint = format!(
+        "https://keys.openpgp.org/pks/lookup?op={operation}&options=mr&search={encoded_query}"
+    );
+    let parsed_endpoint = url::Url::parse(&endpoint)
+        .map_err(|_| "OpenPGP keyserver endpoint is invalid".to_string())?;
+    if parsed_endpoint.host_str() != Some("keys.openpgp.org") || parsed_endpoint.scheme() != "https"
+    {
+        return Err("OpenPGP keyserver endpoint is invalid".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| "OpenPGP keyserver client unavailable".to_string())?;
+    let response = client
+        .get(parsed_endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("OpenPGP keyserver request failed: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "OpenPGP keyserver returned HTTP {}",
+            status.as_u16()
+        ));
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| format!("OpenPGP keyserver response failed: {err}"))?;
+        if body.len().saturating_add(chunk.len()) > PGP_KEYSERVER_RESPONSE_LIMIT_BYTES {
+            return Err("OpenPGP keyserver response exceeds the safety limit".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8(body)
+        .map_err(|_| "OpenPGP keyserver returned invalid UTF-8".to_string())?;
+    if body.len() > PGP_KEYSERVER_RESPONSE_LIMIT_BYTES {
+        return Err("OpenPGP keyserver response exceeds the safety limit".to_string());
+    }
+    let _ = state;
+    let body = body.trim();
+    validate_armored_pgp_material(body)
+        .map_err(|_| "OpenPGP keyserver returned invalid key material".to_string())?;
+    Ok(body.to_string())
+}
+
+async fn native_pgp_search_key(state: &AppState, action: &str, payload: &Value) -> Response {
+    let Some(query) = payload_optional_string(payload, "query") else {
+        return json_result_error(action, "A key id or email address is required");
+    };
+    match fetch_openpgp_keyserver(state, "get", &query).await {
+        Ok(key_material) => {
+            json_value_envelope(StatusCode::OK, action, json!({"Result": key_material}))
+        }
+        Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
+    }
+}
+
+async fn native_pgp_get_stored_keys(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let credential_key = match load_session_credential_key(action, session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+
+    let mut public_keys = Vec::new();
+    let mut private_keys = Vec::new();
+    if let Some(pool) = state.db_pool() {
+        let account = SqlxUserRepository::list_mail_accounts(pool, user.user_id)
+            .await
+            .ok()
+            .and_then(|accounts| accounts.into_iter().next());
+        if let Some(account) = account {
+            let settings =
+                SqlxUserRepository::get_mail_account_settings(pool, user.user_id, account.id).await;
+            if let Ok(Some(settings)) = settings {
+                let keys = settings.get("PGP").and_then(Value::as_object);
+                if let Some(keys) = keys {
+                    for (key_id, material_value) in keys {
+                        let Some(material) = material_value.as_str() else {
+                            continue;
+                        };
+                        if is_encrypted_account_secret(material_value) {
+                            if let Some(blob) = material_value
+                                .as_str()
+                                .and_then(|value| value.strip_prefix("encrypted:"))
+                                .and_then(|value| STANDARD.decode(value).ok())
+                            {
+                                if let Ok(Some(private_material)) =
+                                    decrypt_account_secret(&blob, &credential_key)
+                                {
+                                    private_keys.push(json!({
+                                        "id": format!("{key_id}.key"),
+                                        "value": private_material,
+                                    }));
+                                }
+                            }
+                        } else if material.contains("PGP PUBLIC KEY") {
+                            public_keys.push(json!({
+                                "id": format!("{key_id}_public.asc"),
+                                "value": material,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({"Result": {"public": public_keys, "private": private_keys}}),
+    )
+}
+
+async fn native_pgp_store_key(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+    let Some(key) = payload_optional_string(payload, "key") else {
+        return json_result_error(action, "OpenPGP key is required");
+    };
+    let Some(key_id) = payload_optional_string(payload, "keyId") else {
+        return json_result_error(action, "keyId required");
+    };
+    if validate_gnupg_material(&key, PGP_KEY_MATERIAL_LIMIT_BYTES, true).is_err()
+        || validate_armored_pgp_material(&key).is_err()
+        || !validate_pgp_key_id(&key_id)
+    {
+        return json_result_error(action, "Invalid OpenPGP key");
+    }
+
+    let stored = if key.contains("PGP PRIVATE KEY") {
+        let credential_key = match load_session_credential_key(action, session).await {
+            Ok(credential_key) => credential_key,
+            Err(response) => return response,
+        };
+        let Ok(encrypted) = fm_user::encrypt_account_secret(&key, &credential_key) else {
+            return legacy_action_error(
+                action,
+                UNKNOWN_ERROR,
+                "OpenPGP private-key encryption failed",
+            );
+        };
+        store_primary_account_pgp_key(
+            state,
+            user.user_id,
+            &key_id,
+            Value::String(format!("encrypted:{}", STANDARD.encode(encrypted))),
+        )
+        .await
+    } else if key.contains("PGP PUBLIC KEY") {
+        store_primary_account_pgp_key(
+            state,
+            user.user_id,
+            &format!("{key_id}_public"),
+            Value::String(key),
+        )
+        .await
+    } else {
+        return json_result_error(action, "Unsupported OpenPGP key type");
+    };
+    json_value_envelope(StatusCode::OK, action, json!({"Result": stored}))
+}
+
+async fn store_primary_account_pgp_key(
+    state: &AppState,
+    user_id: i64,
+    storage_key: &str,
+    material: Value,
+) -> bool {
+    use sqlx::Row;
+
+    let Some(pool) = state.db_pool() else {
+        return false;
+    };
+    let Ok(backend_connection) = pool.acquire().await else {
+        return false;
+    };
+    let backend = backend_connection.backend_name().to_string();
+    drop(backend_connection);
+    let query = match backend.as_str() {
+        "PostgreSQL" => {
+            "SELECT id, settings FROM frickmail_mail_accounts WHERE user_id = $1 ORDER BY id LIMIT 1"
+        }
+        _ => "SELECT id, settings FROM frickmail_mail_accounts WHERE user_id = ? ORDER BY id LIMIT 1",
+    };
+    let Ok(Some(row)) = sqlx::query(query).bind(user_id).fetch_optional(pool).await else {
+        return false;
+    };
+    let Ok(account_id) = row.try_get::<i64, _>("id") else {
+        return false;
+    };
+    let Ok(settings_raw) = row.try_get::<Option<String>, _>("settings") else {
+        return false;
+    };
+    let mut settings = settings_raw
+        .and_then(|raw| serde_json::from_str::<Value>(raw.as_str()).ok())
+        .unwrap_or_else(|| json!({}));
+    if !settings.is_object() {
+        settings = json!({});
+    }
+    let Some(object) = settings.as_object_mut() else {
+        return false;
+    };
+    let pgp = object.entry("PGP".to_string()).or_insert_with(|| json!({}));
+    if !pgp.is_object() {
+        *pgp = json!({});
+    }
+    if let Some(pgp_object) = pgp.as_object_mut() {
+        pgp_object.insert(storage_key.to_string(), material);
+    }
+    SqlxUserRepository::update_mail_account_settings(pool, user_id, account_id, &settings)
+        .await
+        .is_ok()
 }
 
 fn validate_gnupg_material(value: &str, limit: usize, armored: bool) -> Result<(), String> {
@@ -32042,6 +32523,71 @@ Subject: Empty body metadata\r\n\r\n"
                 .and_then(|row| row.try_get("settings"))
                 .unwrap();
         serde_json::from_str(&settings).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_pgp_backup_storage_encrypts_and_roundtrips_private_keys() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 9100, "pgp-backup", Some("pgp-backup@example.com")).await;
+        seed_mail_account(&pool, 910, 9100, "Primary", true).await;
+        let credential_key = [7_u8; CREDENTIAL_KEY_BYTES];
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = credential_session(
+            9100,
+            "pgp-backup",
+            Some("pgp-backup@example.com"),
+            &credential_key,
+        )
+        .await;
+        let public_key =
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\ntest\n-----END PGP PUBLIC KEY BLOCK-----";
+        let private_key =
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\nsecret\n-----END PGP PRIVATE KEY BLOCK-----";
+
+        let response = super::native_pgp_store_key(
+            &state,
+            "StorePGPKey",
+            &json!({"key": public_key, "keyId": "ABCDEF0123456789"}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+
+        let response = super::native_pgp_store_key(
+            &state,
+            "StorePGPKey",
+            &json!({"key": private_key, "keyId": "ABCDEF0123456790"}),
+            &session,
+        )
+        .await;
+        assert_eq!(read_json(response).await["Result"], true);
+
+        let settings = mail_account_settings(&pool, 910).await;
+        assert_eq!(settings["PGP"]["ABCDEF0123456789_public"], public_key);
+        let stored_private = settings["PGP"]["ABCDEF0123456790"].as_str().unwrap();
+        assert!(stored_private.starts_with("encrypted:"));
+        assert!(!stored_private.contains("PGP PRIVATE KEY"));
+
+        let response =
+            super::native_pgp_get_stored_keys(&state, "GetStoredPGPKeys", &session).await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["public"][0]["value"], public_key);
+        assert_eq!(body["Result"]["private"][0]["id"], "ABCDEF0123456790.key");
+    }
+
+    #[test]
+    fn legacy_get_pgp_keys_merges_backup_and_gnupg_export() {
+        let backup = json!({
+            "public": [{"id": "public.asc", "value": "-----BEGIN PGP PUBLIC KEY BLOCK-----\nbackup"}],
+            "private": [{"id": "private.key", "value": "-----BEGIN PGP PRIVATE KEY BLOCK-----\nbackup"}]
+        });
+        let mut keys = super::extract_legacy_pgp_backup_strings(backup);
+        keys.extend(Some("exported-public".to_string()));
+        assert_eq!(keys.len(), 3);
+        assert!(keys[0].contains("backup"));
+        assert!(keys[1].contains("PRIVATE KEY"));
+        assert_eq!(keys[2], "exported-public");
     }
 
     async fn account_encrypted_password(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {
