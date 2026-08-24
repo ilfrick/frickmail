@@ -166,7 +166,7 @@ features unless noted elsewhere.
 | Avatars | `Avatar` |
 | Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` (native settings CRUD under the legacy `Plugins["Search Filters"]` namespace; invalid add/edit and empty renamed queries are rejected as an intentional safety boundary, while login-time IMAP application remains pending) |
 | Kolab | `KolabFolder` |
-| Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` |
+| Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` (native, operator-gated bounded legacy private-data archive/restore; requires `FRICKMAIL__ADMIN__TOKEN_HASH` and `FRICKMAIL__PRIVATE_DATA_DIR`, excludes cache and symlinks, and enforces entry/size/path/symlink limits) |
 | Contacts sync | `JsonContactsSync`, `JsonDeduplicateContacts`, `JsonAddContact` |
 | Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` |
 | Change password | `ChangePassword` (partial-native) |
