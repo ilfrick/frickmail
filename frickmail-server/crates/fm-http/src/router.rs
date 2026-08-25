@@ -4052,13 +4052,141 @@ async fn native_pgp_store_key_pair(
     native_pgp_store_or_import(state, action, payload, session).await
 }
 
+async fn extract_legacy_email_address(value: &str) -> Option<String> {
+    let captures = regex::Regex::new(r"[^\s<>]+@[^\s<>]+")
+        .ok()?
+        .captures(value)?;
+    Some(captures[0].to_string())
+}
+
+fn first_hkp_index_keyid(response: &str) -> Option<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    for line in response.lines() {
+        let fields = line.split(':').collect::<Vec<_>>();
+        if fields.first() != Some(&"pub") || fields.len() != 7 {
+            continue;
+        }
+        if !fields[6].is_empty()
+            || fields[5]
+                .parse::<u64>()
+                .map(|expiration| expiration <= now)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        return Some(fields[1].to_string());
+    }
+    None
+}
+
+async fn fetch_openpgp_index(state: &AppState, query: &str) -> Result<String, String> {
+    fetch_openpgp_keyserver(state, "index", query).await
+}
+
 async fn native_pgp_import_key(
     state: &AppState,
     action: &str,
     payload: &Value,
     session: &fm_session::Session,
 ) -> Response {
-    native_pgp_store_or_import(state, action, payload, session).await
+    let user = match load_session_user(state, action, session).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return json_result_error(action, "Not authenticated"),
+        Err(response) => return response,
+    };
+
+    let mut key = payload_optional_string(payload, "key").unwrap_or_default();
+    if key.trim().is_empty() {
+        let mut key_id = payload_optional_string(payload, "keyId").unwrap_or_default();
+        let email = match payload_optional_string(payload, "email") {
+            Some(email) if !key_id.is_empty() => email,
+            Some(email) => extract_legacy_email_address(&email)
+                .await
+                .unwrap_or_else(|| email.trim().to_string()),
+            None => String::new(),
+        };
+        if key_id.is_empty() && !email.is_empty() {
+            if let Ok(index) = fetch_openpgp_index(state, &email).await {
+                key_id = first_hkp_index_keyid(&index).unwrap_or_default();
+            }
+        }
+        if !key_id.is_empty() {
+            key = fetch_openpgp_keyserver(state, "get", &key_id)
+                .await
+                .unwrap_or_default();
+        }
+    }
+
+    let key = key.trim();
+    if key.is_empty() {
+        return json_value_envelope(StatusCode::OK, action, json!({ "Result": {} }));
+    }
+    if let Err(message) = validate_gnupg_material(key, GNUPG_KEY_MATERIAL_LIMIT_BYTES, true)
+        .and_then(|_| validate_armored_pgp_material(key))
+    {
+        return json_result_error(action, &message);
+    }
+
+    let mut result = serde_json::Map::new();
+    result.insert("backup".to_string(), Value::Bool(false));
+    result.insert("gnuPG".to_string(), Value::Bool(false));
+    if payload_bool(payload, "backup") {
+        let credential_key = match load_session_credential_key(action, session).await {
+            Ok(credential_key) => credential_key,
+            Err(response) => return response,
+        };
+        let stored = if key.contains("PGP PRIVATE KEY") {
+            if let Ok(blob) = fm_user::encrypt_account_secret(key, &credential_key) {
+                store_primary_account_pgp_key(
+                    state,
+                    user.user_id,
+                    &format!("{:x}", Sha1::digest(key.as_bytes())),
+                    Value::String(format!("encrypted:{}", STANDARD.encode(blob))),
+                )
+                .await
+            } else {
+                false
+            }
+        } else {
+            store_primary_account_pgp_key(
+                state,
+                user.user_id,
+                &format!("{}_public", hex::encode(Sha1::digest(key.as_bytes()))),
+                Value::String(key.to_string()),
+            )
+            .await
+        };
+        result.insert("backup".to_string(), Value::Bool(stored));
+    }
+    if payload_bool(payload, "gnuPG") {
+        match run_gnupg(
+            state,
+            user.user_id,
+            &["--import"],
+            Some(key.as_bytes().to_vec()),
+            None,
+        )
+        .await
+        {
+            Ok(import) => {
+                result.insert(
+                    "gnuPG".to_string(),
+                    Value::Bool(
+                        import
+                            .status
+                            .iter()
+                            .any(|line| line.starts_with("IMPORT_OK ")),
+                    ),
+                );
+            }
+            Err(message) => return legacy_action_error(action, UNKNOWN_ERROR, message),
+        }
+    }
+
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": result }))
 }
 
 async fn native_pgp_store_or_import(
@@ -32588,6 +32716,42 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(keys[0].contains("backup"));
         assert!(keys[1].contains("PRIVATE KEY"));
         assert_eq!(keys[2], "exported-public");
+    }
+
+    #[test]
+    fn hkp_index_selects_first_valid_unexpired_key() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let response = format!(
+            "info:1:1\npub:ABCDEF0123456789:22:256:0:{}:\nuid:test@example.com:{now}:0:\npub:FEDCBA9876543210:22:256:{now}:0:\n",
+            now.saturating_add(3600)
+        );
+        assert_eq!(
+            super::first_hkp_index_keyid(&response).as_deref(),
+            Some("ABCDEF0123456789")
+        );
+
+        let expired = format!("pub:ABCDEF0123456789:22:256:0:{}:\n", now.saturating_sub(1));
+        assert_eq!(super::first_hkp_index_keyid(&expired), None);
+
+        let invalid = "pub:SHORT\n";
+        assert_eq!(super::first_hkp_index_keyid(invalid), None);
+    }
+
+    #[tokio::test]
+    async fn legacy_email_extractor_matches_php_pattern() {
+        assert_eq!(
+            super::extract_legacy_email_address("Alice <alice@example.com>")
+                .await
+                .as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(
+            super::extract_legacy_email_address("not-an-email").await,
+            None
+        );
     }
 
     async fn account_encrypted_password(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {

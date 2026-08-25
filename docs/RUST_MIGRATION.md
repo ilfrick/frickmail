@@ -5,7 +5,19 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-25 01:45:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-25 07:20:00 CEST (UTC+02:00)
+
+The pending follow-up OpenPGP slice completes `PgpImportKey` parity. Direct
+armor remains authoritative; when omitted, the handler can resolve an email via
+a bounded HKP index, select the first valid unexpired key, fetch it under the
+same response and armor guards, optionally store an encrypted account backup,
+and import into GnuPG while returning the legacy `{backup,gnuPG}` booleans.
+Focused tests cover PHP-compatible email extraction and HKP record filtering.
+Formatting, Clippy with warnings denied, full workspace tests, production-image
+build, read-only startup, `/health`, and in-container GnuPG execution passed.
+Independent senior review approved this slice; publication awaits exact-SHA CI.
+
+## Prior Snapshot — 2026-08-25 01:45:00 CEST (UTC+02:00)
 
 The pending OpenPGP slice adds native `PgpSearchKey`, `GetStoredPGPKeys`, and
 `StorePGPKey`, and corrects `GetPGPKeys` to merge encrypted account-backup keys
