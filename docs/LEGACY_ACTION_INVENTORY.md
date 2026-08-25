@@ -146,6 +146,10 @@ model instead of collapsing verification to one early `VALIDSIG` result.
 Success and failure signatures retain legacy status/summary values, decoded
 UIDs, fingerprints, timestamps, expiry/version fields, valid markers, and
 PHP-compatible summary messages; no recognized signature still returns false.
+IMAP verification also reproduces PHP MIME normalization: bounded part headers
+are fetched before the body, Base64 and quoted-printable clear-signed parts are
+decoded, detached signatures receive the same header-plus-CRLF prefix ahead of
+the body, and signatures remain ASCII-filtered.
 
 Native `GnupgDecrypt` no longer skips embedded signature verification: direct
 and IMAP part decryption return real legacy-compatible signature metadata for

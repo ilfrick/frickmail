@@ -5,7 +5,18 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-25 07:20:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-25 13:20:00 CEST (UTC+02:00)
+
+The pending `PgpVerifyMessage` IMAP MIME normalization slice completes the
+legacy byte-input path for detached and clear-signed verification. The native
+handler now fetches bounded part MIME headers, decodes clear-signed bodies when
+they use Base64 or quoted-printable transfer encoding like PHP, prepends those
+headers plus CRLF to a detached signature before the body, preserves the legacy
+GnuPG input order, and continues to ASCII-filter signatures. A regression covers
+the PHP-compatible clear-signed decoding rules. Formatting, workspace Clippy
+with warnings denied, full workspace tests, production-image build, read-only
+startup, `/health`, and in-container GnuPG execution passed. Independent senior
+review approved.
 
 The pending signed-and-encrypted GnuPG slice removes `--skip-verify` from
 native `GnupgDecrypt`, so verification status is emitted while decrypting.

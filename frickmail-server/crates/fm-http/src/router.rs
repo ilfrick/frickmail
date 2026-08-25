@@ -4899,6 +4899,20 @@ async fn native_pgp_verify_message(
         if folder.is_empty() || uid == 0 || part_id.is_empty() {
             return json_result_error(action, "folder, uid and partId are required");
         }
+        let mut mime = match fm_imap::fetch_mime_part_bounded(
+            config.clone(),
+            &password,
+            &folder,
+            uid,
+            &format!("{part_id}.MIME"),
+            fm_imap::MIME_PART_HEADER_LIMIT_BYTES,
+        )
+        .await
+        {
+            Ok(Some(mime)) => mime,
+            Ok(None) => return json_result_error(action, "Message part not found"),
+            Err(err) => return json_result_error(action, &err.public_message()),
+        };
         let body = match fm_imap::fetch_mime_part_bounded(
             config.clone(),
             &password,
@@ -4914,8 +4928,12 @@ async fn native_pgp_verify_message(
             Err(err) => return json_result_error(action, &err.public_message()),
         };
         let signature = if sig_part_id.is_empty() {
-            Vec::new()
+            match decode_legacy_verified_body(&mime, &body) {
+                Ok(decoded) => decoded,
+                Err(message) => return json_result_error(action, &message),
+            }
         } else {
+            mime.extend_from_slice(b"\r\n");
             match fm_imap::fetch_mime_part_bounded(
                 config,
                 &password,
@@ -4931,7 +4949,7 @@ async fn native_pgp_verify_message(
                 Err(err) => return json_result_error(action, &err.public_message()),
             }
         };
-        (body, signature)
+        (signature, body)
     };
     let text = String::from_utf8_lossy(&text)
         .replace("\r\n", "\n")
@@ -4976,6 +4994,64 @@ fn verification_summary_messages(summary: i64) -> String {
         .map(|(_, message)| *message)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn decode_legacy_verified_body(mime: &[u8], body: &[u8]) -> Result<Vec<u8>, String> {
+    let encoding = String::from_utf8_lossy(mime)
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-transfer-encoding")
+                .then(|| value.trim().to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    match encoding.as_str() {
+        "base64" => {
+            let compact: Vec<u8> = body
+                .iter()
+                .copied()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect();
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(compact)
+                .map_err(|_| "Invalid base64 message part".to_string())
+        }
+        "quoted-printable" => decode_quoted_printable_verified_body(body),
+        _ => Ok(body.to_vec()),
+    }
+}
+
+fn decode_quoted_printable_verified_body(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(data.len());
+    let mut index = 0;
+    while index < data.len() {
+        if data[index] != b'=' {
+            output.push(data[index]);
+            index += 1;
+        } else if index + 1 == data.len() {
+            break;
+        } else if data[index + 1] == b'\n'
+            || (data[index + 1] == b'\r' && data.get(index + 2) == Some(&b'\n'))
+        {
+            output.extend_from_slice(b"\r\n");
+            index += if data[index + 1] == b'\n' { 2 } else { 3 };
+        } else if index + 2 < data.len() {
+            let high = (data[index + 1] as char).to_digit(16);
+            let low = (data[index + 2] as char).to_digit(16);
+            match (high, low) {
+                (Some(high), Some(low)) => {
+                    output.push(((high << 4) | low) as u8);
+                    index += 3;
+                }
+                _ => return Err("Invalid quoted-printable message part".to_string()),
+            }
+        } else {
+            return Err("Invalid quoted-printable message part".to_string());
+        }
+    }
+    Ok(output)
 }
 
 fn legacy_verification_result(signatures: &[Value]) -> Value {
@@ -32961,6 +33037,27 @@ Subject: Empty body metadata\r\n\r\n"
 
         let result = super::legacy_verification_result(&signatures);
         assert_eq!(result["message"], "The signature is fully valid.");
+    }
+
+    #[test]
+    fn clearsigned_verification_body_matches_php_decoding() {
+        let base64_mime = b"Content-Transfer-Encoding: Base64\r\n";
+        assert_eq!(
+            super::decode_legacy_verified_body(base64_mime, b"aGVsbG8=").unwrap(),
+            b"hello".to_vec()
+        );
+
+        let quoted = super::decode_legacy_verified_body(
+            b"Content-Transfer-Encoding: quoted-printable\r\n",
+            b"hello=\r\nworld=A",
+        )
+        .unwrap_err();
+        assert_eq!(quoted, "Invalid quoted-printable message part");
+
+        assert_eq!(
+            super::decode_quoted_printable_verified_body(b"hello=\r\nwor=3Dld").unwrap(),
+            b"hello\r\nwor=ld".to_vec()
+        );
     }
 
     #[test]
