@@ -7,6 +7,18 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-08-25 07:20:00 CEST (UTC+02:00)
 
+The pending GnuPG verification parity slice replaces the early-return verifier
+parser with SnappyMail's multi-signature model. Signature status objects are
+created for `GOODSIG`, `BADSIG`, `ERRSIG`, `EXPKEYSIG`, `REVKEYSIG`, and
+`EXPSIG`; a following `VALIDSIG` updates the same signature with its
+fingerprint, timestamp, expiry, version, and valid marker. Percent-encoded UIDs
+and PHP-compatible summary messages are preserved, while missing signatures
+still return legacy false. Deterministic regressions cover valid, bad,
+multiple-signature, and no-signature output. Formatting, workspace Clippy with
+warnings denied, full workspace tests, production-image build, read-only
+startup, `/health`, and in-container GnuPG execution passed. Independent senior
+review approved.
+
 The pending GnuPG export/decrypt parity slice fixes native `GnupgExportKey` so
 private exports use only `--export-secret-keys`, honor the supplied loopback
 passphrase under the existing 1,024-byte bound, and return real armored GnuPG

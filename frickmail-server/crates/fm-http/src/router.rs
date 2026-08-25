@@ -4937,61 +4937,108 @@ async fn native_pgp_verify_message(
         .flatten()
         .map(|user| user.user_id);
     match run_gnupg_with_message(state, user_id, &["--verify"], Some(signature), text, None).await {
-        Ok(result) => match parse_verification_signature(&result.status) {
-            Some(info) => json_value_envelope(StatusCode::OK, action, json!({ "Result": info })),
-            None => json_value_envelope(StatusCode::OK, action, json!({ "Result": false })),
-        },
+        Ok(result) => {
+            let signatures = parse_verification_signature(&result.status);
+            let info = legacy_verification_result(&signatures);
+            json_value_envelope(StatusCode::OK, action, json!({ "Result": info }))
+        }
         Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
     }
 }
 
-fn parse_verification_signature(status: &[String]) -> Option<Value> {
-    let mut summary = 0;
-    let mut status_code = 1;
-    let mut keyid = String::new();
-    let mut uid = String::new();
+fn verification_summary_messages(summary: i64) -> String {
+    const MESSAGES: [(i64, &str); 11] = [
+        (0, "The signature is fully valid."),
+        (2, "The signature is good but one might want to display some extra information. Check the other bits."),
+        (4, "The signature is bad. It might be useful to check other bits and display more information, i.e. a revoked certificate might not render a signature invalid when the message was received prior to the cause for the revocation."),
+        (16, "The key or at least one certificate has been revoked."),
+        (32, "The key or one of the certificates has expired. It is probably a good idea to display the date of the expiration."),
+        (64, "The signature has expired."),
+        (128, "Can’t verify due to a missing key or certificate."),
+        (256, "The CRL (or an equivalent mechanism) is not available."),
+        (512, "Available CRL is too old."),
+        (1024, "A policy requirement was not met."),
+        (2048, "A system error occurred."),
+    ];
+    MESSAGES
+        .iter()
+        .filter(|(bit, _)| summary == *bit)
+        .map(|(_, message)| *message)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn legacy_verification_result(signatures: &[Value]) -> Value {
+    let Some(mut info) = signatures.first().cloned() else {
+        return json!(false);
+    };
+    info["message"] = json!(verification_summary_messages(
+        info["summary"].as_i64().unwrap_or_default()
+    ));
+    info
+}
+
+fn parse_verification_signature(status: &[String]) -> Vec<Value> {
+    let mut signatures = Vec::new();
     for line in status {
         let tokens = line.split(' ').collect::<Vec<_>>();
-        match tokens.first().copied() {
-            Some("GOODSIG") => {
-                status_code = 0;
-                summary = 0;
-                keyid = tokens.get(1).copied().unwrap_or_default().to_string();
-                uid = tokens.get(2..).unwrap_or(&[]).join(" ");
+        let (status_code, summary) = match tokens.first().copied() {
+            Some("GOODSIG") => (0, 0),
+            Some("BADSIG" | "ERRSIG" | "EXPKEYSIG" | "REVKEYSIG" | "EXPSIG") => (1, 4),
+            Some("VALIDSIG") if !signatures.is_empty() => {
+                let last: &mut Value = signatures.last_mut().unwrap();
+                last["fingerprint"] = json!(tokens.get(1).copied().unwrap_or_default());
+                last["timestamp"] = json!(tokens
+                    .get(3)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0));
+                last["expires"] = json!(tokens
+                    .get(4)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0));
+                last["version"] = json!(tokens
+                    .get(5)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0));
+                last["valid"] = json!(0);
+                continue;
             }
-            Some("BADSIG" | "ERRSIG" | "EXPKEYSIG" | "REVKEYSIG") => {
-                status_code = 1;
-                summary = 4;
-                keyid = tokens.get(1).copied().unwrap_or_default().to_string();
-                uid = tokens.get(2..).unwrap_or(&[]).join(" ");
-            }
-            Some("VALIDSIG") => {
-                return Some(json!({
-                    "fingerprint": tokens.get(1).copied().unwrap_or_default(),
-                    "validity": 0,
-                    "status": status_code,
-                    "summary": summary,
-                    "message": if status_code == 0 { "The signature is fully valid." } else { "" },
-                    "keyid": keyid,
-                    "uid": uid,
-                    "valid": true,
-                }));
-            }
-            _ => {}
-        }
-    }
-    (!keyid.is_empty()).then(|| {
-        json!({
+            _ => continue,
+        };
+        signatures.push(json!({
             "fingerprint": "",
             "validity": 0,
+            "timestamp": 0,
             "status": status_code,
             "summary": summary,
-            "message": "",
-            "keyid": keyid,
-            "uid": uid,
+            "keyid": tokens.get(1).copied().unwrap_or_default(),
+            "uid": percent_decode_uid(&tokens.get(2..).unwrap_or(&[]).join(" ")),
             "valid": false,
-        })
-    })
+        }));
+    }
+    signatures
+}
+
+fn percent_decode_uid(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            let high = (bytes[index + 1] as char).to_digit(16).unwrap() as u8;
+            let low = (bytes[index + 2] as char).to_digit(16).unwrap() as u8;
+            output.push(high * 16 + low);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 /// Appends the sent copy, falling back to the account's configured `SentFolder`
@@ -32867,10 +32914,56 @@ Subject: Empty body metadata\r\n\r\n"
         )
         .await;
         let body = read_json(response).await;
-        println!("decrypt body: {body}");
         let decrypted = body["Result"]["data"].as_str().unwrap();
         assert_eq!(decrypted.trim_end_matches('\n'), "secret parity payload");
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn verification_parser_matches_legacy_php_fields() {
+        let signatures = super::parse_verification_signature(&[
+            "NEWSIG".to_string(),
+            "GOODSIG ABCDEF0123456789 Alice%20Example%20%3Calice@example.com%3E".to_string(),
+            "VALIDSIG FINGERPRINT 2026-08-25 1787640000 0 4 0 1 8 00 PRIMARY".to_string(),
+        ]);
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0]["status"], 0);
+        assert_eq!(signatures[0]["summary"], 0);
+        assert_eq!(signatures[0]["keyid"], "ABCDEF0123456789");
+        assert_eq!(signatures[0]["uid"], "Alice Example <alice@example.com>");
+        assert_eq!(signatures[0]["fingerprint"], "FINGERPRINT");
+        assert_eq!(signatures[0]["timestamp"], 1_787_640_000);
+        assert_eq!(signatures[0]["expires"], 0);
+        assert_eq!(signatures[0]["version"], 4);
+        assert_eq!(signatures[0]["valid"], 0);
+
+        let result = super::legacy_verification_result(&signatures);
+        assert_eq!(result["message"], "The signature is fully valid.");
+    }
+
+    #[test]
+    fn verification_parser_preserves_bad_and_multiple_signatures() {
+        let signatures = super::parse_verification_signature(&[
+            "BADSIG FEDCBA9876543210 Bob%20Example".to_string(),
+            "ERRSIG ABCDEF0123456789 1 10 00 1787640000 9".to_string(),
+        ]);
+        assert_eq!(signatures.len(), 2);
+        assert!(signatures.iter().all(|signature| signature["status"] == 1));
+        assert!(signatures.iter().all(|signature| signature["summary"] == 4));
+        assert!(signatures
+            .iter()
+            .all(|signature| signature["valid"] == false));
+
+        let result = super::legacy_verification_result(&signatures);
+        assert_eq!(
+            result["message"],
+            "The signature is bad. It might be useful to check other bits and display more information, i.e. a revoked certificate might not render a signature invalid when the message was received prior to the cause for the revocation."
+        );
+
+        let missing =
+            super::parse_verification_signature(&["ENC_TO ABCDEF0123456789 1 0".to_string()]);
+        assert!(missing.is_empty());
+        assert_eq!(super::legacy_verification_result(&missing), json!(false));
     }
 
     async fn account_encrypted_password(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {

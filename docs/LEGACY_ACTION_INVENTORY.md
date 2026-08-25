@@ -141,6 +141,12 @@ signing, encryption, and decryption. An isolated end-to-end regression covers
 passphrase-protected generation, private armor export, encryption, and native
 decryption.
 
+Native `PgpVerifyMessage` now preserves SnappyMail's multi-signature status
+model instead of collapsing verification to one early `VALIDSIG` result.
+Success and failure signatures retain legacy status/summary values, decoded
+UIDs, fingerprints, timestamps, expiry/version fields, valid markers, and
+PHP-compatible summary messages; no recognized signature still returns false.
+
 HTML compose now follows MailSo's multipart fallback rule for both actions:
 when `plain` is omitted or PHP-falsey, Rust derives a bounded text/plain part
 from the sanitized canonical HTML and still emits `multipart/alternative`.
@@ -220,10 +226,10 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Complete native parity for legacy GnuPG verification metadata and signed-plus-
-   encrypted payload handling, including IMAP MIME normalization and exact PHP
-   response edge cases. Key listing/import/generation/export and direct or IMAP
-   part decryption are now native.
+1. Complete native parity for signed-plus-encrypted payload handling and exact
+   IMAP MIME normalization edge cases for detached/clear-signed verification.
+   Key listing/import/generation/export, direct or IMAP part decryption, and
+   legacy multi-signature verification metadata are now native.
 2. Complete `Message` parity: remaining message/header details and detailed
    message payloads.
 3. Migrate the legacy connection-token/CSRF contract as part of the Rust-only
