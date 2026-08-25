@@ -20,6 +20,13 @@ signature. Formatting, workspace Clippy with warnings denied, full workspace
 tests, production-image build, read-only startup, `/health`, and in-container
 GnuPG execution passed. Independent senior review approved.
 
+Implementation commit `9a634c6e82835dddc578107ab7664d57831cafc8` was published
+to all four remote tips, with live remote checks confirming identical SHAs.
+Exact-SHA GitHub CI passed for that SHA on `master` run
+[`32829573724`](https://github.com/ilfrick/frickmail/actions/runs/32829573724)
+and `rust-full-migration` run
+[`32829573612`](https://github.com/ilfrick/frickmail/actions/runs/32829573612).
+
 The pending GnuPG verification parity slice replaces the early-return verifier
 parser with SnappyMail's multi-signature model. Signature status objects are
 created for `GOODSIG`, `BADSIG`, `ERRSIG`, `EXPKEYSIG`, `REVKEYSIG`, and
