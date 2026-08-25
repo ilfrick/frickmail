@@ -7,6 +7,19 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-08-25 07:20:00 CEST (UTC+02:00)
 
+The pending signed-and-encrypted GnuPG slice removes `--skip-verify` from
+native `GnupgDecrypt`, so verification status is emitted while decrypting.
+Direct-data and IMAP-part responses now return legacy-compatible multi-signature
+objects instead of always claiming an empty list; unsigned encrypted payloads
+continue to return an empty signature collection. This intentionally improves on
+legacy behavior: a bad or unusable embedded signature can fail decryption rather
+than silently returning plaintext as merely unsigned. An isolated end-to-end
+regression signs and encrypts with a passphrase-protected key, decrypts through
+the native handler, and asserts both recovered plaintext and one valid
+signature. Formatting, workspace Clippy with warnings denied, full workspace
+tests, production-image build, read-only startup, `/health`, and in-container
+GnuPG execution passed. Independent senior review approved.
+
 The pending GnuPG verification parity slice replaces the early-return verifier
 parser with SnappyMail's multi-signature model. Signature status objects are
 created for `GOODSIG`, `BADSIG`, `ERRSIG`, `EXPKEYSIG`, `REVKEYSIG`, and

@@ -4810,7 +4810,7 @@ async fn native_gnupg_decrypt(
         return match run_gnupg(
             state,
             user.user_id,
-            &["--decrypt", "--skip-verify"],
+            &["--decrypt"],
             Some(data.into_bytes()),
             Some((key_id, passphrase)),
         )
@@ -4819,7 +4819,12 @@ async fn native_gnupg_decrypt(
             Ok(result) => json_value_envelope(
                 StatusCode::OK,
                 action,
-                json!({ "Result": { "data": String::from_utf8_lossy(&result.output), "signatures": [] } }),
+                json!({
+                    "Result": {
+                        "data": String::from_utf8_lossy(&result.output),
+                        "signatures": parse_verification_signature(&result.status),
+                    }
+                }),
             ),
             Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
         };
@@ -4845,7 +4850,7 @@ async fn native_gnupg_decrypt(
             match run_gnupg(
                 state,
                 user.user_id,
-                &["--decrypt", "--skip-verify"],
+                &["--decrypt"],
                 Some(data),
                 Some((key_id, passphrase)),
             )
@@ -4854,7 +4859,12 @@ async fn native_gnupg_decrypt(
                 Ok(result) => json_value_envelope(
                     StatusCode::OK,
                     action,
-                    json!({ "Result": { "data": String::from_utf8_lossy(&result.output), "signatures": [] } }),
+                    json!({
+                        "Result": {
+                            "data": String::from_utf8_lossy(&result.output),
+                            "signatures": parse_verification_signature(&result.status),
+                        }
+                    }),
                 ),
                 Err(message) => legacy_action_error(action, UNKNOWN_ERROR, message),
             }
@@ -32895,9 +32905,17 @@ Subject: Empty body metadata\r\n\r\n"
         let encrypted = super::run_gnupg(
             &state,
             9200,
-            &["--armor", "--recipient", fingerprint, "--encrypt"],
+            &[
+                "--armor",
+                "--local-user",
+                fingerprint,
+                "--recipient",
+                fingerprint,
+                "--sign",
+                "--encrypt",
+            ],
             Some(b"secret parity payload".to_vec()),
-            None,
+            Some((fingerprint.to_string(), passphrase.to_string())),
         )
         .await
         .unwrap();
@@ -32916,6 +32934,10 @@ Subject: Empty body metadata\r\n\r\n"
         let body = read_json(response).await;
         let decrypted = body["Result"]["data"].as_str().unwrap();
         assert_eq!(decrypted.trim_end_matches('\n'), "secret parity payload");
+        assert_eq!(body["Result"]["signatures"].as_array().unwrap().len(), 1);
+        assert_eq!(body["Result"]["signatures"][0]["status"], 0);
+        assert_eq!(body["Result"]["signatures"][0]["summary"], 0);
+        assert_eq!(body["Result"]["signatures"][0]["valid"], 0);
         let _ = std::fs::remove_dir_all(&temp_root);
     }
 

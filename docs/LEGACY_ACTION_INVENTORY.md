@@ -147,6 +147,12 @@ Success and failure signatures retain legacy status/summary values, decoded
 UIDs, fingerprints, timestamps, expiry/version fields, valid markers, and
 PHP-compatible summary messages; no recognized signature still returns false.
 
+Native `GnupgDecrypt` no longer skips embedded signature verification: direct
+and IMAP part decryption return real legacy-compatible signature metadata for
+signed-and-encrypted payloads and an empty collection for unsigned encrypted
+payloads. Unlike legacy `--skip-verify`, an invalid embedded signature is not
+treated as silent success.
+
 HTML compose now follows MailSo's multipart fallback rule for both actions:
 when `plain` is omitted or PHP-falsey, Rust derives a bounded text/plain part
 from the sanitized canonical HTML and still emits `multipart/alternative`.
