@@ -25,6 +25,15 @@ the final production image was rebuilt after the approved changes for read-only
 container startup, `/health`, and in-container GnuPG execution checks before
 publication.
 
+Implementation commit `45b4ec31ca0cf29a1aa873b9d3b1317cbf468ddf` was published
+to `master` and `rust-full-migration` on both remotes, with live remote tips
+verified identical. Exact-SHA GitHub CI passed for that SHA on `master` run
+[`32791357229`](https://github.com/ilfrick/frickmail/actions/runs/32791357229)
+and `rust-full-migration` run
+[`32791361772`](https://github.com/ilfrick/frickmail/actions/runs/32791361772).
+This snapshot records that evidence; it intentionally does not alter runtime
+code, so those runs remain authoritative for the implementation.
+
 The completed prior slice adds native bundled-plugin backup and restore for
 `JsonAdminBackupData` and `JsonAdminRestoreData`, preserving the legacy JSON
 response shapes while introducing an explicit Rust admin trust boundary. Both
