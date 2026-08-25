@@ -18,6 +18,14 @@ native handlers. Formatting, workspace Clippy with warnings denied, full
 workspace tests, production-image build, read-only startup, `/health`, and
 in-container GnuPG execution passed. Independent senior review approved.
 
+Implementation commit `296bbb1dc880de885920666ac93aa991f377b544` includes the
+CI-only GnuPG test dependency fix and was published to all four remote tips;
+live remote checks confirmed identical SHAs. Exact-SHA GitHub CI passed for
+that SHA on `master` run
+[`32818414406`](https://github.com/ilfrick/frickmail/actions/runs/32818414406)
+and `rust-full-migration` run
+[`32818414748`](https://github.com/ilfrick/frickmail/actions/runs/32818414748).
+
 The pending follow-up OpenPGP slice completes `PgpImportKey` parity. Direct
 armor remains authoritative; when omitted, the handler can resolve an email via
 a bounded HKP index, select the first valid unexpired key, fetch it under the
