@@ -132,6 +132,15 @@ part of the full webmail core migration.
 | `SaveMessage` | `dev/View/Popup/Compose.js` | partial-native | Natively saves a selected-account draft with `\Seen`, a stable generated `Message-ID`, UID lookup fallback, PHP-compatible `{folder, uid}`/`true` response shapes, and delete-after-append cleanup of the prior draft. It shares the migrated basic compose, JSON-LD, strictly validated Autocrypt headers, staged regular/inline/CID attachments, embedded data-image conversion, MailSo-compatible related/mixed MIME nesting, raw `message/rfc822` handling, and S/MIME/GnuPG root transformation. Saved drafts retain staged capabilities for later retries. Bounded direct client-supplied S/MIME certificate/private-key signing follows the same selected-account/direct/unsigned MailSo precedence as SendMessage; OpenPGP client-side signed/encrypted, selected-account S/MIME, OAuth SMTP, and data-x-src/data-x-style-url transformations are supported. |
 | OpenPGP backup/keyserver bundle: `GetPGPKeys`, `PgpImportKey`, `PgpSearchKey`, `GetStoredPGPKeys`, `StorePGPKey` | bundled SnappyMail PGP trait / frontend callers | native with boundaries | `GetPGPKeys` preserves first-seen order while returning globally unique backup public/private armor, then each GnuPG public-key export as armor; it remains usable without GnuPG. `GnupgGetKeys` separately preserves its legacy object-metadata contract. `GetStoredPGPKeys` decrypts private backups for the authenticated credential session and returns the legacy public/private collections. `StorePGPKey` strictly validates bounded single-block armor/key IDs and stores private keys with the user credential-key AEAD envelope rather than plaintext. `PgpImportKey` restores the legacy `{backup,gnuPG}` contract: direct armor may be backed up and/or imported; when key armor is absent it can resolve an email through a bounded HKP index and fetch its first valid unexpired key. Private backups use the authenticated credential-key AEAD envelope. `PgpSearchKey` streams a bounded HTTPS HKP lookup restricted to `keys.openpgp.org` and accepts only one complete armored PGP block. Boundaries: legacy PHP storage files are not read or written (new native backups live in account settings), only the fixed single keyserver is supported, and exact plugin-filter/error edge behavior is intentionally absent. |
 
+Native `GnupgExportKey` now distinguishes public and private commands exactly:
+public keys use armored `--export`, while private keys use armored
+`--export-secret-keys` with the bounded supplied passphrase through the existing
+GnuPG loopback path. Shared GnuPG execution returns actual stdout while retaining
+parsed status lines, restoring valid key/message output for public export,
+signing, encryption, and decryption. An isolated end-to-end regression covers
+passphrase-protected generation, private armor export, encryption, and native
+decryption.
+
 HTML compose now follows MailSo's multipart fallback rule for both actions:
 when `plain` is omitted or PHP-falsey, Rust derives a bounded text/plain part
 from the sanitized canonical HTML and still emits `multipart/alternative`.
@@ -211,10 +220,10 @@ compatibility fallback until they are migrated.
 
 The next Rust implementation targets from this inventory are:
 
-1. Complete native parity for legacy GnuPG key generation/export/decryption/verification,
-   including IMAP part fetching and exact PHP response edge cases. Key listing/import,
-   account-scoped signing, recipient encryption, and explicit rejection of unsupported
-   operations are now native.
+1. Complete native parity for legacy GnuPG verification metadata and signed-plus-
+   encrypted payload handling, including IMAP MIME normalization and exact PHP
+   response edge cases. Key listing/import/generation/export and direct or IMAP
+   part decryption are now native.
 2. Complete `Message` parity: remaining message/header details and detailed
    message payloads.
 3. Migrate the legacy connection-token/CSRF contract as part of the Rust-only

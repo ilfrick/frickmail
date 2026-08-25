@@ -7,6 +7,17 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-08-25 07:20:00 CEST (UTC+02:00)
 
+The pending GnuPG export/decrypt parity slice fixes native `GnupgExportKey` so
+private exports use only `--export-secret-keys`, honor the supplied loopback
+passphrase under the existing 1,024-byte bound, and return real armored GnuPG
+stdout. The shared runner now preserves parsed status lines while returning
+actual stdout, correcting public exports and other stdout-consuming crypto
+paths. A new isolated end-to-end regression generates a passphrase-protected
+key, exports its private armor, encrypts a payload, and decrypts it through the
+native handlers. Formatting, workspace Clippy with warnings denied, full
+workspace tests, production-image build, read-only startup, `/health`, and
+in-container GnuPG execution passed. Independent senior review approved.
+
 The pending follow-up OpenPGP slice completes `PgpImportKey` parity. Direct
 armor remains authoritative; when omitted, the handler can resolve an email via
 a bounded HKP index, select the first valid unexpired key, fetch it under the

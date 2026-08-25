@@ -3657,7 +3657,9 @@ async fn run_gnupg(
             error.lines().next().unwrap_or_default()
         ));
     }
-    Ok(parse_gnupg_output(&output.stderr))
+    let mut result = parse_gnupg_output(&output.stderr);
+    result.output = output.stdout;
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4755,9 +4757,16 @@ async fn native_gnupg_export_key(
     let Some(key_id) = payload_optional_string(payload, "keyId") else {
         return json_result_error(action, "keyId required");
     };
-    let mut args = vec!["--armor", "--export"];
+    let mut args = vec!["--armor"];
     if payload_bool(payload, "isPrivate") {
+        if payload_optional_string(payload, "passphrase")
+            .is_some_and(|value| value.len() > GNUPG_PASSPHRASE_LIMIT_BYTES)
+        {
+            return json_result_error(action, "OpenPGP passphrase exceeds the safety limit");
+        }
         args.push("--export-secret-keys");
+    } else {
+        args.push("--export");
     }
     args.push(key_id.as_str());
     match run_gnupg(state, user.user_id, &args, None, None).await {
@@ -32752,6 +32761,116 @@ Subject: Empty body metadata\r\n\r\n"
             super::extract_legacy_email_address("not-an-email").await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn gnupg_export_and_decrypt_use_private_key_passphrase() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("frickmail-gnupg-test-{unique}"));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 9200, "gnupg-passphrase", None).await;
+        sqlx::query(
+            "INSERT INTO frickmail_mail_accounts
+                (id, user_id, label, email, type, imap_host, imap_port, imap_secure,
+                 smtp_host, smtp_port, smtp_secure, login, encrypted_password,
+                 encrypted_oauth_refresh_token, oauth_tenant, is_primary, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(910_i64)
+        .bind(9200_i64)
+        .bind("Primary")
+        .bind("primary@example.com")
+        .bind("imap")
+        .bind("imap.example.com")
+        .bind(993_i64)
+        .bind("SSL")
+        .bind("smtp.example.com")
+        .bind(465_i64)
+        .bind("SSL")
+        .bind("primary@example.com")
+        .bind(fm_user::encrypt_account_secret("imap-password", &[7_u8; CREDENTIAL_KEY_BYTES]).unwrap())
+        .bind(None::<Vec<u8>>)
+        .bind(None::<String>)
+        .bind(true)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        let session = authenticated_session(9200, "gnupg-passphrase", None).await;
+        session
+            .insert(
+                fm_session::CREDENTIAL_KEY_SESSION_KEY,
+                STANDARD.encode([7_u8; CREDENTIAL_KEY_BYTES]),
+            )
+            .await
+            .unwrap();
+        session
+            .insert(
+                fm_session::SELECTED_ACCOUNT_SESSION_KEY,
+                fm_core::SelectedMailAccountSession { account_id: 910 },
+            )
+            .await
+            .unwrap();
+        let passphrase = "correct horse battery staple";
+
+        let response = super::native_gnupg_generate_key(
+            &state,
+            "GnupgGenerateKey",
+            &json!({
+                "email": "gnupg-passphrase@example.com",
+                "passphrase": passphrase
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        let fingerprint = body["Result"].as_str().unwrap();
+        assert_eq!(fingerprint.len(), 40);
+
+        let response = super::native_gnupg_export_key(
+            &state,
+            "GnupgExportKey",
+            &json!({"keyId": fingerprint, "isPrivate": true, "passphrase": passphrase}),
+            &session,
+        )
+        .await;
+        let exported = read_json(response).await;
+        let exported = exported["Result"].as_str().unwrap().to_string();
+        assert!(exported.contains("-----BEGIN PGP PRIVATE KEY BLOCK-----"));
+
+        let encrypted = super::run_gnupg(
+            &state,
+            9200,
+            &["--armor", "--recipient", fingerprint, "--encrypt"],
+            Some(b"secret parity payload".to_vec()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = super::native_gnupg_decrypt(
+            &state,
+            "GnupgDecrypt",
+            &json!({
+                "data": String::from_utf8(encrypted.output).unwrap(),
+                "keyId": fingerprint,
+                "passphrase": passphrase
+            }),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        println!("decrypt body: {body}");
+        let decrypted = body["Result"]["data"].as_str().unwrap();
+        assert_eq!(decrypted.trim_end_matches('\n'), "secret parity payload");
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     async fn account_encrypted_password(pool: &AnyPool, account_id: i64) -> Option<Vec<u8>> {
