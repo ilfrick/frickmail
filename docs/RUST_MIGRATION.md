@@ -15,7 +15,16 @@ and import into GnuPG while returning the legacy `{backup,gnuPG}` booleans.
 Focused tests cover PHP-compatible email extraction and HKP record filtering.
 Formatting, Clippy with warnings denied, full workspace tests, production-image
 build, read-only startup, `/health`, and in-container GnuPG execution passed.
-Independent senior review approved this slice; publication awaits exact-SHA CI.
+Independent senior review approved this slice.
+
+Implementation commit `00f45c67443cc8202a6e1ffc501c8ae6dc2a3dde` was published
+to all four remote tips and live remote checks confirmed identical SHAs.
+Exact-SHA GitHub CI passed for that SHA on `master` run
+[`32812370738`](https://github.com/ilfrick/frickmail/actions/runs/32812370738)
+and `rust-full-migration` run
+[`32812373548`](https://github.com/ilfrick/frickmail/actions/runs/32812373548).
+This documentation-only amendment records that evidence; those runs remain
+authoritative for the implementation.
 
 ## Prior Snapshot — 2026-08-25 01:45:00 CEST (UTC+02:00)
 
