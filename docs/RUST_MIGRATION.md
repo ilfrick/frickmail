@@ -19,6 +19,13 @@ warnings denied, full workspace tests, production-image build, read-only
 startup, `/health`, and in-container GnuPG execution passed. Independent senior
 review approved.
 
+Implementation commit `a198298473fa7b2bbd118c01720a082790ff9f20` was published
+to all four remote tips, with live remote checks confirming identical SHAs.
+Exact-SHA GitHub CI passed for that SHA on `master` run
+[`32823183347`](https://github.com/ilfrick/frickmail/actions/runs/32823183347)
+and `rust-full-migration` run
+[`32823183689`](https://github.com/ilfrick/frickmail/actions/runs/32823183689).
+
 The pending GnuPG export/decrypt parity slice fixes native `GnupgExportKey` so
 private exports use only `--export-secret-keys`, honor the supplied loopback
 passphrase under the existing 1,024-byte bound, and return real armored GnuPG
