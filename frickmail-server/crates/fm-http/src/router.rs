@@ -370,19 +370,31 @@ struct GraphDeleteMessageRequest {
 }
 
 pub fn build_router(state: AppState) -> Router {
-    let static_root = state.config().static_root.clone();
+    build_router_with_session(
+        state,
+        fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+    )
+}
 
+pub fn build_router_with_session(
+    state: AppState,
+    session_store: fm_session::AppSessionStore,
+) -> Router {
+    let static_root = state.config().static_root.clone();
     Router::new()
         .route("/", get(root_get).post(json_api))
         .route("/health", get(health))
         .route("/version", get(version))
-        .nest_service("/static", ServeDir::new(static_root))
+        .nest_service(
+            "/static",
+            ServeDir::new(static_root).append_index_html_on_directories(true),
+        )
         .fallback(fallback)
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
                 .layer(CompressionLayer::new())
-                .layer(fm_session::session_layer()),
+                .layer(fm_session::session_layer(session_store)),
         )
         .with_state(state)
 }
@@ -431,6 +443,7 @@ async fn root_get(
     OriginalUri(uri): OriginalUri,
     request: AxumRequest,
 ) -> Response {
+    let index_root = std::path::PathBuf::from(state.config().static_root.clone());
     if let Some(admin) = legacy_admin_app_data_route(&uri) {
         return native_admin_app_data(&state, admin, &session).await;
     }
@@ -441,7 +454,15 @@ async fn root_get(
         return json_api_request(state, uri, request, session).await;
     }
 
-    shell().await
+    match tokio::fs::read(index_root.join("index.html")).await {
+        Ok(body) => (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Err(_) => shell().await,
+    }
 }
 
 async fn json_api(
@@ -9374,10 +9395,17 @@ async fn native_app_data(state: &AppState, admin: bool, session: &fm_session::Se
     });
 
     if let Some(account_id) = selected_account_id.filter(|account_id| *account_id > 0) {
-        let account = accounts
-            .iter()
-            .find(|account| account.id == account_id)
-            .expect("selected account exists in listed accounts");
+        let Some(account) = accounts.iter().find(|account| account.id == account_id) else {
+            if let Err(err) = session
+                .remove::<fm_core::SelectedMailAccountSession>(
+                    fm_session::SELECTED_ACCOUNT_SESSION_KEY,
+                )
+                .await
+            {
+                return app_data_error(format!("Frickmail session write failed: {err}"));
+            }
+            return app_data_response(result);
+        };
         let account_hash = format!(
             "{}-{}",
             account_id,

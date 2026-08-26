@@ -7,4 +7,12 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+tokio.workspace = true
 tower-sessions.workspace = true
+tower-sessions-redis-store = "0.16.0"
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+time = "0.3"

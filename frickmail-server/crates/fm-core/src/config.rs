@@ -11,7 +11,7 @@ pub struct FrickmailConfig {
     pub bind_addr: String,
     #[serde(default = "default_base_url")]
     pub base_url: String,
-    #[serde(default = "default_static_root")]
+    #[serde(default = "default_static_root", alias = "static_root")]
     pub static_root: String,
     #[serde(default = "default_tmp_dir")]
     pub tmp_dir: String,
@@ -399,6 +399,9 @@ impl FrickmailConfig {
         if config.database_url.is_none() {
             config.database_url = legacy_frickmail_database_url();
         }
+        if let Ok(static_root) = env::var("FRICKMAIL_STATIC_ROOT") {
+            config.static_root = static_root;
+        }
         if let Some(open_signup) = legacy_open_signup() {
             config.open_signup = open_signup;
         }
@@ -481,7 +484,7 @@ fn default_base_url() -> String {
 }
 
 fn default_static_root() -> String {
-    "/workspace/frickmail-static".to_string()
+    "/usr/share/frickmail/static".to_string()
 }
 
 fn default_tmp_dir() -> String {

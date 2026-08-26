@@ -5,4 +5,5 @@ pub mod state;
 mod uid_cache;
 
 pub use router::build_router;
+pub use router::build_router_with_session;
 pub use state::AppState;

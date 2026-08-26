@@ -19,6 +19,29 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --locked --release -p frickmail-server \
     && cp target/release/frickmail-server /build/frickmail-server-bin
 
+FROM node:24-bookworm-slim@sha256:e5a8dee7bc1e6a215d224a7ef8206f7e77271bc3cabd5febf2beafac0674f174 AS ui-builder
+
+WORKDIR /build
+COPY package.json yarn.lock ./
+COPY dev/ ./dev/
+COPY vendors/ ./vendors/
+COPY gulpfile.js ./
+COPY tasks/ ./tasks/
+COPY snappymail/v/0.0.0/app/templates ./snappymail/v/0.0.0/app/templates
+COPY plugins/frickmail-user ./plugins/frickmail-user
+COPY plugins/frickmail-theme ./plugins/frickmail-theme
+COPY plugins/login-oidc/LoginOIDC.js ./plugins/login-oidc/LoginOIDC.js
+COPY plugins/calendar/js ./plugins/calendar/js
+COPY plugins/contacts-sync/js ./plugins/contacts-sync/js
+COPY snappymail/v/0.0.0/static ./snappymail/v/0.0.0/static
+COPY snappymail/v/0.0.0/themes ./snappymail/v/0.0.0/themes
+COPY snappymail/v/0.0.0/app/localization ./snappymail/v/0.0.0/app/localization
+COPY frickmail-ui/build.mjs ./frickmail-ui/build.mjs
+
+RUN corepack enable \
+    && corepack yarn install --frozen-lockfile --ignore-scripts \
+    && node frickmail-ui/build.mjs /build/frickmail-static
+
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
 
 ARG FRICKMAIL_UID=10001
@@ -42,6 +65,7 @@ RUN apt-get update \
     && install -d -o frickmail -g frickmail /usr/share/frickmail/static
 
 COPY --from=builder /build/frickmail-server-bin /usr/local/bin/frickmail-server
+COPY --from=ui-builder /build/frickmail-static /usr/share/frickmail/static
 
 ENV FRICKMAIL__BIND_ADDR="0.0.0.0:8888" \
     FRICKMAIL__BASE_URL="http://localhost:8888" \
