@@ -23,6 +23,8 @@ FROM node:24-bookworm-slim@sha256:e5a8dee7bc1e6a215d224a7ef8206f7e77271bc3cabd5f
 
 WORKDIR /build
 COPY package.json yarn.lock ./
+COPY .eslintignore ./.eslintignore
+COPY .eslintrc.js ./.eslintrc.js
 COPY dev/ ./dev/
 COPY vendors/ ./vendors/
 COPY gulpfile.js ./
