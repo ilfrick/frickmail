@@ -43,6 +43,26 @@ pub struct FrickmailConfig {
     pub change_password: ChangePasswordConfig,
     #[serde(default)]
     pub admin: AdminConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    #[serde(default = "default_csrf_enabled")]
+    pub csrf_enabled: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            csrf_enabled: default_csrf_enabled(),
+        }
+    }
+}
+
+fn default_csrf_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

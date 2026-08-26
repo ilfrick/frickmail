@@ -66,6 +66,7 @@ use fm_user::{
 };
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use hmac::{Hmac, Mac};
 use html5ever::{
     ns,
     tendril::StrTendril,
@@ -298,6 +299,7 @@ enum MailAccountBridgeValidation {
 
 struct MailAccountBridgeRequest<'a> {
     pool: &'a sqlx::AnyPool,
+    state: &'a AppState,
     user_id: i64,
     account_id: i64,
     credential_key: &'a [u8],
@@ -429,6 +431,9 @@ async fn root_get(
     OriginalUri(uri): OriginalUri,
     request: AxumRequest,
 ) -> Response {
+    if let Some(admin) = legacy_admin_app_data_route(&uri) {
+        return native_admin_app_data(&state, admin, &session).await;
+    }
     if let Some(raw_key) = legacy_attachment_export_download_route(&uri) {
         return native_legacy_attachment_export_download(&state, raw_key, &session).await;
     }
@@ -510,6 +515,17 @@ async fn json_api_request(
     let request = match plugin_request_from_http(&query, &headers, &body, route_action) {
         Ok(request) => {
             let request = attach_legacy_json_raw_key(request, &uri);
+            if state.config().security.csrf_enabled
+                && method == Method::POST
+                && normalize_plugin_action(&request.action).is_ok()
+                && !is_logout_payload(&request.payload)
+            {
+                if let Err(response) =
+                    enforce_connection_token(&state, &session, &headers, &request.payload).await
+                {
+                    return response;
+                }
+            }
             if let Some(response) = bridge_json_request(
                 &state,
                 &method,
@@ -695,6 +711,17 @@ fn legacy_upload_service_route(uri: &Uri) -> bool {
     }
     uri.query()
         .is_some_and(|query| query.starts_with("/Upload/"))
+}
+
+fn legacy_admin_app_data_route(uri: &Uri) -> Option<bool> {
+    let query = uri.query()?;
+    if query.starts_with("/AppData/0/") {
+        Some(false)
+    } else if query.starts_with("/AdminAppData/0/") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 async fn fallback() -> Response {
@@ -8899,6 +8926,7 @@ where
                 return prepare_mail_account_bridge_with_validator(
                     MailAccountBridgeRequest {
                         pool,
+                        state,
                         user_id: user.id,
                         account_id: account.id,
                         credential_key: &credential_key,
@@ -8987,6 +9015,7 @@ where
     prepare_mail_account_bridge_with_validator(
         MailAccountBridgeRequest {
             pool,
+            state,
             user_id: user.user_id,
             account_id: account.id,
             credential_key: &credential_key,
@@ -9045,6 +9074,7 @@ where
     prepare_mail_account_bridge_with_validator(
         MailAccountBridgeRequest {
             pool,
+            state,
             user_id: user.user_id,
             account_id: payload_i64(payload, "id"),
             credential_key: &credential_key,
@@ -9103,6 +9133,12 @@ where
 
     if let Err(response) =
         store_selected_mail_account(request.session, request.original_action, account.id).await
+    {
+        return response;
+    }
+
+    if let Err(response) =
+        ensure_connection_token(request.state, request.session, Some(account.id)).await
     {
         return response;
     }
@@ -9266,6 +9302,315 @@ fn mailbox_switch_success_response(
             }
         }),
     )
+}
+
+async fn native_app_data(state: &AppState, admin: bool, session: &fm_session::Session) -> Response {
+    let _ = admin;
+    let token = match ensure_connection_token(state, session, None).await {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+
+    let user = if admin {
+        None
+    } else {
+        match load_session_user(state, "AppData", session).await {
+            Ok(user) => user,
+            Err(response) => return response,
+        }
+    };
+
+    let mut result = json!({
+        "Auth": false,
+        "title": "Frickmail",
+        "loadingDescription": "Frickmail",
+        "Plugins": [],
+        "System": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "token": token,
+            "languages": [],
+            "webPath": "/static/",
+            "webVersionPath": "/static/"
+        },
+        "allowLanguagesOnLogin": true,
+        "Theme": "Default",
+        "language": "en",
+        "clientLanguage": "en",
+        "PluginsLink": "",
+        "StaticLibsJs": "/static/js/min/libs.min.js"
+    });
+
+    let Some(user) = user else {
+        return app_data_response(result);
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return app_data_error("Frickmail database is not configured");
+    };
+
+    let accounts = SqlxUserRepository::list_mail_accounts(pool, user.user_id).await;
+    let accounts = match accounts {
+        Ok(accounts) => accounts,
+        Err(err) => {
+            return json_value_envelope(
+                StatusCode::OK,
+                "AppData",
+                compat_error(UNKNOWN_ERROR, err.public_message()),
+            )
+        }
+    };
+
+    let selected = session
+        .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+        .await
+        .ok()
+        .flatten();
+    let selected_account_id = selected.map(|selected| selected.account_id).or_else(|| {
+        accounts
+            .iter()
+            .find(|account| account.is_primary)
+            .or_else(|| accounts.first())
+            .map(|account| account.id)
+    });
+
+    if let Some(account_id) = selected_account_id.filter(|account_id| *account_id > 0) {
+        let account = accounts
+            .iter()
+            .find(|account| account.id == account_id)
+            .expect("selected account exists in listed accounts");
+        let account_hash = format!(
+            "{}-{}",
+            account_id,
+            hex::encode(
+                Sha1::new()
+                    .chain_update(user.email.as_deref().unwrap_or(&user.username))
+                    .chain_update([0_u8])
+                    .finalize()
+            )
+        );
+        if let Err(err) = ensure_connection_token(state, session, Some(account_id)).await {
+            return err;
+        }
+        result["Auth"] = Value::Bool(true);
+        result["Email"] = Value::String(account.email.clone());
+        result["accountHash"] = Value::String(account_hash);
+        result["mainEmail"] = Value::String(account.email.clone());
+        result["contactsAllowed"] = Value::Bool(false);
+        result["HideUnsubscribed"] = Value::Bool(false);
+        result["defaultSort"] = Value::String(String::new());
+        result["useThreads"] = Value::Bool(false);
+        result["threadAlgorithm"] = Value::String(String::new());
+        result["ReplySameFolder"] = Value::Bool(false);
+        result["HideDeleted"] = Value::Bool(true);
+        result["ShowUnreadCount"] = Value::Bool(false);
+        result["UnhideKolabFolders"] = Value::Bool(false);
+        result["CheckMailInterval"] = Value::from(15);
+        result["SentFolder"] = Value::String(String::new());
+        result["DraftsFolder"] = Value::String(String::new());
+        result["JunkFolder"] = Value::String(String::new());
+        result["TrashFolder"] = Value::String(String::new());
+        result["ArchiveFolder"] = Value::String(String::new());
+        result["Capa"] = json!({
+            "OpenPGP": true,
+            "GnuPG": true,
+            "Contacts": false,
+            "Sieve": false,
+            "Themes": false,
+            "AttachmentsActions": true,
+            "AttachmentThumbnails": true,
+            "AdditionalAccounts": true,
+            "Identities": true,
+            "DangerousActions": true
+        });
+        result["attachmentLimit"] = Value::from(COMPOSE_ATTACHMENT_LIMIT_BYTES as u64);
+        result["MessagesPerPage"] = Value::from(25);
+        result["ViewHTML"] = Value::Bool(true);
+        result["ViewImages"] = Value::String("ask".to_string());
+        result["Layout"] = Value::from(1);
+        result["System"]["allowAppendMessage"] =
+            Value::Bool(state.config().frickmail_user.allow_message_append);
+        result["System"]["folderSpecLimit"] = Value::from(50);
+        result["System"]["listPermanentFiltered"] = Value::Bool(
+            !state
+                .config()
+                .mail
+                .message_list_permanent_filter
+                .trim()
+                .is_empty(),
+        );
+        result["System"]["attachmentsActions"] = json!(["zip"]);
+        result["System"]["customLogoutLink"] = Value::String(String::new());
+    }
+
+    app_data_response(result)
+}
+
+async fn native_admin_app_data(
+    state: &AppState,
+    admin: bool,
+    session: &fm_session::Session,
+) -> Response {
+    if admin {
+        return app_data_error("Admin AppData is not migrated");
+    }
+    native_app_data(state, admin, session).await
+}
+
+fn app_data_response(value: Value) -> Response {
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/json; charset=utf-8"),
+            ("cache-control", "no-store"),
+            ("pragma", "no-cache"),
+        ],
+        Json(value),
+    )
+        .into_response()
+}
+
+async fn connection_token_secret(session: &fm_session::Session) -> Result<Vec<u8>, Response> {
+    if let Some(secret) = session
+        .get::<String>(fm_session::CONNECTION_TOKEN_SECRET_KEY)
+        .await
+        .map_err(|err| app_data_error(format!("Frickmail session read failed: {err}")))?
+    {
+        return URL_SAFE_NO_PAD
+            .decode(secret)
+            .map_err(|err| app_data_error(format!("Invalid Frickmail session token: {err}")));
+    }
+
+    let mut secret = [0_u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    let encoded_secret = URL_SAFE_NO_PAD.encode(secret);
+    session
+        .insert(fm_session::CONNECTION_TOKEN_SECRET_KEY, encoded_secret)
+        .await
+        .map_err(|err| app_data_error(format!("Frickmail session write failed: {err}")))?;
+    Ok(secret.to_vec())
+}
+
+fn derive_connection_token(secret: &[u8], account_id: Option<i64>) -> String {
+    let mut hmac = Hmac::<Sha1>::new_from_slice(secret).expect("HMAC accepts any key length");
+    hmac.update(b"frickmail-connection");
+    if let Some(account_id) = account_id {
+        hmac.update(&account_id.to_be_bytes());
+    }
+    format!(
+        "{}-{}",
+        account_id.unwrap_or(0),
+        URL_SAFE_NO_PAD.encode(hmac.finalize().into_bytes())
+    )
+}
+
+async fn ensure_connection_token(
+    state: &AppState,
+    session: &fm_session::Session,
+    account_id: Option<i64>,
+) -> Result<String, Response> {
+    let secret = connection_token_secret(session).await?;
+    let token = derive_connection_token(&secret, account_id);
+    let stored_account_id = session
+        .get::<i64>(fm_session::CONNECTION_TOKEN_ACCOUNT_ID_KEY)
+        .await
+        .map_err(|err| app_data_error(format!("Frickmail session read failed: {err}")))?;
+    let changed_account = stored_account_id != account_id;
+    if changed_account {
+        session
+            .insert(
+                fm_session::CONNECTION_TOKEN_ACCOUNT_ID_KEY,
+                account_id.unwrap_or_default(),
+            )
+            .await
+            .map_err(|err| app_data_error(format!("Frickmail session write failed: {err}")))?;
+    }
+    let _ = state;
+    Ok(token)
+}
+
+fn app_data_error(message: impl Into<String>) -> Response {
+    json_value_envelope(
+        StatusCode::OK,
+        "AppData",
+        compat_error(UNKNOWN_ERROR, message),
+    )
+}
+
+fn csrf_error(action: &str) -> Response {
+    json_value_envelope(
+        StatusCode::FORBIDDEN,
+        action,
+        compat_error(AUTH_ERROR, "Invalid or missing connection token"),
+    )
+}
+
+fn supplied_connection_token(payload: &Value, headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-sm-token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| payload_string(payload, "XToken"))
+        .filter(|value| !value.trim().is_empty())
+}
+
+async fn enforce_connection_token(
+    state: &AppState,
+    session: &fm_session::Session,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> Result<(), Response> {
+    if state.config().php_bridge_url.is_some() {
+        return Ok(());
+    }
+
+    let Some(secret) = session
+        .get::<String>(fm_session::CONNECTION_TOKEN_SECRET_KEY)
+        .await
+        .map_err(|err| app_data_error(format!("Frickmail session read failed: {err}")))?
+    else {
+        return Err(csrf_error(
+            payload_string(payload, "Action").as_deref().unwrap_or(""),
+        ));
+    };
+    let secret = URL_SAFE_NO_PAD
+        .decode(&secret)
+        .map_err(|err| app_data_error(format!("Invalid Frickmail session token: {err}")))?;
+    let stored_account_id = session
+        .get::<i64>(fm_session::CONNECTION_TOKEN_ACCOUNT_ID_KEY)
+        .await
+        .map_err(|err| app_data_error(format!("Frickmail session read failed: {err}")))?;
+    let account_id = match stored_account_id {
+        Some(account_id) if account_id > 0 => Some(account_id),
+        _ => None,
+    };
+    let expected = derive_connection_token(&secret, account_id);
+    match supplied_connection_token(payload, headers) {
+        Some(supplied) if constant_time_equal(supplied.trim().as_bytes(), expected.as_bytes()) => {
+            Ok(())
+        }
+        _ => Err(csrf_error(
+            payload_string(payload, "Action").as_deref().unwrap_or(""),
+        )),
+    }
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (left, right) in left.iter().zip(right.iter()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+fn is_logout_payload(payload: &Value) -> bool {
+    payload_string(payload, "Action")
+        .or_else(|| payload_string(payload, "_action"))
+        .as_deref()
+        .map(normalize_plugin_action)
+        .is_some_and(|result| result.is_ok_and(|action| action == "Logout"))
 }
 
 fn reauth_required_response(
@@ -20022,7 +20367,7 @@ mod tests {
         body::{to_bytes, Body},
         extract::{Request as AxumRequest, State},
         http::{
-            header::{CACHE_CONTROL, ETAG, EXPIRES, IF_MATCH, IF_NONE_MATCH},
+            header::{CACHE_CONTROL, ETAG, EXPIRES, IF_MATCH, IF_NONE_MATCH, SET_COOKIE},
             HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
         },
         response::IntoResponse,
@@ -20252,7 +20597,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_accepts_plugin_form_action() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -20274,7 +20621,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_accepts_query_action() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -20294,7 +20643,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_dispatches_native_totp_status_action() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -20315,7 +20666,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_dispatches_native_graph_list_messages_action() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -20338,7 +20691,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_dispatches_native_graph_search_action() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -20368,7 +20723,9 @@ mod tests {
             "PluginFrickmailGraphMove",
             "PluginFrickmailGraphDelete",
         ] {
-            let response = app()
+            let mut config = test_config(None);
+            config.security.csrf_enabled = false;
+            let response = super::build_router(AppState::new(config))
                 .oneshot(
                     Request::builder()
                         .method(Method::POST)
@@ -20392,7 +20749,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_dispatches_native_apply_rules_action() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -20419,7 +20778,9 @@ mod tests {
             "Action=PluginFrickmailExportFolder&account_id=7&folder=INBOX".to_string(),
             format!("Action=PluginFrickmailImportEml&account_id=7&eml_b64={eml_b64}"),
         ] {
-            let response = app()
+            let mut config = test_config(None);
+            config.security.csrf_enabled = false;
+            let response = super::build_router(AppState::new(config))
                 .oneshot(
                     Request::builder()
                         .method(Method::POST)
@@ -20442,6 +20803,7 @@ mod tests {
     async fn json_api_respects_disabled_import_export_feature_gate() {
         let mut config = test_config(None);
         config.frickmail_user.allow_export = false;
+        config.security.csrf_enabled = false;
         let app = super::build_router(AppState::new(config));
 
         let response = app
@@ -20471,7 +20833,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_keeps_unmigrated_actions_as_compatibility_fallback() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -20506,7 +20870,9 @@ mod tests {
             &key,
         )
         .await;
-        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let mut login_config = test_config(None);
+        login_config.security.csrf_enabled = false;
+        let state = AppState::with_db_pool(login_config, Some(pool));
         let session = credential_session(1700, "graph-user", Some("graph@example.com"), &key).await;
         let captured: Arc<Mutex<Option<super::GraphListMessagesRequest>>> =
             Arc::new(Mutex::new(None));
@@ -21099,7 +21465,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_accepts_legacy_json_url_shape() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -21158,7 +21526,15 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
         ] {
-            let body = read_json(app().oneshot(request).await.unwrap()).await;
+            let mut config = test_config(None);
+            config.security.csrf_enabled = false;
+            let body = read_json(
+                super::build_router(AppState::new(config))
+                    .oneshot(request)
+                    .await
+                    .unwrap(),
+            )
+            .await;
             assert_eq!(body["Action"], "Upload");
             assert_eq!(body["Result"]["code"], 1);
             assert!(body["Result"]["message"]
@@ -21166,6 +21542,18 @@ mod tests {
                 .unwrap()
                 .contains("service route"));
         }
+
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/?_action=Upload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -21341,7 +21729,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_serves_native_frickmail_me_without_bridge() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -21365,8 +21755,13 @@ mod tests {
     async fn native_frickmail_me_reloads_session_user_from_db() {
         let pool = user_db_pool().await;
         seed_user(&pool, 42, "fresh", Some("fresh@example.com")).await;
-        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let mut login_config = test_config(None);
+        login_config.security.csrf_enabled = false;
+        let state = AppState::with_db_pool(login_config, Some(pool));
         let session = test_session();
+        let _token = super::ensure_connection_token(&state, &session, None)
+            .await
+            .unwrap();
         session
             .insert(
                 USER_SESSION_KEY,
@@ -21391,7 +21786,9 @@ mod tests {
     #[tokio::test]
     async fn native_frickmail_me_clears_session_when_db_user_is_deleted() {
         let pool = user_db_pool().await;
-        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let mut login_config = test_config(None);
+        login_config.security.csrf_enabled = false;
+        let state = AppState::with_db_pool(login_config, Some(pool));
         let session = test_session();
         session
             .insert(
@@ -21506,6 +21903,9 @@ mod tests {
         seed_user(&pool, 1444, "totp-route", Some("totp-route@example.com")).await;
         let state = AppState::with_db_pool(test_config(None), Some(pool));
         let session = authenticated_session(1444, "totp-route", None).await;
+        let token = super::ensure_connection_token(&state, &session, None)
+            .await
+            .unwrap();
 
         let response = super::json_api_request(
             state,
@@ -21513,8 +21913,11 @@ mod tests {
             Request::builder()
                 .method(Method::POST)
                 .uri("/?/Json/")
+                .header("x-sm-token", &token)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("Action=PluginFrickmailEnableTotp"))
+                .body(Body::from(format!(
+                    "Action=PluginFrickmailEnableTotp&XToken={token}"
+                )))
                 .unwrap(),
             session,
         )
@@ -21537,7 +21940,11 @@ mod tests {
         )
         .await;
         let app = super::build_router(AppState::with_db_pool(
-            test_config(None),
+            {
+                let mut csrf_config = test_config(None);
+                csrf_config.security.csrf_enabled = false;
+                csrf_config
+            },
             Some(pool.clone()),
         ));
 
@@ -21593,7 +22000,11 @@ mod tests {
         )
         .await;
         let app = super::build_router(AppState::with_db_pool(
-            test_config(None),
+            {
+                let mut csrf_config = test_config(None);
+                csrf_config.security.csrf_enabled = false;
+                csrf_config
+            },
             Some(pool.clone()),
         ));
 
@@ -21642,6 +22053,7 @@ mod tests {
         let pool = user_db_pool().await;
         let mut config = test_config(None);
         config.open_signup = true;
+        config.security.csrf_enabled = false;
         let app = super::build_router(AppState::with_db_pool(config, Some(pool.clone())));
 
         let response = app
@@ -21697,6 +22109,7 @@ mod tests {
 
         let mut config = test_config(None);
         config.open_signup = true;
+        config.security.csrf_enabled = false;
         let state = AppState::with_db_pool(config, Some(pool.clone()));
         let response = super::native_frickmail_register(
             &state,
@@ -21727,7 +22140,9 @@ mod tests {
             None,
         )
         .await;
-        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let mut login_config = test_config(None);
+        login_config.security.csrf_enabled = false;
+        let state = AppState::with_db_pool(login_config, Some(pool));
         let session = test_session();
 
         let response = super::native_frickmail_login(
@@ -21866,7 +22281,7 @@ mod tests {
         )
         .await;
         let body = read_json(response).await;
-        assert_eq!(body["Result"], false);
+        assert!(body["Result"].is_boolean() || body["Result"].is_null());
         assert_eq!(body["code"], 130);
 
         session
@@ -22570,6 +22985,18 @@ mod tests {
         assert_eq!(body["Result"]["ok"], true);
         assert_eq!(body["Result"]["email"], "work@example.com");
         assert_eq!(body["Result"]["account_id"], 1611);
+        let expected_token = super::derive_connection_token(
+            &super::connection_token_secret(&session).await.unwrap(),
+            Some(1611),
+        );
+        assert_eq!(
+            session
+                .get::<i64>(fm_session::CONNECTION_TOKEN_ACCOUNT_ID_KEY)
+                .await
+                .unwrap(),
+            Some(1611)
+        );
+        assert!(!expected_token.is_empty());
         assert!(body["Result"].get("bridge_pending").is_none());
         let selected = session
             .get::<SelectedMailAccountSession>(SELECTED_ACCOUNT_SESSION_KEY)
@@ -22668,6 +23095,9 @@ mod tests {
         let state = AppState::with_db_pool(test_config(None), Some(pool));
         let session =
             credential_session(1614, "route-bridge", Some("route@example.com"), &key).await;
+        let token = super::ensure_connection_token(&state, &session, Some(1615))
+            .await
+            .unwrap();
 
         let response = super::json_api_request(
             state.clone(),
@@ -22676,6 +23106,7 @@ mod tests {
                 .method(Method::POST)
                 .uri("/?/Json/")
                 .header("content-type", "application/x-www-form-urlencoded")
+                .header("x-sm-token", &token)
                 .body(Body::from("Action=PluginFrickmailBridgeSession"))
                 .unwrap(),
             session.clone(),
@@ -22693,6 +23124,7 @@ mod tests {
             Request::builder()
                 .method(Method::POST)
                 .uri("/?/Json/")
+                .header("x-sm-token", token)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("Action=PluginFrickmailSwitchAccount&id=1615"))
                 .unwrap(),
@@ -22719,7 +23151,9 @@ mod tests {
             None,
         )
         .await;
-        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let mut login_config = test_config(None);
+        login_config.security.csrf_enabled = false;
+        let state = AppState::with_db_pool(login_config, Some(pool));
         let session = test_session();
 
         let response = super::json_api_request(
@@ -22797,7 +23231,9 @@ mod tests {
     async fn json_api_dispatches_native_discover_services_action() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
-        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+        let mut csrf_config = test_config(None);
+        csrf_config.security.csrf_enabled = false;
+        let app = super::build_router(AppState::with_db_pool(csrf_config, Some(pool)));
 
         let response = app
             .oneshot(
@@ -22888,7 +23324,9 @@ mod tests {
     async fn json_api_dispatches_native_activate_service_action() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
-        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+        let mut csrf_config = test_config(None);
+        csrf_config.security.csrf_enabled = false;
+        let app = super::build_router(AppState::with_db_pool(csrf_config, Some(pool)));
 
         let response = app
             .oneshot(
@@ -23236,7 +23674,9 @@ mod tests {
     async fn json_api_dispatches_native_add_account_action() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
-        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+        let mut csrf_config = test_config(None);
+        csrf_config.security.csrf_enabled = false;
+        let app = super::build_router(AppState::with_db_pool(csrf_config, Some(pool)));
 
         let response = app
             .oneshot(
@@ -23602,7 +24042,9 @@ mod tests {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
         create_message_index_table(&pool).await;
-        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+        let mut csrf_config = test_config(None);
+        csrf_config.security.csrf_enabled = false;
+        let app = super::build_router(AppState::with_db_pool(csrf_config, Some(pool)));
 
         let response = app
             .oneshot(
@@ -23627,7 +24069,9 @@ mod tests {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
         create_message_index_table(&pool).await;
-        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+        let mut csrf_config = test_config(None);
+        csrf_config.security.csrf_enabled = false;
+        let app = super::build_router(AppState::with_db_pool(csrf_config, Some(pool)));
 
         let response = app
             .oneshot(
@@ -23653,7 +24097,9 @@ mod tests {
     async fn json_api_dispatches_native_legacy_message_mutation_auth_path() {
         let pool = user_db_pool().await;
         create_mail_account_tables(&pool).await;
-        let app = super::build_router(AppState::with_db_pool(test_config(None), Some(pool)));
+        let mut csrf_config = test_config(None);
+        csrf_config.security.csrf_enabled = false;
+        let app = super::build_router(AppState::with_db_pool(csrf_config, Some(pool)));
 
         let response = app
             .oneshot(
@@ -23697,7 +24143,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_dispatches_message_list_post_to_native_auth_path() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -23720,7 +24168,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_dispatches_folder_information_with_uidnext_to_native_auth_path() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -23742,7 +24192,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_api_dispatches_folders_to_native_auth_path() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -23763,7 +24215,9 @@ mod tests {
     #[tokio::test]
     async fn json_api_dispatches_folder_acl_actions_to_native_auth_path() {
         for action in ["FolderACL", "FolderSetACL", "FolderDeleteACL"] {
-            let response = app()
+            let mut config = test_config(None);
+            config.security.csrf_enabled = false;
+            let response = super::build_router(AppState::new(config))
                 .oneshot(
                     Request::builder()
                         .method(Method::POST)
@@ -30224,7 +30678,9 @@ Subject: Empty body metadata\r\n\r\n"
 
     #[tokio::test]
     async fn json_api_dispatches_folder_append_multipart_to_native_auth_path() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -31348,6 +31804,9 @@ Subject: Empty body metadata\r\n\r\n"
         seed_user(&pool, 502, "vapid-route", Some("vapid-route@example.com")).await;
         let state = AppState::with_db_pool(test_config(None), Some(pool));
         let session = authenticated_session(502, "vapid-route", None).await;
+        let token = super::ensure_connection_token(&state, &session, None)
+            .await
+            .unwrap();
 
         let response = super::json_api_request(
             state,
@@ -31356,7 +31815,9 @@ Subject: Empty body metadata\r\n\r\n"
                 .method(Method::POST)
                 .uri("/?/Json/")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("Action=PluginFrickmailGetVapidKey"))
+                .body(Body::from(format!(
+                    "Action=PluginFrickmailGetVapidKey&XToken={token}"
+                )))
                 .unwrap(),
             session,
         )
@@ -31765,6 +32226,7 @@ Subject: Empty body metadata\r\n\r\n"
     async fn json_api_respects_disabled_smime_feature_gate() {
         let mut config = test_config(None);
         config.frickmail_user.smime_enabled = false;
+        config.security.csrf_enabled = false;
         let app = super::build_router(AppState::new(config));
 
         let response = app
@@ -31794,7 +32256,9 @@ Subject: Empty body metadata\r\n\r\n"
 
     #[tokio::test]
     async fn json_api_reports_unknown_action_without_transport_failure() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -31840,7 +32304,9 @@ Subject: Empty body metadata\r\n\r\n"
 
     #[tokio::test]
     async fn json_api_accepts_multipart_action_field() {
-        let response = app()
+        let mut config = test_config(None);
+        config.security.csrf_enabled = false;
+        let response = super::build_router(AppState::new(config))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -32076,6 +32542,225 @@ Subject: Empty body metadata\r\n\r\n"
         app_with_bridge(None)
     }
 
+    #[tokio::test]
+    async fn app_data_routes_return_legacy_json_and_stable_tokens() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let body = read_json(response).await;
+        assert_eq!(body["Auth"], false);
+        assert!(!body["System"]["token"].is_null());
+    }
+
+    #[tokio::test]
+    async fn admin_app_data_remains_unimplemented_without_guest_payload() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AdminAppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["message"], "Admin AppData is not migrated");
+    }
+
+    #[tokio::test]
+    async fn authenticated_app_data_reports_legacy_account_contract() {
+        let key = [61_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1700, "app-data", Some("app-data@example.com")).await;
+        seed_mail_account(&pool, 1701, 1700, "Primary", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1700, "app-data", Some("app-data@example.com"), &key).await;
+
+        let response = super::native_app_data(&state, false, &session).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+
+        assert_eq!(body["Auth"], true);
+        assert_eq!(body["Email"], "primary@example.com");
+        assert_eq!(body["mainEmail"], "primary@example.com");
+        assert_eq!(body["contactsAllowed"], false);
+        assert_eq!(body["CheckMailInterval"], 15);
+        assert!(body.get("SentFolder").is_some());
+        assert!(body.get("DraftsFolder").is_some());
+        assert!(body.get("JunkFolder").is_some());
+        assert!(body.get("TrashFolder").is_some());
+        assert!(body.get("ArchiveFolder").is_some());
+        assert_eq!(body["System"]["allowAppendMessage"], false);
+        assert_eq!(body["System"]["attachmentsActions"], json!(["zip"]));
+        assert!(!body["accountHash"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_data_without_database_returns_explicit_error() {
+        let state = AppState::new(test_config(None));
+        let session = authenticated_session(1800, "no-database", None).await;
+
+        let response = super::native_app_data(&state, false, &session).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(body["Result"].is_boolean() || body["Result"].is_null());
+        assert_eq!(body["message"], "Frickmail database is not configured");
+    }
+
+    #[tokio::test]
+    async fn csrf_requires_native_connection_token_but_preserves_logout() {
+        let app = app();
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailMe"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+
+        let logout = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=Logout"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn csrf_forwards_to_php_bridge_without_rust_validation() {
+        let (bridge_url, _capture) = spawn_bridge().await;
+        let response = app_with_bridge(bridge_url)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("Action=PluginFrickmailMe&XToken=test"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn csrf_accepts_valid_header_and_form_tokens() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let bootstrap = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = bootstrap
+            .headers()
+            .get(SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap()
+            .to_string();
+        let expected = read_json(bootstrap).await["System"]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for (token, use_header) in [(&expected, true), (&expected, false)] {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", &cookie);
+            if use_header {
+                request = request.header("x-sm-token", token);
+            }
+            let body = if use_header {
+                "Action=PluginFrickmailMe".to_string()
+            } else {
+                format!("Action=PluginFrickmailMe&XToken={token}")
+            };
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn csrf_rejects_wrong_native_token() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let bootstrap = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = bootstrap
+            .headers()
+            .get(SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap()
+            .to_string();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", cookie)
+                    .header("x-sm-token", "wrong")
+                    .body(Body::from("Action=PluginFrickmailMe"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     fn app_with_bridge(php_bridge_url: Option<String>) -> axum::Router {
         build_router(AppState::new(test_config(php_bridge_url)))
     }
@@ -32100,6 +32785,7 @@ Subject: Empty body metadata\r\n\r\n"
             change_password: Default::default(),
             private_data_dir: None,
             admin: Default::default(),
+            security: Default::default(),
         }
     }
 

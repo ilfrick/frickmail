@@ -5,6 +5,8 @@ pub use tower_sessions::{MemoryStore, Session};
 pub const USER_SESSION_KEY: &str = "frickmail_user";
 pub const CREDENTIAL_KEY_SESSION_KEY: &str = "frickmail_credential_key";
 pub const SELECTED_ACCOUNT_SESSION_KEY: &str = "frickmail_selected_account";
+pub const CONNECTION_TOKEN_SECRET_KEY: &str = "frickmail_connection_token_secret";
+pub const CONNECTION_TOKEN_ACCOUNT_ID_KEY: &str = "frickmail_connection_token_account_id";
 
 pub fn session_layer() -> SessionManagerLayer<MemoryStore> {
     // Development-only store for the first migration slice. Production cutover
