@@ -61,6 +61,12 @@ jobs:
       - name: Check workspace
         run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo check --workspace
 
+      - name: Start database services for integration tests
+        run: |
+          docker compose -f docker-compose.rust.yml up -d --no-build mysql postgres
+          docker compose -f docker-compose.rust.yml exec -T mysql mysqladmin ping -h 127.0.0.1 --wait
+          docker compose -f docker-compose.rust.yml exec -T postgres pg_isready -U postgres
+
       - name: Test workspace
         run: docker compose -f docker-compose.rust.yml run --rm rust-dev cargo test --workspace
 

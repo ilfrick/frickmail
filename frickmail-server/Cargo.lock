@@ -1321,6 +1321,7 @@ name = "fm-db"
 version = "0.1.0"
 dependencies = [
  "fm-core",
+ "serde_json",
  "sqlx",
  "tokio",
 ]

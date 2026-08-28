@@ -17,6 +17,29 @@ services:
       # Supported schemes are provided by SQLx Any: postgres://, mysql://, sqlite://.
       FRICKMAIL__DATABASE_URL: ""
       FRICKMAIL__REDIS_URL: "redis://redis:6379/0"
+      # Integration test database URLs
+      FM_TEST_MYSQL_URL: "mysql://root:password@mysql:3306/frickmail_test"
+      FM_TEST_POSTGRES_URL: "postgres://postgres:password@postgres:5432/frickmail_test"
     volumes:
       - .:/workspace
     command: ["cargo", "check", "--workspace"]
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: frickmail_test
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: frickmail_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      timeout: 10s
+      retries: 10

@@ -11,4 +11,7 @@ fm-core = { path = "../fm-core" }
 sqlx.workspace = true
 
 [dev-dependencies]
+fm-core = { path = "../fm-core" }
+serde_json = "1"
+sqlx.workspace = true
 tokio.workspace = true
