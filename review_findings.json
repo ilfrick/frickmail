@@ -1,0 +1,62 @@
+[
+  {
+    "file": "/home/nicola/frickmail/frickmail-server/crates/fm-imap/src/lib.rs",
+    "function": "fetch_legacy_message_list_summaries",
+    "line": 3644,
+    "category": "redundant_fetch",
+    "status": "stale",
+    "summary": "Three separate IMAP FETCH round trips where one would suffice",
+    "details": "Verified stale. The current code (line 4490) makes TWO round trips: a bodystructure fetch via async-imap's uid_fetch, then a combined EMAILID+PREVIEW fetch via fetch_legacy_message_email_ids_and_previews (raw IMAP command parsed with imap_proto). The third separate round trip (was: separate EMAILID + separate PREVIEW) was combined into one by commit 40189c557 ('rust: fix review findings — combined IMAP FETCH'). Further reduction to a single round trip by appending EMAILID/PREVIEW to the bodystructure query is not possible because async-imap 0.11.2's Fetch type stores a private response: ResponseData field with no public accessor for EMAILID or PREVIEW attributes.",
+    "resolution": "Already addressed by commit 40189c557 (F07-F08: combined EMAILID+PREVIEW into single UID FETCH round trip). Remaining reduction blocked by async-imap API limitation."
+  },
+  {
+    "file": "/home/nicola/frickmail/frickmail-server/crates/fm-imap/src/lib.rs",
+    "function": "fetch_message_body_preview",
+    "line": 735,
+    "category": "redundant_fetch",
+    "status": "stale",
+    "summary": "Redundant UID FETCH for EMAILID before the bodystructure query",
+    "details": "Verified stale. The current code (line 955) uses fetch_legacy_message_email_ids_and_previews (raw IMAP UID FETCH with combined UID EMAILID PREVIEW) instead of separate fetch_legacy_message_email_id and fetch_legacy_message_preview calls. Commit 885627f5e ('rust: combine EMAILID and PREVIEW fetches in body preview path') specifically reduced this from 2 round trips to 1. The test-only wrappers fetch_legacy_message_email_id and fetch_legacy_message_preview were marked #[cfg(test)] to avoid dead-code warnings.",
+    "resolution": "Already addressed by commit 885627f5e (combined EMAILID+PREVIEW fetches in body preview path)."
+  },
+  {
+    "file": "/home/nicola/frickmail/frickmail-server/crates/fm-http/src/router.rs",
+    "function": "create_zip_archive / native_legacy_attachments_actions_with_fetcher",
+    "line": 4987,
+    "category": "blocking_in_async",
+    "status": "stale",
+    "summary": "Synchronous CPU-bound ZIP compression on the async hot path",
+    "details": "Verified stale. The current code: create_zip_archive (line 13000) is #[cfg(test)] only. The production path uses create_zip_archive_file (line 13068) called inside tokio::task::spawn_blocking (line 12934-12959), which offloads the compression to a dedicated blocking thread pool. Commit 40189c557 (F09: wrap zip archive creation in spawn_blocking) implemented this fix.",
+    "resolution": "Already addressed by commit 40189c557 (F09: wrapped zip archive creation in spawn_blocking)."
+  },
+  {
+    "file": "/home/nicola/frickmail/frickmail-server/crates/fm-http/src/router.rs",
+    "function": "native_legacy_attachments_actions_with_fetcher",
+    "line": 4809,
+    "category": "redundant_work",
+    "status": "debunked",
+    "summary": "Zip is NOT created twice — no duplicate() call exists",
+    "details": "Verified stale. Investigation confirms: zip_bytes is created once via create_zip_archive_file (inside spawn_blocking at line 12934), hashed once (line 4934 — now in updated code), and written to disk once. There is no .duplicate() call anywhere. The response returns only the fileHash reference, not the zip bytes themselves. No double creation occurs.",
+    "resolution": "Debunked — no duplicate zip creation exists in the codebase."
+  },
+  {
+    "file": "/home/nicola/frickmail/frickmail-server/crates/fm-http/src/router.rs",
+    "function": "native_legacy_message_upload_attachments_with_fetcher",
+    "line": 5059,
+    "category": "sequential_io",
+    "status": "stale",
+    "summary": "Independent attachment fetches run sequentially in a for-loop",
+    "details": "Verified stale. The current code (line 13956) uses FuturesUnordered with buffer_unordered to fetch up to COMPOSE_ATTACHMENT_FETCH_CONCURRENCY=2 attachments concurrently. Per-attachment logic is extracted into upload_single_attachment helper. Commit d9439118b ('rust: parallelize attachment upload fetches with join_all') initially parallelized with join_all, then commit 575601725 ('perf: parallelize independent attachment fetches in compose upload') improved with FuturesUnordered + buffer_unordered for bounded concurrency with position-tagged result collection.",
+    "resolution": "Already addressed by commits d9439118b and 575601725 (parallelized attachment fetches with FuturesUnordered + buffer_unordered)."
+  },
+  {
+    "file": "/home/nicola/frickmail/frickmail-server/crates/fm-http/src/router.rs",
+    "function": "native_legacy_attachments_actions_with_fetcher",
+    "line": 4934,
+    "category": "wasted_computation",
+    "status": "debunked",
+    "summary": "SHA1 hash is NOT wasted — it is needed for both disk filename and response",
+    "details": "Verified stale. hex::encode(Sha1::digest(&zip_bytes)) is used in two places: (1) as the disk filename (format!(\"{tmp_dir}/{file_hash}.zip\")) and (2) embedded in the response (\"fileHash\": file_hash inside the JSON response). The zip bytes are NOT embedded in the response as raw bytes — only the hash reference is returned. The hash computation is necessary and not wasteful.",
+    "resolution": "Debunked — SHA1 hash is used for both filename and response, not wasted."
+  }
+]
