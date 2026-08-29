@@ -4,6 +4,12 @@
 //! `frickmail_read_receipt_cache` table correctly on each backend and that
 //! the function is idempotent.
 //!
+//! No `DROP TABLE` cleanup is performed between tests: `ensure_runtime_schema`
+//! uses `CREATE TABLE IF NOT EXISTS`, so concurrent tests against the same
+//! database are safe — each test's first call is a no-op if the table already
+//! exists from a prior test. The tests only inspect schema (existence + primary
+//! key constraint), never data, so table persistence across tests is harmless.
+//!
 //! When a database URL environment variable is not set, the corresponding test
 //! is silently skipped.  In CI, the docker-compose.rust.yml file starts MySQL
 //! and PostgreSQL services alongside the dev container.
@@ -69,10 +75,7 @@ async fn assert_table_exists(pool: &AnyPool, backend: &str) {
             .fetch_one(pool)
             .await
             .expect("query primary key");
-            assert!(
-                pk.get::<i64, _>("c") > 0,
-                "table should have a PRIMARY KEY"
-            );
+            assert!(pk.get::<i64, _>("c") > 0, "table should have a PRIMARY KEY");
         }
         "postgres" => {
             let row = sqlx::query(&format!(
@@ -123,7 +126,9 @@ async fn sqlite_ensure_runtime_schema_creates_table() {
     ensure_drivers();
     let pool = connect("sqlite::memory:").await;
 
-    ensure_runtime_schema(&pool).await.expect("ensure_runtime_schema");
+    ensure_runtime_schema(&pool)
+        .await
+        .expect("ensure_runtime_schema");
 
     assert_table_exists(&pool, "sqlite").await;
 }
@@ -134,7 +139,9 @@ async fn sqlite_ensure_runtime_schema_is_idempotent() {
     let pool = connect("sqlite::memory:").await;
 
     ensure_runtime_schema(&pool).await.expect("first call");
-    ensure_runtime_schema(&pool).await.expect("second call (idempotent)");
+    ensure_runtime_schema(&pool)
+        .await
+        .expect("second call (idempotent)");
 
     assert_table_exists(&pool, "sqlite").await;
 }
@@ -160,15 +167,11 @@ async fn mysql_ensure_runtime_schema_creates_table() {
     };
     let pool = connect(&url).await;
 
-    ensure_runtime_schema(&pool).await.expect("ensure_runtime_schema");
+    ensure_runtime_schema(&pool)
+        .await
+        .expect("ensure_runtime_schema");
 
     assert_table_exists(&pool, "mysql").await;
-
-    // Clean up
-    sqlx::query("DROP TABLE IF EXISTS frickmail_read_receipt_cache")
-        .execute(&pool)
-        .await
-        .ok();
 }
 
 #[tokio::test]
@@ -181,14 +184,11 @@ async fn mysql_ensure_runtime_schema_is_idempotent() {
     let pool = connect(&url).await;
 
     ensure_runtime_schema(&pool).await.expect("first call");
-    ensure_runtime_schema(&pool).await.expect("second call (idempotent)");
+    ensure_runtime_schema(&pool)
+        .await
+        .expect("second call (idempotent)");
 
     assert_table_exists(&pool, "mysql").await;
-
-    sqlx::query("DROP TABLE IF EXISTS frickmail_read_receipt_cache")
-        .execute(&pool)
-        .await
-        .ok();
 }
 
 #[tokio::test]
@@ -216,14 +216,11 @@ async fn postgres_ensure_runtime_schema_creates_table() {
     };
     let pool = connect(&url).await;
 
-    ensure_runtime_schema(&pool).await.expect("ensure_runtime_schema");
+    ensure_runtime_schema(&pool)
+        .await
+        .expect("ensure_runtime_schema");
 
     assert_table_exists(&pool, "postgres").await;
-
-    sqlx::query("DROP TABLE IF EXISTS frickmail_read_receipt_cache")
-        .execute(&pool)
-        .await
-        .ok();
 }
 
 #[tokio::test]
@@ -236,14 +233,11 @@ async fn postgres_ensure_runtime_schema_is_idempotent() {
     let pool = connect(&url).await;
 
     ensure_runtime_schema(&pool).await.expect("first call");
-    ensure_runtime_schema(&pool).await.expect("second call (idempotent)");
+    ensure_runtime_schema(&pool)
+        .await
+        .expect("second call (idempotent)");
 
     assert_table_exists(&pool, "postgres").await;
-
-    sqlx::query("DROP TABLE IF EXISTS frickmail_read_receipt_cache")
-        .execute(&pool)
-        .await
-        .ok();
 }
 
 #[tokio::test]
@@ -255,9 +249,7 @@ async fn postgres_verify_connection_succeeds() {
     };
     let pool = connect(&url).await;
 
-    verify_connection(&pool)
-        .await
-        .expect("verify_connection");
+    verify_connection(&pool).await.expect("verify_connection");
 }
 
 // ---------------------------------------------------------------------------
