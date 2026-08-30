@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-08-30 15:05:00 CEST (UTC+02:00)
 
-The pending OAuth2 provider slice adds native Gmail and O365 part hooks,
+The OAuth2 provider slice adds native Gmail and O365 part hooks,
 replacing the PHP `login-gmail` and `login-o365` plugins in Frickmail mode.
 `StartLoginGMail` and `StartLoginO365` redirect to the providers with PKCE and
 an encrypted state reusing the shared SnappyMail-compatible `EncryptUrlSafe`
@@ -91,6 +91,21 @@ a read-only standalone container without Redis starts, logs the fallback
 warning, and answers `/health`; a container attached to the Redis network
 starts with persistent sessions and answers `/health`; neither restarts
 nor is OOM-killed.
+
+Implementation commit
+`1f72236bd2d7c8a682d9912ab66df5eca2551588` (the fallback correction on top of
+`4c9d3b2b5` and `99582cf8e`) was published to `master` and
+`rust-full-migration` on both remotes; live `git ls-remote` checks confirmed
+all four tips resolve to that SHA. Exact-SHA GitHub `rust-ci` passed for that
+SHA on `master` run
+[`33315148125`](https://github.com/ilfrick/frickmail/actions/runs/33315148125)
+and `rust-full-migration` run
+[`33315150467`](https://github.com/ilfrick/frickmail/actions/runs/33315150467).
+The intermediate SHAs `99582cf8e` and `4c9d3b2b5` are superseded: their runs
+failed as recorded above, and each received the documented focused
+correction before the next publication. This closing documentation-only
+amendment intentionally matches no `rust-ci` path filter and is expected to
+produce no GitHub Actions run.
 
 ## Prior Snapshot — 2026-08-25 14:15:00 CEST (UTC+02:00)
 
