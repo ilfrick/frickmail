@@ -5,7 +5,56 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-25 14:15:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-30 15:05:00 CEST (UTC+02:00)
+
+The pending OAuth2 provider slice adds native Gmail and O365 part hooks,
+replacing the PHP `login-gmail` and `login-o365` plugins in Frickmail mode.
+`StartLoginGMail` and `StartLoginO365` redirect to the providers with PKCE and
+an encrypted state reusing the shared SnappyMail-compatible `EncryptUrlSafe`
+crypto; `LoginGMail` and `LoginO365` exchange the code, fetch userinfo, and
+either persist the refresh token with the active session (matching the PHP
+bridge `upsertOAuthAccount` path) or pass it to the opener through the
+`frickmail-oauth2` popup payload for `FrickmailSaveOAuthToken`. Provider
+configuration lives under `FRICKMAIL__OAUTH2__GMAIL__*` /
+`FRICKMAIL__OAUTH2__O365__*` with the legacy `FRICKMAIL_GMAIL_*` /
+`FRICKMAIL_O365_*` environment variables as fallback. The
+`oauth2.o365.personal` option switches O365 to the path-style
+`https://host/LoginO365` reply URL served by dedicated routes for personal
+Microsoft accounts. The legacy non-Frickmail IMAP-as-identity `LoginProcess`
+callback path is intentionally not migrated. The popup renderer posts both
+success and error payloads to the opener and deliberately does not persist
+the refresh-token-bearing payload to localStorage.
+
+Independent senior review approved the slice after one remediation round. The
+first round blocked on a wrong O365 token-endpoint host, popup payload
+delivery regressions, a plaintext localStorage credential, and missing
+personal-mode redirect parity; all required fixes were applied and the closing
+re-review approved with only informational residual risks (unbounded state
+replay window inherited from PHP parity, config-drift redirect mismatch
+failing safe at the provider).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo check --workspace`, `cargo clippy --workspace --all-targets -D
+warnings`, and `cargo test --workspace` (664 tests across 22 suites, zero
+failures). Production-image validation built `frickmail-rust:oauth2-part-hooks-test`
+at image ID `sha256:25dcfd1c3a159f7ef1e9e6ff91fe3c6943d39e78f459305ad26ec22904547a34`;
+a read-only container started without a database, `/health` returned `ok`, the
+OAuth2 part-hook paths returned the expected popup/redirect behavior
+(unconfigured provider error popup, provider error plus `error_description`
+forwarding, path-style callback route, missing-code redirect to the webmail
+root, configured start-login redirect with PKCE through the legacy
+`FRICKMAIL_GMAIL_CLIENT_ID` env fallback), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice also restores the dual-branch publication policy: the four commits
+`c07048e060b6822eaf0e9d5115247c9a4efbf257`..`8f6f22117f657b5916165a8b9fa23be655c4e046`
+(a review-findings docs update, the DB schema compatibility integration
+tests, the DROP TABLE test-race fix, and the native OIDC
+`StartLoginOIDC`/`LoginOIDC` part-hook slice) had been pushed to `master`
+only; publishing this slice's commit to `rust-full-migration` on both remotes
+fast-forwards that branch to include them.
+
+## Prior Snapshot — 2026-08-25 14:15:00 CEST (UTC+02:00)
 
 The pending `PgpVerifyMessage` IMAP MIME normalization slice completes the
 legacy byte-input path for detached and clear-signed verification. The native

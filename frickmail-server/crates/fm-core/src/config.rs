@@ -28,6 +28,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub oidc: OidcConfig,
     #[serde(default)]
+    pub oauth2: Oauth2Config,
+    #[serde(default)]
     pub mail: MailDefaults,
     #[serde(default)]
     pub cache: FrickmailCacheConfig,
@@ -79,6 +81,37 @@ pub struct OidcConfig {
     pub client_secret: Option<String>,
     #[serde(default = "default_oidc_provider_name")]
     pub provider_name: String,
+}
+
+/// OAuth2 provider configuration for Google and Microsoft.
+///
+/// Values can be set via `FRICKMAIL__OAUTH2__GMAIL__*` /
+/// `FRICKMAIL__OAUTH2__O365__*` environment variables, or the legacy
+/// `FRICKMAIL_GMAIL_*` / `FRICKMAIL_O365_*` names which are merged in
+/// `from_env()`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Oauth2Config {
+    #[serde(default)]
+    pub gmail: Oauth2ProviderConfig,
+    #[serde(default)]
+    pub o365: Oauth2ProviderConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Oauth2ProviderConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    #[serde(default = "default_oauth2_tenant")]
+    pub tenant: String,
+    /// O365 only: use the path-style `https://host/LoginO365` reply URL
+    /// required for personal Microsoft accounts (Outlook.com), instead of
+    /// the query-style `https://host/?LoginO365` reply URL.
+    #[serde(default)]
+    pub personal: bool,
+}
+
+fn default_oauth2_tenant() -> String {
+    "common".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +215,17 @@ impl Default for ChangePasswordConfig {
 
 fn default_change_password_min_length() -> u32 {
     10
+}
+
+fn trimmed_env_value(name: &str) -> Option<String> {
+    env::var(name).ok().and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
 }
 
 fn default_change_password_min_strength() -> u32 {
@@ -407,6 +451,7 @@ impl FrickmailConfig {
         if let Some(open_signup) = legacy_open_signup() {
             config.open_signup = open_signup;
         }
+        config.merge_legacy_oauth2_env();
         config.transactional_smtp.merge_legacy_env();
 
         config.validate()?;
@@ -445,6 +490,42 @@ impl FrickmailConfig {
             });
         }
         Ok(())
+    }
+}
+
+impl Oauth2Config {
+    /// Fallback to legacy `FRICKMAIL_GMAIL_*` / `FRICKMAIL_O365_*` env vars
+    /// when the `FRICKMAIL__OAUTH2__*` config keys are absent.
+    fn merge_legacy_env(&mut self) {
+        self.gmail.client_id = self
+            .gmail
+            .client_id
+            .clone()
+            .or_else(|| trimmed_env_value("FRICKMAIL_GMAIL_CLIENT_ID"));
+        self.gmail.client_secret = self
+            .gmail
+            .client_secret
+            .clone()
+            .or_else(|| trimmed_env_value("FRICKMAIL_GMAIL_CLIENT_SECRET"));
+        self.o365.client_id = self
+            .o365
+            .client_id
+            .clone()
+            .or_else(|| trimmed_env_value("FRICKMAIL_O365_CLIENT_ID"));
+        self.o365.client_secret = self
+            .o365
+            .client_secret
+            .clone()
+            .or_else(|| trimmed_env_value("FRICKMAIL_O365_CLIENT_SECRET"));
+        self.o365.tenant = trimmed_env_value("FRICKMAIL_O365_TENANT")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.o365.tenant.clone());
+    }
+}
+
+impl FrickmailConfig {
+    fn merge_legacy_oauth2_env(&mut self) {
+        self.oauth2.merge_legacy_env();
     }
 }
 

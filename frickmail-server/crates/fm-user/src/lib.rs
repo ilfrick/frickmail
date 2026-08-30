@@ -1062,7 +1062,10 @@ impl SqlxUserRepository {
         Ok(())
     }
 
-    pub async fn get_primary_mail_account(pool: &AnyPool, user_id: i64) -> Result<Option<MailAccount>> {
+    pub async fn get_primary_mail_account(
+        pool: &AnyPool,
+        user_id: i64,
+    ) -> Result<Option<MailAccount>> {
         let mut conn = pool.acquire().await.map_err(db_error)?;
         let backend = conn.backend_name().to_string();
         sqlx::query(primary_mail_account_query(&backend))
@@ -5361,9 +5364,11 @@ fn find_oidc_identity_query(backend: &str) -> &'static str {
              WHERE provider_hash = $1 AND subject = $2 \
              ORDER BY linked_at DESC LIMIT 1"
         }
-        _ => "SELECT user_id FROM frickmail_oidc_identities \
+        _ => {
+            "SELECT user_id FROM frickmail_oidc_identities \
               WHERE provider_hash = ? AND subject = ? \
-              ORDER BY linked_at DESC LIMIT 1",
+              ORDER BY linked_at DESC LIMIT 1"
+        }
     }
 }
 

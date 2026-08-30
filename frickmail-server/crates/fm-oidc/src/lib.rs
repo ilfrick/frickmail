@@ -25,11 +25,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use fm_core::{FrickmailConfig, FrickmailError, Result};
-use base64::Engine;
-use rand_core::{RngCore, OsRng};
+use rand_core::{OsRng, RngCore};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
@@ -160,7 +160,10 @@ pub fn encrypt_state<T: serde::Serialize>(value: &T, salt: &str) -> String {
     let ciphertext = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
-            Payload { msg: json.as_bytes(), aad: salt.as_bytes() },
+            Payload {
+                msg: json.as_bytes(),
+                aad: salt.as_bytes(),
+            },
         )
         .expect("encryption cannot fail with valid key/nonce");
 
@@ -209,7 +212,10 @@ pub fn decrypt_state<T: serde::de::DeserializeOwned>(data: &str, salt: &str) -> 
     let plaintext = cipher
         .decrypt(
             XNonce::from_slice(&nonce_bytes),
-            Payload { msg: ciphertext.as_slice(), aad: salt.as_bytes() },
+            Payload {
+                msg: ciphertext.as_slice(),
+                aad: salt.as_bytes(),
+            },
         )
         .ok()?;
 
@@ -226,6 +232,17 @@ pub fn is_oidc_state(data: &str, salt: &str) -> bool {
     match decrypt_state::<OidcState>(data, salt) {
         Some(state) => state.p == "oidc",
         None => false,
+    }
+}
+
+/// Detects a Gmail/O365 OAuth2 state payload (`p == "gmail"` or `"o365"`),
+/// returning the provider when recognized. Used by the router to route
+/// callbacks whose redirect URI lost the explicit `Login*` query key.
+pub fn oauth2_state_provider(data: &str, salt: &str) -> Option<String> {
+    let state = decrypt_state::<Oauth2State>(data, salt)?;
+    match state.p.as_str() {
+        "gmail" | "o365" => Some(state.p),
+        _ => None,
     }
 }
 
@@ -250,7 +267,10 @@ pub fn encrypt_escrow_key(crypt_key: &[u8], salt: &str) -> Vec<u8> {
     let ciphertext = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
-            Payload { msg: crypt_key, aad: &b""[..] },
+            Payload {
+                msg: crypt_key,
+                aad: &b""[..],
+            },
         )
         .expect("escrow encryption cannot fail");
 
@@ -273,7 +293,10 @@ pub fn decrypt_escrow_key(blob: &[u8], salt: &str) -> Option<Vec<u8>> {
     cipher
         .decrypt(
             XNonce::from_slice(&blob[..XCHACHA_NONCE_LEN]),
-            Payload { msg: &blob[XCHACHA_NONCE_LEN..], aad: &b""[..] },
+            Payload {
+                msg: &blob[XCHACHA_NONCE_LEN..],
+                aad: &b""[..],
+            },
         )
         .ok()
 }
@@ -313,18 +336,26 @@ pub async fn start_login(config: &FrickmailConfig) -> Result<OidcAuthRedirect> {
         .issuer
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| FrickmailError::BadRequest("OIDC issuer (discovery_url) is not configured".to_string()))?;
+        .ok_or_else(|| {
+            FrickmailError::BadRequest("OIDC issuer (discovery_url) is not configured".to_string())
+        })?;
     let client_id = oidc
         .client_id
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| FrickmailError::BadRequest("OIDC client_id is not configured".to_string()))?;
+        .ok_or_else(|| {
+            FrickmailError::BadRequest("OIDC client_id is not configured".to_string())
+        })?;
 
     let salt = config
         .app_salt
         .as_deref()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| FrickmailError::BadRequest("OIDC server secret (app_salt) is not configured".to_string()))?;
+        .ok_or_else(|| {
+            FrickmailError::BadRequest(
+                "OIDC server secret (app_salt) is not configured".to_string(),
+            )
+        })?;
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -332,9 +363,11 @@ pub async fn start_login(config: &FrickmailConfig) -> Result<OidcAuthRedirect> {
         .unwrap_or(0);
 
     let discovery = fetch_discovery_document(discovery_url).await?;
-    let auth_endpoint = discovery
-        .authorization_endpoint
-        .ok_or_else(|| FrickmailError::Upstream(format!("OIDC discovery document missing authorization_endpoint for {discovery_url}")))?;
+    let auth_endpoint = discovery.authorization_endpoint.ok_or_else(|| {
+        FrickmailError::Upstream(format!(
+            "OIDC discovery document missing authorization_endpoint for {discovery_url}"
+        ))
+    })?;
 
     let verifier = generate_pkce_verifier();
     let challenge = pkce_challenge(&verifier);
@@ -349,15 +382,20 @@ pub async fn start_login(config: &FrickmailConfig) -> Result<OidcAuthRedirect> {
         i: Some(discovery_url.trim_end_matches('/').to_string()),
     };
     let encrypted_state = encrypt_state(&state_value, salt);
-    let redirect_uri = format!("{base}/?LoginOIDC", base = config.base_url.trim_end_matches('/'));
+    let redirect_uri = format!(
+        "{base}/?LoginOIDC",
+        base = config.base_url.trim_end_matches('/')
+    );
 
     let auth_url = format!(
         "{endpoint}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}\
          &scope={scope}&state={state}&code_challenge={challenge}&code_challenge_method={method}",
         endpoint = auth_endpoint,
-        redirect_uri = url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect::<String>(),
+        redirect_uri =
+            url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect::<String>(),
         scope = url::form_urlencoded::byte_serialize(OIDC_SCOPES.as_bytes()).collect::<String>(),
-        state = url::form_urlencoded::byte_serialize(encrypted_state.as_bytes()).collect::<String>(),
+        state =
+            url::form_urlencoded::byte_serialize(encrypted_state.as_bytes()).collect::<String>(),
         challenge = url::form_urlencoded::byte_serialize(challenge.as_bytes()).collect::<String>(),
         method = PKCE_CHALLENGE_METHOD,
     );
@@ -380,7 +418,10 @@ struct OidcDiscoveryDocument {
 
 /// Fetches and parses the OIDC discovery document from `{base}/.well-known/openid-configuration`.
 async fn fetch_discovery_document(base_url: &str) -> Result<OidcDiscoveryDocument> {
-    let url = format!("{}/.well-known/openid-configuration", base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/.well-known/openid-configuration",
+        base_url.trim_end_matches('/')
+    );
     let resp = reqwest::Client::new()
         .get(&url)
         .header("Accept", "application/json")
@@ -416,7 +457,11 @@ pub async fn handle_callback(
         .app_salt
         .as_deref()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| FrickmailError::BadRequest("OIDC server secret (app_salt) is not configured".to_string()))?;
+        .ok_or_else(|| {
+            FrickmailError::BadRequest(
+                "OIDC server secret (app_salt) is not configured".to_string(),
+            )
+        })?;
 
     // Decrypt state
     let state: OidcState = decrypt_state(encrypted_state, salt)
@@ -442,16 +487,21 @@ pub async fn handle_callback(
         .as_deref()
         .or(config.oidc.issuer.as_deref())
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| FrickmailError::BadRequest("OIDC state and config missing issuer URL".to_string()))?;
+        .ok_or_else(|| {
+            FrickmailError::BadRequest("OIDC state and config missing issuer URL".to_string())
+        })?;
 
     let discovery = fetch_discovery_document(discovery_url).await?;
 
-    let token_endpoint = discovery
-        .token_endpoint
-        .ok_or_else(|| FrickmailError::Upstream("OIDC provider missing token_endpoint".to_string()))?;
+    let token_endpoint = discovery.token_endpoint.ok_or_else(|| {
+        FrickmailError::Upstream("OIDC provider missing token_endpoint".to_string())
+    })?;
 
     let discovery_url_trimmed = discovery_url.trim_end_matches('/');
-    let redirect_uri = format!("{base}/?LoginOIDC", base = config.base_url.trim_end_matches('/'));
+    let redirect_uri = format!(
+        "{base}/?LoginOIDC",
+        base = config.base_url.trim_end_matches('/')
+    );
 
     // Exchange code for tokens
     let client_id = config.oidc.client_id.as_deref().unwrap_or_default();
@@ -485,7 +535,9 @@ pub async fn handle_callback(
             ok: false,
             mode: state.m.clone(),
             email: None,
-            error: Some(format!("OIDC token exchange failed (HTTP {status}): {body}")),
+            error: Some(format!(
+                "OIDC token exchange failed (HTTP {status}): {body}"
+            )),
             reauth_required: false,
             provider_hash: None,
             subject: None,
@@ -515,9 +567,9 @@ pub async fn handle_callback(
     }
 
     // Fetch userinfo
-    let userinfo_endpoint = discovery
-        .userinfo_endpoint
-        .ok_or_else(|| FrickmailError::Upstream("OIDC provider missing userinfo_endpoint".to_string()))?;
+    let userinfo_endpoint = discovery.userinfo_endpoint.ok_or_else(|| {
+        FrickmailError::Upstream("OIDC provider missing userinfo_endpoint".to_string())
+    })?;
 
     let access_token = token_json
         .get("access_token")
@@ -614,6 +666,464 @@ fn escape_for_script_data(input: &str) -> String {
         .replace('&', "\\u0026")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
+}
+
+// ── OAuth2 provider helpers (Gmail / O365) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Google OAuth2 authorization and token endpoints (hardcoded — no discovery).
+const GMAIL_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/auth";
+const GMAIL_TOKEN_URL: &str = "https://accounts.google.com/o/oauth2/token";
+const GMAIL_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+const GMAIL_SCOPES: &str = "openid email profile \
+    https://mail.google.com/ \
+    https://www.googleapis.com/auth/contacts.readonly \
+    https://www.googleapis.com/auth/calendar";
+
+/// Microsoft (O365/Outlook) OAuth2 endpoints (hardcoded with tenant template).
+const O365_AUTH_URL: &str = "https://login.microsoftonline.com/{{tenant}}/oauth2/v2.0/authorize";
+const O365_TOKEN_URL: &str = "https://login.microsoftonline.com/{{tenant}}/oauth2/v2.0/token";
+const O365_USERINFO_URL: &str = "https://graph.microsoft.com/oidc/userinfo";
+const O365_SCOPES: &str = "openid offline_access email profile \
+    https://outlook.office.com/IMAP.AccessAsUser.All \
+    https://outlook.office.com/SMTP.Send \
+    https://graph.microsoft.com/Contacts.Read \
+    https://graph.microsoft.com/Calendars.ReadWrite";
+
+/// State encrypted by Gmail/O365 `StartLogin*` part hooks.
+///
+/// Mirrors the PHP plugins' `EncryptUrlSafe` payload:
+/// `{p, v, n, t}` where `p` is the provider (`"gmail"` or `"o365"`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct Oauth2State {
+    pub p: String,
+    pub v: String,
+    pub n: String,
+    pub t: u64,
+}
+
+/// Result of a Gmail/O365 OAuth2 callback.
+#[derive(Debug, Clone)]
+pub struct Oauth2CallbackResult {
+    pub ok: bool,
+    pub email: Option<String>,
+    pub error: Option<String>,
+    /// In Frickmail mode, when no session is present the refresh token is
+    /// passed back to the opener via postMessage so the main window can
+    /// call `FrickmailSaveOAuthToken` + `FrickmailSwitchAccount`.
+    pub pending_refresh_token: Option<String>,
+}
+
+fn oauth2_client_id(config: &FrickmailConfig, provider: &str) -> Result<String> {
+    let id = match provider {
+        "gmail" => config.oauth2.gmail.client_id.as_deref(),
+        "o365" => config.oauth2.o365.client_id.as_deref(),
+        _ => None,
+    };
+    id.and_then(|s| {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    })
+    .ok_or_else(|| {
+        FrickmailError::BadRequest(format!("{provider} OAuth2 client_id is not configured"))
+    })
+}
+
+fn salt_from_config(config: &FrickmailConfig) -> Result<&str> {
+    config
+        .app_salt
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            FrickmailError::BadRequest(
+                "OAuth2 server secret (app_salt) is not configured".to_string(),
+            )
+        })
+}
+
+/// Builds an encrypted OAuth2 state payload and returns both the encrypted
+/// form and the decrypted `Oauth2State` (so the caller can read `v` for PKCE).
+fn build_pkce_state(provider: &str, salt: &str) -> (String, Oauth2State) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut nonce_bytes = [0u8; 8];
+    OsRng.fill_bytes(&mut nonce_bytes);
+
+    let state = Oauth2State {
+        p: provider.to_string(),
+        v: generate_pkce_verifier(),
+        n: hex_encode(&nonce_bytes),
+        t: now,
+    };
+    let encrypted = encrypt_state(&state, salt);
+    (encrypted, state)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Resolves the O365 redirect URI from the configuration.
+///
+/// Work/tenant registrations use the query-style `https://host/?LoginO365`
+/// reply URL documented in the README. Personal Microsoft accounts
+/// (`oauth2.o365.personal = true`, matching the legacy plugin's "personal"
+/// mode) require the path-style `https://host/LoginO365` reply URL; the
+/// router serves both shapes.
+fn o365_redirect_uri(config: &FrickmailConfig) -> String {
+    let base = config.base_url.trim_end_matches('/');
+    if config.oauth2.o365.personal {
+        format!("{base}/LoginO365")
+    } else {
+        format!("{base}/?LoginO365")
+    }
+}
+
+/// Builds the authorization redirect URL for Gmail OAuth2 with PKCE.
+///
+/// Replaces the PHP plugin's `ServiceStartLoginGMail` part hook.
+pub async fn gmail_start_login(config: &FrickmailConfig) -> Result<OidcAuthRedirect> {
+    let client_id = oauth2_client_id(config, "gmail")?;
+    let salt = salt_from_config(config)?;
+
+    let (encrypted_state, state) = build_pkce_state("gmail", salt);
+    let challenge = pkce_challenge(&state.v);
+
+    let redirect_uri = format!(
+        "{base}/?LoginGMail",
+        base = config.base_url.trim_end_matches('/')
+    );
+
+    let auth_url = format!(
+        "{endpoint}?response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={redirect_uri}\
+         &scope={scope}\
+         &state={state}\
+         &access_type=offline\
+         &prompt=consent\
+         &code_challenge={challenge}\
+         &code_challenge_method={method}",
+        endpoint = GMAIL_AUTH_URL,
+        redirect_uri =
+            url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect::<String>(),
+        scope = url::form_urlencoded::byte_serialize(GMAIL_SCOPES.as_bytes()).collect::<String>(),
+        state =
+            url::form_urlencoded::byte_serialize(encrypted_state.as_bytes()).collect::<String>(),
+        challenge = url::form_urlencoded::byte_serialize(challenge.as_bytes()).collect::<String>(),
+        method = PKCE_CHALLENGE_METHOD,
+    );
+
+    Ok(OidcAuthRedirect {
+        auth_url,
+        encrypted_state,
+    })
+}
+
+/// Handles the Gmail OAuth2 callback: decrypts state, exchanges the code for
+/// tokens, fetches userinfo, and returns the identity information.
+///
+/// Does NOT save the token to the database — the caller must do that in
+/// Frickmail mode. Returns `Oauth2CallbackResult`.
+pub async fn gmail_handle_callback(
+    config: &FrickmailConfig,
+    encrypted_state: &str,
+    code: &str,
+) -> Result<Oauth2CallbackResult> {
+    let salt = salt_from_config(config)?;
+    let state: Oauth2State = decrypt_state(encrypted_state, salt)
+        .ok_or_else(|| FrickmailError::BadRequest("Gmail: invalid state parameter".to_string()))?;
+
+    if state.p != "gmail" || state.v.is_empty() {
+        return Ok(Oauth2CallbackResult {
+            ok: false,
+            email: None,
+            error: Some("Gmail: invalid state parameter".to_string()),
+            pending_refresh_token: None,
+        });
+    }
+
+    let client_id = oauth2_client_id(config, "gmail")?;
+    let client_secret = config.oauth2.gmail.client_secret.as_deref();
+
+    let redirect_uri = format!(
+        "{base}/?LoginGMail",
+        base = config.base_url.trim_end_matches('/')
+    );
+
+    let token_json = exchange_oauth2_code(
+        GMAIL_TOKEN_URL,
+        &client_id,
+        client_secret,
+        code,
+        &redirect_uri,
+        &state.v,
+    )
+    .await?;
+
+    let refresh_token = token_json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            FrickmailError::Upstream("Gmail OAuth2: refresh_token missing".to_string())
+        })?;
+
+    let access_token = token_json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            FrickmailError::Upstream("Gmail OAuth2: access_token missing".to_string())
+        })?;
+
+    let email = fetch_oauth2_userinfo(GMAIL_USERINFO_URL, access_token).await?;
+
+    Ok(Oauth2CallbackResult {
+        ok: true,
+        email: Some(email),
+        error: None,
+        pending_refresh_token: Some(refresh_token.to_string()),
+    })
+}
+
+/// Builds the authorization redirect URL for O365/Microsoft OAuth2 with PKCE.
+///
+/// Replaces the PHP plugin's `ServiceStartLoginO365` part hook. Handles tenant
+/// selection and personal-vs-work account redirect URI differences.
+pub async fn o365_start_login(config: &FrickmailConfig) -> Result<OidcAuthRedirect> {
+    let client_id = oauth2_client_id(config, "o365")?;
+    let salt = salt_from_config(config)?;
+
+    let tenant = if config.oauth2.o365.tenant.trim().is_empty() {
+        "common".to_string()
+    } else {
+        config.oauth2.o365.tenant.trim().to_string()
+    };
+
+    let (encrypted_state, state) = build_pkce_state("o365", salt);
+    let challenge = pkce_challenge(&state.v);
+
+    let redirect_uri = o365_redirect_uri(config);
+
+    let auth_url = format!(
+        "{endpoint}?response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={redirect_uri}\
+         &scope={scope}\
+         &state={state}\
+         &prompt=select_account\
+         &code_challenge={challenge}\
+         &code_challenge_method={method}",
+        endpoint = O365_AUTH_URL.replace("{{tenant}}", &tenant),
+        redirect_uri =
+            url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect::<String>(),
+        scope = url::form_urlencoded::byte_serialize(O365_SCOPES.as_bytes()).collect::<String>(),
+        state =
+            url::form_urlencoded::byte_serialize(encrypted_state.as_bytes()).collect::<String>(),
+        challenge = url::form_urlencoded::byte_serialize(challenge.as_bytes()).collect::<String>(),
+        method = PKCE_CHALLENGE_METHOD,
+    );
+
+    Ok(OidcAuthRedirect {
+        auth_url,
+        encrypted_state,
+    })
+}
+
+/// Handles the O365/Microsoft OAuth2 callback.
+///
+/// Replaces the PHP plugin's `ServiceLoginO365` part hook. Exchanges the code
+/// for tokens, fetches userinfo from Microsoft Graph, and returns the identity.
+pub async fn o365_handle_callback(
+    config: &FrickmailConfig,
+    encrypted_state: &str,
+    code: &str,
+) -> Result<Oauth2CallbackResult> {
+    let salt = salt_from_config(config)?;
+    let state: Oauth2State = decrypt_state(encrypted_state, salt)
+        .ok_or_else(|| FrickmailError::BadRequest("O365: invalid state parameter".to_string()))?;
+
+    if state.p != "o365" || state.v.is_empty() {
+        return Ok(Oauth2CallbackResult {
+            ok: false,
+            email: None,
+            error: Some("O365: invalid state parameter".to_string()),
+            pending_refresh_token: None,
+        });
+    }
+
+    let client_id = oauth2_client_id(config, "o365")?;
+    let client_secret = config.oauth2.o365.client_secret.as_deref();
+    let tenant = if config.oauth2.o365.tenant.trim().is_empty() {
+        "common".to_string()
+    } else {
+        config.oauth2.o365.tenant.trim().to_string()
+    };
+
+    let token_url = O365_TOKEN_URL.replace("{{tenant}}", &tenant);
+    let redirect_uri = o365_redirect_uri(config);
+
+    let token_json = exchange_oauth2_code(
+        &token_url,
+        &client_id,
+        client_secret,
+        code,
+        &redirect_uri,
+        &state.v,
+    )
+    .await?;
+
+    let refresh_token = token_json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            FrickmailError::Upstream("O365 OAuth2: refresh_token missing".to_string())
+        })?;
+
+    let access_token = token_json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| FrickmailError::Upstream("O365 OAuth2: access_token missing".to_string()))?;
+
+    let email = fetch_oauth2_userinfo(O365_USERINFO_URL, access_token).await?;
+
+    Ok(Oauth2CallbackResult {
+        ok: true,
+        email: Some(email),
+        error: None,
+        pending_refresh_token: Some(refresh_token.to_string()),
+    })
+}
+
+/// Exchanges an authorization code for tokens at the provider's token endpoint.
+async fn exchange_oauth2_code(
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<serde_json::Value> {
+    let mut params: Vec<(&str, &str)> = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
+    ];
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret));
+    }
+
+    let resp = reqwest::Client::new()
+        .post(token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| FrickmailError::Upstream(format!("OAuth2 token exchange failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(FrickmailError::Upstream(format!(
+            "OAuth2 token exchange failed (HTTP {status}): {body}"
+        )));
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| {
+        FrickmailError::Upstream(format!("Invalid OAuth2 token response JSON: {e}"))
+    })?;
+
+    Ok(json)
+}
+
+/// Fetches the user's email from a provider's userinfo endpoint.
+/// Accepts `email`, `email_address`, or `preferred_username` fields.
+async fn fetch_oauth2_userinfo(userinfo_url: &str, access_token: &str) -> Result<String> {
+    let resp = reqwest::Client::new()
+        .get(userinfo_url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| FrickmailError::Upstream(format!("OAuth2 userinfo fetch failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(FrickmailError::Upstream(format!(
+            "OAuth2 userinfo request failed (HTTP {status})"
+        )));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| FrickmailError::Upstream(format!("Invalid OAuth2 userinfo JSON: {e}")))?;
+
+    let email = json
+        .get("email")
+        .or_else(|| json.get("email_address"))
+        .or_else(|| json.get("preferred_username"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            FrickmailError::Upstream("OAuth2 userinfo missing email claim".to_string())
+        })?;
+
+    Ok(email.to_string())
+}
+
+/// Renders the popup callback HTML for Gmail/O365 OAuth2, matching the PHP
+/// plugin's `renderPopupCallback`. The JSON payload uses
+/// `type: "frickmail-oauth2"` with a `provider` field.
+///
+/// If opened as a popup, the script posts the payload (success or error, like
+/// the PHP plugin) to the opener via `window.opener.postMessage` and then
+/// closes itself. If opened as a full-page navigation (no opener), it
+/// redirects back to the webmail root. The payload is deliberately NOT
+/// written to localStorage: for the no-session flow it carries the
+/// long-lived refresh token, which must not be persisted in the browser.
+pub fn render_oauth2_callback(provider: &str, result: &Oauth2CallbackResult) -> String {
+    let status = if result.ok { "ok" } else { "error" };
+    let mut payload = serde_json::json!({
+        "type": "frickmail-oauth2",
+        "provider": provider,
+        "status": status,
+        "email": &result.email,
+        "error": &result.error,
+    });
+    if let Some(token) = &result.pending_refresh_token {
+        payload["pending_refresh_token"] = serde_json::Value::String(token.clone());
+    }
+
+    let json = payload.to_string();
+    let escaped = escape_for_script_data(&json);
+    let summary = if result.ok { "succeeded" } else { "failed" };
+    format!(
+        r#"<!doctype html><meta charset="utf-8"><title>Frickmail</title>
+<script type="application/json" id="frickmail-oauth2-payload">{escaped}</script>
+<script>
+const payload = document.getElementById('frickmail-oauth2-payload').textContent;
+const m = JSON.parse(payload);
+(function() {{
+    try {{ if (window.opener && !window.opener.closed) {{
+        window.opener.postMessage(m, window.location.origin);
+        window.close();
+        return;
+    }} }} catch(e) {{}}
+    window.location.replace('/');
+}})();
+</script><p>Authentication {summary}. You can close this window.</p>"#
+    )
 }
 
 // ── Tests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -722,8 +1232,15 @@ mod tests {
         };
         let encrypted = encrypt_state(&state, test_salt());
         let parts: Vec<&str> = encrypted.split('.').collect();
-        assert_eq!(parts.len(), 3, "encrypted state should have 3 dot-separated parts");
-        assert_eq!(parts[0], "c29kaXVt", "first part should be base64url('sodium')");
+        assert_eq!(
+            parts.len(),
+            3,
+            "encrypted state should have 3 dot-separated parts"
+        );
+        assert_eq!(
+            parts[0], "c29kaXVt",
+            "first part should be base64url('sodium')"
+        );
     }
 
     #[test]
@@ -738,7 +1255,13 @@ mod tests {
         let nonce = XNonce::from_slice(&[42u8; XCHACHA_NONCE_LEN]);
         let plaintext = b"{\"p\":\"oidc\",\"v\":\"legacy\",\"m\":\"login\",\"t\":1700000000}";
         let ciphertext = cipher
-            .encrypt(nonce, Payload { msg: plaintext, aad: salt.as_bytes() })
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: salt.as_bytes(),
+                },
+            )
             .unwrap();
 
         let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -749,5 +1272,190 @@ mod tests {
         let state = decrypted.unwrap();
         assert_eq!(state.p, "oidc");
         assert_eq!(state.v, "legacy");
+    }
+
+    // ── OAuth2 provider (Gmail / O365) tests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    fn oauth2_test_config() -> FrickmailConfig {
+        let mut config: FrickmailConfig = serde_json::from_str("{}").expect("default config");
+        config.base_url = "https://mail.example.com".to_string();
+        config.app_salt = Some(test_salt().to_string());
+        config
+    }
+
+    #[test]
+    fn oauth2_state_roundtrip_and_provider_detection() {
+        let state = Oauth2State {
+            p: "gmail".to_string(),
+            v: "oauth2-verifier".to_string(),
+            n: "0123456789abcdef".to_string(),
+            t: 1700000000,
+        };
+        let encrypted = encrypt_state(&state, test_salt());
+        let decrypted: Option<Oauth2State> = decrypt_state(&encrypted, test_salt());
+        assert_eq!(decrypted, Some(state));
+
+        assert_eq!(
+            oauth2_state_provider(&encrypted, test_salt()),
+            Some("gmail".to_string())
+        );
+        assert_eq!(oauth2_state_provider("garbage", test_salt()), None);
+    }
+
+    #[test]
+    fn oauth2_state_is_not_oidc_state() {
+        let state = Oauth2State {
+            p: "o365".to_string(),
+            v: "oauth2-verifier".to_string(),
+            n: "0123456789abcdef".to_string(),
+            t: 1700000000,
+        };
+        let encrypted = encrypt_state(&state, test_salt());
+        assert_eq!(
+            oauth2_state_provider(&encrypted, test_salt()),
+            Some("o365".to_string())
+        );
+        assert!(!is_oidc_state(&encrypted, test_salt()));
+
+        let oidc_state = OidcState {
+            p: "oidc".to_string(),
+            v: "verifier".to_string(),
+            m: "login".to_string(),
+            t: 1700000000,
+            i: None,
+        };
+        let oidc_encrypted = encrypt_state(&oidc_state, test_salt());
+        assert_eq!(oauth2_state_provider(&oidc_encrypted, test_salt()), None);
+        assert!(is_oidc_state(&oidc_encrypted, test_salt()));
+    }
+
+    #[test]
+    fn render_oauth2_callback_includes_pending_token_and_escapes() {
+        let ok_result = Oauth2CallbackResult {
+            ok: true,
+            email: Some("user@example.com".to_string()),
+            error: None,
+            pending_refresh_token: Some("token-123".to_string()),
+        };
+        let html = render_oauth2_callback("gmail", &ok_result);
+        assert!(html.contains("frickmail-oauth2"));
+        assert!(html.contains("\"provider\":\"gmail\""));
+        assert!(html.contains("pending_refresh_token"));
+        assert!(html.contains("token-123"));
+
+        let bad_result = Oauth2CallbackResult {
+            ok: false,
+            email: Some("attacker@example.com</script>".to_string()),
+            error: Some("<img src=x onerror=alert(1)>".to_string()),
+            pending_refresh_token: None,
+        };
+        let html = render_oauth2_callback("o365", &bad_result);
+        assert!(!html.contains("</script><script>"));
+        assert!(html.contains("\\u003c/script\\u003e"));
+    }
+
+    #[tokio::test]
+    async fn gmail_start_login_builds_pkce_auth_url() {
+        let mut config = oauth2_test_config();
+        config.oauth2.gmail.client_id = Some("gmail-client-id".to_string());
+
+        let redirect = gmail_start_login(&config).await.expect("redirect");
+        assert!(redirect.auth_url.starts_with(GMAIL_AUTH_URL));
+        assert!(redirect.auth_url.contains("client_id=gmail-client-id"));
+        assert!(redirect
+            .auth_url
+            .contains("redirect_uri=https%3A%2F%2Fmail.example.com%2F%3FLoginGMail"));
+        assert!(redirect.auth_url.contains("code_challenge_method=S256"));
+        assert!(redirect.auth_url.contains("access_type=offline"));
+        assert!(redirect.auth_url.contains("prompt=consent"));
+        assert!(redirect
+            .auth_url
+            .contains("https%3A%2F%2Fmail.google.com%2F"));
+        // The state must decrypt back to a gmail state with a usable verifier.
+        let state_param = redirect
+            .auth_url
+            .split("state=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .map(|value| {
+                url::form_urlencoded::parse(format!("s={value}").as_bytes())
+                    .next()
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let state: Oauth2State = decrypt_state(&state_param, test_salt()).expect("state decrypts");
+        assert_eq!(state.p, "gmail");
+        assert!(!state.v.is_empty());
+        assert!(!state.n.is_empty());
+    }
+
+    #[tokio::test]
+    async fn gmail_start_login_requires_client_id() {
+        let config = oauth2_test_config();
+        let err = gmail_start_login(&config).await.expect_err("must fail");
+        assert!(err.to_string().contains("client_id"));
+    }
+
+    #[tokio::test]
+    async fn o365_start_login_uses_configured_tenant_and_endpoints() {
+        let mut config = oauth2_test_config();
+        config.oauth2.o365.client_id = Some("o365-client-id".to_string());
+        config.oauth2.o365.tenant = "contoso.onmicrosoft.com".to_string();
+
+        let redirect = o365_start_login(&config).await.expect("redirect");
+        assert!(redirect.auth_url.starts_with(
+            "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize"
+        ));
+        assert!(redirect.auth_url.contains("client_id=o365-client-id"));
+        assert!(redirect.auth_url.contains("prompt=select_account"));
+        assert!(redirect
+            .auth_url
+            .contains("redirect_uri=https%3A%2F%2Fmail.example.com%2F%3FLoginO365"));
+        assert!(redirect.auth_url.contains("IMAP.AccessAsUser.All"));
+
+        // State must decrypt to an o365 state.
+        let state_param = redirect
+            .auth_url
+            .split("state=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .map(|value| {
+                url::form_urlencoded::parse(format!("s={value}").as_bytes())
+                    .next()
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let state: Oauth2State = decrypt_state(&state_param, test_salt()).expect("state decrypts");
+        assert_eq!(state.p, "o365");
+    }
+
+    #[test]
+    fn o365_token_endpoint_uses_microsoftonline_host() {
+        assert!(O365_TOKEN_URL.starts_with("https://login.microsoftonline.com/"));
+        assert!(!O365_TOKEN_URL.contains("microsoftazure.com"));
+    }
+
+    #[tokio::test]
+    async fn o365_start_login_personal_uses_path_style_redirect_uri() {
+        let mut config = oauth2_test_config();
+        config.oauth2.o365.client_id = Some("o365-client-id".to_string());
+        config.oauth2.o365.personal = true;
+
+        let redirect = o365_start_login(&config).await.expect("redirect");
+        assert!(redirect
+            .auth_url
+            .contains("redirect_uri=https%3A%2F%2Fmail.example.com%2FLoginO365"));
+        assert!(!redirect.auth_url.contains("%3FLoginO365"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_start_login_requires_app_salt() {
+        let mut config = oauth2_test_config();
+        config.app_salt = None;
+        config.oauth2.gmail.client_id = Some("gmail-client-id".to_string());
+        let err = gmail_start_login(&config).await.expect_err("must fail");
+        assert!(err.to_string().contains("app_salt"));
     }
 }

@@ -386,6 +386,8 @@ pub fn build_router_with_session(
         .route("/", get(root_get).post(json_api))
         .route("/health", get(health))
         .route("/version", get(version))
+        .route("/LoginO365", get(o365_path_callback))
+        .route("/StartLoginO365", get(o365_path_start_login))
         .nest_service(
             "/static",
             ServeDir::new(static_root).append_index_html_on_directories(true),
@@ -406,6 +408,29 @@ async fn health() -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+/// Path-style `GET /StartLoginO365` entry point used when
+/// `oauth2.o365.personal` routes the OAuth2 flow through
+/// `https://host/StartLoginO365` (personal Microsoft accounts).
+async fn o365_path_start_login(
+    State(state): State<AppState>,
+    _session: fm_session::Session,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let _ = uri;
+    native_oauth2_start_login(&state, "o365").await
+}
+
+/// Path-style `GET /LoginO365?code=…&state=…` callback used when
+/// `oauth2.o365.personal` registers the `https://host/LoginO365` reply URL
+/// (personal Microsoft accounts).
+async fn o365_path_callback(
+    State(state): State<AppState>,
+    session: fm_session::Session,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    native_oauth2_login(&state, &query_map(&uri), &session, "o365").await
 }
 
 async fn version() -> Json<ApiEnvelope<serde_json::Value>> {
@@ -459,6 +484,10 @@ async fn root_get(
         return response;
     }
 
+    if let Some(response) = native_oauth2_part_hook(&state, &uri, &session).await {
+        return response;
+    }
+
     match tokio::fs::read(index_root.join("index.html")).await {
         Ok(body) => (
             StatusCode::OK,
@@ -493,9 +522,7 @@ async fn native_oidc_part_hook(
     // Some providers strip the first query key, so also check for code+state
     // with a decryptable OIDC state when LoginOIDC is absent.
     if params.contains_key("LoginOIDC") {
-        return Some(
-            native_oidc_login(state, uri, &params, session, "LoginOIDC").await,
-        );
+        return Some(native_oidc_login(state, uri, &params, session, "LoginOIDC").await);
     }
 
     // Fallback: if the query has code+state but no explicit LoginOIDC key,
@@ -503,13 +530,208 @@ async fn native_oidc_part_hook(
     if params.contains_key("code") && params.contains_key("state") {
         let state_str = params.get("state").map(|s| s.as_str()).unwrap_or_default();
         if fm_oidc::is_oidc_state(state_str, state.config().app_salt.as_deref().unwrap_or("")) {
-            return Some(
-                native_oidc_login(state, uri, &params, session, "code").await,
-            );
+            return Some(native_oidc_login(state, uri, &params, session, "code").await);
         }
     }
 
     None
+}
+
+/// Handles the Gmail and O365 OAuth2 part hooks natively
+/// (`StartLoginGMail`, `LoginGMail`, `StartLoginO365`, `LoginO365`).
+///
+/// These are GET requests to `/?StartLoginGMail` (the popup launch) and
+/// `/?LoginGMail&code=…&state=…` (the provider's redirect back), and the
+/// O365 equivalents. Returns `None` when the request is not an OAuth2 part
+/// hook, allowing the caller to fall through to index.html.
+async fn native_oauth2_part_hook(
+    state: &AppState,
+    uri: &Uri,
+    session: &fm_session::Session,
+) -> Option<Response> {
+    let _query = uri.query()?;
+    let params = query_map(uri);
+
+    if params.contains_key("StartLoginGMail") {
+        return Some(native_oauth2_start_login(state, "gmail").await);
+    }
+    if params.contains_key("StartLoginO365") {
+        return Some(native_oauth2_start_login(state, "o365").await);
+    }
+    if params.contains_key("LoginGMail") {
+        return Some(native_oauth2_login(state, &params, session, "gmail").await);
+    }
+    if params.contains_key("LoginO365") {
+        return Some(native_oauth2_login(state, &params, session, "o365").await);
+    }
+
+    // Fallback: if the query has code+state but no explicit Login* key, try to
+    // decrypt the state to see whether it is a Gmail/O365 OAuth2 callback
+    // (some providers rewrite the redirect URI and drop the first query key).
+    if params.contains_key("code") && params.contains_key("state") {
+        let state_str = params.get("state").map(|s| s.as_str()).unwrap_or_default();
+        if let Some(provider) = fm_oidc::oauth2_state_provider(
+            state_str,
+            state.config().app_salt.as_deref().unwrap_or(""),
+        ) {
+            return Some(native_oauth2_login(state, &params, session, &provider).await);
+        }
+    }
+
+    None
+}
+
+/// Renders an OAuth2 popup callback page for an error, matching the PHP
+/// plugins' `renderPopupCallback(false, '', $error, WebPath ?: '/')`.
+fn oauth2_error_response(provider: &str, error: &str) -> Response {
+    let result = fm_oidc::Oauth2CallbackResult {
+        ok: false,
+        email: None,
+        error: Some(error.to_string()),
+        pending_refresh_token: None,
+    };
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        fm_oidc::render_oauth2_callback(provider, &result),
+    )
+        .into_response()
+}
+
+/// Handles `?StartLoginGMail` / `?StartLoginO365` — redirects to the provider's
+/// authorization endpoint with PKCE, or renders the error popup callback when
+/// the provider is not configured.
+async fn native_oauth2_start_login(state: &AppState, provider: &str) -> Response {
+    let config = state.config();
+    let redirect = if provider == "gmail" {
+        fm_oidc::gmail_start_login(config).await
+    } else {
+        fm_oidc::o365_start_login(config).await
+    };
+    match redirect {
+        Ok(redirect) => Redirect::to(&redirect.auth_url).into_response(),
+        Err(err) => oauth2_error_response(provider, &err.to_string()),
+    }
+}
+
+/// Handles `?LoginGMail&code=…&state=…` and `?LoginO365&code=…&state=…` — the
+/// provider's redirect callback.
+///
+/// Frickmail mode parity with the PHP plugins:
+/// - With an active Frickmail session the refresh token is saved to the
+///   account database directly and the popup reports plain success.
+/// - Without a session (the login popup flow) the refresh token is passed to
+///   the opener via the popup payload so the main window can call
+///   `FrickmailSaveOAuthToken` and then switch accounts.
+///
+/// The legacy non-Frickmail IMAP-as-identity `LoginProcess` path is not
+/// migrated; the Rust server only serves Frickmail mode.
+async fn native_oauth2_login(
+    state: &AppState,
+    params: &HashMap<String, String>,
+    session: &fm_session::Session,
+    provider: &str,
+) -> Response {
+    // Handle provider error (e.g. access_denied), preserving the provider's
+    // error_description like the legacy PHP plugins did.
+    if let Some(error) = params.get("error") {
+        let message = match params.get("error_description") {
+            Some(description) if !description.is_empty() => {
+                format!("{error}: {description}")
+            }
+            _ => error.clone(),
+        };
+        return oauth2_error_response(provider, &message);
+    }
+
+    let encrypted_state = params.get("state").map(|s| s.as_str()).unwrap_or_default();
+    let code = params.get("code").map(|s| s.as_str()).unwrap_or_default();
+    if encrypted_state.is_empty() || code.is_empty() {
+        // Legacy PHP redirects a stateless callback back to the webmail root.
+        return Redirect::to("/").into_response();
+    }
+
+    let config = state.config();
+    let callback = if provider == "gmail" {
+        fm_oidc::gmail_handle_callback(config, encrypted_state, code).await
+    } else {
+        fm_oidc::o365_handle_callback(config, encrypted_state, code).await
+    };
+    let result = match callback {
+        Ok(result) => result,
+        Err(err) => return oauth2_error_response(provider, &err.to_string()),
+    };
+    if !result.ok {
+        let error = result.error.unwrap_or_else(|| "unknown error".to_string());
+        return oauth2_error_response(provider, &error);
+    }
+
+    // Session available: save the refresh token to the account database
+    // directly, exactly like the PHP bridge's `upsertOAuthAccount` path.
+    let email = result.email.clone().unwrap_or_default();
+    let action_label = if provider == "gmail" {
+        "StartLoginGMail"
+    } else {
+        "StartLoginO365"
+    };
+    let session_user = load_session_user(state, action_label, session)
+        .await
+        .ok()
+        .flatten();
+    if let Some(user) = session_user {
+        let Some(pool) = state.db_pool() else {
+            return oauth2_error_response(provider, "Frickmail database is not configured");
+        };
+        let credential_key = match load_session_credential_key(action_label, session).await {
+            Ok(key) => key,
+            Err(_) => {
+                return oauth2_error_response(
+                    provider,
+                    "OAuth account could not be saved: missing session credential key",
+                );
+            }
+        };
+        match SqlxUserRepository::save_oauth_refresh_token(
+            pool,
+            user.user_id,
+            provider.to_string(),
+            email.clone(),
+            result.pending_refresh_token.clone().unwrap_or_default(),
+            &credential_key,
+        )
+        .await
+        {
+            Ok(true) => {
+                let ok_result = fm_oidc::Oauth2CallbackResult {
+                    ok: true,
+                    email: result.email,
+                    error: None,
+                    pending_refresh_token: None,
+                };
+                return (
+                    StatusCode::OK,
+                    [("content-type", "text/html; charset=utf-8")],
+                    fm_oidc::render_oauth2_callback(provider, &ok_result),
+                )
+                    .into_response();
+            }
+            Ok(false) => {
+                return oauth2_error_response(provider, "Account not found");
+            }
+            Err(err) => {
+                return oauth2_error_response(provider, &err.public_message());
+            }
+        }
+    }
+
+    // No session in the popup callback — pass the token to the opener via the
+    // popup payload so the main window completes the login.
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        fm_oidc::render_oauth2_callback(provider, &result),
+    )
+        .into_response()
 }
 
 /// Handles `?StartLoginOIDC` — initiates the OIDC authorization-code flow with PKCE.
@@ -676,9 +898,26 @@ async fn native_oidc_login(
     };
 
     if mode == "link" {
-        native_oidc_link_identity(state, pool, session, &provider_hash, &subject, &callback_result).await
+        native_oidc_link_identity(
+            state,
+            pool,
+            session,
+            &provider_hash,
+            &subject,
+            &callback_result,
+        )
+        .await
     } else {
-        native_oidc_establish_session(state, pool, session, &provider_hash, &subject, &callback_result, original_action).await
+        native_oidc_establish_session(
+            state,
+            pool,
+            session,
+            &provider_hash,
+            &subject,
+            &callback_result,
+            original_action,
+        )
+        .await
     }
 }
 
@@ -718,10 +957,8 @@ async fn native_oidc_link_identity(
     };
 
     // Upsert the OIDC identity linking this user.
-    if let Err(err) = SqlxUserRepository::upsert_oidc_identity(
-        pool, user.user_id, provider_hash, subject,
-    )
-    .await
+    if let Err(err) =
+        SqlxUserRepository::upsert_oidc_identity(pool, user.user_id, provider_hash, subject).await
     {
         let payload = fm_oidc::OidcCallbackPayload {
             ok: false,
@@ -741,7 +978,8 @@ async fn native_oidc_link_identity(
     // Encrypt the credential key and store it as the escrow key.
     let salt = state.config().app_salt.as_deref().unwrap_or("");
     let encrypted = fm_oidc::encrypt_escrow_key(&credential_key, salt);
-    if let Err(err) = SqlxUserRepository::set_oidc_escrow_key(pool, user.user_id, &encrypted).await {
+    if let Err(err) = SqlxUserRepository::set_oidc_escrow_key(pool, user.user_id, &encrypted).await
+    {
         let payload = fm_oidc::OidcCallbackPayload {
             ok: false,
             mode: "link".to_string(),
@@ -967,10 +1205,7 @@ async fn native_oidc_establish_session(
 
     let encoded_key = STANDARD.encode(&credential_key);
     if let Err(err) = session
-        .insert(
-            fm_session::CREDENTIAL_KEY_SESSION_KEY,
-            encoded_key,
-        )
+        .insert(fm_session::CREDENTIAL_KEY_SESSION_KEY, encoded_key)
         .await
     {
         let _ = session
@@ -1027,7 +1262,10 @@ async fn native_oidc_establish_session(
     };
 
     let validation = match mail_account_connection_secret_to_validation(
-        pool, user_id, &account, &credential_key,
+        pool,
+        user_id,
+        &account,
+        &credential_key,
     )
     .await
     {
@@ -1130,13 +1368,9 @@ async fn mail_account_connection_secret_to_validation(
     account: &MailAccount,
     credential_key: &[u8],
 ) -> fm_core::Result<MailAccountBridgeValidation> {
-    let secret = SqlxUserRepository::get_mail_account_connection_secret(
-        pool, user_id, account.id,
-    )
-    .await?
-    .ok_or_else(|| {
-        FrickmailError::BadRequest("Primary mail account not found".to_string())
-    })?;
+    let secret = SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account.id)
+        .await?
+        .ok_or_else(|| FrickmailError::BadRequest("Primary mail account not found".to_string()))?;
 
     mail_account_bridge_validation(&secret, credential_key)
 }
@@ -21071,7 +21305,9 @@ mod tests {
         body::{to_bytes, Body},
         extract::{Request as AxumRequest, State},
         http::{
-            header::{CACHE_CONTROL, ETAG, EXPIRES, IF_MATCH, IF_NONE_MATCH, SET_COOKIE},
+            header::{
+                CACHE_CONTROL, CONTENT_TYPE, ETAG, EXPIRES, IF_MATCH, IF_NONE_MATCH, SET_COOKIE,
+            },
             HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
         },
         response::IntoResponse,
@@ -33465,6 +33701,203 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn oauth2_start_login_without_config_renders_error_popup() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?StartLoginGMail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(content_type.starts_with("text/html"));
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("frickmail-oauth2"));
+        assert!(body.contains("\"status\":\"error\""));
+        assert!(body.contains("client_id"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_start_login_gmail_redirects_to_google_when_configured() {
+        let mut config = test_config(None);
+        config.oauth2.gmail.client_id = Some("test-gmail-client".to_string());
+        let app = super::build_router(AppState::new(config));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?StartLoginGMail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(location.starts_with("https://accounts.google.com/o/oauth2/auth"));
+        assert!(location.contains("client_id=test-gmail-client"));
+        assert!(location.contains("code_challenge_method=S256"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_callback_provider_error_renders_error_popup() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?LoginO365&error=access_denied")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("frickmail-oauth2"));
+        assert!(body.contains("\"provider\":\"o365\""));
+        assert!(body.contains("access_denied"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_callback_provider_error_includes_error_description() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(
+                        "/?LoginGMail&error=access_denied&error_description=User%20denied%20access",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("access_denied: User denied access"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_path_start_login_o365_redirects_when_configured() {
+        let mut config = test_config(None);
+        config.oauth2.o365.client_id = Some("test-o365-client".to_string());
+        config.oauth2.o365.tenant = "contoso.onmicrosoft.com".to_string();
+        let app = super::build_router(AppState::new(config));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/StartLoginO365")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(location.starts_with(
+            "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize"
+        ));
+        assert!(location.contains("client_id=test-o365-client"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_path_callback_o365_provider_error_renders_error_popup() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/LoginO365?error=access_denied")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("frickmail-oauth2"));
+        assert!(body.contains("\"provider\":\"o365\""));
+        assert!(body.contains("access_denied"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_callback_invalid_state_renders_error_popup() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?LoginGMail&code=abc&state=garbage-state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("frickmail-oauth2"));
+        assert!(body.contains("\"status\":\"error\""));
+        assert!(body.contains("invalid state"));
+    }
+
+    #[tokio::test]
+    async fn oauth2_callback_missing_code_redirects_to_root() {
+        let app = super::build_router(AppState::new(test_config(None)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?LoginGMail&state=garbage-state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("/")
+        );
+    }
+
     fn app_with_bridge(php_bridge_url: Option<String>) -> axum::Router {
         build_router(AppState::new(test_config(php_bridge_url)))
     }
@@ -33481,6 +33914,7 @@ Subject: Empty body metadata\r\n\r\n"
             app_salt: Some("test-app-salt-for-oidc-ci".to_string()),
             open_signup: false,
             oidc: Default::default(),
+            oauth2: Default::default(),
             mail: Default::default(),
             cache: Default::default(),
             frickmail_user: Default::default(),

@@ -205,15 +205,27 @@ features unless noted elsewhere.
 
 Part hooks must remain compatible while the SnappyMail plugin API is supported:
 
+- `StartLoginGMail` — native. Redirects to Google with PKCE; the encrypted
+  state reuses the shared `EncryptUrlSafe` state crypto. Configured through
+  `FRICKMAIL__OAUTH2__GMAIL__CLIENT_ID/CLIENT_SECRET` or the legacy
+  `FRICKMAIL_GMAIL_*` environment variables.
+- `LoginGMail` — native. Exchanges the code, fetches userinfo, and either
+  saves the refresh token with the active session or passes it to the opener
+  via the `frickmail-oauth2` popup payload for `FrickmailSaveOAuthToken`.
+  The legacy non-Frickmail IMAP-as-identity `LoginProcess` path is not
+  migrated (Rust serves Frickmail mode only).
+- `StartLoginO365` — native. Same contract as `StartLoginGMail` with
+  tenant substitution and the `FRICKMAIL_O365_*` env fallback. The
+  `oauth2.o365.personal` option switches to the path-style
+  `https://host/StartLoginO365` / `https://host/LoginO365` reply URLs served
+  by dedicated routes for personal Microsoft accounts.
+- `LoginO365` — native. Same contract as `LoginGMail` against Microsoft
+  Graph userinfo.
+- `StartLoginOIDC` — native (see previous slice).
+- `LoginOIDC` — native (see previous slice).
 - `RemoteAutoLogin`
 - `Avatar`
-- `StartLoginGMail`
-- `LoginGMail`
-- `StartLoginO365`
-- `LoginO365`
 - `ExternalLogin`
-- `StartLoginOIDC`
-- `LoginOIDC`
 - `cPanelAutoLogin`
 - `ProxyAuth`
 - `UserHeaderSet`
