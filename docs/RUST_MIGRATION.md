@@ -72,6 +72,26 @@ full workspace suite, with the schema-compatibility suite (10 tests,
 including live MySQL/PostgreSQL) run three consecutive times without
 failure against the dev-container databases.
 
+The correction commit `4c9d3b2b5da152e517a2eaad47007ccb4ab00d73` failed the
+exact-SHA GitHub `rust-ci` runs (`33313736617` on `master`, `33313743514` on
+`rust-full-migration`) one step later, in the production-image smoke test:
+the container exited because `main` hard-required a Redis connection at
+startup ("connect persistent Redis session store"), a startup-availability
+regression introduced by the previously under-verified persistent-session
+commit and incompatible with the documented standalone-smoke behavior of
+starting and answering `/health` without dependencies. The focused
+correction makes `main` fall back to the in-memory session store with a
+prominent warning when Redis is unreachable, restoring graceful degradation
+while production deployments with a reachable Redis keep persistent shared
+sessions unchanged. Revalidation passed `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, and the full
+workspace suite (664 tests, 22 suites). Production-image validation
+rebuilt `frickmail-rust:oauth2-part-hooks-test` and confirmed both modes:
+a read-only standalone container without Redis starts, logs the fallback
+warning, and answers `/health`; a container attached to the Redis network
+starts with persistent sessions and answers `/health`; neither restarts
+nor is OOM-killed.
+
 ## Prior Snapshot — 2026-08-25 14:15:00 CEST (UTC+02:00)
 
 The pending `PgpVerifyMessage` IMAP MIME normalization slice completes the

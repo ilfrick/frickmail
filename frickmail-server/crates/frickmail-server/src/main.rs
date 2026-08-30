@@ -38,9 +38,21 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .with_context(|| format!("parse bind address {}", config.bind_addr))?;
 
-    let session_store = fm_session::AppSessionStore::redis(&config.redis_url)
-        .await
-        .map_err(|error| anyhow::anyhow!("connect persistent Redis session store: {error}"))?;
+    let session_store = match fm_session::AppSessionStore::redis(&config.redis_url).await {
+        Ok(store) => store,
+        Err(error) => {
+            // Availability over strictness: a missing or unreachable Redis
+            // must not take the whole webmail down at startup (standalone
+            // smoke containers and degraded deployments must still serve).
+            // Sessions then live only in this process: they do not survive
+            // restarts and are not shared across instances.
+            tracing::warn!(
+                "persistent Redis session store unavailable ({error}); \
+                 falling back to the in-memory session store"
+            );
+            fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default())
+        }
+    };
     let app = build_router_with_session(AppState::with_db_pool(config, db_pool), session_store);
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "starting Frickmail Rust server");
