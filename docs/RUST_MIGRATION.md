@@ -54,6 +54,24 @@ tests, the DROP TABLE test-race fix, and the native OIDC
 only; publishing this slice's commit to `rust-full-migration` on both remotes
 fast-forwards that branch to include them.
 
+The first publication SHA `99582cf8e493ca9ada3f5719bbf565670634710b` failed
+the exact-SHA GitHub `rust-ci` runs (`33312891712` on `master`,
+`33312918887` on `rust-full-migration`) in the pre-existing
+`fm-db` schema-compatibility test
+`postgres_ensure_runtime_schema_is_idempotent`: concurrent
+`ensure_runtime_schema` calls raced on a fresh PostgreSQL database and one
+failed with a duplicate key violation on `pg_type_typname_nsp_index`, a
+known PostgreSQL concurrency limitation of `CREATE TABLE IF NOT EXISTS`.
+That test landed with the previously under-verified DB-slice commits and had
+never been exercised by a completed dual-branch CI run. The focused
+correction serializes the runtime schema migration with a session-level
+PostgreSQL advisory lock inside `ensure_runtime_schema`, releasing it on
+both success and failure paths. Revalidation passed `cargo fmt --all
+-- --check`, `cargo clippy --workspace --all-targets -D warnings`, and the
+full workspace suite, with the schema-compatibility suite (10 tests,
+including live MySQL/PostgreSQL) run three consecutive times without
+failure against the dev-container databases.
+
 ## Prior Snapshot — 2026-08-25 14:15:00 CEST (UTC+02:00)
 
 The pending `PgpVerifyMessage` IMAP MIME normalization slice completes the

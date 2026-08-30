@@ -35,47 +35,78 @@ pub async fn ensure_runtime_schema(pool: &AnyPool) -> Result<()> {
         FrickmailError::Upstream(format!("runtime schema migration failed: {err}"))
     })?;
     let backend = conn.backend_name().to_string();
-    let table = match backend.as_str() {
-        "MySQL" => {
-            "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (\
-            user_id BIGINT NOT NULL, \
-            account_id BIGINT NOT NULL, \
-            folder_hash CHAR(40) NOT NULL, \
-            imap_uid BIGINT NOT NULL, \
-            expires_at BIGINT NOT NULL, \
-            PRIMARY KEY (user_id, account_id, folder_hash, imap_uid), \
-            INDEX idx_fm_read_receipt_cache_expiry (user_id, account_id, expires_at)\
-        )"
-        }
-        _ => {
-            "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (\
-            user_id BIGINT NOT NULL, \
-            account_id BIGINT NOT NULL, \
-            folder_hash CHAR(40) NOT NULL, \
-            imap_uid BIGINT NOT NULL, \
-            expires_at BIGINT NOT NULL, \
-            PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)\
-        )"
-        }
-    };
-    sqlx::query(table)
-        .execute(&mut *conn)
-        .await
-        .map_err(|err| {
-            FrickmailError::Upstream(format!("runtime schema migration failed: {err}"))
-        })?;
-    if backend != "MySQL" {
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_fm_read_receipt_cache_expiry \
-             ON frickmail_read_receipt_cache(user_id, account_id, expires_at)",
-        )
-        .execute(&mut *conn)
-        .await
-        .map_err(|err| {
-            FrickmailError::Upstream(format!("runtime schema migration failed: {err}"))
-        })?;
+
+    // PostgreSQL's `CREATE TABLE IF NOT EXISTS` is not concurrency-safe:
+    // two sessions racing on a fresh database can fail with a duplicate key
+    // violation on `pg_type_typname_nsp_index` while the table row type is
+    // created. Serialize the migration with a session-level advisory lock so
+    // concurrent callers (for example parallel integration tests) cannot
+    // interleave the catalog writes.
+    let postgres = backend == "PostgreSQL";
+    if postgres {
+        sqlx::query("SELECT pg_advisory_lock(67410229183)")
+            .execute(&mut *conn)
+            .await
+            .map_err(|err| {
+                FrickmailError::Upstream(format!("runtime schema migration failed: {err}"))
+            })?;
     }
-    Ok(())
+
+    let outcome = async {
+        let table = match backend.as_str() {
+            "MySQL" => {
+                "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (\
+                user_id BIGINT NOT NULL, \
+                account_id BIGINT NOT NULL, \
+                folder_hash CHAR(40) NOT NULL, \
+                imap_uid BIGINT NOT NULL, \
+                expires_at BIGINT NOT NULL, \
+                PRIMARY KEY (user_id, account_id, folder_hash, imap_uid), \
+                INDEX idx_fm_read_receipt_cache_expiry (user_id, account_id, expires_at)\
+            )"
+            }
+            _ => {
+                "CREATE TABLE IF NOT EXISTS frickmail_read_receipt_cache (\
+                user_id BIGINT NOT NULL, \
+                account_id BIGINT NOT NULL, \
+                folder_hash CHAR(40) NOT NULL, \
+                imap_uid BIGINT NOT NULL, \
+                expires_at BIGINT NOT NULL, \
+                PRIMARY KEY (user_id, account_id, folder_hash, imap_uid)\
+            )"
+            }
+        };
+        sqlx::query(table)
+            .execute(&mut *conn)
+            .await
+            .map_err(|err| {
+                FrickmailError::Upstream(format!("runtime schema migration failed: {err}"))
+            })?;
+        if backend != "MySQL" {
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_fm_read_receipt_cache_expiry \
+                 ON frickmail_read_receipt_cache(user_id, account_id, expires_at)",
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(|err| {
+                FrickmailError::Upstream(format!("runtime schema migration failed: {err}"))
+            })?;
+        }
+        Ok(())
+    }
+    .await;
+
+    if postgres {
+        // Always release the session-level advisory lock, even on failure;
+        // the lock dies with the connection anyway, but the explicit release
+        // lets the pooled connection be reused without holding the lock.
+        let _ = sqlx::query("SELECT pg_advisory_unlock(67410229183)")
+            .execute(&mut *conn)
+            .await;
+    }
+
+    outcome
 }
 
 #[cfg(test)]
