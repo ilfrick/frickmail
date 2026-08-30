@@ -41,6 +41,8 @@ pub struct FrickmailConfig {
     pub demo_account: DemoAccountConfig,
     #[serde(default)]
     pub change_password: ChangePasswordConfig,
+    #[serde(default, alias = "app_salt")]
+    pub app_salt: Option<String>,
     #[serde(default)]
     pub admin: AdminConfig,
     #[serde(default)]

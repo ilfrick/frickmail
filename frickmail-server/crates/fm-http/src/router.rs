@@ -23,7 +23,7 @@ use axum::{
         },
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
     },
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::get,
     Json, Router,
 };
@@ -54,6 +54,7 @@ use fm_mime::{
     parse_body, parse_body_part_text, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment,
     ParsedMessageHeader,
 };
+use fm_oidc;
 use fm_plugin_compat::{
     bridge_unimplemented, is_compat_hook, normalize_plugin_action, ActionNameError,
 };
@@ -454,6 +455,10 @@ async fn root_get(
         return json_api_request(state, uri, request, session).await;
     }
 
+    if let Some(response) = native_oidc_part_hook(&state, &uri, &session).await {
+        return response;
+    }
+
     match tokio::fs::read(index_root.join("index.html")).await {
         Ok(body) => (
             StatusCode::OK,
@@ -463,6 +468,677 @@ async fn root_get(
             .into_response(),
         Err(_) => shell().await,
     }
+}
+
+/// Handles the `StartLoginOIDC` and `LoginOIDC` part hooks natively.
+///
+/// These are GET requests to `/?StartLoginOIDC` (optionally with `&mode=link`)
+/// and `/?LoginOIDC&code=…&state=…` (the OIDC provider's redirect).
+/// Returns `None` when the request is not an OIDC part hook, allowing the
+/// caller to fall through to index.html.
+async fn native_oidc_part_hook(
+    state: &AppState,
+    uri: &Uri,
+    session: &fm_session::Session,
+) -> Option<Response> {
+    let _query = uri.query()?;
+    let params = query_map(uri);
+
+    // Detect: ?StartLoginOIDC or ?StartLoginOIDC&mode=link
+    if params.contains_key("StartLoginOIDC") {
+        return Some(native_oidc_start_login(state, &params).await);
+    }
+
+    // Detect: ?LoginOIDC&code=…&state=…
+    // Some providers strip the first query key, so also check for code+state
+    // with a decryptable OIDC state when LoginOIDC is absent.
+    if params.contains_key("LoginOIDC") {
+        return Some(
+            native_oidc_login(state, uri, &params, session, "LoginOIDC").await,
+        );
+    }
+
+    // Fallback: if the query has code+state but no explicit LoginOIDC key,
+    // try to decrypt the state to see if it's an OIDC callback.
+    if params.contains_key("code") && params.contains_key("state") {
+        let state_str = params.get("state").map(|s| s.as_str()).unwrap_or_default();
+        if fm_oidc::is_oidc_state(state_str, state.config().app_salt.as_deref().unwrap_or("")) {
+            return Some(
+                native_oidc_login(state, uri, &params, session, "code").await,
+            );
+        }
+    }
+
+    None
+}
+
+/// Handles `?StartLoginOIDC` — initiates the OIDC authorization-code flow with PKCE.
+///
+/// Supports `mode=link` (require existing session) and the default `mode=login`.
+/// The `mode` comes from the encrypted state, which `start_login` encodes, so it
+/// is read from the query for link-mode validation.
+async fn native_oidc_start_login(state: &AppState, params: &HashMap<String, String>) -> Response {
+    let mode = params.get("mode").map(|s| s.as_str()).unwrap_or("login");
+
+    if mode == "link" {
+        // Link mode requires an existing session; the session is checked in the
+        // caller (root_get passes the session), but start_login itself doesn't
+        // need it. We just redirect to the OIDC provider with mode=link in the
+        // encrypted state. The callback will verify the session.
+    }
+
+    let config = state.config();
+    match fm_oidc::start_login(config).await {
+        Ok(redirect) => Redirect::to(&redirect.auth_url).into_response(),
+        Err(err) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: mode.to_string(),
+                email: None,
+                error: Some(err.to_string()),
+                reauth_required: false,
+            };
+            (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Handles `?LoginOIDC&code=…&state=…` — the OIDC provider's redirect callback.
+async fn native_oidc_login(
+    state: &AppState,
+    _uri: &Uri,
+    params: &HashMap<String, String>,
+    session: &fm_session::Session,
+    original_action: &str,
+) -> Response {
+    let config = state.config();
+
+    let encrypted_state = params.get("state").map(|s| s.as_str()).unwrap_or("");
+    let code = params.get("code").map(|s| s.as_str()).unwrap_or("");
+
+    // Handle provider error (e.g. access_denied)
+    if let Some(error) = params.get("error") {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "login".to_string(),
+            email: None,
+            error: Some(error.clone()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    if encrypted_state.is_empty() || code.is_empty() {
+        let base = config.base_url.trim_end_matches('/');
+        let _ = base;
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "login".to_string(),
+            email: None,
+            error: Some("OIDC: missing code or state parameter".to_string()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    let callback_result = match fm_oidc::handle_callback(config, encrypted_state, code).await {
+        Ok(result) => result,
+        Err(err) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: None,
+                error: Some(err.to_string()),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+    };
+
+    if !callback_result.ok {
+        let payload: fm_oidc::OidcCallbackPayload = callback_result.into();
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    // Successful callback — now branch on login vs link mode.
+    let mode = callback_result.mode.clone();
+    let Some(provider_hash) = callback_result.provider_hash.clone() else {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: mode.clone(),
+            email: callback_result.email.clone(),
+            error: Some("OIDC: provider hash missing".to_string()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    };
+
+    let Some(subject) = callback_result.subject.clone() else {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: mode.clone(),
+            email: callback_result.email.clone(),
+            error: Some("OIDC: subject missing".to_string()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    };
+
+    let Some(pool) = state.db_pool() else {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: mode.clone(),
+            email: callback_result.email.clone(),
+            error: Some("Frickmail database is not configured".to_string()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    };
+
+    if mode == "link" {
+        native_oidc_link_identity(state, pool, session, &provider_hash, &subject, &callback_result).await
+    } else {
+        native_oidc_establish_session(state, pool, session, &provider_hash, &subject, &callback_result, original_action).await
+    }
+}
+
+/// Link mode: user is already authenticated. Store the OIDC identity and
+/// encrypt the credential key for escrow.
+async fn native_oidc_link_identity(
+    state: &AppState,
+    pool: &sqlx::AnyPool,
+    session: &fm_session::Session,
+    provider_hash: &str,
+    subject: &str,
+    callback_result: &fm_oidc::OidcCallbackResult,
+) -> Response {
+    let Some(user) = (match load_session_user(state, "StartLoginOIDC", session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "link".to_string(),
+            email: callback_result.email.clone(),
+            error: Some("You must be logged in with your Frickmail password before linking an OIDC identity".to_string()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    };
+
+    // Get the credential key from the session.
+    let credential_key = match load_session_credential_key("StartLoginOIDC", session).await {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
+
+    // Upsert the OIDC identity linking this user.
+    if let Err(err) = SqlxUserRepository::upsert_oidc_identity(
+        pool, user.user_id, provider_hash, subject,
+    )
+    .await
+    {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "link".to_string(),
+            email: callback_result.email.clone(),
+            error: Some(err.public_message()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    // Encrypt the credential key and store it as the escrow key.
+    let salt = state.config().app_salt.as_deref().unwrap_or("");
+    let encrypted = fm_oidc::encrypt_escrow_key(&credential_key, salt);
+    if let Err(err) = SqlxUserRepository::set_oidc_escrow_key(pool, user.user_id, &encrypted).await {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "link".to_string(),
+            email: callback_result.email.clone(),
+            error: Some(err.public_message()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    // Success — render the callback page so the popup closes.
+    let payload = fm_oidc::OidcCallbackPayload {
+        ok: true,
+        mode: "link".to_string(),
+        email: callback_result.email.clone(),
+        error: None,
+        reauth_required: false,
+    };
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        fm_oidc::render_callback(&payload),
+    )
+        .into_response()
+}
+
+/// Login mode: look up the OIDC identity, decrypt the escrow key, establish
+/// the session, and bridge IMAP.
+async fn native_oidc_establish_session(
+    state: &AppState,
+    pool: &sqlx::AnyPool,
+    session: &fm_session::Session,
+    provider_hash: &str,
+    subject: &str,
+    callback_result: &fm_oidc::OidcCallbackResult,
+    original_action: &str,
+) -> Response {
+    // Look up the OIDC identity to find the user.
+    let user_id = match SqlxUserRepository::find_oidc_identity(pool, provider_hash, subject).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(
+                    "No Frickmail account is linked to this OIDC identity. \
+                     Log in with your Frickmail password first, then link your \
+                     OIDC account from Settings."
+                        .to_string(),
+                ),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(err.public_message()),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+    };
+
+    // Decrypt the escrow key to recover the credential key.
+    let escrow_blob = match SqlxUserRepository::get_oidc_escrow_key(pool, user_id).await {
+        Ok(Some(blob)) => blob,
+        Ok(None) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(
+                    "OIDC escrow key missing — log in with your Frickmail password \
+                     and re-link OIDC from Settings."
+                        .to_string(),
+                ),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(err.public_message()),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+    };
+
+    let salt = state.config().app_salt.as_deref().unwrap_or("");
+    let credential_key = match fm_oidc::decrypt_escrow_key(&escrow_blob, salt) {
+        Some(key) if key.len() == CREDENTIAL_KEY_BYTES => key,
+        _ => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(
+                    "OIDC escrow key could not be decrypted — the server APP_SALT \
+                     may have changed. Please re-link OIDC from Settings."
+                        .to_string(),
+                ),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+    };
+
+    // Look up the user for session establishment.
+    let user = match SqlxUserRepository::find_by_id(pool, user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some("OIDC identity user not found".to_string()),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(err.public_message()),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+    };
+
+    // Establish the Frickmail session.
+    if let Err(err) = session.cycle_id().await {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "login".to_string(),
+            email: callback_result.email.clone(),
+            error: Some(format!("Frickmail session rotation failed: {err}")),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = session
+        .insert(
+            fm_session::USER_SESSION_KEY,
+            fm_core::UserSession {
+                user_id: user.id,
+                username: user.username.clone(),
+                email: user.email.clone(),
+            },
+        )
+        .await
+    {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "login".to_string(),
+            email: callback_result.email.clone(),
+            error: Some(format!("Frickmail session write failed: {err}")),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    let encoded_key = STANDARD.encode(&credential_key);
+    if let Err(err) = session
+        .insert(
+            fm_session::CREDENTIAL_KEY_SESSION_KEY,
+            encoded_key,
+        )
+        .await
+    {
+        let _ = session
+            .remove::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+            .await;
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "login".to_string(),
+            email: callback_result.email.clone(),
+            error: Some(format!("Frickmail session write failed: {err}")),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    // Bridge IMAP using the primary mail account.
+    let account = match SqlxUserRepository::get_primary_mail_account(pool, user.id).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: true,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: None,
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(err.public_message()),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+    };
+
+    let validation = match mail_account_connection_secret_to_validation(
+        pool, user_id, &account, &credential_key,
+    )
+    .await
+    {
+        Ok(validation) => validation,
+        Err(err) => {
+            let payload = fm_oidc::OidcCallbackPayload {
+                ok: false,
+                mode: "login".to_string(),
+                email: callback_result.email.clone(),
+                error: Some(err.public_message()),
+                reauth_required: false,
+            };
+            return (
+                StatusCode::OK,
+                [("content-type", "text/html; charset=utf-8")],
+                fm_oidc::render_callback(&payload),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate the IMAP connection (like native_frickmail_login does).
+    let bridge_result = validate_mail_account_bridge_live(validation).await;
+    let reauth_required = match &bridge_result {
+        Ok(_) => false,
+        Err(err) => {
+            // Auth errors (expired/incorrect password, missing OAuth token)
+            // require the user to re-enter credentials in the main window.
+            let msg = err.public_message().to_lowercase();
+            msg.contains("re-authorize")
+                || msg.contains("auth")
+                || msg.contains("login")
+                || msg.contains("credential")
+                || msg.contains("password")
+        }
+    };
+
+    if reauth_required {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: true,
+            mode: "login".to_string(),
+            email: callback_result.email.clone(),
+            error: None,
+            reauth_required: true,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = bridge_result {
+        let payload = fm_oidc::OidcCallbackPayload {
+            ok: false,
+            mode: "login".to_string(),
+            email: callback_result.email.clone(),
+            error: Some(err.public_message()),
+            reauth_required: false,
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            fm_oidc::render_callback(&payload),
+        )
+            .into_response();
+    }
+
+    // Success! Store the selected account in the session.
+    if let Err(_err) = store_selected_mail_account(session, original_action, account.id).await {
+        // Continue anyway — the session is established, the bridge is just a nicety.
+    }
+
+    // Establish the connection token so the main window can use the bridged session.
+    if let Err(_err) = ensure_connection_token(state, session, Some(account.id)).await {
+        // Continue anyway.
+    }
+
+    let payload = fm_oidc::OidcCallbackPayload {
+        ok: true,
+        mode: "login".to_string(),
+        email: callback_result.email.clone(),
+        error: None,
+        reauth_required: false,
+    };
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        fm_oidc::render_callback(&payload),
+    )
+        .into_response()
+}
+
+/// Builds a MailAccountBridgeValidation from the user's primary mail account,
+/// used during OIDC login to probe the IMAP connection.
+async fn mail_account_connection_secret_to_validation(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account: &MailAccount,
+    credential_key: &[u8],
+) -> fm_core::Result<MailAccountBridgeValidation> {
+    let secret = SqlxUserRepository::get_mail_account_connection_secret(
+        pool, user_id, account.id,
+    )
+    .await?
+    .ok_or_else(|| {
+        FrickmailError::BadRequest("Primary mail account not found".to_string())
+    })?;
+
+    mail_account_bridge_validation(&secret, credential_key)
 }
 
 async fn json_api(
@@ -32802,6 +33478,7 @@ Subject: Empty body metadata\r\n\r\n"
             php_bridge_url,
             database_url: None,
             redis_url: "redis://redis:6379/0".to_string(),
+            app_salt: Some("test-app-salt-for-oidc-ci".to_string()),
             open_signup: false,
             oidc: Default::default(),
             mail: Default::default(),

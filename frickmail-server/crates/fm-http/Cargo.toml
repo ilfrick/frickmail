@@ -20,6 +20,7 @@ html-escape.workspace = true
 html5ever.workspace = true
 fm-imap = { path = "../fm-imap" }
 fm-mime = { path = "../fm-mime" }
+fm-oidc = { path = "../fm-oidc" }
 fm-plugin-compat = { path = "../fm-plugin-compat" }
 fm-session = { path = "../fm-session" }
 fm-smtp = { path = "../fm-smtp" }

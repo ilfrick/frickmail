@@ -972,6 +972,108 @@ impl SqlxUserRepository {
         unlink_oidc_identity(pool, user_id, provider_hash).await
     }
 
+    pub async fn find_oidc_identity(
+        pool: &AnyPool,
+        provider_hash: &str,
+        subject: &str,
+    ) -> Result<Option<i64>> {
+        let provider_hash = provider_hash.trim();
+        let subject = subject.trim();
+        if provider_hash.is_empty() || subject.is_empty() {
+            return Err(FrickmailError::BadRequest(
+                "provider_hash and subject are required".to_string(),
+            ));
+        }
+
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        sqlx::query(find_oidc_identity_query(&backend))
+            .bind(provider_hash)
+            .bind(subject)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?
+            .map(|row| row.try_get::<i64, _>("user_id").map_err(db_error))
+            .transpose()
+    }
+
+    pub async fn upsert_oidc_identity(
+        pool: &AnyPool,
+        user_id: i64,
+        provider_hash: &str,
+        subject: &str,
+    ) -> Result<()> {
+        let provider_hash = provider_hash.trim().to_string();
+        let subject = subject.trim().to_string();
+        if provider_hash.is_empty() || subject.is_empty() {
+            return Err(FrickmailError::BadRequest(
+                "provider_hash and subject are required".to_string(),
+            ));
+        }
+
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        sqlx::query(upsert_oidc_identity_query(&backend))
+            .bind(user_id)
+            .bind(&provider_hash)
+            .bind(&subject)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub async fn get_oidc_escrow_key(pool: &AnyPool, user_id: i64) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query("SELECT oidc_escrow_key FROM frickmail_users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_error)?;
+        match row {
+            Some(row) => {
+                let escrow_key: Option<Vec<u8>> =
+                    row.try_get("oidc_escrow_key").map_err(db_error)?;
+                Ok(escrow_key)
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn set_oidc_escrow_key(pool: &AnyPool, user_id: i64, key: &[u8]) -> Result<()> {
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        sqlx::query(set_oidc_escrow_key_query(&backend))
+            .bind(key)
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub async fn clear_oidc_escrow_key(pool: &AnyPool, user_id: i64) -> Result<()> {
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        sqlx::query(clear_oidc_escrow_key_query(&backend))
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub async fn get_primary_mail_account(pool: &AnyPool, user_id: i64) -> Result<Option<MailAccount>> {
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        sqlx::query(primary_mail_account_query(&backend))
+            .bind(user_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?
+            .map(row_to_mail_account)
+            .transpose()
+    }
+
     pub async fn list_smime_certs(pool: &AnyPool, user_id: i64) -> Result<Vec<SmimeCertificate>> {
         list_smime_certs(pool, user_id).await
     }
@@ -5252,6 +5354,49 @@ fn oidc_identity_count_query(backend: &str) -> &'static str {
     }
 }
 
+fn find_oidc_identity_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT user_id FROM frickmail_oidc_identities \
+             WHERE provider_hash = $1 AND subject = $2 \
+             ORDER BY linked_at DESC LIMIT 1"
+        }
+        _ => "SELECT user_id FROM frickmail_oidc_identities \
+              WHERE provider_hash = ? AND subject = ? \
+              ORDER BY linked_at DESC LIMIT 1",
+    }
+}
+
+fn upsert_oidc_identity_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_oidc_identities (user_id, provider_hash, subject, linked_at) \
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP) \
+             ON CONFLICT (provider_hash, subject) DO UPDATE SET user_id = $1, linked_at = CURRENT_TIMESTAMP"
+        }
+        "MySQL" => {
+            "INSERT INTO frickmail_oidc_identities (user_id, provider_hash, subject, linked_at) \
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP) \
+             ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), linked_at = CURRENT_TIMESTAMP"
+        }
+        _ => "INSERT OR REPLACE INTO frickmail_oidc_identities (user_id, provider_hash, subject, linked_at) \
+              VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+    }
+}
+
+fn primary_mail_account_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, \
+             smtp_secure, login, CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
+             FROM frickmail_mail_accounts WHERE user_id = $1 AND is_primary = 1 LIMIT 1"
+        }
+        _ => "SELECT id, label, email, type, imap_host, imap_port, imap_secure, smtp_host, smtp_port, \
+              smtp_secure, login, CASE WHEN is_primary THEN 1 ELSE 0 END AS is_primary \
+              FROM frickmail_mail_accounts WHERE user_id = ? AND is_primary = 1 LIMIT 1",
+    }
+}
+
 fn clear_oidc_escrow_key_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -5259,6 +5404,17 @@ fn clear_oidc_escrow_key_query(backend: &str) -> &'static str {
         }
         _ => {
             "UPDATE frickmail_users SET oidc_escrow_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        }
+    }
+}
+
+fn set_oidc_escrow_key_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_users SET oidc_escrow_key = $1, updated_at = NOW() WHERE id = $2"
+        }
+        _ => {
+            "UPDATE frickmail_users SET oidc_escrow_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
         }
     }
 }
