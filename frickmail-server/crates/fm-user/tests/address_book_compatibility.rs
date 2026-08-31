@@ -183,7 +183,7 @@ async fn exercise_backend(pool: &AnyPool) {
 
     // The soft-deleted duplicate no longer appears in listings; the kept
     // row still resolves the shared UID.
-    let deleted_lookup = address_book::get_contact_id_by_uid(&pool, user_id, "ab-uid-1")
+    let deleted_lookup = address_book::get_contact_id_by_uid(pool, user_id, "ab-uid-1")
         .await
         .unwrap();
     assert_eq!(deleted_lookup, Some(contact_id));
