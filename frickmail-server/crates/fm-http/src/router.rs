@@ -1883,6 +1883,9 @@ async fn native_compat_response(
             contacts::native_json_deduplicate_contacts(state, original_action, payload, session)
                 .await,
         ),
+        "JsonContactsSync" => Some(
+            contacts::native_json_contacts_sync(state, original_action, payload, session).await,
+        ),
         "FrickmailCheckNewMail" => {
             Some(native_frickmail_check_new_mail(state, original_action, payload, session).await)
         }
@@ -35324,6 +35327,422 @@ Subject: Empty body metadata\r\n\r\n"
         let mut displays: Vec<&str> = survivors.iter().map(|s| s.display.as_str()).collect();
         displays.sort();
         assert_eq!(displays, vec!["First", "NoUid", "Other", "Third"]);
+    }
+
+    #[tokio::test]
+    async fn contacts_sync_o365_upserts_pages_and_repeats() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8300,
+            "contacts-sync",
+            Some("contacts-sync@example.com"),
+        )
+        .await;
+        create_mail_account_tables(&pool).await;
+        seed_mail_account(&pool, 831, 8300, "Primary", true).await;
+        let key = [31_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_oauth_token(
+            &pool,
+            831,
+            "user@contoso.com",
+            "refresh-sync",
+            Some("contoso.onmicrosoft.com"),
+            &key,
+        )
+        .await;
+        let mut config = test_config(None);
+        config.oauth2.o365.client_id = Some("sync-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        let session = credential_session(
+            8300,
+            "contacts-sync",
+            Some("contacts-sync@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonContactsSync", 831)
+            .await
+            .unwrap();
+
+        let captured = Mutex::new(Vec::new());
+        let token_response = json!({"access_token": "sync-access"});
+        let page_one = json!({
+            "value": [
+                {"id": "A", "displayName": "One", "emailAddresses": [{"address": "one@contoso.com"}]},
+                {"id": "B", "displayName": "Two", "givenName": "Two", "mobilePhone": "+1 555 0100"}
+            ],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/contacts?$top=100&$skiptoken=X"
+        });
+        let page_two = json!({
+            "value": [{"id": "C", "displayName": "Three"}]
+        });
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let captured = &captured;
+            let token_response = token_response.clone();
+            let page_one = page_one.clone();
+            let page_two = page_two.clone();
+            async move {
+                captured.lock().unwrap().push(request.clone());
+                if request.url.contains("/oauth2/v2.0/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else if request.url.contains("skiptoken") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: page_two,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: page_one,
+                    })
+                }
+            }
+        };
+
+        for _round in 0..2 {
+            let response = contacts::native_json_contacts_sync_with_fetcher(
+                &state,
+                "JsonContactsSync",
+                &json!({}),
+                &session,
+                &fetcher,
+            )
+            .await;
+            let body = read_json(response).await;
+            assert_eq!(body["Result"]["count"], 3);
+            assert_eq!(body["Result"]["email"], "user@contoso.com");
+        }
+
+        // Upserts must not duplicate rows across rounds.
+        let summaries = fm_user::address_book::list_contact_summaries(&pool, 8300, 0, 100)
+            .await
+            .unwrap();
+        let mut uids: Vec<&str> = summaries.iter().map(|s| s.uid.as_str()).collect();
+        uids.sort();
+        assert_eq!(uids, vec!["o365:A", "o365:B", "o365:C"]);
+
+        let requests = captured.into_inner().unwrap();
+        let token_form = requests[0].form_body.clone().unwrap();
+        assert!(token_form.contains(&(
+            "scope".to_string(),
+            "https://graph.microsoft.com/Contacts.Read offline_access".to_string()
+        )));
+        assert_eq!(
+            requests[1].url,
+            "https://graph.microsoft.com/v1.0/me/contacts?$top=100"
+        );
+        assert!(requests[2]
+            .url
+            .starts_with("https://graph.microsoft.com/v1.0/me/contacts?$top=100&$skiptoken=X"));
+        // Round two repeats exactly one token request plus two pages.
+        assert_eq!(requests.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn contacts_sync_gmail_paginates_with_page_token() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8400,
+            "contacts-gmail-sync",
+            Some("contacts-gsync@example.com"),
+        )
+        .await;
+        create_mail_account_tables(&pool).await;
+        seed_mail_account(&pool, 841, 8400, "Primary", true).await;
+        let key = [32_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_email_and_type(&pool, 841, "user@gmail.com", "gmail").await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts SET encrypted_oauth_refresh_token = ? WHERE id = ?",
+        )
+        .bind(fm_user::encrypt_account_secret("gmail-refresh-sync", &key).unwrap())
+        .bind(841_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config(None);
+        config.oauth2.gmail.client_id = Some("sync-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        let session = credential_session(
+            8400,
+            "contacts-gmail-sync",
+            Some("contacts-gsync@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonContactsSync", 841)
+            .await
+            .unwrap();
+
+        let captured = Mutex::new(Vec::new());
+        let token_response = json!({"access_token": "g-access"});
+        let page_one = json!({
+            "connections": [
+                {"resourceName": "people/c1", "names": [{"displayName": "One"}],
+                 "emailAddresses": [{"value": "one@gmail.com"}]}
+            ],
+            "nextPageToken": "T 1"
+        });
+        let page_two = json!({
+            "connections": [
+                {"resourceName": "people/c2", "names": [{"displayName": "Two"}],
+                 "emailAddresses": [{"value": "two@gmail.com"}]}
+            ]
+        });
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let captured = &captured;
+            let token_response = token_response.clone();
+            let page_one = page_one.clone();
+            let page_two = page_two.clone();
+            async move {
+                captured.lock().unwrap().push(request.clone());
+                if request.url.contains("accounts.google.com/o/oauth2/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else if request.url.contains("pageToken=") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: page_two,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: page_one,
+                    })
+                }
+            }
+        };
+
+        let response = contacts::native_json_contacts_sync_with_fetcher(
+            &state,
+            "JsonContactsSync",
+            &json!({}),
+            &session,
+            &fetcher,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["count"], 2);
+        assert_eq!(body["Result"]["email"], "user@gmail.com");
+
+        let summaries = fm_user::address_book::list_contact_summaries(&pool, 8400, 0, 100)
+            .await
+            .unwrap();
+        let mut uids: Vec<&str> = summaries.iter().map(|s| s.uid.as_str()).collect();
+        uids.sort();
+        assert_eq!(uids, vec!["gmail:people/c1", "gmail:people/c2"]);
+
+        let requests = captured.into_inner().unwrap();
+        assert!(requests[1].url.starts_with(
+            "https://people.googleapis.com/v1/people/me/connections?pageSize=200&personFields=names,emailAddresses,phoneNumbers,addresses,organizations,birthdays"
+        ));
+        // form_urlencoded encodes the space as `+`, matching PHP's
+        // http_build_query on the page token.
+        assert!(requests[2].url.contains("pageToken=T+1"));
+        // The Gmail token request sends no scope (PHP parity).
+        assert!(!requests[0]
+            .form_body
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|(key, _)| key == "scope"));
+    }
+
+    #[tokio::test]
+    async fn contacts_sync_rejects_non_oauth_accounts_with_php_message() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8500,
+            "contacts-sync-imap",
+            Some("contacts-sync-imap@example.com"),
+        )
+        .await;
+        create_mail_account_tables(&pool).await;
+        seed_mail_account(&pool, 851, 8500, "Primary", true).await;
+        let key = [33_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = credential_session(
+            8500,
+            "contacts-sync-imap",
+            Some("contacts-sync-imap@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonContactsSync", 851)
+            .await
+            .unwrap();
+
+        let response = contacts::native_json_contacts_sync_with_fetcher(
+            &state,
+            "JsonContactsSync",
+            &json!({}),
+            &session,
+            &|_request| async {
+                Err(fm_core::FrickmailError::Upstream(
+                    "unexpected request".to_string(),
+                ))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        // PHP contacts-sync reports the account email, unlike the calendar.
+        assert_eq!(
+            body["Result"]["error"],
+            "Unknown provider for primary@example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn contacts_sync_rejects_offsite_graph_next_link() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8600,
+            "contacts-ssrf",
+            Some("contacts-ssrf@example.com"),
+        )
+        .await;
+        create_mail_account_tables(&pool).await;
+        seed_mail_account(&pool, 861, 8600, "Primary", true).await;
+        let key = [34_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_oauth_token(
+            &pool,
+            861,
+            "user@contoso.com",
+            "refresh-ssrf",
+            Some("contoso.onmicrosoft.com"),
+            &key,
+        )
+        .await;
+        let mut config = test_config(None);
+        config.oauth2.o365.client_id = Some("sync-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool));
+        let session = credential_session(
+            8600,
+            "contacts-ssrf",
+            Some("contacts-ssrf@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonContactsSync", 861)
+            .await
+            .unwrap();
+
+        let token_response = json!({"access_token": "ssrf-access"});
+        let malicious_page = json!({
+            "value": [],
+            "@odata.nextLink": "https://graph.microsoft.com.evil.com/me/contacts?$top=100"
+        });
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let token_response = token_response.clone();
+            let malicious_page = malicious_page.clone();
+            async move {
+                if request.url.contains("/oauth2/v2.0/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: malicious_page,
+                    })
+                }
+            }
+        };
+
+        let response = contacts::native_json_contacts_sync_with_fetcher(
+            &state,
+            "JsonContactsSync",
+            &json!({}),
+            &session,
+            &fetcher,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["error"], "Invalid Microsoft Graph next link");
+    }
+
+    #[tokio::test]
+    async fn contacts_sync_reports_php_http_error_format() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8700,
+            "contacts-httperr",
+            Some("contacts-httperr@example.com"),
+        )
+        .await;
+        create_mail_account_tables(&pool).await;
+        seed_mail_account(&pool, 871, 8700, "Primary", true).await;
+        let key = [35_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_oauth_token(
+            &pool,
+            871,
+            "user@contoso.com",
+            "refresh-http",
+            Some("contoso.onmicrosoft.com"),
+            &key,
+        )
+        .await;
+        let mut config = test_config(None);
+        config.oauth2.o365.client_id = Some("sync-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool));
+        let session = credential_session(
+            8700,
+            "contacts-httperr",
+            Some("contacts-httperr@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonContactsSync", 871)
+            .await
+            .unwrap();
+
+        let token_response = json!({"access_token": "sync-access"});
+        let denied = json!({"error": {"code": "AccessDenied", "message": "nope"}});
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let token_response = token_response.clone();
+            let denied = denied.clone();
+            async move {
+                if request.url.contains("/oauth2/v2.0/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 403,
+                        json: denied,
+                    })
+                }
+            }
+        };
+
+        let response = contacts::native_json_contacts_sync_with_fetcher(
+            &state,
+            "JsonContactsSync",
+            &json!({}),
+            &session,
+            &fetcher,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(
+            body["Result"]["error"],
+            "HTTP 403 GET https://graph.microsoft.com/v1.0/me/contacts?$top=100: {\"error\":{\"code\":\"AccessDenied\",\"message\":\"nope\"}}"
+        );
     }
 
     #[tokio::test]

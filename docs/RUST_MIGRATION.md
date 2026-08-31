@@ -5,10 +5,50 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-31 07:25:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-31 15:30:00 CEST (UTC+02:00)
 
-The pending contacts slice makes `JsonAddContact` and
-`JsonDeduplicateContacts` native and introduces the native Personal Address
+The pending contacts-sync slice makes `JsonContactsSync` native, completing
+the contacts-sync plugin migration: the handler proxies Gmail People API
+(pageSize 200, fixed personFields, page tokens) and Microsoft Graph contacts
+($top=100 following `@odata.nextLink`) with the selected Frickmail mail
+account's encrypted OAuth refresh token, refreshing with the Graph contacts
+scope and upserting by `gmail:` / `o365:` provider UIDs into the native
+address book with the PHP save-count semantics (updates count). Provider
+field mapping (names, N order, emails, phones including Graph's string and
+array shapes, organizations, addresses, birthdays as jCard `date` values),
+person-skipping rules, PHP-style HTTP error messages, and Result envelopes
+match the PHP plugin; `@odata.nextLink` is followed only inside the Graph
+root (SSRF-safe; PHP followed it blindly), pages are capped at 50 with a
+60 s aggregate deadline, and the OAuth token-request builder now takes the
+provider scope so calendar (Calendars.ReadWrite) and contacts
+(Contacts.Read) refreshes stay exact. The provider-mismatch error uses
+PHP's "Unknown provider for {email}" wording for contacts. New unit tests
+cover the mappers and DB-backed flows (O365 pagination plus double-run
+upsert parity, Gmail page-token encoding, provider mismatch, offsite
+next-link rejection, PHP-format HTTP error envelope) were added; all
+outbound HTTP goes through the injectable fetcher.
+
+Independent senior review approved the slice; the review's two recommended
+pre-commit fixes (removing an unreachable duplicate error branch and adding
+regression tests for the next-link SSRF rejection and the PHP-format HTTP
+error string) were applied before staging. Docker-only validation passed:
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -D
+warnings`, and the full workspace suite (706 tests across 23 suites, zero
+failures). Production-image validation built `frickmail-rust:sync-test` at
+image ID
+`sha256:ef35a475d4bc313d1877255e19cefa841addfd6d1d063bb5468da50bc472fd45`;
+a read-only container started without a database, `/health` returned `ok`,
+and the legacy `/?/Json/` route shape dispatched `JsonContactsSync`
+natively (standard unauthenticated envelope instead of the 501
+compatibility fallback), with clean logs and no restarts.
+
+## Prior Snapshot — 2026-08-31 07:25:00 CEST (UTC+02:00)
+
+The contacts slice (published and CI-verified as `eb557a0b3` with
+`rust-ci` runs `33389856713` and `33389862089`; its first SHA
+`5f38fe7a6` failed on a clippy needless-borrow and was corrected) made
+`JsonAddContact` and
+`JsonDeduplicateContacts` native and introduced the native Personal Address
 Book storage: a new `fm-user::address_book` module creates and shares the
 legacy PHP `rainloop_ab_contacts` / `rainloop_ab_properties` schema (jCard
 blob under `prop_type = 251`, flattened typed properties, lowercased search

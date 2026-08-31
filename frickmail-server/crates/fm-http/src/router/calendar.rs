@@ -86,6 +86,11 @@ pub struct CalendarAccountContext {
     pub tenant: String,
     pub client_id: String,
     pub client_secret: Option<String>,
+    /// Email of the resolved mail account (used by the contacts sync
+    /// response, mirroring the PHP plugin's `$oAccount->Email()`).
+    pub email: String,
+    /// Frickmail user id owning the resolved mail account.
+    pub user_id: i64,
 }
 
 pub type CalendarFetchError = FrickmailError;
@@ -221,14 +226,17 @@ fn calendar_event_target(payload: &Value, save_mode: bool) -> (String, String) {
 /// the PHP plugin's token calls (Gmail sends no scope; Graph sends the
 /// calendar scope plus `offline_access`). Empty client secrets are omitted
 /// like the PHP OAuth2 client with an empty secret.
-fn calendar_token_request(context: &CalendarAccountContext) -> CalendarHttpRequest {
+pub(crate) fn calendar_token_request(
+    context: &CalendarAccountContext,
+    o365_scope: &str,
+) -> CalendarHttpRequest {
     let mut form = vec![
         ("client_id".to_string(), context.client_id.clone()),
         ("refresh_token".to_string(), context.refresh_token.clone()),
         ("grant_type".to_string(), "refresh_token".to_string()),
     ];
     if context.provider == "o365" {
-        form.push(("scope".to_string(), O365_CALENDAR_SCOPES.to_string()));
+        form.push(("scope".to_string(), o365_scope.to_string()));
     }
     if let Some(secret) = context
         .client_secret
@@ -256,7 +264,7 @@ fn calendar_token_request(context: &CalendarAccountContext) -> CalendarHttpReque
 
 /// Extracts the access token from a token-endpoint response, mirroring the
 /// PHP `refreshToken` error message on failure.
-fn calendar_access_token(response: &CalendarHttpResponse) -> Result<String, String> {
+pub(crate) fn calendar_access_token(response: &CalendarHttpResponse) -> Result<String, String> {
     if response.status == 200 {
         if let Some(token) = response
             .json
@@ -291,13 +299,17 @@ fn calendar_result_envelope(original_action: &str, result: Value) -> axum::respo
     )
 }
 
-/// Resolves the OAuth2 calendar context of the explicit or selected mail
-/// account (provider, decrypted refresh token, and provider credentials).
-async fn calendar_account_context(
+/// Resolves the OAuth2 context of the explicit or selected mail account
+/// (provider, decrypted refresh token, and provider credentials). The
+/// feature label selects the provider-mismatch error wording: the calendar
+/// hooks use the PHP plugin's message, the contacts sync uses PHP's
+/// "Unknown provider for {email}".
+pub(crate) async fn calendar_account_context(
     state: &AppState,
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    feature: &str,
 ) -> Result<CalendarAccountContext, axum::response::Response> {
     let Some(user) = (match load_session_user(state, original_action, session).await {
         Ok(user) => user,
@@ -335,10 +347,12 @@ async fn calendar_account_context(
         "gmail" => "gmail",
         "o365" => "o365",
         _ => {
-            return Err(calendar_error_envelope(
-                original_action,
-                "Calendar requires a Gmail or Office 365 account",
-            ));
+            let message = if feature == "Contacts" {
+                format!("Unknown provider for {}", account.email)
+            } else {
+                "Calendar requires a Gmail or Office 365 account".to_string()
+            };
+            return Err(calendar_error_envelope(original_action, &message));
         }
     };
     let Some(blob) = account.encrypted_oauth_refresh_token.as_deref() else {
@@ -410,19 +424,22 @@ async fn calendar_account_context(
         tenant,
         client_id,
         client_secret,
+        email: account.email,
+        user_id: user.user_id,
     })
 }
 
 /// Refreshes the provider access token through the fetcher.
-async fn calendar_bearer_token<F, Fut>(
+pub(crate) async fn calendar_bearer_token<F, Fut>(
     context: &CalendarAccountContext,
     fetcher: &F,
+    o365_scope: &str,
 ) -> Result<String, String>
 where
     F: Fn(CalendarHttpRequest) -> Fut,
     Fut: Future<Output = Result<CalendarHttpResponse, CalendarFetchError>>,
 {
-    let response = fetcher(calendar_token_request(context))
+    let response = fetcher(calendar_token_request(context, o365_scope))
         .await
         .map_err(|err| format!("refresh_token exchange failed: {}", err.public_message()))?;
     calendar_access_token(&response)
@@ -834,11 +851,19 @@ where
     F: Fn(CalendarHttpRequest) -> Fut,
     Fut: Future<Output = Result<CalendarHttpResponse, CalendarFetchError>>,
 {
-    let context = match calendar_account_context(state, original_action, payload, session).await {
+    let context = match calendar_account_context(
+        state,
+        original_action,
+        payload,
+        session,
+        "Calendar",
+    )
+    .await
+    {
         Ok(context) => context,
         Err(response) => return response,
     };
-    let bearer = match calendar_bearer_token(&context, fetcher).await {
+    let bearer = match calendar_bearer_token(&context, fetcher, O365_CALENDAR_SCOPES).await {
         Ok(token) => token,
         Err(message) => return calendar_error_envelope(original_action, &message),
     };
@@ -917,11 +942,19 @@ where
     F: Fn(CalendarHttpRequest) -> Fut,
     Fut: Future<Output = Result<CalendarHttpResponse, CalendarFetchError>>,
 {
-    let context = match calendar_account_context(state, original_action, payload, session).await {
+    let context = match calendar_account_context(
+        state,
+        original_action,
+        payload,
+        session,
+        "Calendar",
+    )
+    .await
+    {
         Ok(context) => context,
         Err(response) => return response,
     };
-    let bearer = match calendar_bearer_token(&context, fetcher).await {
+    let bearer = match calendar_bearer_token(&context, fetcher, O365_CALENDAR_SCOPES).await {
         Ok(token) => token,
         Err(message) => return calendar_error_envelope(original_action, &message),
     };
@@ -1043,7 +1076,15 @@ where
     F: Fn(CalendarHttpRequest) -> Fut,
     Fut: Future<Output = Result<CalendarHttpResponse, CalendarFetchError>>,
 {
-    let context = match calendar_account_context(state, original_action, payload, session).await {
+    let context = match calendar_account_context(
+        state,
+        original_action,
+        payload,
+        session,
+        "Calendar",
+    )
+    .await
+    {
         Ok(context) => context,
         Err(response) => return response,
     };
@@ -1057,7 +1098,7 @@ where
     if title.is_empty() || start.is_empty() || end.is_empty() {
         return calendar_error_envelope(original_action, "title/start/end required");
     }
-    let bearer = match calendar_bearer_token(&context, fetcher).await {
+    let bearer = match calendar_bearer_token(&context, fetcher, O365_CALENDAR_SCOPES).await {
         Ok(token) => token,
         Err(message) => return calendar_error_envelope(original_action, &message),
     };
@@ -1124,11 +1165,19 @@ where
     F: Fn(CalendarHttpRequest) -> Fut,
     Fut: Future<Output = Result<CalendarHttpResponse, CalendarFetchError>>,
 {
-    let context = match calendar_account_context(state, original_action, payload, session).await {
+    let context = match calendar_account_context(
+        state,
+        original_action,
+        payload,
+        session,
+        "Calendar",
+    )
+    .await
+    {
         Ok(context) => context,
         Err(response) => return response,
     };
-    let bearer = match calendar_bearer_token(&context, fetcher).await {
+    let bearer = match calendar_bearer_token(&context, fetcher, O365_CALENDAR_SCOPES).await {
         Ok(token) => token,
         Err(message) => return calendar_error_envelope(original_action, &message),
     };
@@ -1269,8 +1318,10 @@ mod tests {
             tenant: "common".to_string(),
             client_id: "id-1".to_string(),
             client_secret: Some("   ".to_string()),
+            email: "user@example.com".to_string(),
+            user_id: 1,
         };
-        let request = calendar_token_request(&context);
+        let request = calendar_token_request(&context, O365_CALENDAR_SCOPES);
         assert_eq!(request.url, "https://accounts.google.com/o/oauth2/token");
         let form = request.form_body.unwrap();
         assert!(!form.iter().any(|(key, _)| key == "scope"));
@@ -1286,8 +1337,10 @@ mod tests {
             tenant: "contoso.onmicrosoft.com".to_string(),
             client_id: "id-2".to_string(),
             client_secret: Some("secret-2".to_string()),
+            email: "user@example.com".to_string(),
+            user_id: 1,
         };
-        let request = calendar_token_request(&context);
+        let request = calendar_token_request(&context, O365_CALENDAR_SCOPES);
         assert_eq!(
             request.url,
             "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token"
@@ -1547,8 +1600,10 @@ mod tests {
             tenant: "contoso.onmicrosoft.com".to_string(),
             client_id: "id-2".to_string(),
             client_secret: Some("client-secret-value".to_string()),
+            email: "user@example.com".to_string(),
+            user_id: 1,
         };
-        let request = calendar_token_request(&context);
+        let request = calendar_token_request(&context, O365_CALENDAR_SCOPES);
         let rendered = format!("{request:?}");
         assert!(!rendered.contains("refresh-secret-value"));
         assert!(!rendered.contains("client-secret-value"));

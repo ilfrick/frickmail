@@ -510,18 +510,33 @@ pub async fn list_contact_summaries(
 /// creates, stored as the `JCARD` property value.
 ///
 /// `properties` yields `(name, values)` pairs in insertion order with
-/// lowercase names and empty parameter objects, like the PHP writer.
+/// lowercase names and empty parameter objects, like the PHP writer. All
+/// values use the jCard `text` value type.
 pub fn build_jcard<'a, I, V>(properties: I) -> String
 where
     I: IntoIterator<Item = (&'a str, V)>,
     V: IntoIterator<Item = &'a str>,
 {
+    build_jcard_typed(
+        properties
+            .into_iter()
+            .map(|(name, values)| (name, "text", values)),
+    )
+}
+
+/// Like [`build_jcard`] with an explicit jCard value type per property
+/// (`text`, `date`, ...), matching Sabre's per-property `getValueType()`.
+pub fn build_jcard_typed<'a, I, V>(properties: I) -> String
+where
+    I: IntoIterator<Item = (&'a str, &'a str, V)>,
+    V: IntoIterator<Item = &'a str>,
+{
     let mut json = String::from("[\"vcard\",[");
-    for (index, (name, values)) in properties.into_iter().enumerate() {
+    for (index, (name, value_type, values)) in properties.into_iter().enumerate() {
         if index > 0 {
             json.push(',');
         }
-        json.push_str(&format!("[\"{name}\",{{}},\"text\""));
+        json.push_str(&format!("[\"{name}\",{{}},\"{value_type}\""));
         for value in values {
             json.push(',');
             json.push_str(&serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string()));
