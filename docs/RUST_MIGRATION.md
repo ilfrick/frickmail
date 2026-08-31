@@ -42,6 +42,16 @@ and the legacy `/?/Json/` route shape dispatched `JsonContactsSync`
 natively (standard unauthenticated envelope instead of the 501
 compatibility fallback), with clean logs and no restarts.
 
+Implementation commit `02aa23845348afcfafc6d9ab844495731f230221` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`33400113908`](https://github.com/ilfrick/frickmail/actions/runs/33400113908)
+and `rust-full-migration` run
+[`33400127955`](https://github.com/ilfrick/frickmail/actions/runs/33400127955).
+This closing documentation-only amendment intentionally matches no
+`rust-ci` path filter and is expected to produce no GitHub Actions run.
+
 ## Prior Snapshot — 2026-08-31 07:25:00 CEST (UTC+02:00)
 
 The contacts slice (published and CI-verified as `eb557a0b3` with
