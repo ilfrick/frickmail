@@ -37,7 +37,23 @@ events loop, and a credential-bearing `Debug` derive), all of which were
 fixed and verified by the closing re-review. Docker-only validation passed:
 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -D
 warnings`, and the full workspace suite (687 tests across 22 suites, zero
-failures).
+failures). Production-image validation built `frickmail-rust:calendar-test`
+at image ID
+`sha256:d36d41bdb52689b2f16d2c20bc29c0c12128ac1c6983b1b304da44f3e853b3b6`;
+a read-only container started without a database, `/health` returned `ok`,
+and the legacy `/?/Json/` route shape dispatched `JsonCalendarList` natively
+(returning the standard unauthenticated envelope instead of the 501
+compatibility fallback), with clean logs and no restarts.
+
+Implementation commit `e8201bd897558b2cb841083690dc4e6508cffca6` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`33343565421`](https://github.com/ilfrick/frickmail/actions/runs/33343565421)
+and `rust-full-migration` run
+[`33343568730`](https://github.com/ilfrick/frickmail/actions/runs/33343568730).
+This closing documentation-only amendment intentionally matches no
+`rust-ci` path filter and is expected to produce no GitHub Actions run.
 
 ## Prior Snapshot — 2026-08-30 15:05:00 CEST (UTC+02:00)
 
