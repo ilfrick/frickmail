@@ -41,6 +41,27 @@ save/update/dedupe/delete flow against live PostgreSQL, MySQL, and SQLite.
 Docker-only validation passed: `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets -D warnings`, and the full
 workspace suite (698 tests across 23 suites, zero failures).
+Production-image validation built `frickmail-rust:contacts-test` at image
+ID
+`sha256:b22367ac0b7a56dc33e1892584b0fe6f9d10a83a537709c5d92fc3bc9fc2ae0f`;
+a read-only container started without a database, `/health` returned `ok`,
+and the legacy `/?/Json/` route shape dispatched `JsonAddContact`
+natively (standard unauthenticated envelope instead of the 501
+compatibility fallback), with clean logs and no restarts.
+
+The first publication SHA `5f38fe7a6c69452a46bbecc32155bb3800cd3ec3`
+failed the exact-SHA GitHub `rust-ci` runs (`33389283336` on `master`,
+`33389289969` on `rust-full-migration`) on a clippy `needless_borrow`
+denied by `-D warnings` in the new compatibility test — a leftover the
+local lint run predated the final test edit. The focused correction
+(`eb557a0b30cca5a1b457638672b2734612ecd45f`) removed the borrow and was
+published to all four tips; exact-SHA GitHub `rust-ci` passed for it on
+`master` run
+[`33389856713`](https://github.com/ilfrick/frickmail/actions/runs/33389856713)
+and `rust-full-migration` run
+[`33389862089`](https://github.com/ilfrick/frickmail/actions/runs/33389862089).
+This closing documentation-only amendment intentionally matches no
+`rust-ci` path filter and is expected to produce no GitHub Actions run.
 
 ## Prior Snapshot — 2026-08-30 21:10:00 CEST (UTC+02:00)
 
