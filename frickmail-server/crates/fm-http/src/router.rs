@@ -1,4 +1,5 @@
 pub mod calendar;
+pub mod contacts;
 
 use std::{
     borrow::Cow,
@@ -1873,6 +1874,13 @@ async fn native_compat_response(
         ),
         "JsonCalendarDelete" => Some(
             calendar::native_frickmail_calendar_delete(state, original_action, payload, session)
+                .await,
+        ),
+        "JsonAddContact" => {
+            Some(contacts::native_json_add_contact(state, original_action, payload, session).await)
+        }
+        "JsonDeduplicateContacts" => Some(
+            contacts::native_json_deduplicate_contacts(state, original_action, payload, session)
                 .await,
         ),
         "FrickmailCheckNewMail" => {
@@ -21371,6 +21379,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::calendar;
+    use super::contacts;
     use super::{legacy_json_action, SqlxUserRepository, JSON_BODY_LIMIT_BYTES};
     use crate::{build_router, AppState};
 
@@ -35107,6 +35116,214 @@ Subject: Empty body metadata\r\n\r\n"
             requests[1].url,
             "https://graph.microsoft.com/v1.0/me/events/AAMkGONE"
         );
+    }
+
+    #[tokio::test]
+    async fn contacts_add_contact_stores_legacy_address_book_rows() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8000,
+            "contacts-add",
+            Some("contacts-add@example.com"),
+        )
+        .await;
+        let key = [21_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session =
+            credential_session(8000, "contacts-add", Some("contacts-add@example.com"), &key).await;
+
+        let response = contacts::native_json_add_contact(
+            &state,
+            "JsonAddContact",
+            &json!({"email": "ada@example.com", "name": "Ada Lovelace"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["email"], "ada@example.com");
+        assert_eq!(body["Result"]["name"], "Ada Lovelace");
+
+        let summaries = fm_user::address_book::list_contact_summaries(&pool, 8000, 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].display, "Ada Lovelace");
+        assert!(summaries[0].uid.starts_with("manual:"));
+        assert_eq!(summaries[0].uid.len(), "manual:".len() + 32);
+
+        let contact_id = summaries[0].id;
+        let rows = sqlx::query(
+            "SELECT prop_type, prop_type_str, prop_value, prop_value_lower \
+             FROM rainloop_ab_properties WHERE id_user = 8000 AND id_contact = ? \
+             ORDER BY id_prop",
+        )
+        .bind(contact_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let types: Vec<i64> = rows
+            .iter()
+            .map(|row| row.try_get::<i64, _>("prop_type").unwrap())
+            .collect();
+        // PHP VCardToProperties order: JCARD blob, FULLNAME, N parts, EMAIL.
+        assert_eq!(
+            types,
+            vec![
+                fm_user::address_book::property_type::JCARD,
+                fm_user::address_book::property_type::FULLNAME,
+                fm_user::address_book::property_type::LAST_NAME,
+                fm_user::address_book::property_type::FIRST_NAME,
+                fm_user::address_book::property_type::EMAIL,
+            ]
+        );
+        let jcard: String = rows
+            .iter()
+            .find(|row| {
+                row.try_get::<i64, _>("prop_type").unwrap()
+                    == fm_user::address_book::property_type::JCARD
+            })
+            .unwrap()
+            .try_get("prop_value")
+            .unwrap();
+        assert!(jcard.starts_with("[\"vcard\",["));
+        assert!(jcard.contains("\"email\",{},\"text\",\"ada@example.com\""));
+        assert!(jcard.contains("\"n\",{},\"text\",\"Lovelace\",\"Ada\""));
+        let email_lower: String = rows
+            .iter()
+            .find(|row| {
+                row.try_get::<i64, _>("prop_type").unwrap()
+                    == fm_user::address_book::property_type::EMAIL
+            })
+            .unwrap()
+            .try_get("prop_value_lower")
+            .unwrap();
+        assert_eq!(email_lower, "ada@example.com");
+    }
+
+    #[tokio::test]
+    async fn contacts_add_contact_rejects_invalid_email() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8100,
+            "contacts-invalid",
+            Some("contacts-invalid@example.com"),
+        )
+        .await;
+        let key = [22_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = credential_session(
+            8100,
+            "contacts-invalid",
+            Some("contacts-invalid@example.com"),
+            &key,
+        )
+        .await;
+
+        for payload in [
+            json!({"email": "not-an-email", "name": "X"}),
+            json!({"email": ""}),
+            json!({}),
+        ] {
+            let response =
+                contacts::native_json_add_contact(&state, "JsonAddContact", &payload, &session)
+                    .await;
+            let body = read_json(response).await;
+            assert_eq!(body["Result"]["error"], "invalid email address");
+        }
+    }
+
+    #[tokio::test]
+    async fn contacts_add_contact_requires_authentication() {
+        let pool = user_db_pool().await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = test_session();
+
+        let response = contacts::native_json_add_contact(
+            &state,
+            "JsonAddContact",
+            &json!({"email": "ada@example.com"}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["error"], "not authenticated");
+    }
+
+    #[tokio::test]
+    async fn contacts_deduplicate_keeps_lowest_id_per_uid() {
+        let pool = user_db_pool().await;
+        seed_user(
+            &pool,
+            8200,
+            "contacts-dedupe",
+            Some("contacts-dedupe@example.com"),
+        )
+        .await;
+        let key = [23_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = credential_session(
+            8200,
+            "contacts-dedupe",
+            Some("contacts-dedupe@example.com"),
+            &key,
+        )
+        .await;
+
+        // Historical duplicates sharing one UID, plus unique contacts.
+        fm_user::address_book::ensure_address_book_schema(&pool)
+            .await
+            .unwrap();
+        let mk = |uid: &str, display: &str| fm_user::address_book::AddressBookContact {
+            id: 0,
+            uid: uid.to_string(),
+            display: display.to_string(),
+            properties: vec![fm_user::address_book::AddressBookProperty::new(
+                fm_user::address_book::property_type::FULLNAME,
+                display,
+            )],
+        };
+        fm_user::address_book::save_contact(&pool, 8200, &mk("shared", "First"))
+            .await
+            .unwrap();
+        fm_user::address_book::save_contact(&pool, 8200, &mk("shared", "Second"))
+            .await
+            .unwrap();
+        fm_user::address_book::save_contact(&pool, 8200, &mk("unique", "Third"))
+            .await
+            .unwrap();
+        // Empty-UID contacts deduplicate by display name.
+        fm_user::address_book::save_contact(&pool, 8200, &mk("", "NoUid"))
+            .await
+            .unwrap();
+        fm_user::address_book::save_contact(&pool, 8200, &mk("", "NoUid"))
+            .await
+            .unwrap();
+        fm_user::address_book::save_contact(&pool, 8200, &mk("", "Other"))
+            .await
+            .unwrap();
+
+        let response = contacts::native_json_deduplicate_contacts(
+            &state,
+            "JsonDeduplicateContacts",
+            &json!({}),
+            &session,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["removed"], 2);
+
+        let survivors = fm_user::address_book::list_contact_summaries(&pool, 8200, 0, 100)
+            .await
+            .unwrap();
+        let mut displays: Vec<&str> = survivors.iter().map(|s| s.display.as_str()).collect();
+        displays.sort();
+        assert_eq!(displays, vec!["First", "NoUid", "Other", "Third"]);
     }
 
     #[tokio::test]

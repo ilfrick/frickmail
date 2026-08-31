@@ -23,6 +23,9 @@ Block conditions:
 4. Rust code that does not compile in the Docker development container.
 5. Endpoint migrations without API shape tests once endpoint behavior is ported.
 6. Unreviewed database schema changes that can destroy existing data.
+7. Committed, logged, or otherwise shared API keys, tokens, passwords, or other
+   secrets — including real credentials in test fixtures, documentation, or
+   review artifacts.
 
 Expected output:
 

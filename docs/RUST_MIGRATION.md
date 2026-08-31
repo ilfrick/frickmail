@@ -5,7 +5,44 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-30 21:10:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-31 07:25:00 CEST (UTC+02:00)
+
+The pending contacts slice makes `JsonAddContact` and
+`JsonDeduplicateContacts` native and introduces the native Personal Address
+Book storage: a new `fm-user::address_book` module creates and shares the
+legacy PHP `rainloop_ab_contacts` / `rainloop_ab_properties` schema (jCard
+blob under `prop_type = 251`, flattened typed properties, lowercased search
+values, email usage-frequency preservation on update, and the soft-delete
+`deleted = 1` semantics) so the PHP compatibility runtime reads and writes
+the same rows during the strangler phase. `JsonAddContact` reproduces the
+PHP plugin's validation, `manual:` UID format (32 random hex characters
+instead of `md5(email . microtime)`), name-to-N splitting, property write
+order, and response envelopes; `JsonDeduplicateContacts` reproduces the
+paged lowest-id-kept deduplication grouped by UID or display name. The
+"address book is not active" errors are intentionally absent (native
+storage is always available). `JsonContactsSync` (Gmail People API /
+Microsoft Graph provider fetching) remains a compatibility fallback for the
+follow-up provider-sync slice. The Postgres schema migration runs under a
+dedicated advisory lock, guarded by a cheap table probe so request handlers
+can call it on every request.
+
+Independent senior review approved the slice after one remediation round.
+The first round blocked on two findings — PostgreSQL `?` placeholders
+(sqlx's `any` driver passes SQL verbatim, so Postgres requires numbered
+`$n` placeholders) and email usage frequencies read after the property
+delete (always empty, contradicting PHP's `getContactFreq` order) — plus
+minor findings (non-transactional `save_contact`, a wrong JCARD-order
+parity claim, dead backend code, and unconditional per-request DDL). The
+remediation fixes all of them: backend-aware placeholders throughout,
+transactional contact writes, frequency reads before the delete, JCARD
+written first like PHP, a probe-guarded schema check, and a new
+`fm-user/tests/address_book_compatibility.rs` suite running the full
+save/update/dedupe/delete flow against live PostgreSQL, MySQL, and SQLite.
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, and the full
+workspace suite (698 tests across 23 suites, zero failures).
+
+## Prior Snapshot — 2026-08-30 21:10:00 CEST (UTC+02:00)
 
 The pending calendar slice makes `JsonCalendarList`, `JsonCalendarEvents`,
 `JsonCalendarSave`, and `JsonCalendarDelete` native in a new
@@ -388,6 +425,15 @@ complete. Publication is not complete until the applicable GitHub Actions run is
 polled to a terminal result. On failure, retrieve the failing job logs, reproduce
 or diagnose locally, apply a focused correction, revalidate, publish a new SHA,
 and repeat CI monitoring until success or an operator decision is required.
+
+**Secrets policy (unconditional):** never commit, or otherwise share, API keys
+or other secrets — tokens, passwords, client secrets, private key material, or
+real user data. Credentials come exclusively from the deployment environment
+(`.env`, Docker secrets, `FRICKMAIL__*` variables, `~/.netrc` for push
+authentication). They must never be copied into commits, documentation, review
+reports, CI logs, or error messages; test fixtures use synthetic values only;
+and secret-bearing paths (`.env`, `frickmail-data/`, `postgres/`, and similar)
+must never enter the repository or any shared artifact.
 
 ### Still Missing Before The Final Rust-Only Goal
 

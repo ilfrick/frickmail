@@ -73,6 +73,8 @@ fn smime_crypto_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
     SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(SMIME_CRYPTO_CONCURRENCY)))
 }
 
+pub mod address_book;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrickmailUser {
     pub id: i64,

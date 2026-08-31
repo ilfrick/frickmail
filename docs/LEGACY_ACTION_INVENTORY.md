@@ -193,7 +193,7 @@ features unless noted elsewhere.
 | Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` (native settings CRUD under the legacy `Plugins["Search Filters"]` namespace; invalid add/edit and empty renamed queries are rejected as an intentional safety boundary, while login-time IMAP application remains pending) |
 | Kolab | `KolabFolder` |
 | Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` (native, operator-gated bounded legacy private-data archive/restore; requires `FRICKMAIL__ADMIN__TOKEN_HASH` and `FRICKMAIL__PRIVATE_DATA_DIR`, excludes cache and symlinks, and enforces entry/size/path/symlink limits) |
-| Contacts sync | `JsonContactsSync`, `JsonDeduplicateContacts`, `JsonAddContact` |
+| Contacts sync | `JsonAddContact` and `JsonDeduplicateContacts` — native. A new `fm-user` address-book module shares the legacy PHP `rainloop_ab_contacts` / `rainloop_ab_properties` schema (jCard blob under `prop_type = 251` plus flattened typed properties and lowercased search values), so the PHP compatibility runtime reads the same rows. Manual contact UIDs use `manual:` plus 32 random hex characters; the "address book is not active" errors are intentionally absent because the native PAB storage is always available. `JsonContactsSync` (Gmail People API / Microsoft Graph fetching) remains a compatibility fallback pending its provider-sync slice. |
 | Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` |
 | Change password | `ChangePassword` (partial-native) |
 | Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` |
