@@ -1,3 +1,5 @@
+pub mod calendar;
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -1857,6 +1859,22 @@ async fn native_compat_response(
         "FrickmailGraphDelete" => {
             Some(native_frickmail_graph_delete(state, original_action, payload, session).await)
         }
+        "JsonCalendarList" => Some(
+            calendar::native_frickmail_calendar_list(state, original_action, payload, session)
+                .await,
+        ),
+        "JsonCalendarEvents" => Some(
+            calendar::native_frickmail_calendar_events(state, original_action, payload, session)
+                .await,
+        ),
+        "JsonCalendarSave" => Some(
+            calendar::native_frickmail_calendar_save(state, original_action, payload, session)
+                .await,
+        ),
+        "JsonCalendarDelete" => Some(
+            calendar::native_frickmail_calendar_delete(state, original_action, payload, session)
+                .await,
+        ),
         "FrickmailCheckNewMail" => {
             Some(native_frickmail_check_new_mail(state, original_action, payload, session).await)
         }
@@ -21352,6 +21370,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tower::ServiceExt;
 
+    use super::calendar;
     use super::{legacy_json_action, SqlxUserRepository, JSON_BODY_LIMIT_BYTES};
     use crate::{build_router, AppState};
 
@@ -34618,6 +34637,476 @@ Subject: Empty body metadata\r\n\r\n"
                 .and_then(|row| row.try_get("settings"))
                 .unwrap();
         serde_json::from_str(&settings).unwrap()
+    }
+
+    #[tokio::test]
+    async fn calendar_list_o365_proxies_graph_with_account_token() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            7000,
+            "calendar-o365",
+            Some("calendar-o365@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 701, 7000, "Primary", true).await;
+        let key = [11_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_oauth_token(
+            &pool,
+            701,
+            "user@contoso.com",
+            "refresh-xyz",
+            Some("contoso.onmicrosoft.com"),
+            &key,
+        )
+        .await;
+        let mut config = test_config(None);
+        config.oauth2.o365.client_id = Some("cal-client".to_string());
+        config.oauth2.o365.client_secret = Some("cal-secret".to_string());
+        let state = AppState::with_db_pool(config, Some(pool));
+        let session = credential_session(
+            7000,
+            "calendar-o365",
+            Some("calendar-o365@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonCalendarList", 701)
+            .await
+            .unwrap();
+
+        let captured = Mutex::new(Vec::new());
+        let token_response = json!({"access_token": "cal-access"});
+        let list_response = json!({"value": [
+            {"id": "AAMkAG", "name": "Calendar", "isDefaultCalendar": true},
+            {"id": "AAMkAH", "name": "Birthdays"}
+        ]});
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let captured = &captured;
+            let token_response = token_response.clone();
+            let list_response = list_response.clone();
+            async move {
+                captured.lock().unwrap().push(request.clone());
+                if request.url.contains("/oauth2/v2.0/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: list_response,
+                    })
+                }
+            }
+        };
+
+        let response = calendar::native_frickmail_calendar_list_with_fetcher(
+            &state,
+            "JsonCalendarList",
+            &json!({}),
+            &session,
+            &fetcher,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["provider"], "o365");
+        assert_eq!(body["Result"]["calendars"].as_array().unwrap().len(), 2);
+        assert_eq!(body["Result"]["calendars"][0]["id"], "AAMkAG");
+        assert_eq!(body["Result"]["calendars"][0]["primary"], true);
+        assert_eq!(body["Result"]["calendars"][1]["color"], "#4a90e2");
+
+        let requests = captured.into_inner().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].url,
+            "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token"
+        );
+        assert!(requests[0].form_body.as_ref().unwrap().contains(&(
+            "scope".to_string(),
+            "https://graph.microsoft.com/Calendars.ReadWrite offline_access".to_string()
+        )));
+        assert_eq!(
+            requests[1].url,
+            "https://graph.microsoft.com/v1.0/me/calendars?$top=50"
+        );
+        assert_eq!(requests[1].bearer.as_deref(), Some("cal-access"));
+    }
+
+    #[tokio::test]
+    async fn calendar_rejects_non_oauth_accounts_inside_result_error() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            7100,
+            "calendar-imap",
+            Some("calendar-imap@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 711, 7100, "Primary", true).await;
+        let key = [12_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = credential_session(
+            7100,
+            "calendar-imap",
+            Some("calendar-imap@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonCalendarList", 711)
+            .await
+            .unwrap();
+
+        let response = calendar::native_frickmail_calendar_list_with_fetcher(
+            &state,
+            "JsonCalendarList",
+            &json!({}),
+            &session,
+            &|_request| async {
+                Err(fm_core::FrickmailError::Upstream(
+                    "unexpected request".to_string(),
+                ))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(
+            body["Result"]["error"],
+            "Calendar requires a Gmail or Office 365 account"
+        );
+    }
+
+    #[tokio::test]
+    async fn calendar_requires_refresh_token() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            7200,
+            "calendar-notoken",
+            Some("calendar-notoken@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 721, 7200, "Primary", true).await;
+        let key = [13_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_email_and_type(&pool, 721, "user@gmail.com", "gmail").await;
+        let mut config = test_config(None);
+        config.oauth2.gmail.client_id = Some("cal-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool));
+        let session = credential_session(
+            7200,
+            "calendar-notoken",
+            Some("calendar-notoken@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonCalendarList", 721)
+            .await
+            .unwrap();
+
+        let response = calendar::native_frickmail_calendar_list_with_fetcher(
+            &state,
+            "JsonCalendarList",
+            &json!({}),
+            &session,
+            &|_request| async {
+                Err(fm_core::FrickmailError::Upstream(
+                    "unexpected request".to_string(),
+                ))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert!(body["Result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("No OAuth2 refresh token"));
+    }
+
+    #[tokio::test]
+    async fn calendar_events_gmail_merges_and_sorts_calendars() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            7300,
+            "calendar-gmail",
+            Some("calendar-gmail@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 731, 7300, "Primary", true).await;
+        let key = [14_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_email_and_type(&pool, 731, "user@gmail.com", "gmail").await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts SET encrypted_oauth_refresh_token = ? WHERE id = ?",
+        )
+        .bind(fm_user::encrypt_account_secret("gmail-refresh", &key).unwrap())
+        .bind(731_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config(None);
+        config.oauth2.gmail.client_id = Some("cal-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool));
+        let session = credential_session(
+            7300,
+            "calendar-gmail",
+            Some("calendar-gmail@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonCalendarEvents", 731)
+            .await
+            .unwrap();
+
+        let captured = Mutex::new(Vec::new());
+        let token_response = json!({"access_token": "g-access"});
+        let later_events = json!({"items": [
+            {"id": "ev-2", "summary": "Later", "start": {"dateTime": "2026-09-02T10:00:00Z"}, "end": {"dateTime": "2026-09-02T11:00:00Z"}}
+        ]});
+        let earlier_events = json!({"items": [
+            {"id": "ev-1", "summary": "Earlier", "start": {"date": "2026-09-01"}, "end": {"date": "2026-09-02"}}
+        ]});
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let captured = &captured;
+            let token_response = token_response.clone();
+            let later_events = later_events.clone();
+            let earlier_events = earlier_events.clone();
+            async move {
+                captured.lock().unwrap().push(request.clone());
+                if request.url.contains("accounts.google.com/o/oauth2/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else if request.url.contains("calendars/second") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: earlier_events,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: later_events,
+                    })
+                }
+            }
+        };
+
+        let response = calendar::native_frickmail_calendar_events_with_fetcher(
+            &state,
+            "JsonCalendarEvents",
+            &json!({"start": "2026-09-01T00:00:00Z", "end": "2026-09-30T23:59:59Z", "calendar_ids": "[\"primary\",\"second\"]"}),
+            &session,
+            &fetcher,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["provider"], "gmail");
+        let events = body["Result"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["id"], "second:ev-1");
+        assert_eq!(events[0]["allDay"], true);
+        assert_eq!(events[1]["id"], "primary:ev-2");
+
+        let requests = captured.into_inner().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[1].url,
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=2026-09-01T00%3A00%3A00Z&timeMax=2026-09-30T23%3A59%3A59Z&singleEvents=true&orderBy=startTime&maxResults=250"
+        );
+        assert!(requests[2]
+            .url
+            .starts_with("https://www.googleapis.com/calendar/v3/calendars/second/events?"));
+    }
+
+    #[tokio::test]
+    async fn calendar_save_validates_and_patches_raw_graph_id() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            7400,
+            "calendar-save",
+            Some("calendar-save@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 741, 7400, "Primary", true).await;
+        let key = [15_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_oauth_token(
+            &pool,
+            741,
+            "user@contoso.com",
+            "refresh-abc",
+            Some("contoso.onmicrosoft.com"),
+            &key,
+        )
+        .await;
+        let mut config = test_config(None);
+        config.oauth2.o365.client_id = Some("cal-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        let session = credential_session(
+            7400,
+            "calendar-save",
+            Some("calendar-save@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonCalendarSave", 741)
+            .await
+            .unwrap();
+
+        let response = calendar::native_frickmail_calendar_save_with_fetcher(
+            &state,
+            "JsonCalendarSave",
+            &json!({"title": "", "start": "S", "end": "E"}),
+            &session,
+            &|_request| async {
+                Err(fm_core::FrickmailError::Upstream(
+                    "unexpected request".to_string(),
+                ))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["error"], "title/start/end required");
+
+        let captured = Mutex::new(Vec::new());
+        let token_response = json!({"access_token": "cal-access"});
+        let saved = json!({"id": "AAMkNEW"});
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let captured = &captured;
+            let token_response = token_response.clone();
+            let saved = saved.clone();
+            async move {
+                captured.lock().unwrap().push(request.clone());
+                if request.url.contains("/oauth2/v2.0/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 201,
+                        json: saved,
+                    })
+                }
+            }
+        };
+
+        let response = calendar::native_frickmail_calendar_save_with_fetcher(
+            &state,
+            "JsonCalendarSave",
+            &json!({
+                "id": "primary:AAMkOLD",
+                "_raw_id": "AAMkOLD",
+                "_calendar": "primary",
+                "title": "Updated",
+                "start": "2026-09-05T09:00:00Z",
+                "end": "2026-09-05T10:00:00Z",
+                "description": "d",
+                "location": "l"
+            }),
+            &session,
+            &fetcher,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        assert_eq!(body["Result"]["id"], "AAMkNEW");
+        let requests = captured.into_inner().unwrap();
+        assert_eq!(requests.len(), 2);
+        // The Graph PATCH addresses the raw event id, not the composite id.
+        assert_eq!(
+            requests[1].url,
+            "https://graph.microsoft.com/v1.0/me/events/AAMkOLD"
+        );
+        assert_eq!(
+            requests[1].json_body.as_ref().unwrap()["subject"],
+            "Updated"
+        );
+    }
+
+    #[tokio::test]
+    async fn calendar_delete_tolerates_410_gone() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(
+            &pool,
+            7500,
+            "calendar-delete",
+            Some("calendar-delete@example.com"),
+        )
+        .await;
+        seed_mail_account(&pool, 751, 7500, "Primary", true).await;
+        let key = [16_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        set_mail_account_oauth_token(
+            &pool,
+            751,
+            "user@contoso.com",
+            "refresh-del",
+            Some("contoso.onmicrosoft.com"),
+            &key,
+        )
+        .await;
+        let mut config = test_config(None);
+        config.oauth2.o365.client_id = Some("cal-client".to_string());
+        let state = AppState::with_db_pool(config, Some(pool));
+        let session = credential_session(
+            7500,
+            "calendar-delete",
+            Some("calendar-delete@example.com"),
+            &key,
+        )
+        .await;
+        super::store_selected_mail_account(&session, "JsonCalendarDelete", 751)
+            .await
+            .unwrap();
+
+        let captured = Mutex::new(Vec::new());
+        let token_response = json!({"access_token": "cal-access"});
+        let fetcher = |request: calendar::CalendarHttpRequest| {
+            let captured = &captured;
+            let token_response = token_response.clone();
+            async move {
+                captured.lock().unwrap().push(request.clone());
+                if request.url.contains("/oauth2/v2.0/token") {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: token_response,
+                    })
+                } else {
+                    Ok(calendar::CalendarHttpResponse {
+                        status: 410,
+                        json: Value::Null,
+                    })
+                }
+            }
+        };
+
+        let response = calendar::native_frickmail_calendar_delete_with_fetcher(
+            &state,
+            "JsonCalendarDelete",
+            &json!({"id": "primary:AAMkGONE", "_raw_id": "", "_calendar": ""}),
+            &session,
+            &fetcher,
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Result"]["ok"], true);
+        let requests = captured.into_inner().unwrap();
+        assert_eq!(
+            requests[1].url,
+            "https://graph.microsoft.com/v1.0/me/events/AAMkGONE"
+        );
     }
 
     #[tokio::test]

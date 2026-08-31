@@ -197,7 +197,7 @@ features unless noted elsewhere.
 | Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` |
 | Change password | `ChangePassword` (partial-native) |
 | Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` |
-| Calendar | `JsonCalendarEvents`, `JsonCalendarList`, `JsonCalendarSave`, `JsonCalendarDelete` |
+| Calendar | `JsonCalendarEvents`, `JsonCalendarList`, `JsonCalendarSave`, `JsonCalendarDelete` — native. Proxies Google Calendar / Microsoft Graph with the selected Frickmail account's encrypted OAuth refresh token (`account_type` selects the provider instead of PHP's domain-list detection; explicit `account_id` or the selected-account session replaces the PHP main-account lookup). Gmail refresh sends no scope; Graph refresh sends the `Calendars.ReadWrite offline_access` scope. Response envelopes, event shapes, composite-id rules, and provider error strings match the PHP plugin; the O365 event *update* intentionally addresses the raw Graph event id instead of the legacy composite `calendar:id` URL (which could never match), and client credentials come from `FRICKMAIL__OAUTH2__*` with the legacy `FRICKMAIL_GMAIL_*` / `FRICKMAIL_O365_*` fallback. |
 | Have I Been Pwned | `HibpCheck` (native) |
 | Two-factor-auth legacy plugin | `GetTwoFactorInfo`, `CreateTwoFactorSecret`, `ShowTwoFactorSecret`, `EnableTwoFactor`, `VerifyTwoFactorCode`, `ClearTwoFactorInfo` |
 

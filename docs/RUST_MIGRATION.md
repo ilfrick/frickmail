@@ -5,7 +5,41 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-30 15:05:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-08-30 21:10:00 CEST (UTC+02:00)
+
+The pending calendar slice makes `JsonCalendarList`, `JsonCalendarEvents`,
+`JsonCalendarSave`, and `JsonCalendarDelete` native in a new
+`fm-http/src/router/calendar.rs` module, replacing the PHP `calendar`
+plugin in Frickmail mode. The handlers proxy Google Calendar and Microsoft
+Graph with the selected Frickmail mail account's encrypted OAuth refresh
+token: the account's `account_type` selects the provider (replacing PHP's
+domain-list detection), an explicit `account_id` or the selected-account
+session replaces the PHP main-account lookup, and provider credentials come
+from `FRICKMAIL__OAUTH2__*` with the legacy `FRICKMAIL_GMAIL_*` /
+`FRICKMAIL_O365_*` environment fallback. Request building, event mapping,
+composite-id splitting, and provider error strings mirror the PHP plugin;
+plugin errors return as `Result.error` inside a 200 envelope like the PHP
+catch block. Two intentional deviations are documented: the O365 event
+update addresses the raw Graph event id instead of the legacy composite
+`calendar:id` URL (which could never match a Graph event id), and resource
+use is bounded (50 calendars, 2000 events, 30 s per-request deadline plus a
+60 s aggregate action deadline). Missing `start`/`end` bounds reproduce the
+PHP default window (first of this month through last of next month, UTC).
+The request type implements a redacting `Debug` so OAuth credentials cannot
+leak through logs. All outbound HTTP goes through an injectable fetcher; 23
+new tests cover the pure builders/mappers and six DB-backed flows against
+captured requests.
+
+Independent senior review approved the slice after one remediation round:
+the first round approved with three non-blocking findings (missing PHP
+`start`/`end` default window, no aggregate deadline across the sequential
+events loop, and a credential-bearing `Debug` derive), all of which were
+fixed and verified by the closing re-review. Docker-only validation passed:
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -D
+warnings`, and the full workspace suite (687 tests across 22 suites, zero
+failures).
+
+## Prior Snapshot — 2026-08-30 15:05:00 CEST (UTC+02:00)
 
 The OAuth2 provider slice adds native Gmail and O365 part hooks,
 replacing the PHP `login-gmail` and `login-o365` plugins in Frickmail mode.
