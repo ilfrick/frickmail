@@ -5,7 +5,52 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-08-31 15:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-09 01:00:00 CEST (UTC+02:00)
+
+The pending `Message` opaque S/MIME auto-verification slice closes the largest
+remaining `Message` response-parity gap against legacy PHP `DoMessage()`: the
+native handler now best-effort verifies a non-detached (`opaque`)
+`smimeSigned` part from the already-fetched `RawMessage` bytes (blocking pool,
+10 s deadline, 2 MiB bound) and emits the PHP-compatible `smimeSigned.body`
+plus `smimeSigned.success` fields. Verification failures fall through to the
+unsigned metadata, mirroring PHP's logged-and-continued path. Supporting
+changes: `security.auto_verify_signatures` setting (default `false`,
+`autoVerifySignatures` alias, matching PHP) reserved for the detached/PGP
+follow-up, and `SmimeVerifyResult.body` carrying the extracted inner content
+for opaque blobs only. `docs/LEGACY_ACTION_INVENTORY.md` records the new
+native scope and the remaining detached/PGP boundary.
+
+Independent senior review approved the slice; the three actionable
+non-blocking findings were remediated before validation (dead `let _`
+binding collapsed to an existence check, new oversize-input regression test,
+new `SecurityConfig` default/alias parsing test). The remaining review notes
+are accepted follow-up boundaries: stricter Rust chain validation versus
+PHP's parse-only `PKCS7_NOVERIFY|NOCHAIN|NOSIGS`, top-level-`RawMessage`
+verification for nested opaque parts, and trust-store-change cache staleness
+(PHP `DoMessage` has no HTTP caching; the Rust ETag intentionally still
+matches PHP's folder/uid/flags/client-hash shape).
+
+Docker-only validation passed: `cargo fmt --all -- --check`, `cargo
+clippy --workspace --all-targets -D warnings`, full workspace unit suites
+(fm-http 402 passed including 5 new tests, fm-core/fm-user/fm-imap/fm-db unit
+suites green), and the live-DB suites against the compose services
+(`schema_compatibility` 10 passed, `address_book_compatibility` 3 passed).
+Production-image validation built `frickmail-rust:message-smime-test` at
+image ID `sha256:6c802161145dd93771840d7463cd392d75b003723eecd97d44a06dc31e7a1109`;
+a read-only container started without a database, `/health` returned `ok`,
+the legacy `/?/Json/` route shape dispatched `Message` natively (standard
+unauthenticated envelope instead of the 501 compatibility fallback), logs
+showed only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed: the working tree holds
+the 3 implementation files plus the documentation amendments
+(docs/RUST_MIGRATION.md, docs/LEGACY_ACTION_INVENTORY.md). No `rust-ci`
+run applies until publication. The major remaining gates toward the final
+Rust-only goal are unchanged (compose PGP/detached auto-verify and OAuth
+SMTP parity, exact `Message` edge parity, connection-token/CSRF contract,
+frontend/theming, cutover validation).
+
+## Prior Snapshot — 2026-08-31 15:30:00 CEST (UTC+02:00)
 
 The pending contacts-sync slice makes `JsonContactsSync` native, completing
 the contacts-sync plugin migration: the handler proxies Gmail People API

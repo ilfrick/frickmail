@@ -296,6 +296,8 @@ pub struct SmimeVerifyResult {
     pub verified: bool,
     pub signer_email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -3507,6 +3509,7 @@ fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
                 ok: true,
                 verified: false,
                 signer_email: None,
+                body: None,
                 error: Some("Could not parse the signed message".to_string()),
             }
         }
@@ -3518,6 +3521,7 @@ fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
                 ok: true,
                 verified: false,
                 signer_email: None,
+                body: None,
                 error: Some(format!("Signature verification failed: {err}")),
             }
         }
@@ -3532,10 +3536,12 @@ fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
                 ok: true,
                 verified: false,
                 signer_email: None,
+                body: None,
                 error: Some(format!("Signature verification failed: {err}")),
             }
         }
     };
+    let is_opaque = content.is_none();
     let mut output = Vec::new();
     if let Err(err) = pkcs7.verify(
         &certs,
@@ -3548,6 +3554,7 @@ fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
             ok: true,
             verified: false,
             signer_email: None,
+            body: None,
             error: Some(format!("Signature verification failed: {err}")),
         };
     }
@@ -3566,6 +3573,11 @@ fn verify_smime_message(message: &[u8]) -> SmimeVerifyResult {
         ok: true,
         verified: true,
         signer_email,
+        body: if is_opaque && !output.is_empty() {
+            String::from_utf8(output).ok()
+        } else {
+            None
+        },
         error: None,
     }
 }

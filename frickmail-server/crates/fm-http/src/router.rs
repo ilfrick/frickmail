@@ -15350,6 +15350,7 @@ where
                 }
             }
 
+            let smime_verify = legacy_message_smime_opaque_verify(&parts).await;
             let mut response = legacy_message_body_response(
                 original_action,
                 &message_request.folder,
@@ -15358,6 +15359,7 @@ where
                 &thread_uids,
                 &thread_unseen_uids,
                 durable_receipt_suppressed.unwrap_or(false),
+                smime_verify,
             );
             if durable_receipt_suppressed.is_some() {
                 legacy_apply_http_cache_headers(
@@ -17745,6 +17747,7 @@ fn legacy_message_json(
     preview: Option<&str>,
     threads: &[u32],
     thread_unseen: &[u32],
+    smime_verify: Option<&fm_user::SmimeVerifyResult>,
 ) -> Value {
     let mut value = json!({
         "@Object": "Object/Message",
@@ -17791,7 +17794,7 @@ fn legacy_message_json(
     if !thread_unseen.is_empty() {
         value["threadUnseen"] = json!(thread_unseen);
     }
-    legacy_apply_message_crypto_json(&mut value, crypto);
+    legacy_apply_message_crypto_json(&mut value, crypto, smime_verify);
     if !html.is_empty() || !plain.is_empty() {
         value["html"] = json!(html);
         value["plain"] = json!(plain);
@@ -17800,7 +17803,11 @@ fn legacy_message_json(
     value
 }
 
-fn legacy_apply_message_crypto_json(value: &mut Value, crypto: &fm_imap::LegacyMessageCrypto) {
+fn legacy_apply_message_crypto_json(
+    value: &mut Value,
+    crypto: &fm_imap::LegacyMessageCrypto,
+    smime_verify: Option<&fm_user::SmimeVerifyResult>,
+) {
     if let Some(pgp_signed) = &crypto.pgp_signed {
         let mut signed = json!({
             "partId": pgp_signed.part_id,
@@ -17830,6 +17837,14 @@ fn legacy_apply_message_crypto_json(value: &mut Value, crypto: &fm_imap::LegacyM
         });
         if let Some(sig_part_id) = &smime_signed.sig_part_id {
             signed["sigPartId"] = json!(sig_part_id);
+        }
+        if let Some(verify) = smime_verify {
+            if verify.verified && !smime_signed.detached {
+                if let Some(body) = verify.body.as_deref() {
+                    signed["body"] = json!(body);
+                }
+                signed["success"] = json!(true);
+            }
         }
         value["smimeSigned"] = signed;
     }
@@ -17907,6 +17922,48 @@ fn legacy_parsed_headers_json(headers: Option<&[ParsedMessageHeader]>) -> Value 
     })
 }
 
+/// Best-effort opaque S/MIME auto-verification for the native `Message`
+/// handler, mirroring legacy PHP `DoMessage()` which always verifies a
+/// non-detached (`opaque`) `smimeSigned` part so the frontend receives the
+/// extracted inner `body` plus a `success` marker.
+///
+/// The raw `RawMessage` bytes already fetched for the preview are verified in
+/// a blocking pool under the shared S/MIME deadline and size bound. Any
+/// failure (oversize input, timeout, parse or chain error) returns `None` so
+/// the message still renders with the unsigned `smimeSigned` metadata, exactly
+/// like PHP's logged-and-continued exception path. Detached signatures and
+/// PGP auto-verification remain gated by the new
+/// `security.auto_verify_signatures` setting and are a follow-up slice.
+async fn legacy_message_smime_opaque_verify(
+    parts: &[BodyPreviewPart],
+) -> Option<fm_user::SmimeVerifyResult> {
+    let has_opaque_signed = parts.iter().any(|part| {
+        (!part.crypto.is_empty())
+            .then_some(&part.crypto)
+            .and_then(|crypto| crypto.smime_signed.as_ref())
+            .is_some_and(|signed| !signed.detached)
+    });
+    if !has_opaque_signed {
+        return None;
+    }
+    let raw = parts
+        .iter()
+        .find(|part| matches!(part.kind, fm_imap::BodyPartKind::RawMessage) && !part.raw.is_empty())
+        .map(|part| part.raw.clone())?;
+    if raw.len() > SMIME_VERIFY_MAX_BYTES {
+        return None;
+    }
+    let verify = tokio::task::spawn_blocking(move || {
+        fm_user::SqlxUserRepository::verify_smime_message(&raw)
+    });
+    let result = tokio::time::timeout(SMIME_VERIFY_DEADLINE, verify)
+        .await
+        .ok()?
+        .ok()?;
+    result.verified.then_some(result)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn legacy_message_body_response(
     action: &str,
     folder: &str,
@@ -17915,6 +17972,7 @@ fn legacy_message_body_response(
     thread_uids: &[u32],
     thread_unseen_uids: &[u32],
     durable_receipt_suppressed: bool,
+    smime_verify: Option<fm_user::SmimeVerifyResult>,
 ) -> Response {
     let flags = parts
         .first()
@@ -18213,6 +18271,7 @@ fn legacy_message_body_response(
                 preview,
                 thread_uids,
                 thread_unseen_uids,
+                smime_verify.as_ref(),
             )
         }),
     )
@@ -28717,6 +28776,7 @@ Subject: Empty body metadata\r\n\r\n"
             None,
             &[],
             &[],
+            None,
         );
 
         assert_eq!(message["references"], "<root@example>");
@@ -28780,7 +28840,7 @@ Subject: Empty body metadata\r\n\r\n"
             }),
         };
 
-        super::legacy_apply_message_crypto_json(&mut value, &crypto);
+        super::legacy_apply_message_crypto_json(&mut value, &crypto, None);
 
         assert_eq!(value["pgpSigned"]["partId"], "1");
         assert_eq!(value["pgpSigned"]["sigPartId"], "2");
@@ -28808,12 +28868,150 @@ Subject: Empty body metadata\r\n\r\n"
                 }),
                 ..Default::default()
             },
+            None,
         );
         assert_eq!(armored["pgpSigned"], json!({"partId": "3.2"}));
         assert_eq!(
             armored["pgpEncrypted"],
             json!({"partId": "3.2", "keyIds": ["0123456789ABCDEF"]})
         );
+    }
+
+    #[test]
+    fn legacy_apply_message_crypto_json_adds_opaque_smime_verify_body_and_success() {
+        let mut value = json!({});
+        let crypto = fm_imap::LegacyMessageCrypto {
+            smime_signed: Some(fm_imap::LegacySmimeSigned {
+                part_id: "1".to_string(),
+                sig_part_id: None,
+                mic_alg: "sha-256".to_string(),
+                detached: false,
+            }),
+            ..Default::default()
+        };
+        let verify = fm_user::SmimeVerifyResult {
+            ok: true,
+            verified: true,
+            signer_email: Some("signer@example.com".to_string()),
+            body: Some("inner mime body".to_string()),
+            error: None,
+        };
+
+        super::legacy_apply_message_crypto_json(&mut value, &crypto, Some(&verify));
+
+        assert_eq!(value["smimeSigned"]["partId"], "1");
+        assert_eq!(value["smimeSigned"]["detached"], false);
+        assert_eq!(value["smimeSigned"]["body"], "inner mime body");
+        assert_eq!(value["smimeSigned"]["success"], true);
+    }
+
+    #[test]
+    fn legacy_apply_message_crypto_json_skips_verify_fields_for_detached_or_failed() {
+        let detached_crypto = fm_imap::LegacyMessageCrypto {
+            smime_signed: Some(fm_imap::LegacySmimeSigned {
+                part_id: "1".to_string(),
+                sig_part_id: Some("2".to_string()),
+                mic_alg: "sha-256".to_string(),
+                detached: true,
+            }),
+            ..Default::default()
+        };
+        let verify = fm_user::SmimeVerifyResult {
+            ok: true,
+            verified: true,
+            signer_email: None,
+            body: Some("inner mime body".to_string()),
+            error: None,
+        };
+        let mut detached = json!({});
+        super::legacy_apply_message_crypto_json(&mut detached, &detached_crypto, Some(&verify));
+        assert!(detached["smimeSigned"].get("body").is_none());
+        assert!(detached["smimeSigned"].get("success").is_none());
+
+        let opaque_crypto = fm_imap::LegacyMessageCrypto {
+            smime_signed: Some(fm_imap::LegacySmimeSigned {
+                part_id: "1".to_string(),
+                sig_part_id: None,
+                mic_alg: "sha-256".to_string(),
+                detached: false,
+            }),
+            ..Default::default()
+        };
+        let failed = fm_user::SmimeVerifyResult {
+            ok: true,
+            verified: false,
+            signer_email: None,
+            body: None,
+            error: Some("Signature verification failed".to_string()),
+        };
+        let mut failed_value = json!({});
+        super::legacy_apply_message_crypto_json(&mut failed_value, &opaque_crypto, Some(&failed));
+        assert!(failed_value["smimeSigned"].get("body").is_none());
+        assert!(failed_value["smimeSigned"].get("success").is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_message_smime_opaque_verify_skips_without_opaque_signed() {
+        let parts = vec![BodyPreviewPart {
+            kind: BodyPartKind::RawMessage,
+            raw: b"Subject: plain\r\n\r\nBody".to_vec(),
+            is_complete: true,
+            flags: Vec::new(),
+            crypto: Default::default(),
+            metadata: Default::default(),
+        }];
+
+        assert!(super::legacy_message_smime_opaque_verify(&parts)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_message_smime_opaque_verify_skips_invalid_smime_best_effort() {
+        let parts = vec![BodyPreviewPart {
+            kind: BodyPartKind::RawMessage,
+            raw: b"Subject: opaque\r\nContent-Type: application/pkcs7-mime; smime-type=signed-data\r\n\r\nnot-a-smime-blob".to_vec(),
+            is_complete: true,
+            flags: Vec::new(),
+            crypto: fm_imap::LegacyMessageCrypto {
+                smime_signed: Some(fm_imap::LegacySmimeSigned {
+                    part_id: "1".to_string(),
+                    sig_part_id: None,
+                    mic_alg: String::new(),
+                    detached: false,
+                }),
+                ..Default::default()
+            },
+            metadata: Default::default(),
+        }];
+
+        assert!(super::legacy_message_smime_opaque_verify(&parts)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_message_smime_opaque_verify_skips_oversize_input() {
+        let parts = vec![BodyPreviewPart {
+            kind: BodyPartKind::RawMessage,
+            raw: vec![b'x'; super::SMIME_VERIFY_MAX_BYTES + 1],
+            is_complete: true,
+            flags: Vec::new(),
+            crypto: fm_imap::LegacyMessageCrypto {
+                smime_signed: Some(fm_imap::LegacySmimeSigned {
+                    part_id: "1".to_string(),
+                    sig_part_id: None,
+                    mic_alg: String::new(),
+                    detached: false,
+                }),
+                ..Default::default()
+            },
+            metadata: Default::default(),
+        }];
+
+        assert!(super::legacy_message_smime_opaque_verify(&parts)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

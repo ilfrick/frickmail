@@ -253,6 +253,10 @@ The next Rust implementation targets from this inventory are:
    Key listing/import/generation/export, direct or IMAP part decryption, and
    legacy multi-signature verification metadata are now native.
 2. Complete `Message` parity: remaining message/header details and detailed
-   message payloads.
+   message payloads. Opaque (non-detached) S/MIME `smimeSigned` auto-verification
+   is now native and best-effort in the `Message` handler (verified inner `body`
+   plus `success`, mirroring PHP `DoMessage()`); detached S/MIME and PGP
+   auto-verification remain gated by the new `security.auto_verify_signatures`
+   setting (default `false`, matching PHP) as a follow-up slice.
 3. Migrate the legacy connection-token/CSRF contract as part of the Rust-only
    session and runtime cutover.

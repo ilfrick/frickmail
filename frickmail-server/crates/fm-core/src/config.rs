@@ -55,18 +55,28 @@ pub struct FrickmailConfig {
 pub struct SecurityConfig {
     #[serde(default = "default_csrf_enabled")]
     pub csrf_enabled: bool,
+    #[serde(
+        default = "default_auto_verify_signatures",
+        alias = "autoVerifySignatures"
+    )]
+    pub auto_verify_signatures: bool,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             csrf_enabled: default_csrf_enabled(),
+            auto_verify_signatures: default_auto_verify_signatures(),
         }
     }
 }
 
 fn default_csrf_enabled() -> bool {
     true
+}
+
+fn default_auto_verify_signatures() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -709,7 +719,10 @@ fn default_export_folder_max_bytes() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{DemoAccountConfig, FrickmailCacheConfig, MailDefaults, MessageListDomainOverride};
+    use super::{
+        DemoAccountConfig, FrickmailCacheConfig, MailDefaults, MessageListDomainOverride,
+        SecurityConfig,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -830,5 +843,23 @@ mod tests {
             recipient_delimiter: String::new(),
         };
         assert_eq!(unsafe_config.recipient_pattern(), None);
+    }
+
+    #[test]
+    fn security_auto_verify_signatures_defaults_false_with_legacy_alias() {
+        let default = serde_json::from_value::<SecurityConfig>(serde_json::json!({})).unwrap();
+        assert!(!default.auto_verify_signatures);
+
+        let snake = serde_json::from_value::<SecurityConfig>(serde_json::json!({
+            "auto_verify_signatures": true
+        }))
+        .unwrap();
+        assert!(snake.auto_verify_signatures);
+
+        let camel = serde_json::from_value::<SecurityConfig>(serde_json::json!({
+            "autoVerifySignatures": true
+        }))
+        .unwrap();
+        assert!(camel.auto_verify_signatures);
     }
 }
