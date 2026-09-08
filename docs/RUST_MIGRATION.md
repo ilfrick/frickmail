@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-09 01:00:00 CEST (UTC+02:00)
 
-The pending `Message` opaque S/MIME auto-verification slice closes the largest
+The `Message` opaque S/MIME auto-verification slice closes the largest
 remaining `Message` response-parity gap against legacy PHP `DoMessage()`: the
 native handler now best-effort verifies a non-detached (`opaque`)
 `smimeSigned` part from the already-fetched `RawMessage` bytes (blocking pool,
@@ -42,13 +42,19 @@ the legacy `/?/Json/` route shape dispatched `Message` natively (standard
 unauthenticated envelope instead of the 501 compatibility fallback), logs
 showed only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed: the working tree holds
-the 3 implementation files plus the documentation amendments
-(docs/RUST_MIGRATION.md, docs/LEGACY_ACTION_INVENTORY.md). No `rust-ci`
-run applies until publication. The major remaining gates toward the final
-Rust-only goal are unchanged (compose PGP/detached auto-verify and OAuth
-SMTP parity, exact `Message` edge parity, connection-token/CSRF contract,
-frontend/theming, cutover validation).
+Implementation commit `e76c31ac0ff166fdda8bf19d2918bca955c8fb1c` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34289667282`](https://github.com/ilfrick/frickmail/actions/runs/34289667282)
+and `rust-full-migration` run
+[`34289682420`](https://github.com/ilfrick/frickmail/actions/runs/34289682420);
+both runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+`rust-ci` path filter and is expected to produce no GitHub Actions run. The
+major remaining gates toward the final Rust-only goal are unchanged (compose
+PGP/detached auto-verify and OAuth SMTP parity, exact `Message` edge parity,
+connection-token/CSRF contract, frontend/theming, cutover validation).
 
 ## Prior Snapshot — 2026-08-31 15:30:00 CEST (UTC+02:00)
 
