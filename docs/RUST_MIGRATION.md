@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-09 15:30:00 CEST (UTC+02:00)
 
-The pending `Message` edge-parity slice corrects the stale "Immediate Next
+The `Message` edge-parity slice corrects the stale "Immediate Next
 Work" note (`Message` dispatch and response parity are native, including
 opaque/detached S/MIME and PGP auto-verification) and pins the `[Preview]`
 subject-prefix strip with a single-`Message`-path regression test
@@ -33,13 +33,19 @@ a read-only container started without a database, `/health` returned `ok`,
 the legacy `/?/Json/` route shape dispatched `Message` natively (standard
 unauthenticated envelope instead of the 501 compatibility fallback), logs
 showed only expected startup messages, and it stopped cleanly.
-This slice is verified but NOT yet committed or pushed: the tracked
-modifications are 1 test change plus this documentation amendment
-(untracked scaffolding/artifacts remain uncommitted and out of scope). No
-`rust-ci` run applies until publication. The major remaining gates
-toward the final Rust-only goal are unchanged (compose PGP assembly and OAuth
-SMTP parity, connection-token/CSRF contract, frontend/theming, cutover
-validation).
+Implementation commit `18ac857e1fbd93947049442a24d8c53383723fba` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34364923404`](https://github.com/ilfrick/frickmail/actions/runs/34364923404)
+and `rust-full-migration` run
+[`34364940759`](https://github.com/ilfrick/frickmail/actions/runs/34364940759);
+both runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+`rust-ci` path filter and is expected to produce no GitHub Actions run. The
+major remaining gates toward the final Rust-only goal are unchanged (compose
+PGP assembly and OAuth SMTP parity, connection-token/CSRF contract,
+frontend/theming, cutover validation).
 
 ## Prior Snapshot — 2026-09-09 09:00:00 CEST (UTC+02:00)
 
