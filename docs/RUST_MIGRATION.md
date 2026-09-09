@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-09 09:00:00 CEST (UTC+02:00)
 
-The pending `Message` detached S/MIME + PGP auto-verification slice completes
+The `Message` detached S/MIME + PGP auto-verification slice completes
 the PHP `DoMessage()` verification parity behind the
 `security.auto_verify_signatures` setting (default `false`, matching PHP).
 Detached `smimeSigned` parts verify from the fetched `RawMessage` bytes via
@@ -42,12 +42,19 @@ the legacy `/?/Json/` route shape dispatched `Message` natively (standard
 unauthenticated envelope instead of the 501 compatibility fallback), logs
 showed only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed: the working tree holds
-1 implementation file plus the documentation amendments
-(docs/RUST_MIGRATION.md, docs/LEGACY_ACTION_INVENTORY.md). No `rust-ci`
-run applies until publication. The major remaining gates toward the final
-Rust-only goal are unchanged (compose PGP assembly and OAuth SMTP parity,
-connection-token/CSRF contract, frontend/theming, cutover validation).
+Implementation commit `311b091182cb11378c2f30feaf180d6001af8a3d` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34324087327`](https://github.com/ilfrick/frickmail/actions/runs/34324087327)
+and `rust-full-migration` run
+[`34324096049`](https://github.com/ilfrick/frickmail/actions/runs/34324096049);
+both runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+`rust-ci` path filter and is expected to produce no GitHub Actions run. The
+major remaining gates toward the final Rust-only goal are unchanged (compose
+PGP assembly and OAuth SMTP parity, connection-token/CSRF contract,
+frontend/theming, cutover validation).
 
 ## Prior Snapshot — 2026-09-09 01:00:00 CEST (UTC+02:00)
 
