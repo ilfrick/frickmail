@@ -5,7 +5,43 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-09 09:00:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-09 15:30:00 CEST (UTC+02:00)
+
+The pending `Message` edge-parity slice corrects the stale "Immediate Next
+Work" note (`Message` dispatch and response parity are native, including
+opaque/detached S/MIME and PGP auto-verification) and pins the `[Preview]`
+subject-prefix strip with a single-`Message`-path regression test
+(`[Preview] Hello` renders as `Hello`, matching PHP's 10-char strip). A
+systematic field-by-field hunt (flags normalization, `hash`/`ETag`,
+`[Preview]`/trim subject, all three spam branches with `isSpam ? 100`
+serialization, header-vs-internal timestamps, address/attachment/header
+collections) plus the frontend consumer check (`smimeSigned.body` feeds
+`MimeToMessage`) confirmed parity with the generic
+`filter.result-message` plugin-hook boundary as the only remaining carve-out.
+`docs/LEGACY_ACTION_INVENTORY.md` already marks `Message` native.
+
+Independent senior review approved the slice with no blockers; its one
+non-blocking suggestion (an fm-imap unit case for the spaced `[Preview]`
+variant) was already covered by the existing summary test.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, and the fm-http lib
+suite (410 passed including the new test).
+Production-image validation built `frickmail-rust:message-edge-test` at
+image ID `sha256:cf885b83b2ccafc5035fb8d7cb1865e5f31416562838554dcabe88f0f1139352`;
+a read-only container started without a database, `/health` returned `ok`,
+the legacy `/?/Json/` route shape dispatched `Message` natively (standard
+unauthenticated envelope instead of the 501 compatibility fallback), logs
+showed only expected startup messages, and it stopped cleanly.
+This slice is verified but NOT yet committed or pushed: the tracked
+modifications are 1 test change plus this documentation amendment
+(untracked scaffolding/artifacts remain uncommitted and out of scope). No
+`rust-ci` run applies until publication. The major remaining gates
+toward the final Rust-only goal are unchanged (compose PGP assembly and OAuth
+SMTP parity, connection-token/CSRF contract, frontend/theming, cutover
+validation).
+
+## Prior Snapshot — 2026-09-09 09:00:00 CEST (UTC+02:00)
 
 The `Message` detached S/MIME + PGP auto-verification slice completes
 the PHP `DoMessage()` verification parity behind the
@@ -1184,9 +1220,11 @@ the detailed route inventory or release checklist. Keep
 2. Keep `docs/LEGACY_ACTION_INVENTORY.md` current as the route/hook/frontend
    source of truth for each migration slice.
 3. Complete native parity for legacy `Message` and the remaining mail actions.
-   `MessageList`, `FolderInformation`, and `FolderInformationMultiply` dispatch
-   are native; `Message` remains partial-native while exact PHP message-model
-   parity is completed.
+   `MessageList`, `FolderInformation`, `FolderInformationMultiply`, and
+   `Message` dispatch are native; `Message` response parity is complete
+   including opaque/detached S/MIME and PGP auto-verification, with only the
+   generic `filter.result-message` plugin-hook boundary remaining
+   (`| Message | ... | native |` — see `docs/LEGACY_ACTION_INVENTORY.md`).
 4. Add Docker MySQL/PostgreSQL/SQLite integration tests for existing schema
    compatibility.
 5. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user

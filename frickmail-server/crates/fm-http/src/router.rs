@@ -26037,6 +26037,36 @@ Version: 1
     }
 
     #[tokio::test]
+    async fn native_legacy_message_strips_preview_subject_prefix() {
+        let key = [71_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(1972, 1973, &key).await;
+
+        let response = super::native_legacy_message_with_fetcher(
+            &state,
+            "Message",
+            &json!({"account_id": 1973, "folder": "INBOX", "uid": 71}),
+            &session,
+            &HeaderMap::new(),
+            Duration::from_secs(1),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![BodyPreviewPart {
+                    kind: BodyPartKind::RawMessage,
+                    raw: b"Subject: [Preview] Hello\r\n\r\nBody".to_vec(),
+                    is_complete: true,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: Default::default(),
+                }]))
+            },
+        )
+        .await;
+        let body = read_json(response).await;
+
+        assert_eq!(body["Action"], "Message");
+        assert_eq!(body["Result"]["subject"], "Hello");
+    }
+
+    #[tokio::test]
     async fn native_legacy_message_populates_raw_draft_info() {
         let key = [56_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let (state, session) = message_body_test_state(1924, 1925, &key).await;
