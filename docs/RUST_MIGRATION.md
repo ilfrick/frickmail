@@ -5,7 +5,51 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-09 01:00:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-09 09:00:00 CEST (UTC+02:00)
+
+The pending `Message` detached S/MIME + PGP auto-verification slice completes
+the PHP `DoMessage()` verification parity behind the
+`security.auto_verify_signatures` setting (default `false`, matching PHP).
+Detached `smimeSigned` parts verify from the fetched `RawMessage` bytes via
+the shared OpenSSL primitive and contribute `success` only; `pgpSigned`
+parts verify through the account GnuPG home reusing the exact
+`PgpVerifyMessage` fetch contract (`{part}.MIME`, `{part}`, `{sigPart}`
+bounds, CRLF/LF and ASCII normalization, clearsigned transfer-decoding) and
+are replaced with the PHP `{fingerprint, success}` shape when the first
+signature has status 0 with a non-empty fingerprint. The S/MIME and PGP
+probes run concurrently under a 30 s outer deadline after the HTTP cache
+check; every failure mode falls back to the unverified part metadata with a
+warning log. The `PgpVerifyMessage` fetch sequence is reused through the
+shared `fetch_pgp_verify_inputs` helper. Seven new
+tests cover the fingerprint parser, both JSON shapes, detached gating and
+best-effort skips, and the disabled-by-default PGP gating (no extra I/O);
+`docs/LEGACY_ACTION_INVENTORY.md` records the new native scope.
+
+Independent senior review approved the slice; the two non-blocking findings
+were remediated before validation (corrected `(signature, body)` doc labels
+on the extracted helper, 30 s outer deadline on the verify phase).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace unit
+suites (fm-http 409 passed including the new tests), and the live-DB suites
+against the compose services (`schema_compatibility` 10 passed,
+`address_book_compatibility` 3 passed, fm-db 56 passed).
+Production-image validation built
+`frickmail-rust:message-auto-verify-test` at image ID
+`sha256:8770029e2ea93ddc024de04311852ed84535dc796dee982b97584025fa6b3247`;
+a read-only container started without a database, `/health` returned `ok`,
+the legacy `/?/Json/` route shape dispatched `Message` natively (standard
+unauthenticated envelope instead of the 501 compatibility fallback), logs
+showed only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed: the working tree holds
+1 implementation file plus the documentation amendments
+(docs/RUST_MIGRATION.md, docs/LEGACY_ACTION_INVENTORY.md). No `rust-ci`
+run applies until publication. The major remaining gates toward the final
+Rust-only goal are unchanged (compose PGP assembly and OAuth SMTP parity,
+connection-token/CSRF contract, frontend/theming, cutover validation).
+
+## Prior Snapshot — 2026-09-09 01:00:00 CEST (UTC+02:00)
 
 The `Message` opaque S/MIME auto-verification slice closes the largest
 remaining `Message` response-parity gap against legacy PHP `DoMessage()`: the
