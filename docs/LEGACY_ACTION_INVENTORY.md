@@ -244,6 +244,52 @@ Unknown actions intentionally return the legacy JSON envelope with an
 `UNKNOWN_ERROR`. Known-but-not-native compatibility actions return a 501
 compatibility fallback until they are migrated.
 
+## Legacy Theme Entry Points
+
+Inventory of every legacy SnappyMail theme surface that must be migrated,
+replaced, or removed under Phase 10 (Frickmail-user theming only). The Rust
+server serves no theme route and stores no theme setting; the Frickmail theme
+ships inside the built static bundle. (The native AppData still emits
+hardcoded compatibility defaults — `"Theme": "Default"`
+(`fm-http/src/router.rs:10318`), `"Themes": false` (`:10407`, inside `Capa`)
+— which step 1 below makes authoritative by ignoring the stored setting.)
+
+| # | Entry point | Location | Notes |
+|---|---|---|---|
+| T1 | 21 bundled theme directories plus `example.css` (22 entries) | `snappymail/v/0.0.0/themes/` (`A`, `BlackWood`, `Blurred`, `BlurredDark`, `Clear`, `DarkShine`, `Default`, `Linen`, `Love`, `LoveDark`, `Magnetic`, `NextcloudV25+`, `NightShine`, `Snow`, `SnowDarkV1`, `Squares`, `SquaresDark`, `Stripes`, `StripesDark`, `Wood`, `Xv`, plus `example.css`) | Each package is `styles.css` (+`images/`); discovery requires `styles.css` or `styles.less`. |
+| T2 | Custom `@custom` / `@nextcloud` theme roots | `Actions/Themes.php` `GetThemes()` | Index-root `themes/` (`@custom` suffix) and ownCloud roots (`@nextcloud`, dead `OC` check) extend the list. |
+| T3 | Theme resolution + validation | `Actions/Themes.php` `GetTheme()` / `ValidateTheme()` | Per-account `Theme` setting with `webmail.theme` (`Default`) fallback. |
+| T4 | LESS compilation | `Actions/Themes.php` `compileCss()` | Server-side LESS build of the active theme. |
+| T5 | CSS service route (+JSON variant) | `ServiceActions.php` `ServiceCss()` | `?/Css/0/{User,Admin}/-/<theme>/-/...` with `CssCache` file cache and `cacheByKey` validators; JSON variant via trailing `/Json`; `cssLink` (`dev/Common/Links.js:59`) targets it. |
+| T6 | Bootstrap template placeholders | `Service.php` (`{{BaseAppThemeName}}`, `{{BaseAppThemeCss}}`) | Active theme name plus inlined compiled CSS in the served page. |
+| T7 | AppData theme payload + capability | `Actions.php` (`System.themes`, `Theme`, `Capa::THEMES`) | Theme list, active theme, and `webmail.allow_themes` capability flag. |
+| T8 | Per-account `Theme` setting plus font settings | `Actions/User.php` settings save (`Theme` validated; `fontSansSerif`/`fontSerif`/`fontMono`, same `Capa::THEMES` gate) | Theme choice and fonts persisted per account. |
+| T9 | Background upload / raw / clear | `Actions/Themes.php` `UploadBackground()`, `ServiceActions.php` `ServiceUploadBackground()`, `Actions/Raw.php` `RawUserBackground()`, `Actions/User.php` `DoClearUserBackground()`, `UserBackgroundName`/`UserBackgroundHash` settings, gated on `Capa::USER_BACKGROUND` | No Rust equivalent exists (read surface: `Actions.php` AppData `userBackgroundName`/`userBackgroundHash` payload; blob is `StorageType::CONFIG` key `'background'` per `Actions/Themes.php:181-184`). |
+| T10 | Admin theme config | `ActionsAdmin.php` (`webmail.theme`, `webmail.allow_themes`, `webmail.allow_user_background`) | Default theme, selection gating, and background gating. |
+| T11 | Config defaults | `Config/Application.php` (`webmail.theme` = `Default`, `webmail.allow_themes` = `true`, `webmail.allow_user_background` = `false`) |  |
+| T12 | Frontend theme store + settings UI | `dev/Stores/Theme.js`, `dev/Settings/User/Themes.js`, `dev/Settings/Admin/General.js`, `dev/Settings/Admin/Config.js` (wired via `dev/Screen/User/Settings.js`, `dev/App/User.js`) | Knockout theme selection, fonts, and backgrounds. |
+| T13 | Frickmail-theme plugin (retained model) | `plugins/frickmail-theme/` (`index.php` bootstrap; `css/tokens|layout|components|login.css` + `css/admin-overrides.css`; `js/ThemeSwitcher.js`, `js/KeyboardShortcuts.js`) | Dark/light/system via `data-fm-theme` + `localStorage` (`fm_theme`, `fm_accent`, `fm_fontsize`); no server setting. This is the surviving theming surface. |
+
+Deletion plan (owner: frontend/theming workstream; blocked on Phase 9 screen
+replacement, since legacy Knockout screens consume T12, and on Phase 4 for
+the T10 admin surface):
+
+1. Freeze: ignore the stored per-account `Theme` (T8) and always serve the
+   Frickmail theme, so existing users land on it before anything is deleted.
+2. Delete serving paths: T5 route + `CssCache`, T6 placeholders, T7 payload,
+   T9 upload/raw/clear endpoints, background settings, and font settings.
+3. Delete sources: T1 packages, T2 custom/nextcloud roots, T3/T4 loader code,
+   T10 admin surface, T11 config keys (`webmail.theme`, `webmail.allow_themes`,
+   `webmail.allow_user_background`) — including removing the
+   `COPY snappymail/v/0.0.0/themes` line from
+   `.docker/release/rust/Dockerfile`, which would otherwise break the build.
+4. Delete UI: T12 store/screens with the legacy Knockout app (Phase 9/13).
+5. Keep T13 unchanged; `localStorage` preferences need no migration.
+
+Exit criteria (matches Phase 10): no production code path loads a legacy
+theme package, and Frickmail theme settings are the only user/admin theming
+surface.
+
 ## Remaining Native Migration Targets
 
 The next Rust implementation targets from this inventory are:

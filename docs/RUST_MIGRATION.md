@@ -5,7 +5,38 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-09 15:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-09 16:00:00 CEST (UTC+02:00)
+
+The pending theme-loader inventory slice (Phase 0 deliverable, Immediate Next
+Work #5) records every legacy SnappyMail theme surface in a new
+`docs/LEGACY_ACTION_INVENTORY.md` section (T1–T13): 21 bundled theme
+directories plus `example.css`, `@custom`/`@nextcloud` roots, the
+`Actions/Themes.php` resolution/validation/LESS/background loader, the
+`ServiceCss()` route with `CssCache`, bootstrap placeholders, the AppData
+theme payload and `Capa::THEMES`/`Capa::USER_BACKGROUND` flags, per-account
+`Theme`/font/background settings, admin config, Knockout store/screens, and
+the retained Frickmail-theme plugin (localStorage-only). The deletion plan is
+ordered freeze → serving paths → sources (including the build-breaking
+`COPY snappymail/v/0.0.0/themes` Dockerfile line) → UI, blocked on Phase 9
+screens and Phase 4 admin APIs, with Phase 10 exit criteria restated.
+
+Independent senior review first blocked on three omissions (font settings,
+`RawUserBackground()`/capability refs, Dockerfile COPY dependency) plus six
+precision findings (package count, route shape, admin keys, admin/UI file
+names, storage keys, AppData read surface); all were verified against source
+and remediated, and the closing re-review approved with no blockers.
+
+Validation is docs-only: every cited path, symbol, and line was verified to
+exist; `git diff --stat` shows only `docs/LEGACY_ACTION_INVENTORY.md`, so no
+Rust build, test, or image change applies and no `rust-ci` run is expected
+before publication.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged (compose PGP assembly and
+OAuth SMTP parity, connection-token/CSRF contract, frontend/theming — now
+with the theme deletion plan recorded — cutover validation).
+
+## Prior Snapshot — 2026-09-09 15:30:00 CEST (UTC+02:00)
 
 The `Message` edge-parity slice corrects the stale "Immediate Next
 Work" note (`Message` dispatch and response parity are native, including
