@@ -7,8 +7,8 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-09 16:00:00 CEST (UTC+02:00)
 
-The pending theme-loader inventory slice (Phase 0 deliverable, Immediate Next
-Work #5) records every legacy SnappyMail theme surface in a new
+The theme-loader inventory slice (Phase 0 deliverable, Immediate Next
+Work #5) records every legacy SnappyMail theme surface in the
 `docs/LEGACY_ACTION_INVENTORY.md` section (T1–T13): 21 bundled theme
 directories plus `example.css`, `@custom`/`@nextcloud` roots, the
 `Actions/Themes.php` resolution/validation/LESS/background loader, the
@@ -31,7 +31,11 @@ exist; `git diff --stat` shows only `docs/LEGACY_ACTION_INVENTORY.md`, so no
 Rust build, test, or image change applies and no `rust-ci` run is expected
 before publication.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
+Implementation commit `5886eee3f8499ab3193021a5ff7e7596508dfc79` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA. As a
+docs-only change it intentionally matches no `rust-ci` path filter, and no
+new GitHub Actions runs were produced, as expected. The major remaining
 gates toward the final Rust-only goal are unchanged (compose PGP assembly and
 OAuth SMTP parity, connection-token/CSRF contract, frontend/theming — now
 with the theme deletion plan recorded — cutover validation).
