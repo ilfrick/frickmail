@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-10 04:00:00 CEST (UTC+02:00)
 
-The pending CI legacy-name allowlist slice (Immediate Next Work #6) makes
+The CI legacy-name allowlist slice (Immediate Next Work #6) makes
 naming cleanup measurable: new workflow `.github/workflows/naming.yml` runs
 `.github/scripts/check-legacy-names.sh` against
 `.github/naming-allowlist.txt` on push/PR. The gate scans tracked files under
@@ -27,11 +27,19 @@ Validation: `bash -n` + YAML parse clean; gate passes on the tree (52 hits,
 9 entries, none stale); both failure modes demonstrated (synthetic new hit
 fails, synthetic stale entry fails; fixtures removed afterwards).
 
-This slice is verified but NOT yet committed or pushed. Pushing it will
-trigger the new `naming` workflow itself (its path filters match its own
-files) alongside `rust-ci` only if Rust paths change — this slice touches no
-Rust code, so only `naming` is expected. The major remaining gates toward the
-final Rust-only goal are unchanged.
+Implementation commit `266f7b13f9d5d26316af77b32b827bad974a6dfe` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA. The new
+`naming` workflow ran on that SHA and passed on `master` run
+[`34572762706`](https://github.com/ilfrick/frickmail/actions/runs/34572762706)
+and `rust-full-migration` run
+[`34572769467`](https://github.com/ilfrick/frickmail/actions/runs/34572769467);
+no `rust-ci` run was produced since no Rust paths changed, as expected. This
+closing documentation-only amendment intentionally matches no CI path filter
+and is expected to produce no GitHub Actions run. The major remaining
+gates toward the final Rust-only goal are unchanged (compose PGP assembly
+and OAuth SMTP parity, connection-token/CSRF contract, frontend/theming
+with the theme deletion plan recorded, cutover validation).
 
 ## Prior Snapshot — 2026-09-09 16:00:00 CEST (UTC+02:00)
 
