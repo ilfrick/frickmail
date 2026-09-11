@@ -5,7 +5,37 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-10 04:00:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 09:40:00 CEST (UTC+02:00)
+
+The pending connection-token/CSRF parity slice hardens the Rust-only
+contract to PHP `ServiceActions` semantics: every POST except `Logout` now
+requires the derived connection token regardless of action-name validity
+(previously skipped for unknown names), and any supplied `X-SM-Token` header
+on `GET /` must match (AppData, raw downloads, JSON GETs, hooks, index;
+headerless requests pass through). Shared `expected_connection_token`
+helper keeps POST semantics byte-identical while the GET path stays
+read-only (never mints session state; no secret means nothing to compare).
+Bridge deployments still defer to PHP tokens; logout stays exempt.
+`docs/LEGACY_ACTION_INVENTORY.md` transport shapes record the contract.
+
+Independent senior review approved with no blockers (constant-time compares,
+no GET minting, exemption/bridge preservation, root_get placement,
+account-switch staleness as parity, identical error mapping, non-vacuous
+tests); one wording nit remediated.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 413 passed including 3 new CSRF tests, live-DB suites green).
+Production-image validation built `frickmail-rust:csrf-contract-test` at
+image ID `sha256:0f57d194333e42b8183085de17f401344e759bc551ed062d0e5a4a9a50f17972`;
+a read-only container returned `/health` ok, rejected an unknown-action POST
+without token (`code 102`), passed a headerless AppData GET on a fresh
+session, showed only expected startup logs, and stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-10 04:00:00 CEST (UTC+02:00)
 
 The CI legacy-name allowlist slice (Immediate Next Work #6) makes
 naming cleanup measurable: new workflow `.github/workflows/naming.yml` runs

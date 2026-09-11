@@ -244,6 +244,13 @@ Unknown actions intentionally return the legacy JSON envelope with an
 `UNKNOWN_ERROR`. Known-but-not-native compatibility actions return a 501
 compatibility fallback until they are migrated.
 
+Connection-token contract (PHP parity): with `security.csrf_enabled` and no
+PHP bridge, every POST except `Logout` requires the derived connection token
+(`XToken` form field or `X-SM-Token` header), regardless of action-name
+validity, and any supplied `X-SM-Token` header on any `GET /` (AppData, raw
+downloads, JSON GETs, hooks, index — headerless requests pass through) must
+match. The bridge deployment skips Rust validation and defers to PHP tokens.
+
 ## Legacy Theme Entry Points
 
 Inventory of every legacy SnappyMail theme surface that must be migrated,

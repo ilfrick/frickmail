@@ -474,6 +474,17 @@ async fn root_get(
     request: AxumRequest,
 ) -> Response {
     let index_root = std::path::PathBuf::from(state.config().static_root.clone());
+    // Legacy PHP validates the X-SM-Token header whenever present, even on
+    // GET service routes (AppData bootstrap, raw downloads, JSON GETs). The
+    // provider OAuth/OIDC redirects and plain page loads carry no such header
+    // and pass through untouched.
+    if state.config().security.csrf_enabled {
+        if let Err(response) =
+            enforce_header_token_if_present(&state, &session, request.headers(), &Value::Null).await
+        {
+            return response;
+        }
+    }
     if let Some(admin) = legacy_admin_app_data_route(&uri) {
         return native_admin_app_data(&state, admin, &session).await;
     }
@@ -1450,9 +1461,10 @@ async fn json_api_request(
     let request = match plugin_request_from_http(&query, &headers, &body, route_action) {
         Ok(request) => {
             let request = attach_legacy_json_raw_key(request, &uri);
+            // Legacy PHP validates the connection token on every POST except
+            // Logout, regardless of whether the action name is valid.
             if state.config().security.csrf_enabled
                 && method == Method::POST
-                && normalize_plugin_action(&request.action).is_ok()
                 && !is_logout_payload(&request.payload)
             {
                 if let Err(response) =
@@ -10552,14 +10564,71 @@ async fn enforce_connection_token(
         return Ok(());
     }
 
+    let Some(expected) = expected_connection_token(session).await? else {
+        return Err(csrf_error(
+            payload_string(payload, "Action").as_deref().unwrap_or(""),
+        ));
+    };
+    match supplied_connection_token(payload, headers) {
+        Some(supplied) if constant_time_equal(supplied.trim().as_bytes(), expected.as_bytes()) => {
+            Ok(())
+        }
+        _ => Err(csrf_error(
+            payload_string(payload, "Action").as_deref().unwrap_or(""),
+        )),
+    }
+}
+
+/// Rejects a stale or forged `X-SM-Token` header on non-POST requests, mirroring
+/// legacy PHP, which validates the header whenever it is present (even on GET).
+/// Unlike POST, no token is required: sessions without an established secret
+/// and requests without the header pass through untouched.
+async fn enforce_header_token_if_present(
+    state: &AppState,
+    session: &fm_session::Session,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> Result<(), Response> {
+    if state.config().php_bridge_url.is_some() {
+        return Ok(());
+    }
+
+    let Some(raw) = headers
+        .get("x-sm-token")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(());
+    };
+    let expected = match expected_connection_token(session).await? {
+        Some(expected) => expected,
+        // No token established in this session yet: nothing to compare
+        // against, so a header cannot be judged stale.
+        None => return Ok(()),
+    };
+    // A present-but-blank header mismatches like any wrong token, mirroring
+    // legacy PHP's isset-then-compare semantics.
+    let supplied = raw.trim();
+    if !supplied.is_empty() && constant_time_equal(supplied.as_bytes(), expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(csrf_error(
+            payload_string(payload, "Action").as_deref().unwrap_or(""),
+        ))
+    }
+}
+
+/// Derives the expected connection token from the session secret without
+/// creating one, so read-only checks never mint session state. Returns `None`
+/// when no secret was established yet.
+async fn expected_connection_token(
+    session: &fm_session::Session,
+) -> Result<Option<String>, Response> {
     let Some(secret) = session
         .get::<String>(fm_session::CONNECTION_TOKEN_SECRET_KEY)
         .await
         .map_err(|err| app_data_error(format!("Frickmail session read failed: {err}")))?
     else {
-        return Err(csrf_error(
-            payload_string(payload, "Action").as_deref().unwrap_or(""),
-        ));
+        return Ok(None);
     };
     let secret = URL_SAFE_NO_PAD
         .decode(&secret)
@@ -10572,15 +10641,7 @@ async fn enforce_connection_token(
         Some(account_id) if account_id > 0 => Some(account_id),
         _ => None,
     };
-    let expected = derive_connection_token(&secret, account_id);
-    match supplied_connection_token(payload, headers) {
-        Some(supplied) if constant_time_equal(supplied.trim().as_bytes(), expected.as_bytes()) => {
-            Ok(())
-        }
-        _ => Err(csrf_error(
-            payload_string(payload, "Action").as_deref().unwrap_or(""),
-        )),
-    }
+    Ok(Some(derive_connection_token(&secret, account_id)))
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
@@ -33861,6 +33922,53 @@ Subject: Empty body metadata\r\n\r\n"
 
     #[tokio::test]
     async fn json_api_rejects_double_plugin_prefix_once() {
+        let app = app();
+        let bootstrap = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = bootstrap
+            .headers()
+            .get(SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap()
+            .to_string();
+        let token = read_json(bootstrap).await["System"]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", cookie)
+                    .body(Body::from(format!(
+                        "Action=PluginPluginFrickmailMe&XToken={token}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(body["code"], 903);
+        assert_eq!(body["Action"], "PluginPluginFrickmailMe");
+    }
+
+    #[tokio::test]
+    async fn csrf_rejects_unknown_action_post_without_token() {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -33873,11 +33981,87 @@ Subject: Empty body metadata\r\n\r\n"
             .await
             .unwrap();
 
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_rejects_stale_header_token_on_get() {
+        let app = app();
+        let bootstrap = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = bootstrap
+            .headers()
+            .get(SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap()
+            .to_string();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .header("cookie", cookie)
+                    .header("x-sm-token", "stale-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_accepts_valid_header_token_on_get() {
+        let app = app();
+        let bootstrap = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = bootstrap
+            .headers()
+            .get(SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap()
+            .to_string();
+        let token = read_json(bootstrap).await["System"]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .header("cookie", cookie)
+                    .header("x-sm-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(response.status(), StatusCode::OK);
-        let body = read_json(response).await;
-        assert_eq!(body["Result"], false);
-        assert_eq!(body["code"], 903);
-        assert_eq!(body["Action"], "PluginPluginFrickmailMe");
     }
 
     #[tokio::test]
