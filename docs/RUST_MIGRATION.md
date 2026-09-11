@@ -5,7 +5,32 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 13:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 14:30:00 CEST (UTC+02:00)
+
+The pending v1 identities slice adds `GET /api/frickmail/v1/identities`,
+reusing the exact repository query as legacy `FrickmailListIdentities`.
+Scoping is strict (`user_id` plus required positive `account_id`, mirroring
+legacy): foreign accounts yield an empty list, never foreign rows; the
+`MailIdentity` shape carries no secrets. Missing/non-numeric/non-positive
+ids are 400s. Two tests cover scoped listing, cross-user isolation plus
+input validation and anonymous rejection.
+
+Independent senior review approved with no actionables (IDOR safety,
+secret-free shapes, auth/DB guards, and test rigor all verified).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 429 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-identities-test` at
+image ID `sha256:01d52cfc0143b68d576ac6eda5bc7dcb61b45814eb95943ca730d567f647a91d`;
+a read-only container returned 401 for anonymous `/identities` (with and
+without `account_id`), logs showed only expected startup messages, and it
+stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 13:30:00 CEST (UTC+02:00)
 
 The v1 accounts slice adds `GET /api/frickmail/v1/accounts`,
 reusing the exact `list_mail_accounts` repository query as legacy

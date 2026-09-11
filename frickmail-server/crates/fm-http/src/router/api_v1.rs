@@ -46,6 +46,7 @@ pub fn routes() -> Router<AppState> {
         .route("/session", get(session))
         .route("/login", post(login))
         .route("/accounts", get(accounts))
+        .route("/identities", get(identities))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -118,6 +119,77 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Lists one mail account's identities, reusing the exact repository query
+/// as legacy `FrickmailListIdentities`. Scoping is strict (`user_id` plus
+/// `account_id`, mirroring legacy): other users' accounts yield an empty
+/// list, never an error and never foreign rows. The `MailIdentity` shape
+/// carries no secrets.
+async fn identities(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let stored = match session
+        .get::<UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(_) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            )
+        }
+    };
+    let Some(user) = stored else {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        );
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let account_id = match params
+        .get("account_id")
+        .map(|value| value.parse::<i64>())
+        .transpose()
+        .ok()
+        .flatten()
+        .filter(|id| *id > 0)
+    {
+        Some(account_id) => account_id,
+        None => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "A positive account_id query parameter is required",
+            )
+        }
+    };
+    match fm_user::SqlxUserRepository::list_mail_identities(pool, user.user_id, account_id).await {
+        Ok(identities) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "identities": identities }))),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("v1 identities listing failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail identities listing failed",
+            )
+        }
+    }
 }
 
 /// Lists the authenticated user's mail accounts with safe metadata and
@@ -1000,5 +1072,128 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["data"]["authenticated"], false);
         assert_eq!(body["data"]["requires_totp"], true);
+    }
+
+    async fn seed_identity_full(
+        pool: &sqlx::AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_identities
+                (id, account_id, user_id, name, email, reply_to, is_default, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(format!("{}@example.com", name.to_ascii_lowercase()))
+        .bind(None::<String>)
+        .bind(id == 401)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v1_identities_lists_account_scoped_identities() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 301, "v1ident", "correct-horse", None).await;
+        seed_mail_account(&pool, 500, 301, "Work").await;
+        seed_identity_full(&pool, 401, 301, 500, "Sender").await;
+        seed_identity_full(&pool, 402, 301, 500, "Alias").await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1ident", "correct-horse").await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/identities?account_id=500")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        let identities = body["data"]["identities"].as_array().unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0]["name"], "Sender");
+        assert_eq!(identities[0]["email"], "sender@example.com");
+        assert_eq!(identities[0]["account_id"], 500);
+    }
+
+    #[tokio::test]
+    async fn v1_identities_isolates_foreign_accounts_and_validates_input() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 302, "v1owner", "correct-horse", None).await;
+        seed_login_user(&pool, 303, "v1stranger", "correct-horse", None).await;
+        seed_mail_account(&pool, 501, 302, "Owner").await;
+        seed_identity_full(&pool, 403, 302, 501, "OwnerName").await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1stranger", "correct-horse").await;
+
+        // Another user's account yields an empty list, never foreign rows.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/identities?account_id=501")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["identities"].as_array().unwrap().len(), 0);
+
+        // Missing, non-numeric, and non-positive account ids are rejected.
+        for uri in [
+            "/api/frickmail/v1/identities",
+            "/api/frickmail/v1/identities?account_id=abc",
+            "/api/frickmail/v1/identities?account_id=0",
+            "/api/frickmail/v1/identities?account_id=-5",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_request", "{uri}");
+        }
+
+        // Anonymous callers are rejected.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/identities?account_id=501")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
