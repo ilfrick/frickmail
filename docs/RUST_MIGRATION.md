@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-11 09:40:00 CEST (UTC+02:00)
 
-The pending connection-token/CSRF parity slice hardens the Rust-only
+The connection-token/CSRF parity slice hardens the Rust-only
 contract to PHP `ServiceActions` semantics: every POST except `Logout` now
 requires the derived connection token regardless of action-name validity
 (previously skipped for unknown names), and any supplied `X-SM-Token` header
@@ -32,8 +32,22 @@ a read-only container returned `/health` ok, rejected an unknown-action POST
 without token (`code 102`), passed a headerless AppData GET on a fresh
 session, showed only expected startup logs, and stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `4007939db24488727ad53daa9534e6208be60535` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34575778869`](https://github.com/ilfrick/frickmail/actions/runs/34575778869)
+and `rust-full-migration` run
+[`34575787686`](https://github.com/ilfrick/frickmail/actions/runs/34575787686),
+and the `naming` gate passed on both branches
+([`34575778880`](https://github.com/ilfrick/frickmail/actions/runs/34575778880),
+[`34575787641`](https://github.com/ilfrick/frickmail/actions/runs/34575787641));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major
+remaining gates toward the final Rust-only goal are unchanged (compose PGP
+assembly and OAuth SMTP parity, frontend/theming with the theme deletion
+plan recorded, cutover validation).
 
 ## Prior Snapshot — 2026-09-10 04:00:00 CEST (UTC+02:00)
 
