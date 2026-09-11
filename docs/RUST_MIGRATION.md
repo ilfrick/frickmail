@@ -27,8 +27,21 @@ image ID `sha256:6ed73d7db801f9f632188a1fdff839b65356a1ac8e7206ae14d4d509510a23c
 a read-only container returned 401 for anonymous `/preferences`, logs showed
 only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `5337b9d690f0a5f1b9cf2924911a8c8c565c2ac4` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34611004042`](https://github.com/ilfrick/frickmail/actions/runs/34611004042)
+and `rust-full-migration` run
+[`34611009904`](https://github.com/ilfrick/frickmail/actions/runs/34611009904),
+and the `naming` gate passed on both branches
+([`34611004072`](https://github.com/ilfrick/frickmail/actions/runs/34611004072),
+[`34611009802`](https://github.com/ilfrick/frickmail/actions/runs/34611009802));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major
+remaining gates toward the final Rust-only goal are unchanged (more v1
+mailbox endpoints, frontend screens, theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-11 16:30:00 CEST (UTC+02:00)
 
