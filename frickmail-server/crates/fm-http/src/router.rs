@@ -18303,6 +18303,34 @@ fn legacy_message_body_response(
     durable_receipt_suppressed: bool,
     verify: LegacyMessageAutoVerify,
 ) -> Response {
+    match legacy_message_body_value(
+        folder,
+        uid,
+        parts,
+        thread_uids,
+        thread_unseen_uids,
+        durable_receipt_suppressed,
+        verify,
+    ) {
+        Some(message) => json_value_envelope(StatusCode::OK, action, json!({ "Result": message })),
+        None => json_result_error(action, "Message body could not be parsed"),
+    }
+}
+
+/// Assembles the legacy `Object/Message` JSON value from fetched body parts,
+/// returning `None` when nothing parsable was found. Shared by the legacy
+/// `Message` action (which wraps it in its envelope) and the stable v1
+/// message route (which nests it in v1 `data`).
+#[allow(clippy::too_many_arguments)]
+fn legacy_message_body_value(
+    folder: &str,
+    uid: u32,
+    parts: Vec<BodyPreviewPart>,
+    thread_uids: &[u32],
+    thread_unseen_uids: &[u32],
+    durable_receipt_suppressed: bool,
+    verify: LegacyMessageAutoVerify,
+) -> Option<Value> {
     let flags = parts
         .first()
         .map(|part| part.flags.as_slice())
@@ -18548,7 +18576,7 @@ fn legacy_message_body_response(
         && sender.is_none()
         && delivered_to.is_none()
     {
-        return json_result_error(action, "Message body could not be parsed");
+        return None;
     }
 
     let hash = legacy_message_hash(folder, uid);
@@ -18561,49 +18589,43 @@ fn legacy_message_body_response(
             .unwrap_or(Value::Null)
     };
     let subject = fm_imap::legacy_message_subject(&subject);
-    json_value_envelope(
-        StatusCode::OK,
-        action,
-        json!({
-            "Result": legacy_message_json(
-                folder,
-                uid,
-                &hash,
-                &subject,
-                encrypted,
-                spam.spam_score,
-                &spam.spam_result,
-                spam.is_spam,
-                &auth_statuses,
-                draft_info.as_ref(),
-                &html,
-                &plain,
-                &message_id,
-                &in_reply_to,
-                &references,
-                &read_receipt,
-                date_timestamp,
-                date_timestamp_source,
-                attachment_json,
-                headers.as_deref(),
-                from.as_deref(),
-                reply_to.as_deref(),
-                to.as_deref(),
-                cc.as_deref(),
-                bcc.as_deref(),
-                sender.as_deref(),
-                delivered_to.as_deref(),
-                &crypto,
-                size,
-                flags,
-                email_id,
-                preview,
-                thread_uids,
-                thread_unseen_uids,
-                &verify,
-            )
-        }),
-    )
+    Some(legacy_message_json(
+        folder,
+        uid,
+        &hash,
+        &subject,
+        encrypted,
+        spam.spam_score,
+        &spam.spam_result,
+        spam.is_spam,
+        &auth_statuses,
+        draft_info.as_ref(),
+        &html,
+        &plain,
+        &message_id,
+        &in_reply_to,
+        &references,
+        &read_receipt,
+        date_timestamp,
+        date_timestamp_source,
+        attachment_json,
+        headers.as_deref(),
+        from.as_deref(),
+        reply_to.as_deref(),
+        to.as_deref(),
+        cc.as_deref(),
+        bcc.as_deref(),
+        sender.as_deref(),
+        delivered_to.as_deref(),
+        &crypto,
+        size,
+        flags,
+        email_id,
+        preview,
+        thread_uids,
+        thread_unseen_uids,
+        &verify,
+    ))
 }
 
 fn legacy_append_message_body_part(

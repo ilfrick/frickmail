@@ -49,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         .route("/identities", get(identities))
         .route("/switch-account", post(switch_account))
         .route("/messages", get(messages))
+        .route("/messages/{uid}", get(message))
         .route("/preferences", get(get_preferences).put(set_preferences))
         .route("/rules", get(rules))
         .fallback(unknown_path)
@@ -131,6 +132,265 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Query parameters for `GET /api/frickmail/v1/messages/{uid}`.
+#[derive(Debug, Deserialize, Default)]
+struct MessageQuery {
+    #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    account_id: Option<i64>,
+}
+
+/// Reads one full message over IMAP, assembling the exact legacy
+/// `Object/Message` value (shared `legacy_message_body_value`, including
+/// signature auto-verification) inside v1 `data`. Thread expansion and HTTP
+/// conditional caching stay on the legacy dispatcher for now.
+async fn message(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    path: Result<axum::extract::Path<u32>, axum::extract::rejection::PathRejection>,
+    query: Result<axum::extract::Query<MessageQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    message_with_fetcher(
+        &state,
+        &session,
+        path,
+        query,
+        super::MESSAGE_BODY_FETCH_DEADLINE,
+        |config, password, folder, uid| async move {
+            fm_imap::fetch_message_body_preview(config, &password, &folder, uid).await
+        },
+    )
+    .await
+}
+
+async fn message_with_fetcher<F, Fut>(
+    state: &AppState,
+    session: &fm_session::Session,
+    path: Result<axum::extract::Path<u32>, axum::extract::rejection::PathRejection>,
+    query: Result<axum::extract::Query<MessageQuery>, axum::extract::rejection::QueryRejection>,
+    fetch_deadline: std::time::Duration,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(fm_imap::ImapConnectionConfig, String, String, u32) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<Option<Vec<fm_imap::BodyPreviewPart>>>>,
+{
+    let stored = match session
+        .get::<UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(_) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            )
+        }
+    };
+    let Some(user) = stored else {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        );
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(uid)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid message uid",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid message query",
+        );
+    };
+    if uid == 0 || params.folder.trim().is_empty() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "A folder query parameter and nonzero uid are required",
+        );
+    }
+    let account_id = match params.account_id.filter(|id| *id > 0) {
+        Some(account_id) => account_id,
+        None => match session
+            .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+            .await
+        {
+            Ok(Some(selected)) if selected.account_id > 0 => selected.account_id,
+            Ok(_) => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "account_required",
+                    "An account_id query parameter or selected account is required",
+                )
+            }
+            Err(_) => {
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_error",
+                    "Frickmail session read failed",
+                )
+            }
+        },
+    };
+    let credential_key = match v1_session_credential_key(session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let account = match fm_user::SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!("v1 message account lookup failed: {}", err.public_message());
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail account lookup failed",
+            );
+        }
+    };
+    let password = match super::account_password(&account, &credential_key) {
+        Ok(password) => password,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_account",
+                "Mail account credentials are unavailable",
+            )
+        }
+    };
+    let imap_config = match super::imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_account",
+                err.public_message(),
+            )
+        }
+    };
+    let auto_verify = state.config().security.auto_verify_signatures;
+    let pgp_verify_connection = auto_verify.then(|| {
+        (
+            imap_config.clone(),
+            password.clone(),
+            params.folder.clone(),
+            uid,
+        )
+    });
+
+    let result = tokio::time::timeout(
+        fetch_deadline,
+        fetcher(imap_config, password, params.folder.clone(), uid),
+    )
+    .await
+    .map_err(|_| fm_core::FrickmailError::Upstream("Message fetch timed out".to_string()));
+    let parts = match result {
+        Ok(Ok(Some(parts))) => parts,
+        Ok(Ok(None)) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "message_not_found",
+                "Message not found",
+            )
+        }
+        Ok(Err(err)) | Err(err) => {
+            tracing::warn!("v1 message fetch failed: {}", err.public_message());
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail server message fetch failed",
+            );
+        }
+    };
+
+    let pgp_signed = parts.iter().find_map(|part| {
+        (!part.crypto.is_empty())
+            .then_some(&part.crypto)
+            .and_then(|crypto| crypto.pgp_signed.clone())
+    });
+    let (smime, pgp_fingerprint) =
+        tokio::time::timeout(super::MESSAGE_AUTO_VERIFY_DEADLINE, async {
+            tokio::join!(
+                super::legacy_message_smime_auto_verify(&parts, auto_verify),
+                async {
+                    let (signed, connection) = match (pgp_signed, pgp_verify_connection) {
+                        (Some(signed), Some((vconfig, vpassword, vfolder, vuid))) => {
+                            (signed, (vconfig, vpassword, vfolder, vuid))
+                        }
+                        _ => return None,
+                    };
+                    super::legacy_message_pgp_auto_verify(
+                        state,
+                        user.user_id,
+                        connection.0,
+                        &connection.1,
+                        &connection.2,
+                        connection.3,
+                        &signed,
+                    )
+                    .await
+                }
+            )
+        })
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                "v1 message auto-verification timed out; rendering unverified signatures"
+            );
+            (None, None)
+        });
+    let durable_receipt_suppressed =
+        super::legacy_read_receipt_cached(pool, user.user_id, account_id, &params.folder, uid)
+            .await
+            .unwrap_or(false);
+    match super::legacy_message_body_value(
+        &params.folder,
+        uid,
+        parts,
+        &[],
+        &[],
+        durable_receipt_suppressed,
+        super::LegacyMessageAutoVerify {
+            smime,
+            pgp_fingerprint,
+        },
+    ) {
+        Some(message) => (StatusCode::OK, Json(ApiV1Envelope::ok(message))).into_response(),
+        None => v1_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unparseable_message",
+            "Message body could not be parsed",
+        ),
+    }
 }
 
 /// Lists one mail account's filter rules, reusing the exact repository query
@@ -2447,5 +2707,199 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn test_message_parts() -> Vec<fm_imap::BodyPreviewPart> {
+        vec![fm_imap::BodyPreviewPart {
+            kind: fm_imap::BodyPartKind::RawMessage,
+            raw: b"Subject: Single message\r\nFrom: Sender <sender@example.com>\r\n\r\nBody"
+                .to_vec(),
+            is_complete: true,
+            flags: Vec::new(),
+            crypto: Default::default(),
+            metadata: Default::default(),
+        }]
+    }
+
+    async fn message_test_state() -> (AppState, fm_session::Session, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 801, "v1msg", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 900, 801, &blob).await;
+        let state = AppState::with_db_pool(test_api_config(), Some(pool));
+        let session = authed_v1_session(801, "v1msg").await;
+        let token = super::super::ensure_connection_token(&state, &session, Some(900))
+            .await
+            .unwrap();
+        (state, session, token)
+    }
+
+    #[tokio::test]
+    async fn v1_message_reads_single_message_through_injected_fetcher() {
+        let (state, session, _) = message_test_state().await;
+
+        let response = super::message_with_fetcher(
+            &state,
+            &session,
+            Ok(axum::extract::Path(55)),
+            Ok(axum::extract::Query(super::MessageQuery {
+                folder: "INBOX".to_string(),
+                account_id: Some(900),
+            })),
+            std::time::Duration::from_secs(5),
+            |config, _password, folder, uid| async move {
+                assert_eq!(config.host, "imap.example.com");
+                assert_eq!(folder, "INBOX");
+                assert_eq!(uid, 55);
+                Ok(Some(test_message_parts()))
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["subject"], "Single message");
+        assert_eq!(body["data"]["uid"], 55);
+        assert_eq!(body["data"]["from"][0]["email"], "sender@example.com");
+    }
+
+    #[tokio::test]
+    async fn v1_message_maps_absent_and_unparseable_messages() {
+        let (state, session, _) = message_test_state().await;
+        let query = || {
+            Ok(axum::extract::Query(super::MessageQuery {
+                folder: "INBOX".to_string(),
+                account_id: Some(900),
+            }))
+        };
+
+        let response = super::message_with_fetcher(
+            &state,
+            &session,
+            Ok(axum::extract::Path(56)),
+            query(),
+            std::time::Duration::from_secs(5),
+            |_config, _password, _folder, _uid| async move { Ok(None) },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "message_not_found");
+
+        let response = super::message_with_fetcher(
+            &state,
+            &session,
+            Ok(axum::extract::Path(57)),
+            query(),
+            std::time::Duration::from_secs(5),
+            |_config, _password, _folder, _uid| async move {
+                Ok(Some(vec![fm_imap::BodyPreviewPart {
+                    kind: fm_imap::BodyPartKind::RawMessage,
+                    raw: b"\x00\x01\x02".to_vec(),
+                    is_complete: true,
+                    flags: Vec::new(),
+                    crypto: Default::default(),
+                    metadata: Default::default(),
+                }]))
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "unparseable_message");
+    }
+
+    #[tokio::test]
+    async fn v1_message_rejects_bad_requests_over_http() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 802, "v1msgerr", "correct-horse", None).await;
+        seed_mail_account(&pool, 901, 802, "Broken").await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1msgerr", "correct-horse").await;
+
+        // Missing folder.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/messages/60?account_id=901")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Non-numeric uid.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/messages/abc?folder=INBOX")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Zero uid.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/messages/0?folder=INBOX")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+
+        // Unknown account.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/messages/60?folder=INBOX&account_id=999999")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Undecryptable stored credentials.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/messages/60?folder=INBOX&account_id=901")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_account");
     }
 }

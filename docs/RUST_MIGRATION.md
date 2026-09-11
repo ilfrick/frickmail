@@ -5,7 +5,33 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 18:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 19:30:00 CEST (UTC+02:00)
+
+The v1 message-read slice adds `GET /api/frickmail/v1/messages/{uid}`,
+assembling the exact legacy `Object/Message` value (the big body builder was
+split behavior-preservingly into a value function plus the legacy envelope
+wrapper, proven by all 63 legacy message tests) inside v1 `data`, including
+signature auto-verification and read-receipt suppression state. Thread
+expansion and HTTP conditional caching stay on the legacy dispatcher for now;
+absent UIDs are 404s and unparseable bodies 422s. The IMAP fetcher is
+injectable like the list endpoint. Three tests cover the success path,
+absent/unparseable mapping, and bad-request cases over HTTP.
+
+Independent senior review approved with no blockers; two follow-up nits
+(`{uid}` notation, zero-uid test) were applied.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 442 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-message-test` at
+image ID `sha256:55593912ba49b868fdae2545d2a9cd67286ac5af83eba8dc09c5915983524615`;
+a read-only container returned 401 for anonymous message reads, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 18:30:00 CEST (UTC+02:00)
 
 The v1 rules slice adds `GET /api/frickmail/v1/rules`, reusing the
 exact repository query as legacy `FrickmailListRules`. Unlike identities
