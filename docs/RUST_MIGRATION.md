@@ -5,7 +5,36 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 15:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 16:30:00 CEST (UTC+02:00)
+
+The pending v1 messages slice adds `GET /api/frickmail/v1/messages`, the
+first mailbox endpoint: explicit-or-selected account resolution, scoped
+credential lookup, shared request normalization (limit defaults/clamping,
+per-user hide-deleted, domain search settings), and IMAP fetch under the
+shared deadline, returning the MailSo-compatible list shape inside the v1
+envelope. Thread views, receipt-suppression post-processing, HTTP conditional
+caching, and the UID cache stay on the legacy dispatcher for now (noted in
+module docs). The fetcher is injectable like the legacy pattern, so tests
+run without IMAP. Three tests cover the success path (request mapping,
+default limit, response shape) plus bad-request/unknown-account/broken-
+credential/anonymous cases.
+
+Independent senior review approved with no blockers; one suggested 502
+test was added (upstream failures map to `upstream_error` without leaking
+storage text).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 435 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-messages-test` at
+image ID `sha256:3e837ba4dbf03e52fa5cef46af2cd9ca835a419f7b4868e8002676456a219734`;
+a read-only container returned 401 for anonymous `/messages`, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 15:30:00 CEST (UTC+02:00)
 
 The v1 switch-account slice adds `POST /api/frickmail/v1/switch-account`,
 reusing legacy ownership checks (user-scoped account lookup), credential-material
