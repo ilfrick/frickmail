@@ -12,4 +12,4 @@ pub use config::{
 };
 pub use date::legacy_rfc2822_timestamp;
 pub use error::{ErrorBody, FrickmailError, Result};
-pub use json::{ApiEnvelope, HealthResponse};
+pub use json::{ApiEnvelope, ApiV1Envelope, ApiV1Error, HealthResponse, API_V1_VERSION};

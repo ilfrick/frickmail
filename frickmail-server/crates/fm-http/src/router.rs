@@ -1,3 +1,4 @@
+pub mod api_v1;
 pub mod calendar;
 pub mod contacts;
 
@@ -392,6 +393,7 @@ pub fn build_router_with_session(
         .route("/version", get(version))
         .route("/LoginO365", get(o365_path_callback))
         .route("/StartLoginO365", get(o365_path_start_login))
+        .nest("/api/frickmail/v1", api_v1::routes())
         .nest_service(
             "/static",
             ServeDir::new(static_root).append_index_html_on_directories(true),

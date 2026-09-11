@@ -5,7 +5,41 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 10:50:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 11:20:00 CEST (UTC+02:00)
+
+The pending Phase 9 API-foundation slice mounts the stable Rust-owned API at
+`/api/frickmail/v1` (new `fm-http/src/router/api_v1.rs`, framework-agnostic
+JSON with real HTTP statuses instead of 200 envelopes). Contract:
+`{"version":"v1","data":…}` on success, `{"version":"v1","error":{code,
+message}}` on failure; additive fields never bump the version. Ships with
+`GET /health` (unauthenticated) and `GET /session` (reads the
+`FrickmailSession` cookie session only — 401 anonymous, 500 on store
+failure, never a login attempt or mutation), plus a JSON 404 fallback (and a JSON 405 for wrong methods) so
+unknown v1 paths never leak the HTML shell or axum's default bodies. Only safe methods exist so far,
+so no connection-token CSRF check applies; the first state-changing route
+must enforce it. Envelope types live in `fm-core` with unit tests; six
+tests cover envelopes, health, anonymous 401, JSON 404, and JSON 405.
+Authenticated
+`GET /session` coverage lands with the login-endpoint slice, which will
+exercise session creation end to end.
+
+Independent senior review approved the slice; one contract edge (wrong
+methods fell through to axum's default 405 body) was closed with a JSON 405
+handler plus test before validation.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 419 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-test` at image ID
+`sha256:9e193fdec140f5c0269f0a5ff520e4c801f38f5ab0be7b7f76c4b4ebc6385b46`;
+a read-only container verified the live contract (`/health` 200 envelope,
+`/session` 401 envelope, unknown path 404, POST 405), `/health` returned
+`ok`, logs showed only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 10:50:00 CEST (UTC+02:00)
 
 The client-PGP compose slice closes the "staged attachments with
 client OpenPGP MIME" gap: `SendMessage`/`SaveMessage` now accept staged
