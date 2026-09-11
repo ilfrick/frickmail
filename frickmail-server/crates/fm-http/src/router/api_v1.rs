@@ -47,6 +47,7 @@ pub fn routes() -> Router<AppState> {
         .route("/login", post(login))
         .route("/accounts", get(accounts))
         .route("/identities", get(identities))
+        .route("/switch-account", post(switch_account))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -110,6 +111,14 @@ async fn session(state: axum::extract::State<AppState>, session: fm_session::Ses
     if let Ok(Some(token)) = super::expected_connection_token(&session).await {
         data["csrf_token"] = json!(token);
     }
+    if let Ok(Some(selected)) = session
+        .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+        .await
+    {
+        data["selected_account_id"] = json!(selected.account_id);
+    } else {
+        data["selected_account_id"] = json!(null);
+    }
     (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
 }
 
@@ -119,6 +128,171 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Switches the selected mail account for this session, reusing the legacy
+/// ownership check (`user_id`-scoped lookup), credential-material validation
+/// (decryptable password / OAuth token, no network), and account-scoped
+/// connection-token refresh. The fresh `csrf_token` is returned because
+/// switched scopes invalidate the previous token.
+///
+/// Intentional deviation from legacy `FrickmailSwitchAccount`: no live
+/// IMAP/OAuth probe happens here. v1 separates session selection from
+/// transport health, which surfaces on first mailbox use instead.
+async fn switch_account(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<SwitchAccountRequest>, JsonRejection>,
+) -> Response {
+    // Token before identity, mirroring the legacy dispatcher (which rejects
+    // tokenless POSTs before routing to the action handler).
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let stored = match session
+        .get::<UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(_) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            )
+        }
+    };
+    let Some(user) = stored else {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        );
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid switch-account request",
+        );
+    };
+    if request.account_id <= 0 {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "A positive account_id is required",
+        );
+    }
+    let credential_key = match session
+        .get::<String>(fm_session::CREDENTIAL_KEY_SESSION_KEY)
+        .await
+        .map_err(|_| {
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            )
+        }) {
+        Ok(Some(encoded)) => encoded,
+        _ => {
+            return v1_error(
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated",
+                "No authenticated Frickmail session",
+            )
+        }
+    };
+    let credential_key = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(credential_key.trim())
+            .ok()
+            .filter(|key| key.len() == fm_user::CREDENTIAL_KEY_BYTES)
+    };
+    let Some(credential_key) = credential_key else {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        );
+    };
+    let account = match fm_user::SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        request.account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!("v1 switch-account lookup failed: {}", err.public_message());
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail account lookup failed",
+            );
+        }
+    };
+    if let Err(message) = super::mail_account_bridge_validation(&account, &credential_key)
+        .map(|_| ())
+        .map_err(|err| err.public_message())
+    {
+        return v1_error(StatusCode::BAD_REQUEST, "invalid_account", message);
+    }
+    if let Err(err) = session
+        .insert(
+            fm_session::SELECTED_ACCOUNT_SESSION_KEY,
+            fm_core::SelectedMailAccountSession {
+                account_id: request.account_id,
+            },
+        )
+        .await
+    {
+        tracing::warn!("v1 switch-account store failed: {err}");
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Frickmail account switch failed",
+        );
+    }
+    let token =
+        match super::ensure_connection_token(&state, &session, Some(request.account_id)).await {
+            Ok(token) => token,
+            Err(_) => {
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Frickmail account switch failed",
+                );
+            }
+        };
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({
+            "switched": true,
+            "account": {
+                "id": account.id,
+                "email": account.email,
+            },
+            "csrf_token": token,
+        }))),
+    )
+        .into_response()
 }
 
 /// Lists one mail account's identities, reusing the exact repository query
@@ -252,6 +426,12 @@ struct LoginRequest {
     totp_code: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SwitchAccountRequest {
+    #[serde(default)]
+    account_id: i64,
+}
+
 /// Authenticates with username/password (+TOTP when the account requires it)
 /// through the exact core shared with legacy `FrickmailLogin`, then rotates
 /// the session id and stores the user session plus credential key.
@@ -282,7 +462,7 @@ async fn login(
         );
     };
 
-    if let Err(response) = v1_login_csrf(&state, &session, &headers).await {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
         return response;
     }
 
@@ -344,13 +524,13 @@ async fn login(
     }
 }
 
-/// Connection-token check for the login route. Unlike the read-only GET
-/// helper, login always requires the token once CSRF is enabled: legacy
-/// `FrickmailLogin` POSTs 403 without one, and the bootstrap (`GET
-/// /api/frickmail/v1/session`, legacy AppData) always mints a secret first.
+/// Connection-token check for state-changing v1 routes. Unlike the read-only
+/// GET helper, these always require the token once CSRF is enabled: legacy
+/// POSTs 403 without one, and the bootstrap (`GET /api/frickmail/v1/session`,
+/// legacy AppData) always mints a secret first.
 /// Only the `X-SM-Token` header is honored (intentional: v1 is strict JSON,
 /// while the legacy `XToken` form field stays on the old dispatcher).
-async fn v1_login_csrf(
+async fn v1_require_token(
     state: &AppState,
     session: &fm_session::Session,
     headers: &axum::http::HeaderMap,
@@ -1192,6 +1372,173 @@ mod tests {
                     .body(Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn seed_imap_account_with_password(
+        pool: &sqlx::AnyPool,
+        id: i64,
+        user_id: i64,
+        password: &[u8],
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_mail_accounts
+                (id, user_id, label, email, type, imap_host, imap_port, imap_secure,
+                 smtp_host, smtp_port, smtp_secure, login, encrypted_password,
+                 encrypted_oauth_refresh_token, oauth_tenant, is_primary, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind("Switchable")
+        .bind("switchable@example.com")
+        .bind("imap")
+        .bind("imap.example.com")
+        .bind(993_i64)
+        .bind("SSL")
+        .bind("smtp.example.com")
+        .bind(465_i64)
+        .bind("SSL")
+        .bind("switchable@example.com")
+        .bind(password.to_vec())
+        .bind(None::<Vec<u8>>)
+        .bind(None::<String>)
+        .bind(true)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn switch_request(cookie: &str, token: Option<&str>, account_id: i64) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/frickmail/v1/switch-account")
+            .header("content-type", "application/json")
+            .header("cookie", cookie);
+        if let Some(token) = token {
+            request = request.header("x-sm-token", token);
+        }
+        request
+            .body(Body::from(
+                serde_json::json!({"account_id": account_id}).to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v1_switch_account_switches_and_refreshes_token() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 401, "v1switch", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 600, 401, &blob).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1switch", "correct-horse").await;
+
+        let response = app
+            .clone()
+            .oneshot(switch_request(&cookie, Some(&token), 600))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["switched"], true);
+        assert_eq!(body["data"]["account"]["id"], 600);
+        assert_eq!(body["data"]["account"]["email"], "switchable@example.com");
+        let switched_token = body["data"]["csrf_token"].as_str().unwrap();
+        assert!(switched_token.starts_with("600-"), "{switched_token}");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/session")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["selected_account_id"], 600);
+    }
+
+    #[tokio::test]
+    async fn v1_switch_account_rejects_unknown_foreign_and_broken_accounts() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 402, "v1switcher", "correct-horse", None).await;
+        seed_login_user(&pool, 403, "v1bystander", "correct-horse", None).await;
+        seed_mail_account(&pool, 601, 403, "Foreign").await;
+        seed_mail_account(&pool, 602, 402, "Broken").await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1switcher", "correct-horse").await;
+
+        // Unknown account id.
+        let response = app
+            .clone()
+            .oneshot(switch_request(&cookie, Some(&token), 999_999))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "account_not_found");
+
+        // Another user's account: scoped lookup finds nothing.
+        let response = app
+            .clone()
+            .oneshot(switch_request(&cookie, Some(&token), 601))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "account_not_found");
+
+        // Undecryptable stored credentials: dummy bytes cannot decode.
+        let response = app
+            .oneshot(switch_request(&cookie, Some(&token), 602))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_account");
+    }
+
+    #[tokio::test]
+    async fn v1_switch_account_requires_auth_and_token() {
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+
+        // Token is checked before identity, mirroring the legacy dispatcher:
+        // even anonymous callers get 403 without a token.
+        let response = app
+            .clone()
+            .oneshot(switch_request("", None, 600))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let response = app
+            .clone()
+            .oneshot(switch_request(&cookie, None, 600))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
+
+        // A valid token still cannot switch without an authenticated user.
+        let response = app
+            .oneshot(switch_request(&cookie, Some(&token), 600))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

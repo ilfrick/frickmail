@@ -5,7 +5,35 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 14:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 15:30:00 CEST (UTC+02:00)
+
+The pending v1 switch-account slice adds `POST /api/frickmail/v1/switch-account`,
+reusing legacy ownership checks (user-scoped account lookup), credential-material
+validation without network (decryptable password/OAuth token), session
+storage, and the account-scoped connection-token refresh (returned as
+`csrf_token`, since switched scopes invalidate the previous token).
+Authenticated `GET /session` additionally reports `selected_account_id`.
+CSRF runs before identity, mirroring the legacy dispatcher. Intentional
+deviation: no live IMAP/OAuth probe — v1 separates session selection from
+transport health, which surfaces on first mailbox use. Four tests cover the
+switch lifecycle, unknown/foreign/broken accounts, and the auth/token gates.
+
+Independent senior review approved with no blockers; one follow-up parity
+note (credential-key length check) was applied, propagating session-store
+failures to 500s instead of masking them as 401s.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 432 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-switch-test` at
+image ID `sha256:c00b608bb3b8d9514bd88ca7aaf2818f562df1f7742f1a6651a11ab3ec15c134`;
+a read-only container rejected a tokenless switch with 403 `invalid_token`,
+logs showed only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 14:30:00 CEST (UTC+02:00)
 
 The v1 identities slice adds `GET /api/frickmail/v1/identities`,
 reusing the exact repository query as legacy `FrickmailListIdentities`.
