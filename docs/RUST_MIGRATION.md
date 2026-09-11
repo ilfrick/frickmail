@@ -5,7 +5,35 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-09 16:00:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-10 04:00:00 CEST (UTC+02:00)
+
+The pending CI legacy-name allowlist slice (Immediate Next Work #6) makes
+naming cleanup measurable: new workflow `.github/workflows/naming.yml` runs
+`.github/scripts/check-legacy-names.sh` against
+`.github/naming-allowlist.txt` on push/PR. The gate scans tracked files under
+the migration-owned surfaces (`frickmail-server/`, the Rust Dockerfile and
+compose files, `frickmail-ui/`, `package.json`) for `snappymail`/`rainloop`
+and fails on any unallowlisted hit or any stale entry. The 9-entry baseline
+(52 hits) is all compatibility-justified with owners and removal phases:
+`SnappyMail\Crypt` parity comments, shared `rainloop_ab_*` schema SQL,
+the internal `LEGACY_SNAPPYMAIL_APP_VERSION` digest constant, and
+strangler-phase bundle inputs. The legacy PHP/JS runtime stays out of scope
+until its removal phases.
+
+Independent senior review approved the slice with no blockers (script safety,
+index consistency, coverage spot-check, workflow validity all verified).
+
+Validation: `bash -n` + YAML parse clean; gate passes on the tree (52 hits,
+9 entries, none stale); both failure modes demonstrated (synthetic new hit
+fails, synthetic stale entry fails; fixtures removed afterwards).
+
+This slice is verified but NOT yet committed or pushed. Pushing it will
+trigger the new `naming` workflow itself (its path filters match its own
+files) alongside `rust-ci` only if Rust paths change — this slice touches no
+Rust code, so only `naming` is expected. The major remaining gates toward the
+final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-09 16:00:00 CEST (UTC+02:00)
 
 The theme-loader inventory slice (Phase 0 deliverable, Immediate Next
 Work #5) records every legacy SnappyMail theme surface in the
@@ -1270,7 +1298,12 @@ the detailed route inventory or release checklist. Keep
    compatibility.
 5. Inventory the legacy theme loader and plan deletion in favor of Frickmail-user
    theming.
-6. Add CI allowlists for temporary legacy names so naming cleanup is measurable.
+6. CI allowlists for temporary legacy names are now enforced by the `naming`
+   workflow (`.github/workflows/naming.yml`), which runs
+   `.github/scripts/check-legacy-names.sh` against `.github/naming-allowlist.txt`:
+   any unallowlisted `snappymail`/`rainloop` reference in the Rust workspace,
+   Rust packaging, or new UI sources fails, as does any stale entry — so
+   naming cleanup stays measurable.
 7. Track the Frickmail-user usable release gate and do not continue into full
    legacy runtime removal until that release is available and operator input is
    received.

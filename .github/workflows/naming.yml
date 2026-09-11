@@ -1,0 +1,46 @@
+name: naming
+
+on:
+  push:
+    branches:
+      - master
+      - rust-full-migration
+    paths:
+      - ".github/naming-allowlist.txt"
+      - ".github/scripts/check-legacy-names.sh"
+      - ".github/workflows/naming.yml"
+      - ".docker/release/rust/Dockerfile"
+      - "docker-compose.rust.yml"
+      - "docker-compose.rust-production.yml"
+      - "frickmail-server/**"
+      - "frickmail-ui/**"
+      - "package.json"
+  pull_request:
+    paths:
+      - ".github/naming-allowlist.txt"
+      - ".github/scripts/check-legacy-names.sh"
+      - ".github/workflows/naming.yml"
+      - ".docker/release/rust/Dockerfile"
+      - "docker-compose.rust.yml"
+      - "docker-compose.rust-production.yml"
+      - "frickmail-server/**"
+      - "frickmail-ui/**"
+      - "package.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: naming-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  legacy-names:
+    name: Legacy product-name allowlist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check legacy product-name references
+        run: bash .github/scripts/check-legacy-names.sh

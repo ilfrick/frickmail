@@ -1,0 +1,24 @@
+# Legacy product-name allowlist for the naming CI gate.
+#
+# Each non-empty, non-comment line has five `|`-separated fields:
+#   path-prefix | match-pattern (ERE, case-insensitive) | owner | removal-phase | reason
+#
+# A tracked line under the gate scope containing `snappymail` or `rainloop`
+# (any case) must match at least one entry by path prefix AND pattern, or the
+# gate fails. Every entry must match at least one line, or the gate fails as
+# stale — remove the entry instead of letting it rot.
+#
+# Policy: legacy names survive only inside compatibility shims, build inputs
+# for the strangler-phase UI bundle, required DB-schema compatibility, or
+# migration notes, each with an owner and removal phase (see
+# docs/RUST_MIGRATION.md "Naming Policy").
+
+frickmail-server/crates/fm-oidc/src/lib.rs|SnappyMail|oidc|PHP-runtime-removal|SnappyMail\Crypt parity comments for the shared EncryptUrlSafe state crypto
+frickmail-server/crates/fm-user/src/address_book.rs|rainloop_ab_|db-compat|PHP-bridge-removal-plus-schema-decision|Required rainloop_ab_contacts/rainloop_ab_properties schema compatibility shared with the PHP runtime
+frickmail-server/crates/fm-user/src/address_book.rs|SnappyMail|db-compat|PHP-bridge-removal-plus-schema-decision|Upstream SnappyMail class parity references in schema documentation
+frickmail-server/crates/fm-user/src/address_book.rs|RainLoop|db-compat|PHP-bridge-removal-plus-schema-decision|Upstream RainLoop provider parity references in schema documentation
+frickmail-server/crates/fm-user/tests/address_book_compatibility.rs|rainloop_ab_|db-compat|PHP-bridge-removal-plus-schema-decision|Compatibility-suite fixtures for the shared address-book schema
+frickmail-server/crates/fm-http/src/router.rs|SNAPPYMAIL_APP_VERSION|http|PHP-runtime-removal|Internal legacy app-version constant used for compatibility digests, never user-facing
+frickmail-server/crates/fm-http/src/router.rs|rainloop_ab_|db-compat|PHP-bridge-removal-plus-schema-decision|Compatibility-suite query against the shared address-book schema
+.docker/release/rust/Dockerfile|snappymail/v/0\.0\.0/|packaging|legacy-UI-removal|Strangler-phase UI bundle build inputs (static, templates, themes, localization)
+frickmail-ui/build.mjs|snappymail/v/0\.0\.0/|packaging|legacy-UI-removal|Strangler-phase static-bundle source paths
