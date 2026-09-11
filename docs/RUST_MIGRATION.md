@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-11 11:20:00 CEST (UTC+02:00)
 
-The pending Phase 9 API-foundation slice mounts the stable Rust-owned API at
+The Phase 9 API-foundation slice mounts the stable Rust-owned API at
 `/api/frickmail/v1` (new `fm-http/src/router/api_v1.rs`, framework-agnostic
 JSON with real HTTP statuses instead of 200 envelopes). Contract:
 `{"version":"v1","data":…}` on success, `{"version":"v1","error":{code,
@@ -36,8 +36,22 @@ a read-only container verified the live contract (`/health` 200 envelope,
 `/session` 401 envelope, unknown path 404, POST 405), `/health` returned
 `ok`, logs showed only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `5f2daeed169df011571245a7f9afeaefb7a279c5` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34585555724`](https://github.com/ilfrick/frickmail/actions/runs/34585555724)
+and `rust-full-migration` run
+[`34585560799`](https://github.com/ilfrick/frickmail/actions/runs/34585560799),
+and the `naming` gate passed on both branches
+([`34585555730`](https://github.com/ilfrick/frickmail/actions/runs/34585555730),
+[`34585560775`](https://github.com/ilfrick/frickmail/actions/runs/34585560775));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major remaining
+gates toward the final Rust-only goal are unchanged (v1 session-authenticated
+coverage with the login endpoints, frontend screens, theming removal,
+cutover validation).
 
 ## Prior Snapshot — 2026-09-11 10:50:00 CEST (UTC+02:00)
 
