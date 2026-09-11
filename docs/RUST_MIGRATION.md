@@ -5,7 +5,46 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 11:20:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 12:30:00 CEST (UTC+02:00)
+
+The pending v1 login slice adds `POST /api/frickmail/v1/login` through a
+shared authentication core extracted from legacy `FrickmailLogin`
+(`native_login_authenticate` + `native_login_establish_session`: dummy-hash
+no-enumeration, TOTP gating with replay protection, credential-key
+derivation, session rotation with rollback — legacy responses byte-identical
+per the untouched login tests). v1 maps outcomes to the versioned envelope
+(200 authenticated user, 200 `requires_totp`, 401 `invalid_credentials`,
+503 without a database) with no mail-account bridge probing by design.
+Anonymous `GET /session` now bootstraps and returns the `csrf_token`
+(legacy AppData parity) so login always requires the `X-SM-Token` header
+when CSRF is enabled; DB/session failures return generic 500s with server
+logs instead of storage internals. Ten v1 tests cover bootstrap, the full
+login→session lifecycle, identical unknown/wrong-password rejection, TOTP
+gating plus valid-code success with replay rejection, and CSRF enforcement —
+delivering the deferred authenticated-`GET /session` coverage too.
+
+Independent senior review first blocked on three security findings (login
+CSRF fail-open pre-bootstrap, ignored `csrf_enabled` flag, storage error
+details in 500 bodies) plus five hardening notes; all were remediated
+(anonymous `GET /session` bootstraps and returns the `csrf_token`, login
+always requires it when CSRF is enabled, generic 500s with server logs,
+redacted credential-key `Debug`, corrected 405 message, documented
+header-only/strict-typing deviations, TOTP success+replay test) and the
+closing re-review approved with no blockers.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 425 passed including 10 v1 tests, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-login-test` at
+image ID `sha256:010ac5487dc85282fb87ba61d8111a15dc0b18b62881037fd7cde54f02bbaa88`;
+a read-only container verified the live contract (anonymous session
+bootstrap with `csrf_token`, login without a database → 503 envelope),
+logs showed only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 11:20:00 CEST (UTC+02:00)
 
 The Phase 9 API-foundation slice mounts the stable Rust-owned API at
 `/api/frickmail/v1` (new `fm-http/src/router/api_v1.rs`, framework-agnostic

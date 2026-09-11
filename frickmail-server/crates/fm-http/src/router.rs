@@ -9840,6 +9840,130 @@ async fn native_frickmail_login(
     .await
 }
 
+/// Credentials accepted by [`native_login_authenticate`], carrying everything
+/// the session layer needs without re-reading the database.
+#[derive(Clone)]
+pub(super) struct NativeLoginCredentials {
+    pub user_id: i64,
+    pub username: String,
+    pub email: Option<String>,
+    pub credential_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for NativeLoginCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeLoginCredentials")
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("credential_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Outcome of [`native_login_authenticate`], shared by the legacy
+/// `FrickmailLogin` action and the stable v1 login route so password
+/// verification, TOTP gating, and key derivation cannot drift apart.
+#[derive(Debug, Clone)]
+pub(super) enum NativeLoginOutcome {
+    Authenticated(NativeLoginCredentials),
+    TotpRequired { error: String },
+    Rejected,
+}
+
+/// Verifies username/password (dummy-hash comparison on unknown users, so
+/// callers learn nothing from timing or messages), enforces TOTP when the
+/// account requires it, and derives the per-user credential key. The error
+/// variant carries an already-public message; `Rejected` is intentionally
+/// identical for unknown users and wrong passwords.
+pub(super) async fn native_login_authenticate(
+    pool: &sqlx::AnyPool,
+    username: &str,
+    password: &str,
+    totp_code: &str,
+) -> Result<NativeLoginOutcome, String> {
+    let user = SqlxUserRepository::find_by_username(pool, username)
+        .await
+        .map_err(|err| err.public_message())?;
+    let verified =
+        verify_login_password(password, user.as_ref()).map_err(|err| err.public_message())?;
+    if !verified {
+        return Ok(NativeLoginOutcome::Rejected);
+    }
+
+    let user = user.expect("verified login requires a user");
+    if user
+        .totp_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty() && secret != "0")
+    {
+        let secret = user.totp_secret.as_deref().unwrap_or_default();
+        let totp_code = totp_code
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        let totp_result =
+            SqlxUserRepository::verify_totp_login_code(pool, user.id, secret, totp_code)
+                .await
+                .map_err(|err| err.public_message())?;
+        if !totp_result.ok {
+            return Ok(NativeLoginOutcome::TotpRequired {
+                error: totp_result
+                    .error
+                    .unwrap_or_else(|| "Invalid two-factor code".to_string()),
+            });
+        }
+    }
+
+    let credential_key =
+        derive_credential_key(password, &user.kdf_salt).map_err(|err| err.public_message())?;
+    Ok(NativeLoginOutcome::Authenticated(NativeLoginCredentials {
+        user_id: user.id,
+        username: user.username.clone(),
+        email: user.email.clone(),
+        credential_key: credential_key.to_vec(),
+    }))
+}
+
+/// Rotates the session id and stores the user session plus the encrypted
+/// credential key, rolling the user session back when the key write fails.
+/// Error strings match the historical login responses exactly.
+pub(super) async fn native_login_establish_session(
+    session: &fm_session::Session,
+    credentials: &NativeLoginCredentials,
+) -> Result<(), String> {
+    if let Err(err) = session.cycle_id().await {
+        return Err(format!("Frickmail session rotation failed: {err}"));
+    }
+    if let Err(err) = session
+        .insert(
+            fm_session::USER_SESSION_KEY,
+            fm_core::UserSession {
+                user_id: credentials.user_id,
+                username: credentials.username.clone(),
+                email: credentials.email.clone(),
+            },
+        )
+        .await
+    {
+        return Err(format!("Frickmail session write failed: {err}"));
+    }
+    if let Err(err) = session
+        .insert(
+            fm_session::CREDENTIAL_KEY_SESSION_KEY,
+            STANDARD.encode(&credentials.credential_key),
+        )
+        .await
+    {
+        let _ = session
+            .remove::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+            .await;
+        return Err(format!("Frickmail session write failed: {err}"));
+    }
+    Ok(())
+}
+
 async fn native_frickmail_login_with_validator<V, Fut>(
     state: &AppState,
     original_action: &str,
@@ -9857,39 +9981,11 @@ where
 
     let username = payload_string(payload, "username").unwrap_or_default();
     let password = payload_string(payload, "password").unwrap_or_default();
-    let user = match SqlxUserRepository::find_by_username(pool, &username).await {
-        Ok(user) => user,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
-    };
-    let verified = match verify_login_password(&password, user.as_ref()) {
-        Ok(verified) => verified,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
-    };
-    if !verified {
-        return json_result_error(original_action, "Invalid username or password");
-    }
-
-    let user = user.expect("verified login requires a user");
-    if user
-        .totp_secret
-        .as_deref()
-        .is_some_and(|secret| !secret.is_empty() && secret != "0")
+    let totp_code = payload_string(payload, "totp_code").unwrap_or_default();
+    let credentials = match native_login_authenticate(pool, &username, &password, &totp_code).await
     {
-        let secret = user.totp_secret.as_deref().unwrap_or_default();
-        let totp_code = payload_string(payload, "totp_code")
-            .unwrap_or_default()
-            .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect::<String>();
-        let totp_result = match SqlxUserRepository::verify_totp_login_code(
-            pool, user.id, secret, totp_code,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(err) => return json_result_error(original_action, &err.public_message()),
-        };
-        if !totp_result.ok {
+        Ok(NativeLoginOutcome::Authenticated(credentials)) => credentials,
+        Ok(NativeLoginOutcome::TotpRequired { error }) => {
             return json_value_envelope(
                 StatusCode::OK,
                 original_action,
@@ -9897,66 +9993,32 @@ where
                     "Result": {
                         "ok": false,
                         "requires_totp": true,
-                        "error": totp_result.error.unwrap_or_else(|| "Invalid two-factor code".to_string())
+                        "error": error
                     }
                 }),
             );
         }
-    }
-
-    let credential_key = match derive_credential_key(&password, &user.kdf_salt) {
-        Ok(credential_key) => credential_key,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
+        Ok(NativeLoginOutcome::Rejected) => {
+            return json_result_error(original_action, "Invalid username or password");
+        }
+        Err(message) => return json_result_error(original_action, &message),
     };
 
-    if let Err(err) = session.cycle_id().await {
-        return json_result_error(
-            original_action,
-            &format!("Frickmail session rotation failed: {err}"),
-        );
+    if let Err(message) = native_login_establish_session(session, &credentials).await {
+        return json_result_error(original_action, &message);
     }
-    if let Err(err) = session
-        .insert(
-            fm_session::USER_SESSION_KEY,
-            fm_core::UserSession {
-                user_id: user.id,
-                username: user.username.clone(),
-                email: user.email.clone(),
-            },
-        )
-        .await
-    {
-        return json_result_error(
-            original_action,
-            &format!("Frickmail session write failed: {err}"),
-        );
-    }
-    if let Err(err) = session
-        .insert(
-            fm_session::CREDENTIAL_KEY_SESSION_KEY,
-            STANDARD.encode(credential_key),
-        )
-        .await
-    {
-        let _ = session
-            .remove::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
-            .await;
-        return json_result_error(
-            original_action,
-            &format!("Frickmail session write failed: {err}"),
-        );
-    }
+    let user_id = credentials.user_id;
 
-    match SqlxUserRepository::list_mail_accounts(pool, user.id).await {
+    match SqlxUserRepository::list_mail_accounts(pool, user_id).await {
         Ok(accounts) => {
             if let Some(account) = accounts.first() {
                 return prepare_mail_account_bridge_with_validator(
                     MailAccountBridgeRequest {
                         pool,
                         state,
-                        user_id: user.id,
+                        user_id,
                         account_id: account.id,
-                        credential_key: &credential_key,
+                        credential_key: &credentials.credential_key,
                         session,
                         original_action,
                         reauth_response: true,

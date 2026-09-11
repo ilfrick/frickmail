@@ -8,20 +8,33 @@
 //! - Failure is `{"version":"v1","error":{"code":…,"message":…}}` with a
 //!   matching HTTP status (401 unauthenticated, 404 unknown path, …).
 //! - Additive fields never bump the version; breaking changes do.
-//! - Only safe (GET/HEAD) routes exist so far, so no connection-token CSRF
-//!   check applies here. The first state-changing route must enforce the
-//!   same token contract as the legacy dispatcher.
-//! - Authentication reuses the `FrickmailSession` cookie session; nothing
-//!   here mints or rotates session state.
+//! - Authentication reuses the `FrickmailSession` cookie session. The login
+//!   route always requires the connection token via the `X-SM-Token` header
+//!   (header-only by design; the legacy `XToken` form field stays on the old
+//!   dispatcher), bootstrapped from anonymous `GET /session` exactly like
+//!   legacy AppData. Request bodies are strict JSON: unlike the legacy
+//!   dispatcher, numbers/bools are not coerced to strings.
+//!
+//! Intentional deviation from legacy `FrickmailLogin`: no mail-account
+//! bridge probing happens here. v1 separates authentication (this route)
+//! from account validation (account routes read the stored credential key
+//! on first use).
 
 use axum::{
+    extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 
+use super::NativeLoginOutcome;
+use super::{
+    constant_time_equal, expected_connection_token, native_login_authenticate,
+    native_login_establish_session,
+};
 use crate::AppState;
 use fm_core::{ApiV1Envelope, ApiV1Error, UserSession};
 
@@ -31,6 +44,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/session", get(session))
+        .route("/login", post(login))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -42,10 +56,14 @@ async fn health() -> Json<ApiV1Envelope<serde_json::Value>> {
     })))
 }
 
-/// Returns the currently authenticated session user, if any. Reads session
-/// state only: an absent or unreadable session is a 401/500, never a login
-/// attempt and never a mutation.
-async fn session(session: fm_session::Session) -> Response {
+/// Returns the currently authenticated session user, if any.
+///
+/// Anonymous callers additionally receive the bootstrapped `csrf_token` they
+/// must echo back on `POST /login` (mirroring legacy AppData, which mints
+/// the token secret on bootstrap). Authenticated callers receive the token
+/// for their current scope, read without mutating session state. A store
+/// failure is a 500, never a login attempt and never a user mutation.
+async fn session(state: axum::extract::State<AppState>, session: fm_session::Session) -> Response {
     let stored = match session
         .get::<UserSession>(fm_session::USER_SESSION_KEY)
         .await
@@ -60,24 +78,37 @@ async fn session(session: fm_session::Session) -> Response {
         }
     };
     let Some(user) = stored else {
-        return v1_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthenticated",
-            "No authenticated Frickmail session",
-        );
+        let token = match super::ensure_connection_token(&state, &session, None).await {
+            Ok(token) => token,
+            Err(_) => {
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_error",
+                    "Frickmail session write failed",
+                );
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({
+                "authenticated": false,
+                "csrf_token": token,
+            }))),
+        )
+            .into_response();
     };
-    (
-        StatusCode::OK,
-        Json(ApiV1Envelope::ok(json!({
-            "authenticated": true,
-            "user": {
-                "id": user.user_id,
-                "username": user.username,
-                "email": user.email,
-            },
-        }))),
-    )
-        .into_response()
+    let mut data = json!({
+        "authenticated": true,
+        "user": {
+            "id": user.user_id,
+            "username": user.username,
+            "email": user.email,
+        },
+    });
+    if let Ok(Some(token)) = super::expected_connection_token(&session).await {
+        data["csrf_token"] = json!(token);
+    }
+    (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
 }
 
 async fn unknown_path() -> Response {
@@ -88,15 +119,160 @@ async fn unknown_path() -> Response {
     )
 }
 
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    totp_code: Option<String>,
+}
+
+/// Authenticates with username/password (+TOTP when the account requires it)
+/// through the exact core shared with legacy `FrickmailLogin`, then rotates
+/// the session id and stores the user session plus credential key.
+///
+/// Unknown users and wrong passwords are indistinguishable (401
+/// `invalid_credentials` either way: dummy-hash comparison, no enumeration).
+/// TOTP-gated accounts without a valid code get HTTP 200 with
+/// `requires_totp` — possession of valid primary credentials is not an
+/// error. No mail-account bridge probing happens here by design.
+async fn login(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<LoginRequest>, JsonRejection>,
+) -> Response {
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid login request",
+        );
+    };
+
+    if let Err(response) = v1_login_csrf(&state, &session, &headers).await {
+        return response;
+    }
+
+    let outcome = match native_login_authenticate(
+        pool,
+        &request.username,
+        &request.password,
+        request.totp_code.as_deref().unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(message) => {
+            tracing::warn!("v1 login authentication failed: {message}");
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail login failed",
+            );
+        }
+    };
+    match outcome {
+        NativeLoginOutcome::Authenticated(credentials) => {
+            if let Err(message) = native_login_establish_session(&session, &credentials).await {
+                tracing::warn!("v1 login session setup failed: {message}");
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Frickmail login failed",
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(ApiV1Envelope::ok(json!({
+                    "authenticated": true,
+                    "user": {
+                        "id": credentials.user_id,
+                        "username": credentials.username,
+                        "email": credentials.email,
+                    },
+                }))),
+            )
+                .into_response()
+        }
+        NativeLoginOutcome::TotpRequired { error } => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({
+                "authenticated": false,
+                "requires_totp": true,
+                "error": error,
+            }))),
+        )
+            .into_response(),
+        NativeLoginOutcome::Rejected => v1_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_credentials",
+            "Invalid username or password",
+        ),
+    }
+}
+
+/// Connection-token check for the login route. Unlike the read-only GET
+/// helper, login always requires the token once CSRF is enabled: legacy
+/// `FrickmailLogin` POSTs 403 without one, and the bootstrap (`GET
+/// /api/frickmail/v1/session`, legacy AppData) always mints a secret first.
+/// Only the `X-SM-Token` header is honored (intentional: v1 is strict JSON,
+/// while the legacy `XToken` form field stays on the old dispatcher).
+async fn v1_login_csrf(
+    state: &AppState,
+    session: &fm_session::Session,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), Response> {
+    if !state.config().security.csrf_enabled || state.config().php_bridge_url.is_some() {
+        return Ok(());
+    }
+    let expected = match expected_connection_token(session).await {
+        Ok(expected) => expected,
+        Err(_) => {
+            return Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            ));
+        }
+    };
+    let valid = expected.is_some_and(|expected| {
+        headers
+            .get("x-sm-token")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|supplied| !supplied.is_empty())
+            .is_some_and(|supplied| constant_time_equal(supplied.as_bytes(), expected.as_bytes()))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(v1_error(
+            StatusCode::FORBIDDEN,
+            "invalid_token",
+            "Invalid or missing connection token",
+        ))
+    }
+}
+
 async fn v1_method_not_allowed() -> Response {
     v1_error(
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
-        "Only safe methods are served by /api/frickmail/v1 so far",
+        "Method not allowed for this /api/frickmail/v1 path",
     )
 }
 
-fn v1_error(status: StatusCode, code: &'static str, message: &str) -> Response {
+fn v1_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> Response {
     (status, Json(ApiV1Error::new(code, message))).into_response()
 }
 
@@ -177,7 +353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v1_session_rejects_anonymous_callers() {
+    async fn v1_session_bootstraps_csrf_token_for_anonymous_callers() {
         let response = api_app()
             .oneshot(
                 Request::builder()
@@ -189,10 +365,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+        assert!(!cookie.is_empty());
         let body = read_json(response).await;
         assert_eq!(body["version"], "v1");
-        assert_eq!(body["error"]["code"], "unauthenticated");
+        assert_eq!(body["data"]["authenticated"], false);
+        let token = body["data"]["csrf_token"].as_str().unwrap();
+        assert!(token.starts_with("0-"), "{token}");
     }
 
     #[tokio::test]
@@ -231,5 +411,379 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["version"], "v1");
         assert_eq!(body["error"]["code"], "method_not_allowed");
+    }
+
+    async fn login_db_pool() -> sqlx::AnyPool {
+        sqlx::any::install_default_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE frickmail_users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                email TEXT,
+                password_hash TEXT NOT NULL,
+                kdf_salt BLOB NOT NULL,
+                settings TEXT NOT NULL,
+                totp_secret TEXT,
+                oidc_escrow_key BLOB,
+                updated_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_totp_used (
+                user_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                \"window\" INTEGER NOT NULL,
+                used_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, code, \"window\")
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn seed_login_user(
+        pool: &sqlx::AnyPool,
+        id: i64,
+        username: &str,
+        password: &str,
+        totp_secret: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_users
+                (id, username, email, password_hash, kdf_salt, settings, totp_secret, oidc_escrow_key, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(username)
+        .bind(format!("{username}@example.com"))
+        .bind(fm_user::hash_login_password(password).unwrap())
+        .bind(vec![9_u8; fm_user::KDF_SALT_BYTES])
+        .bind("{}")
+        .bind(totp_secret.map(ToOwned::to_owned))
+        .bind(None::<Vec<u8>>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn login_app(pool: sqlx::AnyPool) -> Router {
+        Router::new()
+            .nest("/api/frickmail/v1", super::routes())
+            .layer(fm_session::session_layer(
+                fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+            ))
+            .with_state(AppState::with_db_pool(test_api_config(), Some(pool)))
+    }
+
+    /// Bootstraps an anonymous session: returns the session cookie plus the
+    /// minted CSRF token, exactly like legacy AppData bootstrap.
+    async fn bootstrap_csrf(app: Router) -> (String, String) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+        let token = read_json(response).await["data"]["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (cookie, token)
+    }
+
+    fn login_request(cookie: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/frickmail/v1/login")
+            .header("content-type", "application/json")
+            .header("cookie", cookie);
+        if let Some(token) = token {
+            request = request.header("x-sm-token", token);
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    }
+
+    fn session_cookie(response: &Response) -> String {
+        response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn v1_login_authenticates_and_establishes_session() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 101, "v1user", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+
+        let response = app
+            .clone()
+            .oneshot(login_request(
+                &cookie,
+                Some(&token),
+                serde_json::json!({"username": "v1user", "password": "correct-horse"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["authenticated"], true);
+        assert_eq!(body["data"]["user"]["id"], 101);
+        assert_eq!(body["data"]["user"]["username"], "v1user");
+        assert_eq!(body["data"]["user"]["email"], "v1user@example.com");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/session")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["authenticated"], true);
+        assert_eq!(body["data"]["user"]["id"], 101);
+        assert_eq!(body["data"]["user"]["username"], "v1user");
+        assert!(body["data"]["user"].get("password_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn v1_login_rejects_tokenless_logins() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 105, "v1bare", "correct-horse", None).await;
+        let app = login_app(pool);
+
+        // No bootstrap happened on this session, so no token exists and the
+        // login must be rejected like legacy tokenless login POSTs.
+        let response = app
+            .oneshot(login_request(
+                "",
+                None,
+                serde_json::json!({"username": "v1bare", "password": "correct-horse"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
+    }
+
+    #[tokio::test]
+    async fn v1_login_rejects_unknown_users_and_wrong_passwords_identically() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 102, "v1other", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+
+        for username in ["nosuchuser", "v1other"] {
+            let response = app
+                .clone()
+                .oneshot(login_request(
+                    &cookie,
+                    Some(&token),
+                    serde_json::json!({"username": username, "password": "wrong"}),
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = read_json(response).await;
+            assert_eq!(body["version"], "v1");
+            assert_eq!(body["error"]["code"], "invalid_credentials");
+            assert_eq!(body["error"]["message"], "Invalid username or password");
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_login_requires_totp_for_totp_accounts() {
+        let pool = login_db_pool().await;
+        seed_login_user(
+            &pool,
+            103,
+            "v1totp",
+            "correct-horse",
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+
+        let response = app
+            .oneshot(login_request(
+                &cookie,
+                Some(&token),
+                serde_json::json!({"username": "v1totp", "password": "correct-horse"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["authenticated"], false);
+        assert_eq!(body["data"]["requires_totp"], true);
+    }
+
+    #[tokio::test]
+    async fn v1_login_enforces_token_once_bootstrapped() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 104, "v1csrf", "correct-horse", None).await;
+        let app = crate::build_router(AppState::with_db_pool(test_api_config(), Some(pool)));
+
+        let bootstrap = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/?/AppData/0/12345/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = session_cookie(&bootstrap);
+        let token = read_json(bootstrap).await["System"]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let login = |cookie: &str, token: Option<&str>| {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/login")
+                .header("content-type", "application/json")
+                .header("cookie", cookie);
+            if let Some(token) = token {
+                request = request.header("x-sm-token", token);
+            }
+            request
+                .body(Body::from(
+                    serde_json::json!({"username": "v1csrf", "password": "wrong"}).to_string(),
+                ))
+                .unwrap()
+        };
+
+        let response = app
+            .clone()
+            .oneshot(login(&cookie, Some("wrong-token")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
+
+        // The valid token passes CSRF and reaches authentication (401 here
+        // because the password is wrong, proving the check passed).
+        let response = app.oneshot(login(&cookie, Some(&token))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_credentials");
+    }
+
+    fn test_totp_counter() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() / 30)
+            .unwrap_or_default()
+    }
+
+    fn test_totp_code(secret: &str, counter: u64) -> String {
+        let key = data_encoding::BASE32_NOPAD
+            .decode(secret.trim().to_ascii_uppercase().as_bytes())
+            .unwrap();
+        use hmac::{Hmac, Mac};
+        use sha1::Sha1;
+        let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key).unwrap();
+        mac.update(&counter.to_be_bytes());
+        let digest = mac.finalize().into_bytes();
+        let offset = (digest[19] & 0x0f) as usize;
+        let value = (((digest[offset] & 0x7f) as u32) << 24)
+            | ((digest[offset + 1] as u32) << 16)
+            | ((digest[offset + 2] as u32) << 8)
+            | (digest[offset + 3] as u32);
+        format!("{:06}", value % 1_000_000)
+    }
+
+    #[tokio::test]
+    async fn v1_login_accepts_valid_totp_and_rejects_replay() {
+        let pool = login_db_pool().await;
+        seed_login_user(
+            &pool,
+            106,
+            "v1totpok",
+            "correct-horse",
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let code = test_totp_code("JBSWY3DPEHPK3PXP", test_totp_counter());
+
+        let response = app
+            .clone()
+            .oneshot(login_request(
+                &cookie,
+                Some(&token),
+                serde_json::json!({
+                    "username": "v1totpok",
+                    "password": "correct-horse",
+                    "totp_code": code,
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["authenticated"], true);
+        assert_eq!(body["data"]["user"]["id"], 106);
+
+        // Replaying the same code must fail TOTP like the legacy login does.
+        let response = app
+            .oneshot(login_request(
+                &cookie,
+                Some(&token),
+                serde_json::json!({
+                    "username": "v1totpok",
+                    "password": "correct-horse",
+                    "totp_code": code,
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["authenticated"], false);
+        assert_eq!(body["data"]["requires_totp"], true);
     }
 }
