@@ -5,7 +5,36 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 09:40:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 10:50:00 CEST (UTC+02:00)
+
+The pending client-PGP compose slice closes the "staged attachments with
+client OpenPGP MIME" gap: `SendMessage`/`SaveMessage` now accept staged
+attachments alongside Mailvelope-style `signed`/`encrypted` payloads,
+nesting the PGP entity as the MIME root under shared MailSo-compatible
+related/mixed wrapping (attachments stay siblings, never inside the signed
+or encrypted envelope), exactly like PHP appending attachments after its PGP
+branch. The attachment wrapping was extracted byte-identically into a shared
+helper reused by plain/HTML, signed, and encrypted roots; no-attachment PGP
+rendering is unchanged. Three tests cover both builders (markers, byte
+parity, sibling ordering, linked `related` branch) plus the full
+send-success/save-success staged-capability lifecycle.
+
+Independent senior review approved conditional on strengthened tests, which
+were added; the closing re-review found READY-TO-COMMIT with zero residual
+references to the old rejection.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 415 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:pgp-attachments-test` at
+image ID `sha256:656422dcbcd3b7d587e38e90e442082c4e90e84bdcddc02b3ea840845631351d`;
+a read-only container started without a database, `/health` returned `ok`,
+logs showed only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 09:40:00 CEST (UTC+02:00)
 
 The connection-token/CSRF parity slice hardens the Rust-only
 contract to PHP `ServiceActions` semantics: every POST except `Logout` now

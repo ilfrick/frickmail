@@ -7214,12 +7214,6 @@ fn legacy_validate_pgp_compose_content(payload: &Value) -> Result<(), String> {
     }
 
     if let Some(signed) = legacy_pgp_signed_content(payload) {
-        if !legacy_compose_attachment_specs(payload)?.is_empty() {
-            return Err(
-                "Client-provided OpenPGP MIME with staged attachments is not yet supported"
-                    .to_string(),
-            );
-        }
         if !legacy_pgp_is_seven_bit_text(&signed) {
             return Err("OpenPGP signed MIME must be 7-bit text".to_string());
         }
@@ -7232,12 +7226,6 @@ fn legacy_validate_pgp_compose_content(payload: &Value) -> Result<(), String> {
             return Err("OpenPGP signed MIME boundary is invalid".to_string());
         }
     } else if let Some(encrypted) = legacy_pgp_encrypted_content(payload) {
-        if !legacy_compose_attachment_specs(payload)?.is_empty() {
-            return Err(
-                "Client-provided OpenPGP MIME with staged attachments is not yet supported"
-                    .to_string(),
-            );
-        }
         if !legacy_pgp_is_seven_bit_text(&encrypted) {
             return Err("OpenPGP encrypted data must be 7-bit text".to_string());
         }
@@ -9007,13 +8995,71 @@ fn build_legacy_send_message_with_id(
     build_legacy_send_message_with_metadata(request, keep_bcc_header, message_id, None)
 }
 
+enum LegacyMimeRoot {
+    Single(lettre::message::SinglePart),
+    Multi(lettre::message::MultiPart),
+}
+
+/// Wraps a MIME root entity with staged attachments using MailSo-compatible
+/// nesting: the root plus every CID-linked attachment goes under
+/// multipart/related, and non-linked attachments become siblings of that
+/// related body under an outer multipart/mixed container.
+fn legacy_compose_root_with_attachments(
+    builder: lettre::message::MessageBuilder,
+    root: LegacyMimeRoot,
+    attachments: &[LegacyComposeAttachment],
+) -> Result<lettre::message::Message, String> {
+    use lettre::message::MultiPart;
+
+    let wrap_root = |multipart: lettre::message::MultiPartBuilder, root: LegacyMimeRoot| match root
+    {
+        LegacyMimeRoot::Single(part) => multipart.singlepart(part),
+        LegacyMimeRoot::Multi(part) => multipart.multipart(part),
+    };
+
+    let mut root = root;
+    if attachments
+        .iter()
+        .any(|attachment| attachment.spec.is_linked)
+    {
+        let mut related = wrap_root(MultiPart::related(), root);
+        for attachment in attachments
+            .iter()
+            .filter(|attachment| attachment.spec.is_linked)
+        {
+            related = related.singlepart(legacy_compose_attachment_part(attachment)?);
+        }
+        root = LegacyMimeRoot::Multi(related);
+    }
+
+    if attachments
+        .iter()
+        .any(|attachment| !attachment.spec.is_linked)
+    {
+        let mut mixed = wrap_root(MultiPart::mixed(), root);
+        for attachment in attachments
+            .iter()
+            .filter(|attachment| !attachment.spec.is_linked)
+        {
+            mixed = mixed.singlepart(legacy_compose_attachment_part(attachment)?);
+        }
+        root = LegacyMimeRoot::Multi(mixed);
+    }
+
+    match root {
+        LegacyMimeRoot::Single(part) => builder.singlepart(part),
+        LegacyMimeRoot::Multi(part) => builder.multipart(part),
+    }
+    .map_err(|err| format!("Message build failed: {err}"))
+}
+
 fn build_legacy_send_message_with_metadata(
     request: &LegacySendMessageRequest,
     keep_bcc_header: bool,
     message_id: Option<&str>,
     message_date: Option<SystemTime>,
 ) -> Result<LegacyBuiltMessage, String> {
-    use lettre::message::{header, Mailbox, MultiPart, MultiPartBuilder, SinglePart};
+    use lettre::message::{header, Mailbox, MultiPart, SinglePart};
 
     let parse_mailbox = |address: &str| -> Result<Mailbox, String> {
         address
@@ -9100,6 +9146,9 @@ fn build_legacy_send_message_with_metadata(
     // Mailvelope or OpenPGPUserStore), embed it verbatim. The `signed` string
     // contains the headers + body of a multipart/signed part; we split at the
     // first blank line to match PHP's `explode("\r\n\r\n", $signed, 2)`.
+    // Like PHP (which appends staged attachments as siblings afterwards), the
+    // signed entity becomes the MIME root and staged attachments wrap around
+    // it; without attachments the historical top-level rendering is kept.
     if let Some(signed_mime) = &request.pgp_signed {
         let mut parts = signed_mime.splitn(2, "\r\n\r\n");
         let _signed_headers = parts.next().unwrap_or("");
@@ -9116,21 +9165,38 @@ fn build_legacy_send_message_with_metadata(
         );
         let content_type = header::ContentType::parse(&content_type_str)
             .map_err(|_| "Invalid PGP signed Content-Type".to_string())?;
-        return Ok(LegacyBuiltMessage {
-            message: builder
-                .header(header::MIME_VERSION_1_0)
+        if request.attachments.is_empty() {
+            return Ok(LegacyBuiltMessage {
+                message: builder
+                    .header(header::MIME_VERSION_1_0)
+                    .header(content_type)
+                    .body(lettre::message::Body::dangerous_pre_encoded(
+                        signed_body.as_bytes().to_vec(),
+                        header::ContentTransferEncoding::SevenBit,
+                    ))
+                    .map_err(|err| format!("Message build failed: {err}"))?,
+                autocrypt: request.autocrypt.clone(),
+            });
+        }
+        let root = LegacyMimeRoot::Single(
+            SinglePart::builder()
                 .header(content_type)
+                .header(header::ContentTransferEncoding::SevenBit)
                 .body(lettre::message::Body::dangerous_pre_encoded(
                     signed_body.as_bytes().to_vec(),
                     header::ContentTransferEncoding::SevenBit,
-                ))
-                .map_err(|err| format!("Message build failed: {err}"))?,
+                )),
+        );
+        let message = legacy_compose_root_with_attachments(builder, root, &request.attachments)?;
+        return Ok(LegacyBuiltMessage {
+            message,
             autocrypt: request.autocrypt.clone(),
         });
     }
 
     // OpenPGP: if the client pre-encrypted data (e.g. via Mailvelope), wrap it
-    // in the standard application/pgp-encrypted MIME structure.
+    // in the standard application/pgp-encrypted MIME structure, again keeping
+    // staged attachments as MailSo-compatible siblings when present.
     if let Some(encrypted) = &request.pgp_encrypted {
         let normalized = legacy_normalize_pgp_crlf(encrypted);
         let encrypted_part = SinglePart::builder()
@@ -9155,10 +9221,21 @@ fn build_legacy_send_message_with_metadata(
         let multipart = MultiPart::encrypted("application/pgp-encrypted".to_string())
             .singlepart(encrypted_part)
             .singlepart(data_part);
+        if request.attachments.is_empty() {
+            return Ok(LegacyBuiltMessage {
+                message: builder
+                    .multipart(multipart)
+                    .map_err(|err| format!("Message build failed: {err}"))?,
+                autocrypt: request.autocrypt.clone(),
+            });
+        }
+        let message = legacy_compose_root_with_attachments(
+            builder,
+            LegacyMimeRoot::Multi(multipart),
+            &request.attachments,
+        )?;
         return Ok(LegacyBuiltMessage {
-            message: builder
-                .multipart(multipart)
-                .map_err(|err| format!("Message build failed: {err}"))?,
+            message,
             autocrypt: request.autocrypt.clone(),
         });
     }
@@ -9177,16 +9254,6 @@ fn build_legacy_send_message_with_metadata(
             )
     };
 
-    enum LegacyMimeRoot {
-        Single(SinglePart),
-        Multi(MultiPart),
-    }
-
-    let add_root = |multipart: MultiPartBuilder, root: LegacyMimeRoot| match root {
-        LegacyMimeRoot::Single(part) => multipart.singlepart(part),
-        LegacyMimeRoot::Multi(part) => multipart.multipart(part),
-    };
-
     // MailSo groups the body and every CID-referenced attachment under
     // multipart/related. Non-linked attachments are siblings of that related
     // body under an outer multipart/mixed container.
@@ -9198,8 +9265,9 @@ fn build_legacy_send_message_with_metadata(
                 .header(header::ContentType::TEXT_PLAIN)
                 .body(request.plain.clone())
         }
+        .map_err(|err| format!("Message build failed: {err}"))?
     } else {
-        let mut root = if request.html.is_empty() {
+        let root = if request.html.is_empty() {
             LegacyMimeRoot::Single(
                 SinglePart::builder()
                     .header(header::ContentType::TEXT_PLAIN)
@@ -9208,45 +9276,8 @@ fn build_legacy_send_message_with_metadata(
         } else {
             LegacyMimeRoot::Multi(alternative())
         };
-
-        if request
-            .attachments
-            .iter()
-            .any(|attachment| attachment.spec.is_linked)
-        {
-            let mut related = add_root(MultiPart::related(), root);
-            for attachment in request
-                .attachments
-                .iter()
-                .filter(|attachment| attachment.spec.is_linked)
-            {
-                related = related.singlepart(legacy_compose_attachment_part(attachment)?);
-            }
-            root = LegacyMimeRoot::Multi(related);
-        }
-
-        if request
-            .attachments
-            .iter()
-            .any(|attachment| !attachment.spec.is_linked)
-        {
-            let mut mixed = add_root(MultiPart::mixed(), root);
-            for attachment in request
-                .attachments
-                .iter()
-                .filter(|attachment| !attachment.spec.is_linked)
-            {
-                mixed = mixed.singlepart(legacy_compose_attachment_part(attachment)?);
-            }
-            root = LegacyMimeRoot::Multi(mixed);
-        }
-
-        match root {
-            LegacyMimeRoot::Single(part) => builder.singlepart(part),
-            LegacyMimeRoot::Multi(part) => builder.multipart(part),
-        }
-    }
-    .map_err(|err| format!("Message build failed: {err}"))?;
+        legacy_compose_root_with_attachments(builder, root, &request.attachments)?
+    };
 
     Ok(LegacyBuiltMessage {
         message,
@@ -28685,6 +28716,113 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[test]
+    fn legacy_compose_nests_staged_attachments_beside_client_pgp_signed() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "signed": "Content-Type: multipart/signed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nHello\r\n--b\r\nContent-Type: application/pgp-signature\r\n\r\nSIGNATURE\r\n--b--\r\n",
+            "boundary": "b",
+        });
+        assert!(super::legacy_validate_compose_limits(&payload).is_ok());
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .unwrap();
+        request.attachments = vec![
+            super::LegacyComposeAttachment {
+                spec: super::LegacyComposeAttachmentSpec {
+                    token: "c".repeat(40),
+                    file_name: "report.pdf".to_string(),
+                    is_inline: false,
+                    content_id: String::new(),
+                    content_location: String::new(),
+                    mime_type: "application/pdf".to_string(),
+                    is_linked: false,
+                },
+                data: b"PDF-DATA".to_vec(),
+            },
+            super::LegacyComposeAttachment {
+                spec: super::LegacyComposeAttachmentSpec {
+                    token: "e".repeat(40),
+                    file_name: "chart.png".to_string(),
+                    is_inline: true,
+                    content_id: "<chart@example.com>".to_string(),
+                    content_location: String::new(),
+                    mime_type: "image/png".to_string(),
+                    is_linked: true,
+                },
+                data: b"PNG-DATA".to_vec(),
+            },
+        ];
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("signed message build")
+                .formatted(),
+        )
+        .unwrap();
+        assert!(raw.contains("Content-Type: multipart/mixed"), "{raw}");
+        assert!(raw.contains("Content-Type: multipart/related"), "{raw}");
+        assert!(raw.contains("multipart/signed"), "{raw}");
+        assert!(raw.contains("SIGNATURE"), "{raw}");
+        assert!(raw.contains("filename=\"report.pdf\""), "{raw}");
+        assert!(raw.contains("UERGLURBVEE="), "{raw}");
+        // Attachments stay siblings of the signed entity, never inside it.
+        let signed_end = raw.find("--b--").expect("signed close in {raw}");
+        let attachment_at = raw
+            .find("filename=\"report.pdf\"")
+            .expect("attachment in {raw}");
+        assert!(signed_end < attachment_at, "{raw}");
+        assert!(raw.contains("Content-ID: <chart@example.com>"), "{raw}");
+    }
+
+    #[test]
+    fn legacy_compose_nests_staged_attachments_beside_client_pgp_encrypted() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "encrypted": "\n-----BEGIN PGP MESSAGE-----\nabc\r\ndef\n-----END PGP MESSAGE-----\n",
+        });
+        assert!(super::legacy_validate_compose_limits(&payload).is_ok());
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                .unwrap();
+        request.attachments = vec![super::LegacyComposeAttachment {
+            spec: super::LegacyComposeAttachmentSpec {
+                token: "d".repeat(40),
+                file_name: "notes.txt".to_string(),
+                is_inline: false,
+                content_id: String::new(),
+                content_location: String::new(),
+                mime_type: "text/plain".to_string(),
+                is_linked: false,
+            },
+            data: b"NOTES-DATA".to_vec(),
+        }];
+
+        let raw = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("encrypted message build")
+                .formatted(),
+        )
+        .expect("7-bit encrypted message");
+        assert!(raw.contains("Content-Type: multipart/mixed"), "{raw}");
+        assert!(raw.contains("Content-Type: multipart/encrypted"), "{raw}");
+        assert!(
+            raw.contains("-----BEGIN PGP MESSAGE-----\r\nabc\r\ndef\r\n-----END PGP MESSAGE-----"),
+            "{raw}"
+        );
+        assert!(raw.contains("filename=\"notes.txt\""), "{raw}");
+        // The attachment stays a sibling after the encrypted entity.
+        let encrypted_entity = raw
+            .find("Content-Type: multipart/encrypted")
+            .expect("encrypted entity in {raw}");
+        let attachment_at = raw
+            .find("filename=\"notes.txt\"")
+            .expect("attachment in {raw}");
+        assert!(encrypted_entity < attachment_at, "{raw}");
+    }
+
+    #[test]
     fn legacy_compose_builds_regular_and_inline_staged_attachments() {
         let payload = json!({
             "from": "sender@example.com",
@@ -39089,7 +39227,7 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[tokio::test]
-    async fn client_pgp_with_staged_attachment_rejects_before_send_or_save_side_effects() {
+    async fn client_pgp_with_staged_attachment_sends_and_saves_with_siblings() {
         let key = [64_u8; fm_user::CREDENTIAL_KEY_BYTES];
         let temp_root = std::env::temp_dir().join(format!(
             "frickmail-client-pgp-attachment-{}",
@@ -39099,21 +39237,32 @@ Subject: Empty body metadata\r\n\r\n"
         config.tmp_dir = temp_root.to_string_lossy().to_string();
         let (state, session) =
             message_body_test_state_with_config(8_942, 8_943, &key, config).await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET smtp_host = ?, smtp_port = ?, smtp_secure = ?
+             WHERE id = ?",
+        )
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(8_943_i64)
+        .execute(state.db_pool().unwrap())
+        .await
+        .unwrap();
         let scope =
             super::LegacyComposeStagingScope::new(&temp_root.to_string_lossy(), 8_942, 8_943);
         let token = "d".repeat(40);
-        super::legacy_stage_compose_attachment(&scope, &token, b"MUST-REMAIN-STAGED", false)
+        super::legacy_stage_compose_attachment(&scope, &token, b"MUST-BE-SENT", false)
             .await
             .unwrap();
-        let payload = json!({
+        let send_payload = json!({
             "account_id": 8_943,
             "from": "work@example.com",
             "to": "recipient@example.net",
-            "saveFolder": "Drafts",
             "boundary": "client-pgp-boundary",
             "signed": "Content-Type: ignored\r\n\r\n--client-pgp-boundary--\r\n",
             "attachments": {
-                (token.clone()): {"name": "must-remain.txt", "inline": false, "type": "text/plain"}
+                (token.clone()): {"name": "must-send.txt", "inline": false, "type": "text/plain"}
             }
         });
         let sent = Arc::new(Mutex::new(None));
@@ -39124,20 +39273,24 @@ Subject: Empty body metadata\r\n\r\n"
         let send_response = super::native_send_message_inner_with_sender(
             &state,
             "SendMessage",
-            &payload,
+            &send_payload,
             &session,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
         )
         .await;
         let send_body = read_json(send_response).await;
-        assert!(send_body["Result"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("Client-provided OpenPGP MIME"));
-        assert!(sent.lock().unwrap().is_none());
-        assert!(scope.path(&token).unwrap().exists());
+        assert_eq!(send_body["Result"], true);
+        let sent_bytes = sent.lock().unwrap().clone().expect("smtp send recorded");
+        let sent_text = String::from_utf8_lossy(&sent_bytes);
+        assert!(sent_text.contains("multipart/signed"), "{sent_text}");
+        assert!(sent_text.contains("multipart/mixed"), "{sent_text}");
+        assert!(sent_text.contains("must-send.txt"), "{sent_text}");
+        assert!(!scope.path(&token).unwrap().exists());
 
+        super::legacy_stage_compose_attachment(&scope, &token, b"MUST-BE-SAVED", false)
+            .await
+            .unwrap();
         let appended = Arc::new(Mutex::new(None));
         let appender = RecordingDraftAppender {
             message: Arc::clone(&appended),
@@ -39145,17 +39298,31 @@ Subject: Empty body metadata\r\n\r\n"
         let save_response = super::native_save_message_with_appender(
             &state,
             "SaveMessage",
-            &payload,
+            &json!({
+                "account_id": 8_943,
+                "from": "work@example.com",
+                "saveFolder": "Drafts",
+                "boundary": "client-pgp-boundary",
+                "signed": "Content-Type: ignored\r\n\r\n--client-pgp-boundary--\r\n",
+                "attachments": {
+                    (token.clone()): {"name": "must-save.txt", "inline": false, "type": "text/plain"}
+                }
+            }),
             &session,
             &appender,
         )
         .await;
         let save_body = read_json(save_response).await;
-        assert!(save_body["Result"]["error"]
-            .as_str()
+        assert_eq!(save_body["Result"]["uid"], 77);
+        let saved_bytes = appended
+            .lock()
             .unwrap()
-            .contains("Client-provided OpenPGP MIME"));
-        assert!(appended.lock().unwrap().is_none());
+            .clone()
+            .expect("draft append recorded");
+        let saved_text = String::from_utf8_lossy(&saved_bytes);
+        assert!(saved_text.contains("multipart/signed"), "{saved_text}");
+        assert!(saved_text.contains("multipart/mixed"), "{saved_text}");
+        assert!(saved_text.contains("must-save.txt"), "{saved_text}");
         assert!(scope.path(&token).unwrap().exists());
 
         tokio::fs::remove_dir_all(&temp_root).await.unwrap();
