@@ -49,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         .route("/identities", get(identities))
         .route("/switch-account", post(switch_account))
         .route("/messages", get(messages))
+        .route("/preferences", get(get_preferences).put(set_preferences))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -129,6 +130,120 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Reads the authenticated user's merged preferences, reusing the exact
+/// repository query as legacy `FrickmailGetPrefs`. GET-only, so no CSRF
+/// check applies.
+async fn get_preferences(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    match fm_user::SqlxUserRepository::preferences(pool, user_id).await {
+        Ok(Some(prefs)) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "preferences": prefs }))),
+        )
+            .into_response(),
+        Ok(None) => v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        ),
+        Err(err) => {
+            tracing::warn!("v1 preferences lookup failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail preferences lookup failed",
+            )
+        }
+    }
+}
+
+/// Applies a validated preferences patch, reusing the exact schema-driven
+/// cleaning as legacy `FrickmailSetPrefs` (unknown keys dropped, values
+/// clamped/coerced). State-changing, so the connection token is required.
+async fn set_preferences(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(Json(body)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid preferences request",
+        );
+    };
+    let patch = body.get("preferences").unwrap_or(&Value::Null);
+    match fm_user::SqlxUserRepository::update_preferences(pool, user_id, patch).await {
+        Ok(Some(prefs)) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "preferences": prefs }))),
+        )
+            .into_response(),
+        Ok(None) => v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        ),
+        Err(err) => {
+            tracing::warn!("v1 preferences update failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail preferences update failed",
+            )
+        }
+    }
+}
+
+/// Resolves the session user id for v1 handlers: store failures are 500s,
+/// absent sessions are 401s.
+async fn v1_session_user_id(session: &fm_session::Session) -> Result<i64, Response> {
+    match session
+        .get::<UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(Some(user)) => Ok(user.user_id),
+        Ok(None) => Err(v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        )),
+        Err(_) => Err(v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_error",
+            "Frickmail session read failed",
+        )),
+    }
 }
 
 /// Reads and validates the session credential key, mirroring legacy
@@ -2014,5 +2129,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn v1_preferences_round_trip_through_login() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 601, "v1prefs", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1prefs", "correct-horse").await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/preferences")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert!(body["data"]["preferences"].is_object());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/frickmail/v1/preferences")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        serde_json::json!({"preferences": {
+                            "unified_inbox_limit": 80,
+                            "bogus_key": "dropped",
+                        }})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["preferences"]["unified_inbox_limit"], 80);
+        assert!(body["data"]["preferences"].get("bogus_key").is_none());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/preferences")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["preferences"]["unified_inbox_limit"], 80);
+    }
+
+    #[tokio::test]
+    async fn v1_preferences_rejects_anonymous_and_tokenless_writes() {
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/preferences")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let (cookie, _) = bootstrap_csrf(app.clone()).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/frickmail/v1/preferences")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        serde_json::json!({"preferences": {"unified_inbox_limit": 80}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
     }
 }

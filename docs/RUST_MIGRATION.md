@@ -5,7 +5,32 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 16:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 17:30:00 CEST (UTC+02:00)
+
+The v1 preferences slice adds `GET`+`PUT
+/api/frickmail/v1/preferences`, reusing the exact repository queries as
+legacy `FrickmailGetPrefs`/`FrickmailSetPrefs` (merged read, schema-driven
+patch cleaning: unknown keys dropped, values clamped/coerced). GET is
+read-only; PUT requires the connection token. Two tests cover the
+authenticated round-trip (patch applies, unknown keys dropped, values
+persist) plus anonymous/tokenless rejection.
+
+Independent senior review approved with no actionables (route isolation,
+PUT CSRF ordering, patch cleaning parity, response shapes, non-vacuous
+tests using a schema-valid key).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 437 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-prefs-test` at
+image ID `sha256:6ed73d7db801f9f632188a1fdff839b65356a1ac8e7206ae14d4d509510a23c1`;
+a read-only container returned 401 for anonymous `/preferences`, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 16:30:00 CEST (UTC+02:00)
 
 The v1 messages slice adds `GET /api/frickmail/v1/messages`, the
 first mailbox endpoint: explicit-or-selected account resolution, scoped
