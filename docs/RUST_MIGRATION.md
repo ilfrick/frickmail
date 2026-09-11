@@ -5,7 +5,30 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 17:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 18:30:00 CEST (UTC+02:00)
+
+The v1 rules slice adds `GET /api/frickmail/v1/rules`, reusing the
+exact repository query as legacy `FrickmailListRules`. Unlike identities
+(empty list), unknown or foreign accounts surface the repository's
+`account_not_found` as 404; the `MailRule` shape carries no secrets.
+GET-only, so no CSRF check applies. Two tests cover scoped listing plus
+unknown/foreign/malformed/anonymous cases.
+
+Independent senior review approved with no actionables (exact error-string
+mapping, secret-free shapes, mirrored guards, non-vacuous tests).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 439 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-rules-test` at
+image ID `sha256:0bb7023207503dcf5d12d0df93de9282abe389ae7ef9fc428f899259837c2a42`;
+a read-only container returned 401 for anonymous `/rules`, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 17:30:00 CEST (UTC+02:00)
 
 The v1 preferences slice adds `GET`+`PUT
 /api/frickmail/v1/preferences`, reusing the exact repository queries as

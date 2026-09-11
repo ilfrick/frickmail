@@ -50,6 +50,7 @@ pub fn routes() -> Router<AppState> {
         .route("/switch-account", post(switch_account))
         .route("/messages", get(messages))
         .route("/preferences", get(get_preferences).put(set_preferences))
+        .route("/rules", get(rules))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -130,6 +131,77 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Lists one mail account's filter rules, reusing the exact repository query
+/// as legacy `FrickmailListRules`. Unlike identities (which return `[]` for
+/// foreign accounts), the repository rejects unknown accounts, so those map
+/// to 404 `account_not_found` here. The `MailRule` shape carries no secrets.
+async fn rules(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid rules query",
+        );
+    };
+    let account_id = match params
+        .get("account_id")
+        .map(|value| value.parse::<i64>())
+        .transpose()
+        .ok()
+        .flatten()
+        .filter(|id| *id > 0)
+    {
+        Some(account_id) => account_id,
+        None => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "A positive account_id query parameter is required",
+            )
+        }
+    };
+    match fm_user::SqlxUserRepository::list_mail_rules(pool, user_id, account_id).await {
+        Ok(rules) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "rules": rules }))),
+        )
+            .into_response(),
+        Err(fm_core::FrickmailError::BadRequest(message)) if message == "Account not found" => {
+            v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!("v1 rules listing failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail rules listing failed",
+            )
+        }
+    }
 }
 
 /// Reads the authenticated user's merged preferences, reusing the exact
@@ -2232,5 +2304,148 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "invalid_token");
+    }
+
+    async fn seed_mail_rule(pool: &sqlx::AnyPool, id: i64, user_id: i64, account_id: i64) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_rules (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                conditions TEXT NOT NULL,
+                actions TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                last_run TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO frickmail_rules
+                (id, user_id, account_id, name, conditions, actions, enabled, last_run, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(account_id)
+        .bind("Archive newsletters")
+        .bind("{\"conditions\": [], \"logic\": \"all\"}")
+        .bind("{\"actions\": []}")
+        .bind(true)
+        .bind(None::<String>)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v1_rules_lists_account_scoped_rules() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 701, "v1rules", "correct-horse", None).await;
+        seed_mail_account(&pool, 800, 701, "Filtered").await;
+        seed_mail_rule(&pool, 900, 701, 800).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1rules", "correct-horse").await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/rules?account_id=800")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        let rules = body["data"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["name"], "Archive newsletters");
+        assert_eq!(rules[0]["account_id"], 800);
+    }
+
+    #[tokio::test]
+    async fn v1_rules_rejects_unknown_foreign_and_bad_requests() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 702, "v1rulesother", "correct-horse", None).await;
+        seed_login_user(&pool, 703, "v1rulesstranger", "correct-horse", None).await;
+        seed_mail_account(&pool, 801, 702, "Owner").await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(
+            app.clone(),
+            &cookie,
+            &token,
+            "v1rulesstranger",
+            "correct-horse",
+        )
+        .await;
+
+        // Unknown and foreign accounts map to 404, never foreign rows.
+        for uri in [
+            "/api/frickmail/v1/rules?account_id=999999",
+            "/api/frickmail/v1/rules?account_id=801",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "account_not_found", "{uri}");
+        }
+
+        // Missing and malformed account ids are 400s.
+        for uri in [
+            "/api/frickmail/v1/rules",
+            "/api/frickmail/v1/rules?account_id=abc",
+            "/api/frickmail/v1/rules?account_id=0",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // Anonymous callers are rejected.
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/rules?account_id=801")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
