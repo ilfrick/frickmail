@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-11 15:30:00 CEST (UTC+02:00)
 
-The pending v1 switch-account slice adds `POST /api/frickmail/v1/switch-account`,
+The v1 switch-account slice adds `POST /api/frickmail/v1/switch-account`,
 reusing legacy ownership checks (user-scoped account lookup), credential-material
 validation without network (decryptable password/OAuth token), session
 storage, and the account-scoped connection-token refresh (returned as
@@ -30,8 +30,21 @@ image ID `sha256:c00b608bb3b8d9514bd88ca7aaf2818f562df1f7742f1a6651a11ab3ec15c13
 a read-only container rejected a tokenless switch with 403 `invalid_token`,
 logs showed only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `2e13b27d17118c89ac4cee64dc414d4b0bcf9884` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34602049957`](https://github.com/ilfrick/frickmail/actions/runs/34602049957)
+and `rust-full-migration` run
+[`34602056944`](https://github.com/ilfrick/frickmail/actions/runs/34602056944),
+and the `naming` gate passed on both branches
+([`34602049767`](https://github.com/ilfrick/frickmail/actions/runs/34602049767),
+[`34602056910`](https://github.com/ilfrick/frickmail/actions/runs/34602056910));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major remaining
+gates toward the final Rust-only goal are unchanged (v1 mailbox endpoints,
+frontend screens, theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-11 14:30:00 CEST (UTC+02:00)
 
