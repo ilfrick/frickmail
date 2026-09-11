@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-11 10:50:00 CEST (UTC+02:00)
 
-The pending client-PGP compose slice closes the "staged attachments with
+The client-PGP compose slice closes the "staged attachments with
 client OpenPGP MIME" gap: `SendMessage`/`SaveMessage` now accept staged
 attachments alongside Mailvelope-style `signed`/`encrypted` payloads,
 nesting the PGP entity as the MIME root under shared MailSo-compatible
@@ -31,8 +31,19 @@ image ID `sha256:656422dcbcd3b7d587e38e90e442082c4e90e84bdcddc02b3ea840845631351
 a read-only container started without a database, `/health` returned `ok`,
 logs showed only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `cfcf3d196efcd29e4b5a12598a714bb7a5b65c4d` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34580686016`](https://github.com/ilfrick/frickmail/actions/runs/34580686016)
+and `rust-full-migration` run
+[`34580690756`](https://github.com/ilfrick/frickmail/actions/runs/34580690756);
+both runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major remaining
+gates toward the final Rust-only goal are unchanged (compose PGP assembly
+and OAuth SMTP parity, frontend/theming with the theme deletion plan
+recorded, cutover validation).
 
 ## Prior Snapshot — 2026-09-11 09:40:00 CEST (UTC+02:00)
 
