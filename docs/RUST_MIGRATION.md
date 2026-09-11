@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-11 12:30:00 CEST (UTC+02:00)
 
-The pending v1 login slice adds `POST /api/frickmail/v1/login` through a
+The v1 login slice adds `POST /api/frickmail/v1/login` through a
 shared authentication core extracted from legacy `FrickmailLogin`
 (`native_login_authenticate` + `native_login_establish_session`: dummy-hash
 no-enumeration, TOTP gating with replay protection, credential-key
@@ -41,8 +41,21 @@ a read-only container verified the live contract (anonymous session
 bootstrap with `csrf_token`, login without a database → 503 envelope),
 logs showed only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `7757e07c655a764b40dc5f1ff7796e4d2582ca66` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34591799096`](https://github.com/ilfrick/frickmail/actions/runs/34591799096)
+and `rust-full-migration` run
+[`34591805298`](https://github.com/ilfrick/frickmail/actions/runs/34591805298),
+and the `naming` gate passed on both branches
+([`34591799124`](https://github.com/ilfrick/frickmail/actions/runs/34591799124),
+[`34591805279`](https://github.com/ilfrick/frickmail/actions/runs/34591805279));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major remaining
+gates toward the final Rust-only goal are unchanged (v1 account/mailbox
+endpoints, frontend screens, theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-11 11:20:00 CEST (UTC+02:00)
 
