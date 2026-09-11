@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-11 14:30:00 CEST (UTC+02:00)
 
-The pending v1 identities slice adds `GET /api/frickmail/v1/identities`,
+The v1 identities slice adds `GET /api/frickmail/v1/identities`,
 reusing the exact repository query as legacy `FrickmailListIdentities`.
 Scoping is strict (`user_id` plus required positive `account_id`, mirroring
 legacy): foreign accounts yield an empty list, never foreign rows; the
@@ -27,8 +27,21 @@ a read-only container returned 401 for anonymous `/identities` (with and
 without `account_id`), logs showed only expected startup messages, and it
 stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `c1c779edf39a7843f7a6c435ef801a34d68d590c` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34598042210`](https://github.com/ilfrick/frickmail/actions/runs/34598042210)
+and `rust-full-migration` run
+[`34598048519`](https://github.com/ilfrick/frickmail/actions/runs/34598048519),
+and the `naming` gate passed on both branches
+([`34598042175`](https://github.com/ilfrick/frickmail/actions/runs/34598042175),
+[`34598048531`](https://github.com/ilfrick/frickmail/actions/runs/34598048531));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major remaining
+gates toward the final Rust-only goal are unchanged (v1 mailbox endpoints,
+frontend screens, theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-11 13:30:00 CEST (UTC+02:00)
 
