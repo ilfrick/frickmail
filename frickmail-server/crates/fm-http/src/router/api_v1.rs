@@ -45,6 +45,7 @@ pub fn routes() -> Router<AppState> {
         .route("/health", get(health))
         .route("/session", get(session))
         .route("/login", post(login))
+        .route("/accounts", get(accounts))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -117,6 +118,56 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Lists the authenticated user's mail accounts with safe metadata and
+/// inline identities, reusing the exact repository query as legacy
+/// `FrickmailListAccounts`. The returned `MailAccount` shape carries no
+/// secrets by construction (passwords and tokens live in the separate
+/// `MailAccountConnectionSecret` type, which is never serialized here).
+async fn accounts(state: axum::extract::State<AppState>, session: fm_session::Session) -> Response {
+    let stored = match session
+        .get::<UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(_) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            )
+        }
+    };
+    let Some(user) = stored else {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        );
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    match fm_user::SqlxUserRepository::list_mail_accounts(pool, user.user_id).await {
+        Ok(accounts) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "accounts": accounts }))),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("v1 accounts listing failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail accounts listing failed",
+            )
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,6 +499,47 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            "CREATE TABLE frickmail_mail_accounts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                email TEXT NOT NULL,
+                type TEXT NOT NULL,
+                imap_host TEXT,
+                imap_port INTEGER,
+                imap_secure TEXT,
+                smtp_host TEXT,
+                smtp_port INTEGER,
+                smtp_secure TEXT,
+                login TEXT,
+                encrypted_password BLOB,
+                encrypted_oauth_refresh_token BLOB,
+                oauth_tenant TEXT,
+                settings TEXT NOT NULL DEFAULT '{}',
+                is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE frickmail_identities (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                reply_to TEXT,
+                is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         pool
     }
 
@@ -476,6 +568,129 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_mail_account(pool: &sqlx::AnyPool, id: i64, user_id: i64, label: &str) {
+        let local = label.to_ascii_lowercase();
+        sqlx::query(
+            "INSERT INTO frickmail_mail_accounts
+                (id, user_id, label, email, type, imap_host, imap_port, imap_secure,
+                 smtp_host, smtp_port, smtp_secure, login, encrypted_password,
+                 encrypted_oauth_refresh_token, oauth_tenant, is_primary, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(label)
+        .bind(format!("{local}@example.com"))
+        .bind("imap")
+        .bind("imap.example.com")
+        .bind(993_i64)
+        .bind("SSL")
+        .bind("smtp.example.com")
+        .bind(465_i64)
+        .bind("SSL")
+        .bind(format!("{local}@example.com"))
+        .bind(vec![1_u8, 2, 3])
+        .bind(None::<Vec<u8>>)
+        .bind(None::<String>)
+        .bind(true)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_identity(pool: &sqlx::AnyPool, id: i64, user_id: i64, account_id: i64) {
+        sqlx::query(
+            "INSERT INTO frickmail_identities
+                (id, account_id, user_id, name, email, reply_to, is_default, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(user_id)
+        .bind("Sender")
+        .bind("sender@example.com")
+        .bind(None::<String>)
+        .bind(true)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn login_as(
+        app: Router,
+        cookie: &str,
+        token: &str,
+        username: &str,
+        password: &str,
+    ) -> String {
+        let response = app
+            .oneshot(login_request(
+                cookie,
+                Some(token),
+                serde_json::json!({"username": username, "password": password}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        session_cookie(&response)
+    }
+
+    #[tokio::test]
+    async fn v1_accounts_lists_safe_metadata_for_authenticated_users() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 201, "v1acct", "correct-horse", None).await;
+        seed_mail_account(&pool, 300, 201, "Primary").await;
+        seed_mail_account(&pool, 301, 201, "Secondary").await;
+        seed_identity(&pool, 400, 201, 300).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1acct", "correct-horse").await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/accounts")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        let accounts = body["data"]["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0]["email"], "primary@example.com");
+        assert_eq!(accounts[0]["identities"].as_array().unwrap().len(), 1);
+        assert_eq!(accounts[0]["identities"][0]["email"], "sender@example.com");
+        let serialized = body.to_string();
+        assert!(!serialized.contains("encrypted_password"));
+        assert!(!serialized.contains("AQID"));
+    }
+
+    #[tokio::test]
+    async fn v1_accounts_rejects_anonymous_callers() {
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/accounts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "unauthenticated");
+    }
     fn login_app(pool: sqlx::AnyPool) -> Router {
         Router::new()
             .nest("/api/frickmail/v1", super::routes())
