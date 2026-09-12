@@ -5,7 +5,27 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 16:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 17:30:00 CEST (UTC+02:00)
+
+The contacts-UI slice adds the address-book view to the v1 shell:
+`js/contacts.js` (pure row/list rendering with escaping plus a thin loader
+over `GET /contacts`) wired behind shell navigation. Six `node --test`
+tests pin escaping, fallbacks, empty states, and loader addressing; ESLint
+and the naming gate pass.
+
+Independent senior review approved with no actionables (XSS, contract,
+wiring, 58/58 tests, lint, names, secrets all verified).
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-contacts-test` at image ID
+`sha256:8aab88017c8c4e823fbe9e6477942c6e61a11f6a27b3473fbe5ae5a9a51380d4`
+serves `/static/v1/js/contacts.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 16:30:00 CEST (UTC+02:00)
 
 The v1 contacts slice adds `GET /api/frickmail/v1/contacts`,
 reusing the exact address-book summary query (id/uid/display, user-scoped,

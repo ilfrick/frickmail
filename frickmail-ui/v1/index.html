@@ -15,6 +15,7 @@ import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadFolders, renderFolderList } from './js/folders.js';
+import { loadContacts, renderContacts } from './js/contacts.js';
 import { collectComposePayload, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
@@ -27,10 +28,12 @@ function nav(active) {
 	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
 	const settings = active === 'settings' ? ' aria-current="page"' : '';
 	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
+	const contacts = active === 'contacts' ? ' aria-current="page"' : '';
 	const compose = active === 'compose' ? ' aria-current="page"' : '';
 	return '<nav data-fm="nav">'
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
+		+ '<button type="button" data-fm="nav-contacts"' + contacts + '>Contacts</button>'
 		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
 		+ '<button type="button" data-fm="nav-compose"' + compose + '>Compose</button>'
 		+ '<button type="button" data-fm="nav-logout">Sign out</button>'
@@ -40,6 +43,7 @@ function nav(active) {
 function wireNav() {
 	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
+	const contactsButton = root.querySelector('[data-fm="nav-contacts"]');
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
 	const composeButton = root.querySelector('[data-fm="nav-compose"]');
 	const logoutButton = root.querySelector('[data-fm="nav-logout"]');
@@ -48,6 +52,9 @@ function wireNav() {
 	}
 	if (tasksButton) {
 		tasksButton.addEventListener('click', () => showTasks('all'));
+	}
+	if (contactsButton) {
+		contactsButton.addEventListener('click', () => showContacts());
 	}
 	if (settingsButton) {
 		settingsButton.addEventListener('click', showSettings);
@@ -91,6 +98,18 @@ async function showTasks(filter) {
 		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load tasks.</p>';
+	}
+}
+
+async function showContacts() {
+	try {
+		const data = await loadContacts(api, { limit: 50 });
+		root.innerHTML = nav('contacts')
+			+ '<h1 data-fm="title">Contacts</h1>'
+			+ renderContacts(data);
+		wireNav();
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load contacts.</p>';
 	}
 }
 

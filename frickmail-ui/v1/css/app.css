@@ -234,6 +234,25 @@ body {
 	margin: 0.75rem 0;
 }
 
+#app [data-fm="contacts"] {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+#app [data-fm="contact"] {
+	display: flex;
+	gap: 0.75rem;
+	align-items: baseline;
+	padding: 0.4rem 0;
+	border-bottom: 1px solid #343b48;
+}
+
+#app [data-fm="contact"] [data-fm="uid"] {
+	color: var(--fm-muted);
+	font-size: 0.8rem;
+}
+
 #app textarea {
 	width: 100%;
 	padding: 0.55rem 0.65rem;
