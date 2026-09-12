@@ -1,0 +1,85 @@
+/* Frickmail v1 shell styles (Phase 9).
+ *
+ * Self-contained starting point: CSS variables with dark defaults, a
+ * centered authentication card, and form primitives. Later slices adopt the
+ * shared Frickmail theme tokens once the legacy pipeline no longer owns
+ * them.
+ */
+
+:root {
+	color-scheme: dark;
+	--fm-bg: #1b1e24;
+	--fm-surface: #23272f;
+	--fm-text: #e8eaf0;
+	--fm-muted: #9aa1b2;
+	--fm-accent: #4a90e2;
+	--fm-danger: #e06c75;
+	--fm-radius: 10px;
+	--fm-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	min-height: 100vh;
+	display: grid;
+	place-items: center;
+	background: var(--fm-bg);
+	color: var(--fm-text);
+	font-family: var(--fm-font);
+}
+
+#app {
+	width: min(26rem, calc(100vw - 2rem));
+	background: var(--fm-surface);
+	border-radius: var(--fm-radius);
+	padding: 1.75rem;
+}
+
+#app h1 {
+	margin: 0 0 1.25rem;
+	font-size: 1.25rem;
+}
+
+#app label {
+	display: block;
+	margin: 0.75rem 0 0.25rem;
+	color: var(--fm-muted);
+	font-size: 0.85rem;
+}
+
+#app input {
+	width: 100%;
+	padding: 0.55rem 0.65rem;
+	border: 1px solid #3a4150;
+	border-radius: 6px;
+	background: #14171d;
+	color: inherit;
+	font: inherit;
+}
+
+#app .actions {
+	margin-top: 1.25rem;
+}
+
+#app button[type="submit"] {
+	width: 100%;
+	padding: 0.6rem;
+	border: 0;
+	border-radius: 6px;
+	background: var(--fm-accent);
+	color: #fff;
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+#app .status {
+	min-height: 1.4em;
+	margin-top: 0.75rem;
+	color: var(--fm-danger);
+	font-size: 0.9rem;
+}

@@ -2,3 +2,5 @@
 !/dev/**/*.js
 !/tasks/**/*.js
 !/*.js
+!/frickmail-ui/v1/**/*.js
+!/frickmail-ui/v1/**/*.mjs

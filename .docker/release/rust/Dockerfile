@@ -39,6 +39,7 @@ COPY snappymail/v/0.0.0/static ./snappymail/v/0.0.0/static
 COPY snappymail/v/0.0.0/themes ./snappymail/v/0.0.0/themes
 COPY snappymail/v/0.0.0/app/localization ./snappymail/v/0.0.0/app/localization
 COPY frickmail-ui/build.mjs ./frickmail-ui/build.mjs
+COPY frickmail-ui/v1 ./frickmail-ui/v1
 
 RUN corepack enable \
     && corepack yarn install --frozen-lockfile --ignore-scripts \

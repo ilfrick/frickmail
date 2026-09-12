@@ -5,7 +5,36 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 02:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 03:30:00 CEST (UTC+02:00)
+
+The pending UI-foundation slice starts Phase 9 screens with a deliberate
+no-framework decision: the Frickmail-user JS is already vanilla DOM (zero
+Knockout in Login/Tasks), so `frickmail-ui/v1/` ships vanilla ES modules —
+zero new dependencies, no bundling, offline-friendly. Ships an app shell
+(`index.html`), a tested v1 API client (`js/api.js`: envelope parsing,
+CSRF token bootstrap/echo, login/logout, injectable fetch), a login screen
+(`js/login.js` with TOTP step), and self-contained styles. Nine `node
+--test` tests cover envelopes, payloads, origin handling, and the client; ESLint covers the
+tree (`.eslintignore` extended); `build.mjs` copies the tree to
+`frickmail-static/v1/` excluding `*.test.mjs`; the naming gate passes.
+
+Independent senior review approved with two non-blocking nits (both
+applied: absolute-origin `baseUrl` handling with test, `minlength="8"`
+kept as matching server policy plus legacy UI).
+
+Docker-only validation passed: `node --test` (9 tests), ESLint clean,
+naming gate passes, production image
+`frickmail-rust:ui-v1-test` at image ID
+`sha256:7e20e636faa1e726b4315a46d870e834a64b73dec4f2ba51e6b7541bbed30185`
+serves `/static/v1/` (200), `/static/v1/js/api.js` (200), and correctly
+404s the excluded test file. The first production build caught a missing
+`COPY frickmail-ui/v1` line in the ui-builder stage (fixed before
+validation).
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 02:30:00 CEST (UTC+02:00)
 
 The v1 logout slice adds `POST /api/frickmail/v1/logout`, tearing
 down the server-side session and expiring the client cookie (via

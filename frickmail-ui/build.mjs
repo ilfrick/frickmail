@@ -16,6 +16,12 @@ await cp(staticRoot, outputRoot, { recursive: true });
 await cp(path.join(root, 'snappymail/v/0.0.0/themes'), path.join(outputRoot, 'themes'), {
   recursive: true,
 });
+// Phase 9 standalone app: vanilla ES modules need no bundling, copy as-is
+// (unit tests stay out of the production bundle).
+await cp(path.join(root, 'frickmail-ui/v1'), path.join(outputRoot, 'v1'), {
+  recursive: true,
+  filter: (source) => !source.endsWith('.test.mjs'),
+});
 
 const pluginFiles = [
   ['plugins/login-oidc/LoginOIDC.js', false],

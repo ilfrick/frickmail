@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Frickmail</title>
+<link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+<main id="app" aria-live="polite"><p>Loading Frickmail…</p></main>
+<noscript><p>Frickmail needs JavaScript enabled.</p></noscript>
+<script type="module">
+import { ApiClient } from './js/api.js';
+import { renderLogin } from './js/login.js';
+
+const api = new ApiClient('');
+const root = document.getElementById('app');
+try {
+	const session = await api.bootstrap();
+	if (session && session.authenticated) {
+		root.innerHTML = '<p>Signed in. Mailbox screens land in the next slice.</p>';
+	} else {
+		renderLogin(root, api, () => {
+			root.innerHTML = '<p>Signed in. Mailbox screens land in the next slice.</p>';
+		});
+	}
+} catch (error) {
+	root.innerHTML = '<p>Cannot reach the Frickmail server.</p>';
+}
+</script>
+</body>
+</html>
