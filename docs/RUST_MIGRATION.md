@@ -5,7 +5,31 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 04:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 05:30:00 CEST (UTC+02:00)
+
+The message-view slice adds the v1 reading view: `js/message.js`
+(pure header/attachment rendering with escaping, HTML-vs-plain selection,
+uid-addressed loading) wired behind mailbox clicks, with server-sanitized
+HTML shown in a sandboxed frame and plain text via textContent. Twenty-six
+`node --test` tests pin address formatting, header escaping, attachment
+metadata, body selection, and loader addressing; ESLint and the naming gate
+pass.
+
+Independent senior review first blocked on two real finds (detail view uses
+camelCase `dateTimestamp` unlike list summaries, masked by tests; an unused
+import failing ESLint); both fixed with a non-empty-date assertion, and the
+re-review approved with no blockers.
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-message-test` at image ID
+`sha256:1eef71f03b1148b327518842bc4bca17199cbf476833ed4e72e5af81fbd6db99`
+serves `/static/v1/js/message.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 04:30:00 CEST (UTC+02:00)
 
 The mailbox-list slice adds the first v1 screens: `js/mailbox.js`
 (pure `escapeHtml`/`formatTimestamp`/row/list rendering over the v1

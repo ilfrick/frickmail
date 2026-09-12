@@ -124,3 +124,55 @@ body {
 	font-size: 0.8rem;
 	white-space: nowrap;
 }
+
+#app [data-fm="headers"] {
+	margin-bottom: 1rem;
+}
+
+#app [data-fm="headers"] h2 {
+	margin: 0 0 0.5rem;
+	font-size: 1.1rem;
+}
+
+#app [data-fm="headers"] div {
+	color: var(--fm-muted);
+	font-size: 0.85rem;
+}
+
+#app [data-fm="body"] {
+	width: 100%;
+	min-height: 20rem;
+	border: 1px solid #343b48;
+	border-radius: 6px;
+	background: #fff;
+}
+
+#app pre {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+#app [data-fm="attachments"] {
+	list-style: none;
+	margin: 1rem 0 0;
+	padding: 0;
+}
+
+#app [data-fm="attachment"] {
+	display: flex;
+	gap: 0.75rem;
+	padding: 0.4rem 0;
+	border-top: 1px solid #343b48;
+	font-size: 0.85rem;
+}
+
+#app button[data-fm="back"] {
+	margin-bottom: 1rem;
+	background: none;
+	border: 1px solid #3a4150;
+	border-radius: 6px;
+	color: inherit;
+	font: inherit;
+	padding: 0.4rem 0.8rem;
+	cursor: pointer;
+}

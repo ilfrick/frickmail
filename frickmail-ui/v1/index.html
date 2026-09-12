@@ -14,14 +14,46 @@
 import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
+import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 
 const api = new ApiClient('');
 const root = document.getElementById('app');
+
+async function showMessage(folder, uid) {
+	try {
+		const message = await loadMessage(api, folder, uid);
+		const selected = selectMessageBody(message);
+		let viewer = '';
+		if (selected.kind === 'html') {
+			viewer = '<iframe data-fm="body" sandbox="" title="Message body"></iframe>';
+		} else {
+			const pre = document.createElement('pre');
+			pre.textContent = selected.body;
+			viewer = pre.outerHTML;
+		}
+		root.innerHTML = '<button type="button" data-fm="back">Back</button>'
+			+ renderMessageHeader(message)
+			+ viewer
+			+ renderAttachments(message);
+		const frame = root.querySelector('[data-fm="body"]');
+		if (frame && selected.kind === 'html') {
+			frame.srcdoc = selected.body;
+		}
+		root.querySelector('[data-fm="back"]').addEventListener('click', showMailbox);
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load the message.</p>';
+	}
+}
 
 async function showMailbox() {
 	try {
 		const data = await loadMailbox(api, 'INBOX', { limit: 25 });
 		root.innerHTML = '<h1 data-fm="title">Inbox</h1>' + renderMailbox(data);
+		for (const item of root.querySelectorAll('[data-fm="message"]')) {
+			item.addEventListener('click', () => {
+				showMessage('INBOX', item.getAttribute('data-uid'));
+			});
+		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the mailbox.</p>';
 	}
