@@ -5,7 +5,36 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 13:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 14:30:00 CEST (UTC+02:00)
+
+The v1 send slice adds `POST /api/frickmail/v1/send`, reusing the
+exact compose/delivery pipeline as legacy `SendMessage` (validation, MIME
+build, SMTP delivery, Sent filing into the account's configured `SentFolder`)
+behind injectable sender/appender seams, with plain addressing plus
+text/HTML bodies (attachments, client PGP/SMIME, and signing options stay on
+the legacy dispatcher for now). Response mapping: transport success → 200
+`{sent:true}`, legacy validation failures → generic 400, everything else →
+generic 502 with server-side logs. Account existence is pre-checked for
+404s. Three tests cover delivery plus Sent filing, opt-out skipping, and
+bad-request mapping.
+
+Independent senior review first blocked on response misclassification (dead
+903 branch — validation arrives codeless); remediated with generic 400s,
+account `SentFolder` reuse, and strengthened tests, and the closing
+re-review approved with no blockers.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 452 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-send-test` at
+image ID `sha256:d3d254e3d25e0cebb5d99da8f8e41ac3f8cfcd2362010ebf769ec26f68302ebb`;
+a read-only container rejected tokenless send with 403, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 13:30:00 CEST (UTC+02:00)
 
 The folders-UI slice adds mailbox navigation to the v1 shell:
 `js/folders.js` (pure folder row/list rendering with escaping and

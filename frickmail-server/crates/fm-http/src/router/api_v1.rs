@@ -51,6 +51,7 @@ pub fn routes() -> Router<AppState> {
         .route("/logout", post(logout))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
+        .route("/send", post(send))
         .route("/preferences", get(get_preferences).put(set_preferences))
         .route("/rules", get(rules))
         .route("/tasks", get(tasks))
@@ -135,6 +136,244 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Maps a legacy send response onto the v1 contract: transport success
+/// (HTTP 200 with `Result: true`) becomes 200 `{sent:true}`; legacy input
+/// validation (`Result.ok == false`, no code field) becomes a generic 400;
+/// everything else becomes a generic 502. Legacy error text never reaches
+/// v1 clients; details stay server-side.
+async fn map_send_response(response: Response) -> Response {
+    if response.status() != StatusCode::OK {
+        tracing::warn!(
+            "v1 send failed with legacy status {}",
+            response.status().as_u16()
+        );
+        return v1_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Mail message delivery failed",
+        );
+    }
+    let body = match axum::body::to_bytes(response.into_body(), 64 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail message delivery failed",
+            )
+        }
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(body) => body,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail message delivery failed",
+            )
+        }
+    };
+    if body.get("Result") == Some(&json!(true)) {
+        return (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "sent": true }))),
+        )
+            .into_response();
+    }
+    if body.get("Result").and_then(|result| result.get("ok")) == Some(&json!(false))
+        || body.get("code") == Some(&json!(903))
+    {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid send request",
+        );
+    }
+    tracing::warn!("v1 send failed without transport success");
+    v1_error(
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        "Mail message delivery failed",
+    )
+}
+
+/// Sends a plain text/HTML message through the selected or explicit account,
+/// reusing the exact compose/delivery pipeline as legacy `SendMessage`
+/// (validation, MIME build, SMTP delivery, Sent filing). Attachments,
+/// client PGP/SMIME payloads, and signing options stay on the legacy
+/// dispatcher for now: v1 `SendRequest` carries only addressing plus
+/// text/HTML bodies. State-changing, so the connection token is required.
+async fn send(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<SendRequest>, JsonRejection>,
+) -> Response {
+    send_with_sender_and_appender(
+        &state,
+        &session,
+        body,
+        &headers,
+        &super::ProductionLegacySmtpSender,
+        &super::ProductionLegacySentAppender,
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SendRequest {
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    cc: Option<String>,
+    #[serde(default)]
+    bcc: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    html: Option<String>,
+    #[serde(default = "default_send_save_to_sent")]
+    save_to_sent: bool,
+}
+
+fn default_send_save_to_sent() -> bool {
+    true
+}
+
+async fn send_with_sender_and_appender(
+    state: &AppState,
+    session: &fm_session::Session,
+    body: Result<Json<SendRequest>, JsonRejection>,
+    headers: &axum::http::HeaderMap,
+    smtp_sender: &dyn super::LegacySmtpSender,
+    sent_appender: &dyn super::LegacySentAppender,
+) -> Response {
+    if let Err(response) = v1_require_token(state, session, headers).await {
+        return response;
+    }
+    let stored = match session
+        .get::<UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(_) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            )
+        }
+    };
+    let Some(user) = stored else {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        );
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid send request",
+        );
+    };
+    if request.to.trim().is_empty() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "At least one recipient is required",
+        );
+    }
+    let account_id = match request.account_id.filter(|id| *id > 0) {
+        Some(account_id) => account_id,
+        None => match session
+            .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+            .await
+        {
+            Ok(Some(selected)) if selected.account_id > 0 => selected.account_id,
+            Ok(_) => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "account_required",
+                    "An account_id or selected account is required",
+                )
+            }
+            Err(_) => {
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_error",
+                    "Frickmail session read failed",
+                )
+            }
+        },
+    };
+    let sent_folder = match fm_user::SqlxUserRepository::get_mail_account_settings(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(settings)) => settings
+            .get("SentFolder")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+            .map(ToOwned::to_owned),
+        Ok(None) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!("v1 send settings lookup failed: {}", err.public_message());
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail settings lookup failed",
+            );
+        }
+    };
+    let payload = json!({
+        "account_id": account_id,
+        "to": request.to,
+        "cc": request.cc,
+        "bcc": request.bcc,
+        "subject": request.subject,
+        "plain": request.text,
+        "html": request.html,
+    });
+    let mut payload = payload;
+    if request.save_to_sent {
+        payload["saveFolder"] = json!(sent_folder.as_deref().unwrap_or("Sent"));
+    }
+    let response = super::native_send_message_inner_with_sender_and_sent_appender(
+        state,
+        "SendMessage",
+        &payload,
+        session,
+        std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+        smtp_sender,
+        sent_appender,
+    )
+    .await;
+    map_send_response(response).await
 }
 
 /// Lists one account's IMAP folders, reusing the exact fetch as legacy
@@ -3543,5 +3782,219 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    struct RecordingSmtpSender {
+        message: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::LegacySmtpSender for RecordingSmtpSender {
+        async fn send(
+            &self,
+            _settings: &fm_smtp::SmtpSendSettings,
+            _envelope: &lettre::address::Envelope,
+            message: &[u8],
+            _options: fm_smtp::SmtpDeliveryOptions,
+        ) -> fm_core::Result<bool> {
+            *self.message.lock().unwrap() = Some(message.to_vec());
+            Ok(true)
+        }
+    }
+
+    struct RecordingSentAppender {
+        message: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::LegacySentAppender for RecordingSentAppender {
+        #[allow(clippy::too_many_arguments)]
+        async fn append_sent(
+            &self,
+            _state: &AppState,
+            _pool: &sqlx::AnyPool,
+            _user_id: i64,
+            _account_id: i64,
+            _config: &fm_imap::ImapConnectionConfig,
+            _password: &str,
+            _folder: &str,
+            raw: &[u8],
+        ) -> Result<(), String> {
+            *self.message.lock().unwrap() = Some(raw.to_vec());
+            Ok(())
+        }
+    }
+
+    async fn send_test_state() -> (AppState, fm_session::Session, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1201, "v1send", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 1201, 1201, &blob).await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET smtp_host = ?, smtp_port = ?, smtp_secure = ?
+             WHERE id = ?",
+        )
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(1201_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = AppState::with_db_pool(test_api_config(), Some(pool));
+        let session = authed_v1_session(1201, "v1send").await;
+        let token = super::super::ensure_connection_token(&state, &session, Some(1201))
+            .await
+            .unwrap();
+        (state, session, token)
+    }
+
+    #[tokio::test]
+    async fn v1_send_delivers_and_files_sent_copy() {
+        let (state, session, token) = send_test_state().await;
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-sm-token", token.parse().unwrap());
+
+        let response = super::send_with_sender_and_appender(
+            &state,
+            &session,
+            Ok(axum::extract::Json(super::SendRequest {
+                account_id: Some(1201),
+                to: "recipient@example.net".to_string(),
+                cc: None,
+                bcc: None,
+                subject: Some("Hello via v1".to_string()),
+                text: Some("Body text".to_string()),
+                html: None,
+                save_to_sent: true,
+            })),
+            &headers,
+            &RecordingSmtpSender {
+                message: std::sync::Arc::clone(&sent),
+            },
+            &RecordingSentAppender {
+                message: std::sync::Arc::clone(&stored),
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["sent"], true);
+
+        let sent_text = String::from_utf8(sent.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(sent_text.contains("Hello via v1"), "{sent_text}");
+        assert!(sent_text.contains("Body text"), "{sent_text}");
+        let stored_text = String::from_utf8(stored.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(stored_text.contains("Hello via v1"), "{stored_text}");
+        assert!(stored_text.contains("Body text"), "{stored_text}");
+    }
+
+    #[tokio::test]
+    async fn v1_send_skips_sent_filing_when_disabled() {
+        let (state, session, token) = send_test_state().await;
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-sm-token", token.parse().unwrap());
+
+        let response = super::send_with_sender_and_appender(
+            &state,
+            &session,
+            Ok(axum::extract::Json(super::SendRequest {
+                account_id: Some(1201),
+                to: "recipient@example.net".to_string(),
+                cc: None,
+                bcc: None,
+                subject: Some("No filing".to_string()),
+                text: Some("Body text".to_string()),
+                html: None,
+                save_to_sent: false,
+            })),
+            &headers,
+            &RecordingSmtpSender {
+                message: std::sync::Arc::clone(&sent),
+            },
+            &RecordingSentAppender {
+                message: std::sync::Arc::clone(&stored),
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["sent"], true);
+        assert!(sent.lock().unwrap().is_some());
+        assert!(stored.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn v1_send_rejects_bad_requests_over_http() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1202, "v1senderr", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1senderr", "correct-horse").await;
+
+        // Missing recipients.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/send")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        serde_json::json!({"account_id": 1202, "subject": "No recipients"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Malformed body.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/send")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from("not-json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Tokenless send is rejected.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/send")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        serde_json::json!({"to": "a@example.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
