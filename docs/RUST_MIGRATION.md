@@ -24,8 +24,21 @@ image ID `sha256:24bd09a95e31d9e6c91fa180cc49bc66946ab5420a6ee77e2ada34e952a1594
 a read-only container returned 401 for anonymous `/folders`, logs showed
 only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `d03ff333471cd21dc2fd40a1389920a75671a0a6` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34692788609`](https://github.com/ilfrick/frickmail/actions/runs/34692788609)
+and `rust-full-migration` run
+[`34692791999`](https://github.com/ilfrick/frickmail/actions/runs/34692791999),
+and the `naming` gate passed on both branches
+([`34692788594`](https://github.com/ilfrick/frickmail/actions/runs/34692788594),
+[`34692791981`](https://github.com/ilfrick/frickmail/actions/runs/34692791981));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major
+remaining gates toward the final Rust-only goal are unchanged (more v1
+endpoints/screens, theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-12 08:30:00 CEST (UTC+02:00)
 
