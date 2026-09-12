@@ -233,3 +233,31 @@ body {
 	display: block;
 	margin: 0.75rem 0;
 }
+
+#app [data-fm="folders"] {
+	list-style: none;
+	margin: 0 0 1rem;
+	padding: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem;
+}
+
+#app [data-fm="folder"] {
+	border: 1px solid #343b48;
+	border-radius: 6px;
+	padding: 0.35rem 0.6rem;
+	font-size: 0.85rem;
+	cursor: pointer;
+	color: var(--fm-muted);
+}
+
+#app [data-fm="folder"][data-current] {
+	color: var(--fm-text);
+	border-color: var(--fm-accent);
+}
+
+#app [data-fm="counts"] {
+	margin-left: 0.4rem;
+	opacity: 0.75;
+}

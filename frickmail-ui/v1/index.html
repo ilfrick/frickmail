@@ -14,6 +14,7 @@
 import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
+import { loadFolders, renderFolderList } from './js/folders.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
 import { collectPreferencesPatch, loadPreferences, renderPreferencesForm, savePreferences } from './js/settings.js';
@@ -39,7 +40,7 @@ function wireNav() {
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
 	const logoutButton = root.querySelector('[data-fm="nav-logout"]');
 	if (inboxButton) {
-		inboxButton.addEventListener('click', showMailbox);
+		inboxButton.addEventListener('click', () => showMailbox('INBOX'));
 	}
 	if (tasksButton) {
 		tasksButton.addEventListener('click', () => showTasks('all'));
@@ -150,20 +151,30 @@ async function showMessage(folder, uid) {
 		if (frame && selected.kind === 'html') {
 			frame.srcdoc = selected.body;
 		}
-		root.querySelector('[data-fm="back"]').addEventListener('click', showMailbox);
+		root.querySelector('[data-fm="back"]').addEventListener('click', () => showMailbox(folder));
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the message.</p>';
 	}
 }
 
-async function showMailbox() {
+async function showMailbox(folder) {
+	const current = typeof folder === 'string' && folder ? folder : 'INBOX';
 	try {
-		const data = await loadMailbox(api, 'INBOX', { limit: 25 });
-		root.innerHTML = nav('inbox') + '<h1 data-fm="title">Inbox</h1>' + renderMailbox(data);
+		const folders = await loadFolders(api);
+		const data = await loadMailbox(api, current, { limit: 25 });
+		root.innerHTML = nav('inbox')
+			+ '<h1 data-fm="title">Inbox</h1>'
+			+ renderFolderList(folders, current)
+			+ renderMailbox(data);
 		wireNav();
+		for (const item of root.querySelectorAll('[data-fm="folder"]')) {
+			item.addEventListener('click', () => {
+				showMailbox(item.getAttribute('data-name') || 'INBOX');
+			});
+		}
 		for (const item of root.querySelectorAll('[data-fm="message"]')) {
 			item.addEventListener('click', () => {
-				showMessage('INBOX', item.getAttribute('data-uid'));
+				showMessage(current, item.getAttribute('data-uid'));
 			});
 		}
 	} catch (error) {

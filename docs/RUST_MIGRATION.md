@@ -5,7 +5,30 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 12:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 13:30:00 CEST (UTC+02:00)
+
+The folders-UI slice adds mailbox navigation to the v1 shell:
+`js/folders.js` (pure folder row/list rendering with escaping and
+unread/total counts plus a thin loader over `GET /folders`) with folder
+selection driving `showMailbox(folder)` end to end — the hardcoded INBOX is
+gone. Six `node --test` tests pin escaping, selection marking, fallbacks,
+empty states, and loader addressing; ESLint and the naming gate pass.
+
+Independent senior review first blocked on a real wiring bug (raw event
+listeners passed the DOM Event as the folder, sending `?folder=[object
+MouseEvent]`); all three call sites fixed plus a type-guarded default, and
+the re-review approved with no blockers.
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-folders-test` at image ID
+`sha256:6d364aedf185eb52b26da294da6654c2a03b847752908c2a3252796360837`
+serves `/static/v1/js/folders.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 12:30:00 CEST (UTC+02:00)
 The v1 folders slice adds `GET /api/frickmail/v1/folders`, reusing
 the exact fetch as legacy `Folders` (subscription discovery follows the
 account's stored `HideUnsubscribed` setting). The IMAP fetcher is injectable
