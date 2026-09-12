@@ -23,8 +23,17 @@ Docker-only validation passed: production image
 serves `/static/v1/js/tasks.js` (200), logs showed only expected startup
 messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `5d164528e39d73ff88b7d381b257d68121a0674e` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA. As a
+UI/docs-only change it matches no `rust-ci` path filter; the `naming` gate
+passed on both branches
+([`34690665987`](https://github.com/ilfrick/frickmail/actions/runs/34690665987),
+[`34690667374`](https://github.com/ilfrick/frickmail/actions/runs/34690667374)).
+This closing documentation-only amendment intentionally matches no CI path
+filter and is expected to produce no GitHub Actions run. The major
+remaining gates toward the final Rust-only goal are unchanged (more v1
+screens/endpoints, theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-12 06:30:00 CEST (UTC+02:00)
 
