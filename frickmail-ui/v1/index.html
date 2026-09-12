@@ -13,17 +13,26 @@
 <script type="module">
 import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
+import { loadMailbox, renderMailbox } from './js/mailbox.js';
 
 const api = new ApiClient('');
 const root = document.getElementById('app');
+
+async function showMailbox() {
+	try {
+		const data = await loadMailbox(api, 'INBOX', { limit: 25 });
+		root.innerHTML = '<h1 data-fm="title">Inbox</h1>' + renderMailbox(data);
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load the mailbox.</p>';
+	}
+}
+
 try {
 	const session = await api.bootstrap();
 	if (session && session.authenticated) {
-		root.innerHTML = '<p>Signed in. Mailbox screens land in the next slice.</p>';
+		await showMailbox();
 	} else {
-		renderLogin(root, api, () => {
-			root.innerHTML = '<p>Signed in. Mailbox screens land in the next slice.</p>';
-		});
+		renderLogin(root, api, showMailbox);
 	}
 } catch (error) {
 	root.innerHTML = '<p>Cannot reach the Frickmail server.</p>';

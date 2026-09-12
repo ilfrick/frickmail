@@ -5,7 +5,31 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 03:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 04:30:00 CEST (UTC+02:00)
+
+The mailbox-list slice adds the first v1 screens: `js/mailbox.js`
+(pure `escapeHtml`/`formatTimestamp`/row/list rendering over the v1
+`GET /messages` shape plus a thin `loadMailbox` query wrapper) wired into
+the shell behind login, with list styles. Nineteen `node --test` tests pin
+escaping (no raw markup from subjects/senders), unseen marking, fallbacks,
+empty states, and query mapping; ESLint and the naming gate pass; test
+files stay out of the static bundle.
+
+Independent senior review first blocked on a real contract bug (code read
+`dateTimestamp`, the wire emits snake_case `date_timestamp`, masked by the
+tests); the fix plus a non-empty-date assertion, corrected glob-form test
+invocation, and re-review approved with no blockers.
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-mailbox-test` at image ID
+`sha256:8f24df9e0ba805676799fe449da62d9076714b882578a4148d71f1b61e56604e`
+serves `/static/v1/js/mailbox.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 03:30:00 CEST (UTC+02:00)
 
 The UI-foundation slice starts Phase 9 screens with a deliberate
 no-framework decision: the Frickmail-user JS is already vanilla DOM (zero

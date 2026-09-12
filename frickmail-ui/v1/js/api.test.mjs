@@ -1,5 +1,5 @@
 // Unit tests for the v1 API client (Phase 9). Run with:
-//   node --test frickmail-ui/v1/js/
+//   node --test "frickmail-ui/v1/js/*.test.mjs"
 // No DOM, no network, no dependencies: the client takes an injected fetch.
 
 import { describe, it } from 'node:test';

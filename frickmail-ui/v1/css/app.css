@@ -83,3 +83,44 @@ body {
 	color: var(--fm-danger);
 	font-size: 0.9rem;
 }
+
+#app [data-fm="list"] {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+#app [data-fm="message"] {
+	display: grid;
+	grid-template-columns: minmax(8rem, 12rem) 1fr auto;
+	gap: 0.75rem;
+	align-items: baseline;
+	padding: 0.55rem 0.25rem;
+	border-bottom: 1px solid #343b48;
+	cursor: pointer;
+}
+
+#app [data-fm="message"][data-unseen] [data-fm="subject"] {
+	font-weight: 700;
+	color: var(--fm-text);
+}
+
+#app [data-fm="from"] {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--fm-muted);
+	font-size: 0.85rem;
+}
+
+#app [data-fm="subject"] {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+#app [data-fm="date"] {
+	color: var(--fm-muted);
+	font-size: 0.8rem;
+	white-space: nowrap;
+}
