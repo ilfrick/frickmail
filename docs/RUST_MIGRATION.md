@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-12 03:30:00 CEST (UTC+02:00)
 
-The pending UI-foundation slice starts Phase 9 screens with a deliberate
+The UI-foundation slice starts Phase 9 screens with a deliberate
 no-framework decision: the Frickmail-user JS is already vanilla DOM (zero
 Knockout in Login/Tasks), so `frickmail-ui/v1/` ships vanilla ES modules —
 zero new dependencies, no bundling, offline-friendly. Ships an app shell
@@ -31,8 +31,21 @@ serves `/static/v1/` (200), `/static/v1/js/api.js` (200), and correctly
 `COPY frickmail-ui/v1` line in the ui-builder stage (fixed before
 validation).
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `f87c65fac179b3d4a0151279f1bb4db898ad0fb4` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34688534896`](https://github.com/ilfrick/frickmail/actions/runs/34688534896)
+and `rust-full-migration` run
+[`34688537764`](https://github.com/ilfrick/frickmail/actions/runs/34688537764),
+and the `naming` gate passed on both branches
+([`34688534900`](https://github.com/ilfrick/frickmail/actions/runs/34688534900),
+[`34688537780`](https://github.com/ilfrick/frickmail/actions/runs/34688537780));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major remaining
+gates toward the final Rust-only goal are unchanged (more v1 screens,
+theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-12 02:30:00 CEST (UTC+02:00)
 
