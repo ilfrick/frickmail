@@ -5,7 +5,29 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 15:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 16:30:00 CEST (UTC+02:00)
+
+The v1 contacts slice adds `GET /api/frickmail/v1/contacts`,
+reusing the exact address-book summary query (id/uid/display, user-scoped,
+bounded limit/offset with lenient pagination). GET-only, so no CSRF check
+applies. Two tests cover listing through a real login plus anonymous
+rejection.
+
+Independent senior review approved with two follow-ups, both applied
+(lenient-pagination note, test-helper dedup).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 454 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-contacts-test` at
+image ID `sha256:a0391a265e585287cfc650cb3b7333ae58934d39d350b663bc597da8c347de98`;
+a read-only container returned 401 for anonymous `/contacts`, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 15:30:00 CEST (UTC+02:00)
 
 The compose-UI slice adds message composition to the v1 shell:
 `js/compose.js` (pure form rendering with escaping, DOM payload collection,

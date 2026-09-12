@@ -60,7 +60,7 @@ pub struct AddressBookContact {
 }
 
 /// Paginated contact summaries used by deduplication (PHP `GetContacts`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct AddressBookContactSummary {
     pub id: i64,
     pub uid: String,

@@ -49,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         .route("/identities", get(identities))
         .route("/switch-account", post(switch_account))
         .route("/logout", post(logout))
+        .route("/contacts", get(contacts))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
         .route("/send", post(send))
@@ -136,6 +137,67 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Lists the authenticated user's address-book contact summaries (id, uid,
+/// display), reusing the exact repository query behind contact
+/// deduplication. User-scoped storage with no secrets. Non-numeric
+/// limit/offset fall back to defaults by design (lenient pagination).
+/// GET-only, so no CSRF check applies.
+async fn contacts(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    const DEFAULT_CONTACTS_LIMIT: i64 = 50;
+    const MAX_CONTACTS_LIMIT: i64 = 200;
+
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid contacts query",
+        );
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(|limit| limit.clamp(1, MAX_CONTACTS_LIMIT))
+        .unwrap_or(DEFAULT_CONTACTS_LIMIT);
+    let offset = params
+        .get("offset")
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(|offset| offset.max(0))
+        .unwrap_or(0);
+    match fm_user::address_book::list_contact_summaries(pool, user_id, offset, limit).await {
+        Ok(contacts) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "contacts": contacts }))),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("v1 contacts listing failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail contacts listing failed",
+            )
+        }
+    }
 }
 
 /// Maps a legacy send response onto the v1 contract: transport success
@@ -3996,5 +4058,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    async fn contacts_test_state() -> (Router, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1301, "v1contacts", "correct-horse", None).await;
+        fm_user::address_book::ensure_address_book_schema(&pool)
+            .await
+            .unwrap();
+        for (index, name) in ["Ada", "Bob"].iter().enumerate() {
+            fm_user::address_book::save_contact(
+                &pool,
+                1301,
+                &fm_user::address_book::AddressBookContact {
+                    id: 0,
+                    uid: format!("manual:{index}"),
+                    display: name.to_string(),
+                    properties: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1contacts", "correct-horse").await;
+        (app, cookie)
+    }
+
+    #[tokio::test]
+    async fn v1_contacts_lists_user_contacts() {
+        let (app, cookie) = contacts_test_state().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/contacts?limit=10")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        let contacts = body["data"]["contacts"].as_array().unwrap();
+        assert_eq!(contacts.len(), 2);
+        assert_eq!(contacts[0]["display"], "Ada");
+        assert!(contacts[0].get("password_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn v1_contacts_rejects_anonymous_callers() {
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/contacts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
