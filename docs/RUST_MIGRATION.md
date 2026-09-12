@@ -26,8 +26,21 @@ image ID `sha256:5d8a705a9d5cf63d18f3d743d18f5085a1dcd9cb84f4c5d9dc7f6c6f3d2e51c
 a read-only container rejected tokenless logout with 403, logs showed
 only expected startup messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `edfb110fb643bda7f29fe84997c8a544cdf56748` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA.
+Exact-SHA GitHub `rust-ci` passed for that SHA on `master` run
+[`34664458405`](https://github.com/ilfrick/frickmail/actions/runs/34664458405)
+and `rust-full-migration` run
+[`34664461174`](https://github.com/ilfrick/frickmail/actions/runs/34664461174),
+and the `naming` gate passed on both branches
+([`34664458466`](https://github.com/ilfrick/frickmail/actions/runs/34664458466),
+[`34664461175`](https://github.com/ilfrick/frickmail/actions/runs/34664461175));
+all runs reported only the known nonblocking Node.js 20 deprecation
+annotation. This closing documentation-only amendment intentionally matches no
+CI path filter and is expected to produce no GitHub Actions run. The major
+remaining gates toward the final Rust-only goal are unchanged (more v1
+endpoints, frontend screens, theming removal, cutover validation).
 
 ## Prior Snapshot — 2026-09-11 20:30:00 CEST (UTC+02:00)
 
