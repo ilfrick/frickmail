@@ -5,7 +5,31 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 20:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 02:30:00 CEST (UTC+02:00)
+
+The v1 logout slice adds `POST /api/frickmail/v1/logout`, tearing
+down the server-side session and expiring the client cookie (via
+`Session::flush`) idempotently — anonymous callers get the same success
+shape. State-changing, so the connection token is required. Two tests cover
+authenticated teardown (cookie expiry plus dead pre-logout cookie) and
+idempotent anonymous logout with tokenless rejection.
+
+Independent senior review first blocked on cookie expiry (`delete()` is
+server-side-only); switching to `flush()` plus a `Max-Age=0` assertion
+closed it, and the re-review approved with no blockers.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 446 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-logout-test` at
+image ID `sha256:5d8a705a9d5cf63d18f3d743d18f5085a1dcd9cb84f4c5d9dc7f6c6f3d2e51c3`;
+a read-only container rejected tokenless logout with 403, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 20:30:00 CEST (UTC+02:00)
 
 The v1 tasks slice adds `GET /api/frickmail/v1/tasks`, reusing the
 exact repository query as legacy `FrickmailListTasks` with the same

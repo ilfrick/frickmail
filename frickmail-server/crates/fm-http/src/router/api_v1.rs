@@ -48,6 +48,7 @@ pub fn routes() -> Router<AppState> {
         .route("/accounts", get(accounts))
         .route("/identities", get(identities))
         .route("/switch-account", post(switch_account))
+        .route("/logout", post(logout))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
         .route("/preferences", get(get_preferences).put(set_preferences))
@@ -133,6 +134,35 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Destroys the session and expires the `FrickmailSession` cookie (via
+/// `Session::flush`, which clears server-side data and emits the middleware
+/// removal cookie), ending the authenticated session regardless of its
+/// current state (idempotent: anonymous callers get the same success shape).
+/// State-changing, so the connection token is required once bootstrapped —
+/// exactly like the login route.
+async fn logout(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    if let Err(err) = session.flush().await {
+        tracing::warn!("v1 logout destroy failed: {err}");
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Frickmail logout failed",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({ "logged_out": true }))),
+    )
+        .into_response()
 }
 
 /// Lists the authenticated user's tasks, reusing the exact repository query
@@ -3067,5 +3097,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn v1_logout_tears_down_authenticated_sessions() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1001, "v1logout", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1logout", "correct-horse").await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/logout")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            set_cookie.contains("Max-Age=0"),
+            "logout must expire the session cookie, got: {set_cookie}"
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["logged_out"], true);
+
+        // The pre-logout cookie no longer authenticates.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/session")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["authenticated"], false);
+    }
+
+    #[tokio::test]
+    async fn v1_logout_is_idempotent_and_token_gated() {
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+
+        // Anonymous logout still succeeds (idempotent teardown).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/logout")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["logged_out"], true);
+
+        // Without a token it is rejected even though logout is idempotent.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/logout")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
     }
 }
