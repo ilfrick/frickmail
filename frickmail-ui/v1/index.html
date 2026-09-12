@@ -29,6 +29,7 @@ function nav(active) {
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
 		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
+		+ '<button type="button" data-fm="nav-logout">Sign out</button>'
 		+ '</nav>';
 }
 
@@ -36,6 +37,7 @@ function wireNav() {
 	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
+	const logoutButton = root.querySelector('[data-fm="nav-logout"]');
 	if (inboxButton) {
 		inboxButton.addEventListener('click', showMailbox);
 	}
@@ -45,6 +47,26 @@ function wireNav() {
 	if (settingsButton) {
 		settingsButton.addEventListener('click', showSettings);
 	}
+	if (logoutButton) {
+		logoutButton.addEventListener('click', signOut);
+	}
+}
+
+async function signOut() {
+	try {
+		await api.logout();
+	} catch (error) {
+		void error;
+	}
+	// Refresh the CSRF token: logout cleared it and the next sign-in needs
+	// a bootstrapped one. Failure still lands on the login form, whose first
+	// submit will surface the token error honestly.
+	try {
+		await api.bootstrap();
+	} catch (error) {
+		void error;
+	}
+	renderLogin(root, api, showMailbox);
 }
 
 async function showTasks(filter) {

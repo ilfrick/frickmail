@@ -5,7 +5,27 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 07:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 08:30:00 CEST (UTC+02:00)
+
+The shell-auth slice wires the missing sign-out path into the v1
+shell: a nav Sign-out button calls `api.logout()`, then re-bootstraps the
+CSRF token (logout clears it) before returning to the login form, so
+re-login works without a page reload. No new API surface; existing
+`node --test` (41), ESLint, and naming-gate suites stay green.
+
+Independent senior review approved with no actionables (wiring, nav
+coverage on all views, double-submit idempotency, no XSS, suites green).
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-logout-test` at image ID
+`sha256:cc6261467eda09789efdd468e3c25c8a513b118b48487c5896b3685632ca995a`
+serves the v1 shell (200), logs showed only expected startup messages,
+and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 07:30:00 CEST (UTC+02:00)
 
 The tasks-screen slice adds the v1 tasks view: `js/tasks.js`
 (pure row/list/filter rendering with escaping plus a thin loader over `GET
