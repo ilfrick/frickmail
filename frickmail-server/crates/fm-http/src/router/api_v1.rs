@@ -54,6 +54,7 @@ pub fn routes() -> Router<AppState> {
         .route("/preferences", get(get_preferences).put(set_preferences))
         .route("/rules", get(rules))
         .route("/tasks", get(tasks))
+        .route("/folders", get(folders))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -134,6 +135,186 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Lists one account's IMAP folders, reusing the exact fetch as legacy
+/// `Folders` (subscription discovery follows the account's stored
+/// `HideUnsubscribed` setting, mirroring legacy). GET-only, so no CSRF
+/// check applies.
+async fn folders(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    folders_with_fetcher(
+        &state,
+        &session,
+        query,
+        super::MESSAGE_LIST_DEADLINE,
+        |config, password, discover| async move {
+            fm_imap::fetch_legacy_folders(config, &password, discover).await
+        },
+    )
+    .await
+}
+
+async fn folders_with_fetcher<F, Fut>(
+    state: &AppState,
+    session: &fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+    fetch_deadline: std::time::Duration,
+    fetcher: F,
+) -> Response
+where
+    F: FnOnce(fm_imap::ImapConnectionConfig, String, bool) -> Fut,
+    Fut: std::future::Future<Output = fm_core::Result<fm_imap::LegacyFolderCollection>>,
+{
+    let user_id = match v1_session_user_id(session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid folders query",
+        );
+    };
+    let account_id = match params
+        .get("account_id")
+        .map(|value| value.parse::<i64>())
+        .transpose()
+        .ok()
+        .flatten()
+        .filter(|id| *id > 0)
+    {
+        Some(account_id) => account_id,
+        None => match session
+            .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+            .await
+        {
+            Ok(Some(selected)) if selected.account_id > 0 => selected.account_id,
+            Ok(_) => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "account_required",
+                    "An account_id query parameter or selected account is required",
+                )
+            }
+            Err(_) => {
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_error",
+                    "Frickmail session read failed",
+                )
+            }
+        },
+    };
+    let credential_key = match v1_session_credential_key(session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let settings =
+        match fm_user::SqlxUserRepository::get_mail_account_settings(pool, user_id, account_id)
+            .await
+        {
+            Ok(Some(settings)) => settings,
+            Ok(None) => {
+                return v1_error(
+                    StatusCode::NOT_FOUND,
+                    "account_not_found",
+                    "Mail account not found",
+                )
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "v1 folders settings lookup failed: {}",
+                    err.public_message()
+                );
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Frickmail settings lookup failed",
+                );
+            }
+        };
+    let discover_subscriptions = settings
+        .get("HideUnsubscribed")
+        .or_else(|| settings.get("hideUnsubscribed"))
+        .is_some_and(super::legacy_php_truthy);
+    let account = match fm_user::SqlxUserRepository::get_mail_account_connection_secret(
+        pool, user_id, account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!("v1 folders account lookup failed: {}", err.public_message());
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail account lookup failed",
+            );
+        }
+    };
+    let password = match super::account_password(&account, &credential_key) {
+        Ok(password) => password,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_account",
+                "Mail account credentials are unavailable",
+            )
+        }
+    };
+    let imap_config = match super::imap_config_from_account_secret(&account) {
+        Ok(config) => config,
+        Err(err) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_account",
+                err.public_message(),
+            )
+        }
+    };
+
+    let result = tokio::time::timeout(
+        fetch_deadline,
+        fetcher(imap_config, password, discover_subscriptions),
+    )
+    .await
+    .map_err(|_| fm_core::FrickmailError::Upstream("Folder list fetch timed out".to_string()));
+    match result {
+        Ok(Ok(collection)) => (StatusCode::OK, Json(ApiV1Envelope::ok(collection))).into_response(),
+        Ok(Err(err)) | Err(err) => {
+            tracing::warn!("v1 folders fetch failed: {}", err.public_message());
+            v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail server folder listing failed",
+            )
+        }
+    }
 }
 
 /// Destroys the session and expires the `FrickmailSession` cookie (via
@@ -3190,5 +3371,177 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "invalid_token");
+    }
+
+    fn test_folder_collection() -> fm_imap::LegacyFolderCollection {
+        fm_imap::LegacyFolderCollection {
+            folders: vec![fm_imap::LegacyFolder {
+                name: "INBOX".to_string(),
+                full_name: "INBOX".to_string(),
+                delimiter: "/".to_string(),
+                attributes: Vec::new(),
+                metadata: std::collections::HashMap::new(),
+                uid_next: Some(101),
+                total_emails: Some(2),
+                unread_emails: Some(1),
+                id: None,
+                size: None,
+                role: None,
+                etag: Some("folder-etag".to_string()),
+            }],
+            quota_usage: None,
+            quota_limit: None,
+            namespace: String::new(),
+            namespaces: None,
+            capabilities: vec!["IMAP4rev1".to_string()],
+        }
+    }
+
+    async fn folders_test_state() -> (AppState, fm_session::Session) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1101, "v1folders", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 1100, 1101, &blob).await;
+        let state = AppState::with_db_pool(test_api_config(), Some(pool));
+        let session = authed_v1_session(1101, "v1folders").await;
+        (state, session)
+    }
+
+    #[tokio::test]
+    async fn v1_folders_lists_collection_through_injected_fetcher() {
+        let (state, session) = folders_test_state().await;
+
+        let response = super::folders_with_fetcher(
+            &state,
+            &session,
+            Ok(axum::extract::Query(std::collections::HashMap::from([(
+                "account_id".to_string(),
+                "1100".to_string(),
+            )]))),
+            std::time::Duration::from_secs(5),
+            |config, _password, discover| async move {
+                assert_eq!(config.host, "imap.example.com");
+                assert!(!discover);
+                Ok(test_folder_collection())
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["folders"][0]["name"], "INBOX");
+        assert_eq!(body["data"]["folders"][0]["total_emails"], 2);
+    }
+
+    #[tokio::test]
+    async fn v1_folders_enables_discovery_from_account_settings() {
+        let (state, session) = folders_test_state().await;
+        assert!(fm_user::SqlxUserRepository::update_mail_account_settings(
+            state.db_pool().unwrap(),
+            1101,
+            1100,
+            &serde_json::json!({ "HideUnsubscribed": "1" }),
+        )
+        .await
+        .unwrap());
+
+        let response = super::folders_with_fetcher(
+            &state,
+            &session,
+            Ok(axum::extract::Query(std::collections::HashMap::from([(
+                "account_id".to_string(),
+                "1100".to_string(),
+            )]))),
+            std::time::Duration::from_secs(5),
+            |_config, _password, discover| async move {
+                assert!(discover);
+                Ok(test_folder_collection())
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn v1_folders_rejects_bad_requests_over_http() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1102, "v1folderserr", "correct-horse", None).await;
+        seed_mail_account(&pool, 1101, 1102, "Broken").await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(
+            app.clone(),
+            &cookie,
+            &token,
+            "v1folderserr",
+            "correct-horse",
+        )
+        .await;
+
+        // Unknown account.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/folders?account_id=999999")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Missing account with no selection.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/folders")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Undecryptable stored credentials.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/folders?account_id=1101")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_account");
+
+        // Anonymous callers are rejected.
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/folders")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -5,7 +5,29 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 08:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 12:30:00 CEST (UTC+02:00)
+The v1 folders slice adds `GET /api/frickmail/v1/folders`, reusing
+the exact fetch as legacy `Folders` (subscription discovery follows the
+account's stored `HideUnsubscribed` setting). The IMAP fetcher is injectable
+like the message endpoints. Three tests cover the success path (host,
+setting, shape), the discovery-enabled branch, plus unknown/missing/
+broken-credential/anonymous cases over HTTP.
+
+Independent senior review approved; two follow-ups were applied (credential
+check ordering, discovery-enabled branch coverage).
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 449 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-folders-test` at
+image ID `sha256:24bd09a95e31d9e6c91fa180cc49bc66946ab5420a6ee77e2ada34e952a1594e`;
+a read-only container returned 401 for anonymous `/folders`, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 08:30:00 CEST (UTC+02:00)
 
 The shell-auth slice wires the missing sign-out path into the v1
 shell: a nav Sign-out button calls `api.logout()`, then re-bootstraps the
