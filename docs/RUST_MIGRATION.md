@@ -5,7 +5,28 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 06:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 07:30:00 CEST (UTC+02:00)
+
+The tasks-screen slice adds the v1 tasks view: `js/tasks.js`
+(pure row/list/filter rendering with escaping plus a thin loader over `GET
+/tasks`) wired behind shell navigation. Eight `node --test` tests pin
+escaping, completion marking, fallbacks, empty states, filter selection,
+and loader addressing; ESLint and the naming gate pass. Completion stays
+read-only (no toggle endpoint exists yet).
+
+Independent senior review approved with two cosmetic follow-ups (task CSS
+rules, header-comment accuracy), both applied.
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-tasks-test` at image ID
+`sha256:5b17109f9ca1e7d8664bb5911800624ff0f6a359c391114018e1c9e5d11355b3`
+serves `/static/v1/js/tasks.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 06:30:00 CEST (UTC+02:00)
 
 The settings-screen slice adds the v1 preferences UI: `js/settings.js`
 (generic type-switched preference rendering over any schema, DOM patch

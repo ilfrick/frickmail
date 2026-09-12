@@ -15,6 +15,7 @@ import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
+import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
 import { collectPreferencesPatch, loadPreferences, renderPreferencesForm, savePreferences } from './js/settings.js';
 
 const api = new ApiClient('');
@@ -23,20 +24,43 @@ const root = document.getElementById('app');
 function nav(active) {
 	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
 	const settings = active === 'settings' ? ' aria-current="page"' : '';
+	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
 	return '<nav data-fm="nav">'
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
+		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
 		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
 		+ '</nav>';
 }
 
 function wireNav() {
 	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
+	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
 	if (inboxButton) {
 		inboxButton.addEventListener('click', showMailbox);
 	}
+	if (tasksButton) {
+		tasksButton.addEventListener('click', () => showTasks('all'));
+	}
 	if (settingsButton) {
 		settingsButton.addEventListener('click', showSettings);
+	}
+}
+
+async function showTasks(filter) {
+	try {
+		const data = await loadTasks(api, filter);
+		root.innerHTML = nav('tasks')
+			+ '<h1 data-fm="title">Tasks</h1>'
+			+ renderTasksFilter(filter)
+			+ '<div data-fm="tasks-wrap">' + renderTasks(data) + '</div>';
+		wireNav();
+		const select = root.querySelector('[data-fm="filter"]');
+		if (select) {
+			select.addEventListener('change', () => showTasks(select.value));
+		}
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load tasks.</p>';
 	}
 }
 

@@ -214,3 +214,22 @@ body {
 #app [data-fm="row"] input[type="checkbox"] {
 	width: auto;
 }
+
+#app [data-fm="tasks"] {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+#app [data-fm="task"] {
+	display: flex;
+	gap: 0.5rem;
+	align-items: baseline;
+	padding: 0.4rem 0;
+	border-bottom: 1px solid #343b48;
+}
+
+#app [data-fm="filter-label"] {
+	display: block;
+	margin: 0.75rem 0;
+}
