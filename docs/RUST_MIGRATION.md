@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-12 18:30:00 CEST (UTC+02:00)
 
-The pending rules-UI slice adds the filter-rules view to the v1 shell
+The rules-UI slice adds the filter-rules view to the v1 shell
 (`js/rules.js` pure rendering plus thin loader over `GET /rules`) with
 shell navigation. Six `node --test` tests pin escaping, enablement
 marking, fallbacks, empty states, and loader addressing; ESLint and the
@@ -26,8 +26,18 @@ Docker-only validation passed: production image
 serves `/static/v1/js/rules.js` (200), logs showed only expected startup
 messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `f1d9f494b0e38098ef5700dcdc223dd3df87e740` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA. As a
+UI/docs-only change it matches no `rust-ci` path filter; the `naming` gate
+passed on both branches
+([`34702739447`](https://github.com/ilfrick/frickmail/actions/runs/34702739447),
+[`34702744647`](https://github.com/ilfrick/frickmail/actions/runs/34702744647)).
+This closing documentation-only amendment intentionally matches no CI path
+filter and is expected to produce no GitHub Actions run. The major
+remaining gates toward the final Rust-only goal are unchanged (calendar and
+other screens/endpoints, theming removal, cutover validation, admin
+backend).
 
 ## Prior Snapshot — 2026-09-12 17:30:00 CEST (UTC+02:00)
 
