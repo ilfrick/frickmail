@@ -23,8 +23,17 @@ Docker-only validation passed: production image
 serves `/static/v1/js/compose.js` (200), logs showed only expected startup
 messages, and it stopped cleanly.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
-gates toward the final Rust-only goal are unchanged.
+Implementation commit `d97169e56abd56f1f0130939c51ef6e64deca6b2` was
+published to `master` and `rust-full-migration` on both remotes; live
+`git ls-remote` checks confirmed all four tips resolve to that SHA. As a
+UI/docs-only change it matches no `rust-ci` path filter; the `naming` gate
+passed on both branches
+([`34697713336`](https://github.com/ilfrick/frickmail/actions/runs/34697713336),
+[`34697715306`](https://github.com/ilfrick/frickmail/actions/runs/34697715306)).
+This closing documentation-only amendment intentionally matches no CI path
+filter and is expected to produce no GitHub Actions run. The major
+remaining gates toward the final Rust-only goal are unchanged (theming
+removal, cutover validation, admin backend).
 
 ## Prior Snapshot — 2026-09-12 14:30:00 CEST (UTC+02:00)
 
