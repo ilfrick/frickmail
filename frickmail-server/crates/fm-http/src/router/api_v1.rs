@@ -52,6 +52,7 @@ pub fn routes() -> Router<AppState> {
         .route("/messages/{uid}", get(message))
         .route("/preferences", get(get_preferences).put(set_preferences))
         .route("/rules", get(rules))
+        .route("/tasks", get(tasks))
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -132,6 +133,59 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Lists the authenticated user's tasks, reusing the exact repository query
+/// as legacy `FrickmailListTasks`. The optional `filter` query parameter
+/// accepts `pending` or `completed` (anything else lists all, mirroring
+/// legacy). The `MailTask` shape is user-scoped storage with no secrets.
+/// GET-only, so no CSRF check applies.
+async fn tasks(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid tasks query",
+        );
+    };
+    let filter = match params.get("filter").map(String::as_str) {
+        Some("pending") => fm_user::TaskFilter::Pending,
+        Some("completed") => fm_user::TaskFilter::Completed,
+        _ => fm_user::TaskFilter::All,
+    };
+    match fm_user::SqlxUserRepository::list_tasks(pool, user_id, filter).await {
+        Ok(tasks) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "tasks": tasks }))),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("v1 tasks listing failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail tasks listing failed",
+            )
+        }
+    }
 }
 
 /// Query parameters for `GET /api/frickmail/v1/messages/{uid}`.
@@ -2901,5 +2955,117 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "invalid_account");
+    }
+
+    async fn seed_task(pool: &sqlx::AnyPool, user_id: i64, title: &str) -> i64 {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_tasks (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                notes TEXT,
+                due_date TEXT,
+                completed BOOLEAN NOT NULL DEFAULT FALSE,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        fm_user::SqlxUserRepository::add_task(
+            pool,
+            user_id,
+            fm_user::NewMailTask {
+                title: title.to_string(),
+                notes: None,
+                due_date: None,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v1_tasks_lists_and_filters_user_tasks() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 901, "v1tasks", "correct-horse", None).await;
+        seed_task(&pool, 901, "Buy milk").await;
+        let done_id = seed_task(&pool, 901, "Done thing").await;
+        fm_user::SqlxUserRepository::complete_task(&pool, 901, done_id, true)
+            .await
+            .unwrap();
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1tasks", "correct-horse").await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/tasks")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["tasks"].as_array().unwrap().len(), 2);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/tasks?filter=pending")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        let pending = body["data"]["tasks"].as_array().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["title"], "Buy milk");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/tasks?filter=completed")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        let completed = body["data"]["tasks"].as_array().unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["title"], "Done thing");
+    }
+
+    #[tokio::test]
+    async fn v1_tasks_rejects_anonymous_callers() {
+        let pool = login_db_pool().await;
+        let app = login_app(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

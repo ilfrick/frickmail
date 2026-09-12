@@ -5,7 +5,31 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-11 19:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-11 20:30:00 CEST (UTC+02:00)
+
+The v1 tasks slice adds `GET /api/frickmail/v1/tasks`, reusing the
+exact repository query as legacy `FrickmailListTasks` with the same
+`pending`/`completed`/all filter mapping. The `MailTask` shape is
+user-scoped storage with no secrets. GET-only, so no CSRF check applies.
+Two tests cover listing plus pending/completed filtering and anonymous
+rejection.
+
+Independent senior review approved with no actionables; one follow-up ID
+robustness note (use returned ids instead of hardcoded autoincrement) was
+applied.
+
+Docker-only validation passed: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -D warnings`, full workspace suites
+(fm-http 444 passed, live-DB suites green).
+Production-image validation built `frickmail-rust:api-v1-tasks-test` at
+image ID `sha256:ff33361f33ab0c5b43435eda9cee36981774f442dad7bcd78a516c9427fa5acd`;
+a read-only container returned 401 for anonymous `/tasks`, logs showed
+only expected startup messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-11 19:30:00 CEST (UTC+02:00)
 
 The v1 message-read slice adds `GET /api/frickmail/v1/messages/{uid}`,
 assembling the exact legacy `Object/Message` value (the big body builder was
