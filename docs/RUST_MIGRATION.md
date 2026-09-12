@@ -5,7 +5,31 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 17:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 18:30:00 CEST (UTC+02:00)
+
+The pending rules-UI slice adds the filter-rules view to the v1 shell
+(`js/rules.js` pure rendering plus thin loader over `GET /rules`) with
+shell navigation. Six `node --test` tests pin escaping, enablement
+marking, fallbacks, empty states, and loader addressing; ESLint and the
+naming gate pass. It also fixes a real shell gap found during wiring: no
+flow ever selected an account, so every account-dependent view 400'd — the
+shell now ensures a selection on entry (primary/first account, mirroring
+legacy login selection) while login stays authentication-only by design.
+
+Independent senior review first blocked on two wiring finds (post-logout
+re-login bypassed selection; view bypassed the tested loader); both fixed,
+and the re-review approved with no blockers.
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-rules-test` at image ID
+`sha256:eab139399e0c1f63fea558313a165315539791fa99aff24c2dbd8ef8b61a47cd`
+serves `/static/v1/js/rules.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 17:30:00 CEST (UTC+02:00)
 
 The contacts-UI slice adds the address-book view to the v1 shell:
 `js/contacts.js` (pure row/list rendering with escaping plus a thin loader

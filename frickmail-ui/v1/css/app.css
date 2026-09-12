@@ -253,6 +253,20 @@ body {
 	font-size: 0.8rem;
 }
 
+#app [data-fm="rules"] {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+#app [data-fm="rule"] {
+	display: flex;
+	gap: 0.5rem;
+	align-items: baseline;
+	padding: 0.4rem 0;
+	border-bottom: 1px solid #343b48;
+}
+
 #app textarea {
 	width: 100%;
 	padding: 0.55rem 0.65rem;

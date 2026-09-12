@@ -15,6 +15,7 @@ import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadFolders, renderFolderList } from './js/folders.js';
+import { loadRules, renderRules } from './js/rules.js';
 import { loadContacts, renderContacts } from './js/contacts.js';
 import { collectComposePayload, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
@@ -28,11 +29,13 @@ function nav(active) {
 	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
 	const settings = active === 'settings' ? ' aria-current="page"' : '';
 	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
+	const rules = active === 'rules' ? ' aria-current="page"' : '';
 	const contacts = active === 'contacts' ? ' aria-current="page"' : '';
 	const compose = active === 'compose' ? ' aria-current="page"' : '';
 	return '<nav data-fm="nav">'
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
+		+ '<button type="button" data-fm="nav-rules"' + rules + '>Rules</button>'
 		+ '<button type="button" data-fm="nav-contacts"' + contacts + '>Contacts</button>'
 		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
 		+ '<button type="button" data-fm="nav-compose"' + compose + '>Compose</button>'
@@ -43,6 +46,7 @@ function nav(active) {
 function wireNav() {
 	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
+	const rulesButton = root.querySelector('[data-fm="nav-rules"]');
 	const contactsButton = root.querySelector('[data-fm="nav-contacts"]');
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
 	const composeButton = root.querySelector('[data-fm="nav-compose"]');
@@ -52,6 +56,9 @@ function wireNav() {
 	}
 	if (tasksButton) {
 		tasksButton.addEventListener('click', () => showTasks('all'));
+	}
+	if (rulesButton) {
+		rulesButton.addEventListener('click', () => showRules());
 	}
 	if (contactsButton) {
 		contactsButton.addEventListener('click', () => showContacts());
@@ -81,7 +88,7 @@ async function signOut() {
 	} catch (error) {
 		void error;
 	}
-	renderLogin(root, api, showMailbox);
+	renderLogin(root, api, enterApp);
 }
 
 async function showTasks(filter) {
@@ -110,6 +117,24 @@ async function showContacts() {
 		wireNav();
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load contacts.</p>';
+	}
+}
+
+async function showRules() {
+	try {
+		const session = await api.bootstrap();
+		const data = await loadRules(
+			api,
+			session && session.selected_account_id
+				? { accountId: session.selected_account_id }
+				: undefined
+		);
+		root.innerHTML = nav('rules')
+			+ '<h1 data-fm="title">Rules</h1>'
+			+ renderRules(data);
+		wireNav();
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load rules.</p>';
 	}
 }
 
@@ -207,6 +232,29 @@ async function showMessage(folder, uid) {
 	}
 }
 
+/// Enters the authenticated app: ensures an account is selected (first
+/// primary, else oldest — mirroring legacy login selection) so
+/// account-dependent views work, then opens the inbox.
+async function enterApp() {
+	try {
+		const session = await api.bootstrap();
+		if (!session.selected_account_id) {
+			const listing = await api.request('GET', '/accounts');
+			const accounts = listing && Array.isArray(listing.accounts) ? listing.accounts : [];
+			const primary = accounts.find((account) => account && account.is_primary)
+				|| accounts.find((account) => account && account.id);
+			if (primary) {
+				await api.request('POST', '/switch-account', {
+					body: { account_id: primary.id }
+				});
+			}
+		}
+	} catch (error) {
+		void error;
+	}
+	await showMailbox('INBOX');
+}
+
 async function showMailbox(folder) {
 	const current = typeof folder === 'string' && folder ? folder : 'INBOX';
 	try {
@@ -235,9 +283,9 @@ async function showMailbox(folder) {
 try {
 	const session = await api.bootstrap();
 	if (session && session.authenticated) {
-		await showMailbox();
+		await enterApp();
 	} else {
-		renderLogin(root, api, showMailbox);
+		renderLogin(root, api, enterApp);
 	}
 } catch (error) {
 	root.innerHTML = '<p>Cannot reach the Frickmail server.</p>';
