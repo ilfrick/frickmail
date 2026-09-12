@@ -5,7 +5,30 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 05:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 06:30:00 CEST (UTC+02:00)
+
+The settings-screen slice adds the v1 preferences UI: `js/settings.js`
+(generic type-switched preference rendering over any schema, DOM patch
+collection, thin load/save wrappers) wired behind new shell navigation
+(Inbox/Settings with current-page marking). Seven `node --test` tests pin
+escaping, row branching, form rendering, patch collection (including
+non-numeric numbers → null), and I/O pass-through; ESLint and the naming
+gate pass.
+
+Independent senior review first blocked on a lost submit handler after
+save re-render (plus a count nit and NaN hardening); all fixed with a
+named re-wired handler, and the re-review approved with no blockers.
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-settings-test` at image ID
+`sha256:b3922e42244e6816a0b5bddfb1f4fa399fbeca3a6ecd2bee17a13397fdc20b7e`
+serves `/static/v1/js/settings.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 05:30:00 CEST (UTC+02:00)
 
 The message-view slice adds the v1 reading view: `js/message.js`
 (pure header/attachment rendering with escaping, HTML-vs-plain selection,

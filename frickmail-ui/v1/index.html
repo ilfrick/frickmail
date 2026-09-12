@@ -15,9 +15,72 @@ import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
+import { collectPreferencesPatch, loadPreferences, renderPreferencesForm, savePreferences } from './js/settings.js';
 
 const api = new ApiClient('');
 const root = document.getElementById('app');
+
+function nav(active) {
+	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
+	const settings = active === 'settings' ? ' aria-current="page"' : '';
+	return '<nav data-fm="nav">'
+		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
+		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
+		+ '</nav>';
+}
+
+function wireNav() {
+	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
+	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
+	if (inboxButton) {
+		inboxButton.addEventListener('click', showMailbox);
+	}
+	if (settingsButton) {
+		settingsButton.addEventListener('click', showSettings);
+	}
+}
+
+async function showSettings() {
+	try {
+		const data = await loadPreferences(api);
+		root.innerHTML = nav('settings')
+			+ '<h1 data-fm="title">Settings</h1>'
+			+ renderPreferencesForm(data.preferences);
+		wireNav();
+		wireSettingsForm();
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load settings.</p>';
+	}
+}
+
+function wireSettingsForm() {
+	const form = root.querySelector('[data-fm="prefs"]');
+	if (form) {
+		form.addEventListener('submit', onSettingsSubmit);
+	}
+}
+
+async function onSettingsSubmit(event) {
+	event.preventDefault();
+	try {
+		const saved = await savePreferences(api, collectPreferencesPatch(root));
+		root.innerHTML = nav('settings')
+			+ '<h1 data-fm="title">Settings</h1>'
+			+ renderPreferencesForm(saved.preferences);
+		wireNav();
+		wireSettingsForm();
+		showSettingsStatus('Saved.');
+	} catch (error) {
+		showSettingsStatus(error && error.message ? error.message : 'Save failed.');
+	}
+}
+
+function showSettingsStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
 
 async function showMessage(folder, uid) {
 	try {
@@ -31,10 +94,12 @@ async function showMessage(folder, uid) {
 			pre.textContent = selected.body;
 			viewer = pre.outerHTML;
 		}
-		root.innerHTML = '<button type="button" data-fm="back">Back</button>'
+		root.innerHTML = nav('')
+			+ '<button type="button" data-fm="back">Back</button>'
 			+ renderMessageHeader(message)
 			+ viewer
 			+ renderAttachments(message);
+		wireNav();
 		const frame = root.querySelector('[data-fm="body"]');
 		if (frame && selected.kind === 'html') {
 			frame.srcdoc = selected.body;
@@ -48,7 +113,8 @@ async function showMessage(folder, uid) {
 async function showMailbox() {
 	try {
 		const data = await loadMailbox(api, 'INBOX', { limit: 25 });
-		root.innerHTML = '<h1 data-fm="title">Inbox</h1>' + renderMailbox(data);
+		root.innerHTML = nav('inbox') + '<h1 data-fm="title">Inbox</h1>' + renderMailbox(data);
+		wireNav();
 		for (const item of root.querySelectorAll('[data-fm="message"]')) {
 			item.addEventListener('click', () => {
 				showMessage('INBOX', item.getAttribute('data-uid'));
