@@ -15,6 +15,7 @@ import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadFolders, renderFolderList } from './js/folders.js';
+import { collectComposePayload, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
 import { collectPreferencesPatch, loadPreferences, renderPreferencesForm, savePreferences } from './js/settings.js';
@@ -26,10 +27,12 @@ function nav(active) {
 	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
 	const settings = active === 'settings' ? ' aria-current="page"' : '';
 	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
+	const compose = active === 'compose' ? ' aria-current="page"' : '';
 	return '<nav data-fm="nav">'
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
 		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
+		+ '<button type="button" data-fm="nav-compose"' + compose + '>Compose</button>'
 		+ '<button type="button" data-fm="nav-logout">Sign out</button>'
 		+ '</nav>';
 }
@@ -38,6 +41,7 @@ function wireNav() {
 	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
+	const composeButton = root.querySelector('[data-fm="nav-compose"]');
 	const logoutButton = root.querySelector('[data-fm="nav-logout"]');
 	if (inboxButton) {
 		inboxButton.addEventListener('click', () => showMailbox('INBOX'));
@@ -47,6 +51,9 @@ function wireNav() {
 	}
 	if (settingsButton) {
 		settingsButton.addEventListener('click', showSettings);
+	}
+	if (composeButton) {
+		composeButton.addEventListener('click', () => showCompose());
 	}
 	if (logoutButton) {
 		logoutButton.addEventListener('click', signOut);
@@ -126,6 +133,30 @@ function showSettingsStatus(text) {
 	const status = root.querySelector('[data-fm="status"]');
 	if (status) {
 		status.textContent = text;
+	}
+}
+
+function showCompose(seed) {
+	root.innerHTML = nav('compose')
+		+ '<h1 data-fm="title">Compose</h1>'
+		+ renderComposeForm(seed);
+	wireNav();
+	const form = root.querySelector('[data-fm="compose"]');
+	if (form) {
+		form.addEventListener('submit', onComposeSubmit);
+	}
+}
+
+async function onComposeSubmit(event) {
+	event.preventDefault();
+	try {
+		await sendMessage(api, collectComposePayload(root));
+		await showMailbox('INBOX');
+	} catch (error) {
+		const status = root.querySelector('[data-fm="status"]');
+		if (status) {
+			status.textContent = error && error.message ? error.message : 'Send failed.';
+		}
 	}
 }
 

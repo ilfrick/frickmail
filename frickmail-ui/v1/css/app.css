@@ -234,6 +234,17 @@ body {
 	margin: 0.75rem 0;
 }
 
+#app textarea {
+	width: 100%;
+	padding: 0.55rem 0.65rem;
+	border: 1px solid #3a4150;
+	border-radius: 6px;
+	background: #14171d;
+	color: inherit;
+	font: inherit;
+	resize: vertical;
+}
+
 #app [data-fm="folders"] {
 	list-style: none;
 	margin: 0 0 1rem;

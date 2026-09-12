@@ -5,7 +5,28 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 14:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 15:30:00 CEST (UTC+02:00)
+
+The compose-UI slice adds message composition to the v1 shell:
+`js/compose.js` (pure form rendering with escaping, DOM payload collection,
+thin send wrapper over `POST /send`) wired behind shell navigation with
+success returning to the inbox. Five `node --test` tests pin escaping,
+payload shapes, collection defaults, and send addressing; ESLint and the
+naming gate pass.
+
+Independent senior review approved with two cosmetic follow-ups (compose
+`aria-current` marking, test-count wording), both applied.
+
+Docker-only validation passed: production image
+`frickmail-rust:ui-compose-test` at image ID
+`sha256:5eff8866818b5808a72a8568c5066d5b510092bf7f7563ac9c10f52bab37b1ac`
+serves `/static/v1/js/compose.js` (200), logs showed only expected startup
+messages, and it stopped cleanly.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 14:30:00 CEST (UTC+02:00)
 
 The v1 send slice adds `POST /api/frickmail/v1/send`, reusing the
 exact compose/delivery pipeline as legacy `SendMessage` (validation, MIME
