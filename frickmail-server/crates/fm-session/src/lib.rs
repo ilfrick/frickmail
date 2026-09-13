@@ -15,6 +15,9 @@ pub const CREDENTIAL_KEY_SESSION_KEY: &str = "frickmail_credential_key";
 pub const SELECTED_ACCOUNT_SESSION_KEY: &str = "frickmail_selected_account";
 pub const CONNECTION_TOKEN_SECRET_KEY: &str = "frickmail_connection_token_secret";
 pub const CONNECTION_TOKEN_ACCOUNT_ID_KEY: &str = "frickmail_connection_token_account_id";
+/// Marks a session as operator-authenticated for the v1 admin tree. The
+/// value is a unit marker only; the bearer token itself is never stored.
+pub const ADMIN_SESSION_KEY: &str = "frickmail_admin";
 
 #[derive(Debug, Clone)]
 pub enum AppSessionStore {

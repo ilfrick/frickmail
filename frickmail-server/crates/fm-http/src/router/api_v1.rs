@@ -49,6 +49,8 @@ pub fn routes() -> Router<AppState> {
         .route("/identities", get(identities))
         .route("/switch-account", post(switch_account))
         .route("/logout", post(logout))
+        .route("/admin/login", post(admin_login))
+        .route("/admin/logout", post(admin_logout))
         .route("/contacts", get(contacts))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
@@ -104,6 +106,7 @@ async fn session(state: axum::extract::State<AppState>, session: fm_session::Ses
             StatusCode::OK,
             Json(ApiV1Envelope::ok(json!({
                 "authenticated": false,
+                "is_admin": v1_require_admin(&session).await.is_ok(),
                 "csrf_token": token,
             }))),
         )
@@ -120,6 +123,7 @@ async fn session(state: axum::extract::State<AppState>, session: fm_session::Ses
     if let Ok(Some(token)) = super::expected_connection_token(&session).await {
         data["csrf_token"] = json!(token);
     }
+    data["is_admin"] = json!(v1_require_admin(&session).await.is_ok());
     if let Ok(Some(selected)) = session
         .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
         .await
@@ -137,6 +141,136 @@ async fn unknown_path() -> Response {
         "not_found",
         "Unknown /api/frickmail/v1 path",
     )
+}
+
+/// Guards future v1 admin endpoints: the session must carry the operator
+/// flag established by `POST /admin/login`. Anything else is 403, including
+/// authenticated non-admin sessions.
+async fn v1_require_admin(session: &fm_session::Session) -> Result<(), Response> {
+    match session.get::<bool>(fm_session::ADMIN_SESSION_KEY).await {
+        Ok(Some(true)) => Ok(()),
+        Ok(_) => Err(v1_error(
+            StatusCode::FORBIDDEN,
+            "admin_forbidden",
+            "Operator authentication required",
+        )),
+        Err(_) => Err(v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_error",
+            "Frickmail session read failed",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AdminLoginRequest {
+    #[serde(default)]
+    token: String,
+}
+
+/// Establishes operator authentication from the configured admin token
+/// hash (`FRICKMAIL__ADMIN__TOKEN_HASH`), the same trust root as the
+/// backup/restore gate — deliberately not the legacy login/password
+/// scheme. Argon2 verification runs off the async worker; unknown and wrong
+/// tokens are indistinguishable 401s. Rotate the session id first so a
+/// pre-login session cannot be fixed.
+async fn admin_login(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<AdminLoginRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid admin login request",
+        );
+    };
+    let token_hash = state
+        .config()
+        .admin
+        .token_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|token_hash| !token_hash.is_empty());
+    let Some(token_hash) = token_hash else {
+        return v1_error(
+            StatusCode::FORBIDDEN,
+            "admin_disabled",
+            "Operator authentication is not configured",
+        );
+    };
+    let token = request.token.trim().to_string();
+    if token.is_empty() || token.len() > 1024 {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid operator token",
+        );
+    }
+    let authorized = tokio::task::spawn_blocking({
+        let token_hash = token_hash.to_string();
+        move || fm_user::verify_password_hash(&token, &token_hash).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !authorized {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid operator token",
+        );
+    }
+    if let Err(err) = session.cycle_id().await {
+        tracing::warn!("v1 admin login rotation failed: {err}");
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Frickmail admin login failed",
+        );
+    }
+    if let Err(err) = session.insert(fm_session::ADMIN_SESSION_KEY, true).await {
+        tracing::warn!("v1 admin login store failed: {err}");
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Frickmail admin login failed",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({ "authenticated": true }))),
+    )
+        .into_response()
+}
+
+/// Clears operator authentication without touching the user session, so an
+/// operator using webmail in the same browser stays signed in. Idempotent.
+async fn admin_logout(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    if let Err(err) = session.remove::<bool>(fm_session::ADMIN_SESSION_KEY).await {
+        tracing::warn!("v1 admin logout failed: {err}");
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Frickmail admin logout failed",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({ "logged_out": true }))),
+    )
+        .into_response()
 }
 
 /// Lists the authenticated user's address-book contact summaries (id, uid,
@@ -4127,5 +4261,270 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn admin_test_config(token: Option<&str>) -> FrickmailConfig {
+        let mut config = test_api_config();
+        config.admin.token_hash = token.map(|token| fm_user::hash_admin_token(token).unwrap());
+        config
+    }
+
+    fn admin_login_app(token: Option<&str>) -> Router {
+        Router::new()
+            .nest("/api/frickmail/v1", super::routes())
+            .layer(fm_session::session_layer(
+                fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+            ))
+            .with_state(AppState::new(admin_test_config(token)))
+    }
+
+    async fn admin_bootstrapped(app: Router) -> (String, String) {
+        bootstrap_csrf(app).await
+    }
+
+    #[tokio::test]
+    async fn v1_admin_login_establishes_operator_sessions() {
+        let app = admin_login_app(Some("opensesame"));
+        let (cookie, token) = admin_bootstrapped(app.clone()).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/login")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        serde_json::json!({"token": "opensesame"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["authenticated"], true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/session")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["is_admin"], true);
+    }
+
+    #[tokio::test]
+    async fn v1_admin_login_rejects_unknown_wrong_and_disabled_tokens() {
+        // Wrong token.
+        let app = admin_login_app(Some("opensesame"));
+        let (cookie, token) = admin_bootstrapped(app.clone()).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/login")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        serde_json::json!({"token": "wrong"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
+
+        // Tokenless login is rejected.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/login")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .body(Body::from(
+                        serde_json::json!({"token": "opensesame"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Unconfigured operator authentication stays disabled.
+        let app = admin_login_app(None);
+        let (cookie, token) = admin_bootstrapped(app.clone()).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/login")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        serde_json::json!({"token": "anything"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "admin_disabled");
+    }
+
+    #[tokio::test]
+    async fn v1_admin_logout_clears_only_the_operator_flag() {
+        let app = admin_login_app(Some("opensesame"));
+        let (cookie, token) = admin_bootstrapped(app.clone()).await;
+        let login = Request::builder()
+            .method(Method::POST)
+            .uri("/api/frickmail/v1/admin/login")
+            .header("content-type", "application/json")
+            .header("cookie", &cookie)
+            .header("x-sm-token", &token)
+            .body(Body::from(
+                serde_json::json!({"token": "opensesame"}).to_string(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(login).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/logout")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["logged_out"], true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/session")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        // Anonymous again, and explicitly not an operator.
+        assert_eq!(body["data"]["authenticated"], false);
+        assert_eq!(body["data"]["is_admin"], false);
+    }
+
+    #[tokio::test]
+    async fn v1_admin_login_rotates_the_session_id() {
+        let app = admin_login_app(Some("opensesame"));
+        let (cookie, token) = admin_bootstrapped(app.clone()).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/login")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        serde_json::json!({"token": "opensesame"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let rotated = session_cookie(&response);
+        assert_ne!(rotated, cookie);
+    }
+
+    #[tokio::test]
+    async fn v1_admin_logout_preserves_user_sessions() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1401, "v1both", "correct-horse", None).await;
+        let mut config = test_api_config();
+        config.admin.token_hash = Some(fm_user::hash_admin_token("opensesame").unwrap());
+        let app = Router::new()
+            .nest("/api/frickmail/v1", super::routes())
+            .layer(fm_session::session_layer(
+                fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+            ))
+            .with_state(AppState::with_db_pool(config, Some(pool)));
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1both", "correct-horse").await;
+
+        let admin_login = Request::builder()
+            .method(Method::POST)
+            .uri("/api/frickmail/v1/admin/login")
+            .header("content-type", "application/json")
+            .header("cookie", &cookie)
+            .header("x-sm-token", &token)
+            .body(Body::from(
+                serde_json::json!({"token": "opensesame"}).to_string(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(admin_login).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/logout")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/session")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["authenticated"], true);
+        assert_eq!(body["data"]["user"]["id"], 1401);
+        assert_eq!(body["data"]["is_admin"], false);
     }
 }

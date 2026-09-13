@@ -5,7 +5,31 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-12 18:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-12 19:30:00 CEST (UTC+02:00)
+
+The pending admin-auth slice starts Phase 4 with the operator trust root
+already used by backup/restore (`FRICKMAIL__ADMIN__TOKEN_HASH`): `POST
+/api/frickmail/v1/admin/login` verifies the bearer token in a blocking
+pool and establishes a session operator flag (rotating the id first);
+`POST /api/frickmail/v1/admin/logout` clears only that flag; anonymous and authenticated
+`GET /session` report `is_admin`; and `v1_require_admin` guards future
+endpoints with 403s. Wrong/empty/oversize/corrupt-hash tokens are
+indistinguishable `401 invalid_token`; disabled config is `403
+admin_disabled` independent of the presented token (enabled-vs-disabled
+distinct by design, no token oracle); session store failures are generic
+500s. Five tests cover login, rejection matrix, flag-scoped logout, session
+rotation, and user-session coexistence.
+
+Independent senior review APPROVED this slice twice (initial + test delta).
+
+Docker-only validation is done: production image builds, `/health` 200,
+anonymous `/session` reports `is_admin:false`, `POST /admin/login` fail-closes
+403 when no admin hash is configured, no errors or panics in logs.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-12 18:30:00 CEST (UTC+02:00)
 
 The rules-UI slice adds the filter-rules view to the v1 shell
 (`js/rules.js` pure rendering plus thin loader over `GET /rules`) with
