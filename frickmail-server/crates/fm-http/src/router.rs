@@ -6281,8 +6281,9 @@ async fn legacy_send_message_flag_draft_source(
     }
 }
 
-/// Resolves the SMTP endpoint, preferring the per-account record and falling
-/// back to the server-wide mail defaults.
+/// Resolves the SMTP endpoint, preferring the per-account record, then the
+/// enabled domain template matching the account email, and finally the
+/// server-wide mail defaults.
 async fn legacy_smtp_send_settings(
     state: &AppState,
     pool: &sqlx::AnyPool,
@@ -6297,12 +6298,39 @@ async fn legacy_smtp_send_settings(
         .map_err(|err| err.public_message())?
         .ok_or_else(|| "Account not found".to_string())?;
 
+    // A resolution failure degrades to the previous stored-then-default
+    // behavior rather than failing the send.
+    let template = SqlxUserRepository::resolve_domain_for_email(pool, &account.email)
+        .await
+        .ok()
+        .flatten();
+    let template_smtp_host = template.as_ref().and_then(|domain| {
+        domain
+            .smtp_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+    });
+    let template_smtp_port = template
+        .as_ref()
+        .and_then(|domain| domain.smtp_port)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port > 0);
+    let template_smtp_secure = template.as_ref().and_then(|domain| {
+        domain
+            .smtp_secure
+            .as_deref()
+            .map(str::trim)
+            .filter(|secure| !secure.is_empty())
+    });
+
     let defaults = &state.config().mail;
     let host = stored
         .smtp_host
         .as_deref()
         .map(str::trim)
         .filter(|host| !host.is_empty())
+        .or(template_smtp_host)
         .unwrap_or(defaults.smtp_host.trim())
         .to_string();
     if host.is_empty() {
@@ -6313,6 +6341,7 @@ async fn legacy_smtp_send_settings(
         .smtp_port
         .and_then(|port| u16::try_from(port).ok())
         .filter(|port| *port > 0)
+        .or(template_smtp_port)
         .unwrap_or(defaults.smtp_port);
     if port == 0 {
         return Err("SMTP port is not configured".to_string());
@@ -6323,6 +6352,7 @@ async fn legacy_smtp_send_settings(
         .as_deref()
         .map(str::trim)
         .filter(|secure| !secure.is_empty())
+        .or(template_smtp_secure)
         .unwrap_or(match port {
             465 => "ssl",
             _ => "starttls",

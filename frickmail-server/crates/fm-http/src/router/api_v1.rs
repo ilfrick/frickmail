@@ -51,6 +51,16 @@ pub fn routes() -> Router<AppState> {
         .route("/logout", post(logout))
         .route("/admin/login", post(admin_login))
         .route("/admin/logout", post(admin_logout))
+        .route(
+            "/admin/domains",
+            get(admin_list_domains).post(admin_save_domain),
+        )
+        .route("/admin/domains/aliases", post(admin_save_domain_alias))
+        .route(
+            "/admin/domains/{name}",
+            get(admin_get_domain).delete(admin_delete_domain),
+        )
+        .route("/admin/domains/{name}/disable", post(admin_disable_domain))
         .route("/contacts", get(contacts))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
@@ -246,6 +256,275 @@ async fn admin_login(
         Json(ApiV1Envelope::ok(json!({ "authenticated": true }))),
     )
         .into_response()
+}
+
+/// Requires an operator session and a configured database, returning the
+/// pool or the response to send. Keeps every admin domain handler on one
+/// auth/database/CSRF shape.
+async fn v1_admin_pool(
+    state: &AppState,
+    session: &fm_session::Session,
+    headers: Option<&axum::http::HeaderMap>,
+) -> Result<sqlx::AnyPool, Response> {
+    v1_require_admin(session).await?;
+    if let Some(headers) = headers {
+        v1_require_token(state, session, headers).await?;
+    }
+    let Some(pool) = state.db_pool() else {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        ));
+    };
+    Ok(pool.clone())
+}
+
+fn v1_domain_error(err: fm_core::FrickmailError, action: &str) -> Response {
+    match err {
+        fm_core::FrickmailError::BadRequest(message) => v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("Frickmail domain {action} failed: {message}"),
+        ),
+        err => {
+            tracing::warn!("v1 domain {action} failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("Frickmail domain {action} failed"),
+            )
+        }
+    }
+}
+
+/// Lists admin-managed mail domains. Operator-only; GET, so no CSRF check.
+async fn admin_list_domains(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, None).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    match fm_user::SqlxUserRepository::list_domains(&pool).await {
+        Ok(domains) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "domains": domains }))),
+        )
+            .into_response(),
+        Err(err) => v1_domain_error(err, "listing"),
+    }
+}
+
+/// Returns one admin-managed mail domain. Operator-only; GET, so no CSRF check.
+async fn admin_get_domain(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    name: Result<axum::extract::Path<String>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, None).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let Ok(axum::extract::Path(name)) = name else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid domain path",
+        );
+    };
+    match fm_user::SqlxUserRepository::get_domain(&pool, &name).await {
+        Ok(Some(domain)) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "domain": domain }))),
+        )
+            .into_response(),
+        Ok(None) => v1_error(
+            StatusCode::NOT_FOUND,
+            "domain_not_found",
+            "Mail domain not found",
+        ),
+        Err(err) => v1_domain_error(err, "lookup"),
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DomainRequest {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    imap_host: Option<String>,
+    #[serde(default)]
+    imap_port: Option<i64>,
+    #[serde(default)]
+    imap_secure: Option<String>,
+    #[serde(default)]
+    smtp_host: Option<String>,
+    #[serde(default)]
+    smtp_port: Option<i64>,
+    #[serde(default)]
+    smtp_secure: Option<String>,
+}
+
+/// Creates or replaces an admin-managed mail domain template. Operator-only
+/// with CSRF; strict JSON, so numbers/bools are never coerced.
+async fn admin_save_domain(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<DomainRequest>, JsonRejection>,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, Some(&headers)).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid domain body",
+        );
+    };
+    match fm_user::SqlxUserRepository::save_domain(
+        &pool,
+        fm_user::NewMailDomain {
+            name: request.name,
+            disabled: request.disabled,
+            imap_host: request.imap_host,
+            imap_port: request.imap_port,
+            imap_secure: request.imap_secure,
+            smtp_host: request.smtp_host,
+            smtp_port: request.smtp_port,
+            smtp_secure: request.smtp_secure,
+        },
+    )
+    .await
+    {
+        Ok(domain) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "domain": domain }))),
+        )
+            .into_response(),
+        Err(err) => v1_domain_error(err, "save"),
+    }
+}
+
+/// Deletes an admin-managed mail domain and its aliases. Operator-only with
+/// CSRF; unknown names are 404 so operators can distinguish typos.
+async fn admin_delete_domain(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    name: Result<axum::extract::Path<String>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, Some(&headers)).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let Ok(axum::extract::Path(name)) = name else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid domain path",
+        );
+    };
+    match fm_user::SqlxUserRepository::get_domain(&pool, &name).await {
+        Ok(None) => v1_error(
+            StatusCode::NOT_FOUND,
+            "domain_not_found",
+            "Mail domain not found",
+        ),
+        Ok(Some(_)) => match fm_user::SqlxUserRepository::delete_domain(&pool, &name).await {
+            Ok(_) => (
+                StatusCode::OK,
+                Json(ApiV1Envelope::ok(json!({ "deleted": true }))),
+            )
+                .into_response(),
+            Err(err) => v1_domain_error(err, "delete"),
+        },
+        Err(err) => v1_domain_error(err, "lookup"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DomainDisableRequest {
+    disabled: bool,
+}
+
+/// Enables or disables a domain template. Operator-only with CSRF; disabled
+/// templates are skipped by connection resolution.
+async fn admin_disable_domain(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    name: Result<axum::extract::Path<String>, axum::extract::rejection::PathRejection>,
+    body: Result<Json<DomainDisableRequest>, JsonRejection>,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, Some(&headers)).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let (Ok(axum::extract::Path(name)), Ok(Json(request))) = (name, body) else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid domain disable request",
+        );
+    };
+    match fm_user::SqlxUserRepository::set_domain_disabled(&pool, &name, request.disabled).await {
+        Ok(Some(domain)) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "domain": domain }))),
+        )
+            .into_response(),
+        Ok(None) => v1_error(
+            StatusCode::NOT_FOUND,
+            "domain_not_found",
+            "Mail domain not found",
+        ),
+        Err(err) => v1_domain_error(err, "disable"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DomainAliasRequest {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    alias: String,
+}
+
+/// Points an alias name at an existing domain template. Operator-only with
+/// CSRF; aliases never shadow real domain rows.
+async fn admin_save_domain_alias(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<DomainAliasRequest>, JsonRejection>,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, Some(&headers)).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid domain alias body",
+        );
+    };
+    match fm_user::SqlxUserRepository::save_domain_alias(&pool, &request.name, &request.alias).await
+    {
+        Ok(domain) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "domain": domain }))),
+        )
+            .into_response(),
+        Err(err) => v1_domain_error(err, "alias save"),
+    }
 }
 
 /// Clears operator authentication without touching the user session, so an
@@ -4526,5 +4805,321 @@ mod tests {
         assert_eq!(body["data"]["authenticated"], true);
         assert_eq!(body["data"]["user"]["id"], 1401);
         assert_eq!(body["data"]["is_admin"], false);
+    }
+
+    async fn admin_domain_app() -> Router {
+        let mut config = test_api_config();
+        config.admin.token_hash = Some(fm_user::hash_admin_token("opensesame").unwrap());
+        let pool = login_db_pool().await;
+        Router::new()
+            .nest("/api/frickmail/v1", super::routes())
+            .layer(fm_session::session_layer(
+                fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+            ))
+            .with_state(AppState::with_db_pool(config, Some(pool)))
+    }
+
+    async fn admin_operator_cookie(app: Router, cookie: &str, token: &str) -> String {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/admin/login")
+                    .header("content-type", "application/json")
+                    .header("cookie", cookie)
+                    .header("x-sm-token", token)
+                    .body(Body::from(
+                        serde_json::json!({"token": "opensesame"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        session_cookie(&response)
+    }
+
+    fn admin_domain_request(
+        method: Method,
+        uri: &str,
+        cookie: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", cookie);
+        if let Some(token) = token {
+            request = request
+                .header("content-type", "application/json")
+                .header("x-sm-token", token);
+        }
+        request
+            .body(
+                body.map(|value| Body::from(value.to_string()))
+                    .unwrap_or_else(Body::empty),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v1_admin_domains_require_operator_sessions() {
+        let app = admin_domain_app().await;
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+
+        // Anonymous callers are rejected before any database or CSRF work.
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/domains",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // A signed-in user without the operator flag is rejected too.
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1501, "v1plain", "correct-horse", None).await;
+        let mut config = test_api_config();
+        config.admin.token_hash = Some(fm_user::hash_admin_token("opensesame").unwrap());
+        let user_app = Router::new()
+            .nest("/api/frickmail/v1", super::routes())
+            .layer(fm_session::session_layer(
+                fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+            ))
+            .with_state(AppState::with_db_pool(config, Some(pool)));
+        let (user_cookie, user_token) = bootstrap_csrf(user_app.clone()).await;
+        let user_cookie = login_as(
+            user_app.clone(),
+            &user_cookie,
+            &user_token,
+            "v1plain",
+            "correct-horse",
+        )
+        .await;
+        let response = user_app
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/domains",
+                &user_cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Operator POSTs without CSRF are rejected even with a valid session.
+        let cookie = admin_operator_cookie(app.clone(), &cookie, &token).await;
+        let response = app
+            .oneshot(admin_domain_request(
+                Method::POST,
+                "/api/frickmail/v1/admin/domains",
+                &cookie,
+                None,
+                Some(serde_json::json!({"name": "example.com"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn v1_admin_domains_crud_roundtrip() {
+        let app = admin_domain_app().await;
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = admin_operator_cookie(app.clone(), &cookie, &token).await;
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/domains",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await["data"]["domains"], json!([]));
+
+        let saved = serde_json::json!({
+            "name": "Example.COM",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "imap_secure": "ssl",
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 465,
+            "smtp_secure": "SSL"
+        });
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::POST,
+                "/api/frickmail/v1/admin/domains",
+                &cookie,
+                Some(&token),
+                Some(saved),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["domain"]["name"], "example.com");
+        assert_eq!(body["data"]["domain"]["imap_secure"], "SSL");
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/domains/example.com",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response).await["data"]["domain"]["smtp_port"],
+            465
+        );
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/domains/missing.test",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::POST,
+                "/api/frickmail/v1/admin/domains/aliases",
+                &cookie,
+                Some(&token),
+                Some(serde_json::json!({"name": "example.com", "alias": "alias.test"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response).await["data"]["domain"]["alias_of"],
+            "example.com"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::POST,
+                "/api/frickmail/v1/admin/domains/example.com/disable",
+                &cookie,
+                Some(&token),
+                Some(serde_json::json!({"disabled": true})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response).await["data"]["domain"]["disabled"],
+            true
+        );
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::DELETE,
+                "/api/frickmail/v1/admin/domains/missing.test",
+                &cookie,
+                Some(&token),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::DELETE,
+                "/api/frickmail/v1/admin/domains/example.com",
+                &cookie,
+                Some(&token),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await["data"]["deleted"], true);
+
+        let response = app
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/domains",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(read_json(response).await["data"]["domains"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn v1_admin_domains_reject_invalid_rows() {
+        let app = admin_domain_app().await;
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = admin_operator_cookie(app.clone(), &cookie, &token).await;
+
+        for body in [
+            serde_json::json!({"name": "no-dot"}),
+            serde_json::json!({"name": "example.com", "imap_port": 0}),
+            serde_json::json!({"name": "example.com", "smtp_secure": "ROT13"}),
+            serde_json::json!({"name": "example.com", "alias": "example.com"}),
+        ] {
+            let uri = if body.get("alias").is_some() {
+                "/api/frickmail/v1/admin/domains/aliases"
+            } else {
+                "/api/frickmail/v1/admin/domains"
+            };
+            let response = app
+                .clone()
+                .oneshot(admin_domain_request(
+                    Method::POST,
+                    uri,
+                    &cookie,
+                    Some(&token),
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // Alias targets must exist.
+        let response = app
+            .oneshot(admin_domain_request(
+                Method::POST,
+                "/api/frickmail/v1/admin/domains/aliases",
+                &cookie,
+                Some(&token),
+                Some(serde_json::json!({"name": "missing.test", "alias": "new.test"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

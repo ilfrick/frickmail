@@ -1861,9 +1861,10 @@ async fn fetch_mail_account_connection_secret(
 async fn add_mail_account(
     pool: &AnyPool,
     user_id: i64,
-    input: NewMailAccount,
+    mut input: NewMailAccount,
     credential_key: &[u8],
 ) -> Result<i64> {
+    apply_domain_connection_defaults(pool, &mut input).await?;
     let prepared = prepare_new_mail_account(input, credential_key)?;
     let mut conn = pool.acquire().await.map_err(db_error)?;
     let backend = conn.backend_name().to_string();
@@ -1946,14 +1947,72 @@ async fn update_mail_account(
     validate_optional_mail_host(new_imap_host.as_deref(), "imap_host")?;
     validate_optional_mail_host(new_smtp_host.as_deref(), "smtp_host")?;
     let encrypted_password = encrypt_optional_secret(input.password, credential_key)?;
+    // An update that leaves a host blank (and finds nothing stored) inherits
+    // the enabled domain template, mirroring account creation. Port/secure
+    // fall back to the template only on the side whose host was blank-filled,
+    // so an explicit host never gets a foreign template's port mixed in.
+    let imap_host_blank = new_imap_host.is_none()
+        && existing
+            .imap_host
+            .as_deref()
+            .is_none_or(|host| host.trim().is_empty());
+    let smtp_host_blank = new_smtp_host.is_none()
+        && existing
+            .smtp_host
+            .as_deref()
+            .is_none_or(|host| host.trim().is_empty());
+    let mut domain: Option<MailDomain> = None;
+    if imap_host_blank || smtp_host_blank {
+        domain = SqlxUserRepository::resolve_domain_for_email(pool, &existing.email).await?;
+    }
+    let domain_imap_host = domain.as_ref().and_then(|domain| {
+        domain
+            .imap_host
+            .as_deref()
+            .and_then(|host| (!host.trim().is_empty()).then(|| host.to_string()))
+    });
+    let domain_smtp_host = domain.as_ref().and_then(|domain| {
+        domain
+            .smtp_host
+            .as_deref()
+            .and_then(|host| (!host.trim().is_empty()).then(|| host.to_string()))
+    });
+    let domain_imap_port = imap_host_blank
+        .then(|| domain.as_ref().and_then(|domain| domain.imap_port))
+        .flatten();
+    let domain_imap_secure = imap_host_blank
+        .then(|| {
+            domain
+                .as_ref()
+                .and_then(|domain| domain.imap_secure.clone())
+        })
+        .flatten();
+    let domain_smtp_port = smtp_host_blank
+        .then(|| domain.as_ref().and_then(|domain| domain.smtp_port))
+        .flatten();
+    let domain_smtp_secure = smtp_host_blank
+        .then(|| {
+            domain
+                .as_ref()
+                .and_then(|domain| domain.smtp_secure.clone())
+        })
+        .flatten();
     sqlx::query(update_imap_mail_account_query(&backend))
         .bind(&label)
-        .bind(new_imap_host.or(existing.imap_host))
-        .bind(input.imap_port.or(existing.imap_port))
-        .bind(trim_non_empty(input.imap_secure).or(existing.imap_secure))
-        .bind(new_smtp_host.or(existing.smtp_host))
-        .bind(input.smtp_port.or(existing.smtp_port))
-        .bind(trim_non_empty(input.smtp_secure).or(existing.smtp_secure))
+        .bind(new_imap_host.or(existing.imap_host).or(domain_imap_host))
+        .bind(input.imap_port.or(existing.imap_port).or(domain_imap_port))
+        .bind(
+            trim_non_empty(input.imap_secure)
+                .or(existing.imap_secure)
+                .or(domain_imap_secure),
+        )
+        .bind(new_smtp_host.or(existing.smtp_host).or(domain_smtp_host))
+        .bind(input.smtp_port.or(existing.smtp_port).or(domain_smtp_port))
+        .bind(
+            trim_non_empty(input.smtp_secure)
+                .or(existing.smtp_secure)
+                .or(domain_smtp_secure),
+        )
         .bind(trim_non_empty(input.login).or(existing.login))
         .bind(encrypted_password)
         .bind(user_id)
@@ -6343,6 +6402,549 @@ fn value_to_php_string(value: &Value) -> String {
     }
 }
 
+/// Admin-managed mail domain: connection template consulted when an account
+/// does not carry its own IMAP/SMTP settings. `alias_of` marks a pure alias
+/// row that resolves to another domain; alias rows carry no connection fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailDomain {
+    pub name: String,
+    pub disabled: bool,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<i64>,
+    pub imap_secure: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i64>,
+    pub smtp_secure: Option<String>,
+    pub alias_of: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct NewMailDomain {
+    pub name: String,
+    pub disabled: bool,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<i64>,
+    pub imap_secure: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i64>,
+    pub smtp_secure: Option<String>,
+}
+
+/// Connection modes accepted by the IMAP/SMTP dialers, mirroring
+/// `fm_imap::parse_security` so stored domain templates cannot name a mode
+/// the runtime rejects at connection time.
+const DOMAIN_SECURE_MODES: &[&str] = &["SSL", "TLS", "STARTTLS", "NONE", "PLAIN", "UNENCRYPTED"];
+/// Alias chains are followed iteratively; this bounds hostile or cyclic rows.
+const DOMAIN_ALIAS_MAX_DEPTH: usize = 8;
+
+fn normalize_domain_name(name: &str) -> Result<String> {
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return Err(FrickmailError::BadRequest(
+            "Domain name is required".to_string(),
+        ));
+    }
+    if name.len() > 253 {
+        return Err(FrickmailError::BadRequest(
+            "Domain name is too long".to_string(),
+        ));
+    }
+    let ascii = idna::domain_to_ascii(&name)
+        .map_err(|_| FrickmailError::BadRequest("Invalid domain name".to_string()))?;
+    if !ascii.contains('.') {
+        return Err(FrickmailError::BadRequest(
+            "Invalid domain name".to_string(),
+        ));
+    }
+    for label in ascii.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(FrickmailError::BadRequest(
+                "Invalid domain name".to_string(),
+            ));
+        }
+    }
+    Ok(ascii)
+}
+
+fn normalize_domain_secure(value: Option<String>, field: &str) -> Result<Option<String>> {
+    let Some(value) = trim_non_empty(value) else {
+        return Ok(None);
+    };
+    let upper = value.to_ascii_uppercase();
+    if !DOMAIN_SECURE_MODES.contains(&upper.as_str()) {
+        return Err(FrickmailError::BadRequest(format!(
+            "Unsupported {field} mode '{value}'"
+        )));
+    }
+    // The SMTP dialer accepts only none/starttls/ssl/tls: PLAIN and
+    // UNENCRYPTED are IMAP-parse aliases for "no encryption", so they are
+    // stored as NONE for SMTP fields rather than failing at send time.
+    if field.starts_with("smtp") && (upper == "PLAIN" || upper == "UNENCRYPTED") {
+        return Ok(Some("NONE".to_string()));
+    }
+    Ok(Some(upper))
+}
+
+fn normalize_domain_port(value: Option<i64>, field: &str) -> Result<Option<i64>> {
+    let Some(port) = value else {
+        return Ok(None);
+    };
+    if !(1..=65535).contains(&port) {
+        return Err(FrickmailError::BadRequest(format!(
+            "Invalid {field} '{port}'"
+        )));
+    }
+    Ok(Some(port))
+}
+
+fn domain_create_table_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "CREATE TABLE IF NOT EXISTS frickmail_domains (
+                name        VARCHAR(253) PRIMARY KEY,
+                disabled    BOOLEAN NOT NULL DEFAULT FALSE,
+                imap_host   TEXT,
+                imap_port   INTEGER,
+                imap_secure VARCHAR(16),
+                smtp_host   TEXT,
+                smtp_port   INTEGER,
+                smtp_secure VARCHAR(16),
+                alias_of    VARCHAR(253),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"
+        }
+        "MySQL" => {
+            "CREATE TABLE IF NOT EXISTS frickmail_domains (
+                name        VARCHAR(253) PRIMARY KEY,
+                disabled    BOOLEAN NOT NULL DEFAULT FALSE,
+                imap_host   TEXT,
+                imap_port   INTEGER,
+                imap_secure VARCHAR(16),
+                smtp_host   TEXT,
+                smtp_port   INTEGER,
+                smtp_secure VARCHAR(16),
+                alias_of    VARCHAR(253),
+                updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )"
+        }
+        _ => {
+            "CREATE TABLE IF NOT EXISTS frickmail_domains (
+                name        TEXT PRIMARY KEY,
+                disabled    INTEGER NOT NULL DEFAULT 0,
+                imap_host   TEXT,
+                imap_port   INTEGER,
+                imap_secure TEXT,
+                smtp_host   TEXT,
+                smtp_port   INTEGER,
+                smtp_secure TEXT,
+                alias_of    TEXT,
+                updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        }
+    }
+}
+
+fn domain_select_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "SELECT name, disabled, imap_host, imap_port, imap_secure, \
+             smtp_host, smtp_port, smtp_secure, alias_of \
+             FROM frickmail_domains WHERE name = $1"
+        }
+        _ => {
+            "SELECT name, disabled, imap_host, imap_port, imap_secure, \
+             smtp_host, smtp_port, smtp_secure, alias_of \
+             FROM frickmail_domains WHERE name = ?"
+        }
+    }
+}
+
+fn domain_list_query() -> &'static str {
+    "SELECT name, disabled, imap_host, imap_port, imap_secure, \
+     smtp_host, smtp_port, smtp_secure, alias_of \
+     FROM frickmail_domains ORDER BY name ASC"
+}
+
+fn domain_insert_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_domains (name, disabled, imap_host, imap_port, \
+             imap_secure, smtp_host, smtp_port, smtp_secure, alias_of) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+        }
+        _ => {
+            "INSERT INTO frickmail_domains (name, disabled, imap_host, imap_port, \
+             imap_secure, smtp_host, smtp_port, smtp_secure, alias_of) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        }
+    }
+}
+
+fn domain_update_query(backend: &str) -> &'static str {
+    // Binds always run (disabled, imap_host, imap_port, imap_secure, smtp_host,
+    // smtp_port, smtp_secure, alias_of, name) so one call order serves every backend.
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_domains SET disabled = $1, imap_host = $2, imap_port = $3, \
+             imap_secure = $4, smtp_host = $5, smtp_port = $6, smtp_secure = $7, \
+             alias_of = $8 WHERE name = $9"
+        }
+        _ => {
+            "UPDATE frickmail_domains SET disabled = ?, imap_host = ?, imap_port = ?, \
+             imap_secure = ?, smtp_host = ?, smtp_port = ?, smtp_secure = ?, \
+             alias_of = ? WHERE name = ?"
+        }
+    }
+}
+
+fn domain_delete_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_domains WHERE name = $1",
+        _ => "DELETE FROM frickmail_domains WHERE name = ?",
+    }
+}
+
+fn row_to_mail_domain(row: sqlx::any::AnyRow) -> Result<MailDomain> {
+    // Boolean representation varies by backend driver (SQLite INTEGER,
+    // PostgreSQL BOOLEAN, MySQL TINYINT as integer): accept every shape the
+    // Any driver decodes.
+    let disabled = row
+        .try_get::<bool, _>("disabled")
+        .or_else(|_| row.try_get::<i32, _>("disabled").map(|value| value != 0))
+        .or_else(|_| row.try_get::<i64, _>("disabled").map(|value| value != 0))
+        .map_err(db_error)?;
+    Ok(MailDomain {
+        name: row.try_get::<String, _>("name").map_err(db_error)?,
+        disabled,
+        imap_host: row
+            .try_get::<Option<String>, _>("imap_host")
+            .map_err(db_error)?,
+        imap_port: row
+            .try_get::<Option<i64>, _>("imap_port")
+            .map_err(db_error)?,
+        imap_secure: row
+            .try_get::<Option<String>, _>("imap_secure")
+            .map_err(db_error)?,
+        smtp_host: row
+            .try_get::<Option<String>, _>("smtp_host")
+            .map_err(db_error)?,
+        smtp_port: row
+            .try_get::<Option<i64>, _>("smtp_port")
+            .map_err(db_error)?,
+        smtp_secure: row
+            .try_get::<Option<String>, _>("smtp_secure")
+            .map_err(db_error)?,
+        alias_of: row
+            .try_get::<Option<String>, _>("alias_of")
+            .map_err(db_error)?,
+    })
+}
+
+async fn ensure_domains_table(pool: &AnyPool) -> Result<()> {
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(domain_create_table_query(&backend))
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
+}
+
+async fn fetch_domain_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Any>,
+    backend: &str,
+    name: &str,
+) -> Result<Option<MailDomain>> {
+    sqlx::query(domain_select_query(backend))
+        .bind(name)
+        .fetch_optional(&mut **conn)
+        .await
+        .map_err(db_error)?
+        .map(row_to_mail_domain)
+        .transpose()
+}
+
+impl SqlxUserRepository {
+    pub async fn list_domains(pool: &AnyPool) -> Result<Vec<MailDomain>> {
+        ensure_domains_table(pool).await?;
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        sqlx::query(domain_list_query())
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_error)?
+            .into_iter()
+            .map(row_to_mail_domain)
+            .collect()
+    }
+
+    pub async fn get_domain(pool: &AnyPool, name: &str) -> Result<Option<MailDomain>> {
+        ensure_domains_table(pool).await?;
+        let name = normalize_domain_name(name)?;
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        fetch_domain_on_conn(&mut conn, &backend, &name).await
+    }
+
+    pub async fn save_domain(pool: &AnyPool, input: NewMailDomain) -> Result<MailDomain> {
+        ensure_domains_table(pool).await?;
+        let name = normalize_domain_name(&input.name)?;
+        let imap_host = trim_non_empty(input.imap_host);
+        let smtp_host = trim_non_empty(input.smtp_host);
+        validate_optional_mail_host(imap_host.as_deref(), "imap_host")?;
+        validate_optional_mail_host(smtp_host.as_deref(), "smtp_host")?;
+        let domain = MailDomain {
+            name: name.clone(),
+            disabled: input.disabled,
+            imap_host,
+            imap_port: normalize_domain_port(input.imap_port, "imap_port")?,
+            imap_secure: normalize_domain_secure(input.imap_secure, "imap_secure")?,
+            smtp_host,
+            smtp_port: normalize_domain_port(input.smtp_port, "smtp_port")?,
+            smtp_secure: normalize_domain_secure(input.smtp_secure, "smtp_secure")?,
+            alias_of: None,
+        };
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        if fetch_domain_on_conn(&mut conn, &backend, &name)
+            .await?
+            .is_some()
+        {
+            sqlx::query(domain_update_query(&backend))
+                .bind(domain.disabled)
+                .bind(&domain.imap_host)
+                .bind(domain.imap_port)
+                .bind(&domain.imap_secure)
+                .bind(&domain.smtp_host)
+                .bind(domain.smtp_port)
+                .bind(&domain.smtp_secure)
+                .bind(&domain.alias_of)
+                .bind(&domain.name)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_error)?;
+        } else {
+            sqlx::query(domain_insert_query(&backend))
+                .bind(&domain.name)
+                .bind(domain.disabled)
+                .bind(&domain.imap_host)
+                .bind(domain.imap_port)
+                .bind(&domain.imap_secure)
+                .bind(&domain.smtp_host)
+                .bind(domain.smtp_port)
+                .bind(&domain.smtp_secure)
+                .bind(&domain.alias_of)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_error)?;
+        }
+        Ok(domain)
+    }
+
+    pub async fn delete_domain(pool: &AnyPool, name: &str) -> Result<bool> {
+        ensure_domains_table(pool).await?;
+        let name = normalize_domain_name(name)?;
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        sqlx::query(domain_delete_query(&backend))
+            .bind(&name)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        // Aliases pointing at the deleted domain resolve to nothing afterwards;
+        // they are removed with it so resolution can never follow a dangling
+        // row. The sweep repeats to fixpoint so transitive aliases (A→B→C
+        // when C is deleted) leave no orphans either.
+        let mut removed = vec![name.clone()];
+        while let Some(target) = removed.pop() {
+            let aliases: Vec<String> = sqlx::query(domain_list_query())
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(db_error)?
+                .into_iter()
+                .filter_map(|row| row_to_mail_domain(row).ok())
+                .filter(|domain| domain.alias_of.as_deref() == Some(target.as_str()))
+                .map(|domain| domain.name)
+                .collect();
+            for alias in aliases {
+                sqlx::query(domain_delete_query(&backend))
+                    .bind(&alias)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(db_error)?;
+                removed.push(alias);
+            }
+        }
+        Ok(true)
+    }
+
+    pub async fn set_domain_disabled(
+        pool: &AnyPool,
+        name: &str,
+        disabled: bool,
+    ) -> Result<Option<MailDomain>> {
+        ensure_domains_table(pool).await?;
+        let name = normalize_domain_name(name)?;
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        let Some(mut domain) = fetch_domain_on_conn(&mut conn, &backend, &name).await? else {
+            return Ok(None);
+        };
+        domain.disabled = disabled;
+        sqlx::query(domain_update_query(&backend))
+            .bind(domain.disabled)
+            .bind(&domain.imap_host)
+            .bind(domain.imap_port)
+            .bind(&domain.imap_secure)
+            .bind(&domain.smtp_host)
+            .bind(domain.smtp_port)
+            .bind(&domain.smtp_secure)
+            .bind(&domain.alias_of)
+            .bind(&domain.name)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        Ok(Some(domain))
+    }
+
+    pub async fn save_domain_alias(pool: &AnyPool, name: &str, alias: &str) -> Result<MailDomain> {
+        ensure_domains_table(pool).await?;
+        let name = normalize_domain_name(name)?;
+        let alias = normalize_domain_name(alias)?;
+        if alias == name {
+            return Err(FrickmailError::BadRequest(
+                "Domain alias cannot point to itself".to_string(),
+            ));
+        }
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        if fetch_domain_on_conn(&mut conn, &backend, &name)
+            .await?
+            .is_none()
+        {
+            return Err(FrickmailError::BadRequest("Unknown domain".to_string()));
+        }
+        let row = MailDomain {
+            name: alias.clone(),
+            disabled: false,
+            imap_host: None,
+            imap_port: None,
+            imap_secure: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_secure: None,
+            alias_of: Some(name),
+        };
+        if fetch_domain_on_conn(&mut conn, &backend, &alias)
+            .await?
+            .is_some()
+        {
+            // An alias never shadows a real domain row.
+            return Err(FrickmailError::BadRequest(
+                "Domain already exists".to_string(),
+            ));
+        }
+        sqlx::query(domain_insert_query(&backend))
+            .bind(&row.name)
+            .bind(false)
+            .bind(Option::<String>::None)
+            .bind(Option::<i64>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<i64>::None)
+            .bind(Option::<String>::None)
+            .bind(&row.alias_of)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        Ok(row)
+    }
+
+    /// Resolves the enabled connection template for an email address: exact
+    /// domain match, following alias rows, skipping disabled templates.
+    /// Returns `None` when no enabled template applies so callers fall back
+    /// to stored account settings and then environment defaults.
+    pub async fn resolve_domain_for_email(
+        pool: &AnyPool,
+        email: &str,
+    ) -> Result<Option<MailDomain>> {
+        ensure_domains_table(pool).await?;
+        let Some((_, domain)) = email.trim().rsplit_once('@') else {
+            return Ok(None);
+        };
+        let mut name = normalize_domain_name(domain).unwrap_or_default();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        for _ in 0..=DOMAIN_ALIAS_MAX_DEPTH {
+            let Some(row) = fetch_domain_on_conn(&mut conn, &backend, &name).await? else {
+                return Ok(None);
+            };
+            if row.disabled {
+                return Ok(None);
+            }
+            match row.alias_of {
+                Some(target) => name = target,
+                None => return Ok(Some(row)),
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Fills blank IMAP/SMTP connection fields of a new IMAP account from the
+/// enabled domain template matching the account email. Every field is gated
+/// individually, so explicitly provided values always win and existing
+/// behavior is unchanged when no template applies.
+async fn apply_domain_connection_defaults(
+    pool: &AnyPool,
+    input: &mut NewMailAccount,
+) -> Result<()> {
+    if normalize_account_type(&input.account_type)? != "imap" {
+        return Ok(());
+    }
+    let imap_blank = trim_non_empty(input.imap_host.clone()).is_none();
+    let smtp_blank = trim_non_empty(input.smtp_host.clone()).is_none();
+    if !imap_blank && !smtp_blank {
+        return Ok(());
+    }
+    let Some(domain) = SqlxUserRepository::resolve_domain_for_email(pool, &input.email).await?
+    else {
+        return Ok(());
+    };
+    if imap_blank {
+        if let Some(host) = domain.imap_host.filter(|host| !host.trim().is_empty()) {
+            input.imap_host = Some(host);
+            if input.imap_port.is_none() {
+                input.imap_port = domain.imap_port;
+            }
+            if trim_non_empty(input.imap_secure.clone()).is_none() {
+                input.imap_secure = domain.imap_secure;
+            }
+        }
+    }
+    if smtp_blank {
+        if let Some(host) = domain.smtp_host.filter(|host| !host.trim().is_empty()) {
+            input.smtp_host = Some(host);
+            if input.smtp_port.is_none() {
+                input.smtp_port = domain.smtp_port;
+            }
+            if trim_non_empty(input.smtp_secure.clone()).is_none() {
+                input.smtp_secure = domain.smtp_secure;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use argon2::{
@@ -9723,5 +10325,344 @@ mod tests {
         let rsa = Rsa::generate(2048).unwrap();
         let key = PKey::from_rsa(rsa).unwrap();
         String::from_utf8(key.private_key_to_pem_pkcs8().unwrap()).unwrap()
+    }
+
+    fn test_domain(name: &str) -> super::NewMailDomain {
+        super::NewMailDomain {
+            name: name.to_string(),
+            disabled: false,
+            imap_host: Some("imap.example.com".to_string()),
+            imap_port: Some(993),
+            imap_secure: Some("SSL".to_string()),
+            smtp_host: Some("smtp.example.com".to_string()),
+            smtp_port: Some(465),
+            smtp_secure: Some("SSL".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn repository_saves_lists_and_resolves_domains() {
+        let pool = sqlite_pool().await;
+
+        let saved = SqlxUserRepository::save_domain(&pool, test_domain("Example.COM "))
+            .await
+            .unwrap();
+        assert_eq!(saved.name, "example.com");
+        assert!(!saved.disabled);
+
+        // PLAIN/UNENCRYPTED are IMAP no-encryption aliases; for SMTP fields
+        // they are stored as NONE so the SMTP dialer accepts the template.
+        let mut plain = test_domain("plain.test");
+        plain.smtp_secure = Some("plain".to_string());
+        plain.imap_secure = Some("UNENCRYPTED".to_string());
+        let saved = SqlxUserRepository::save_domain(&pool, plain).await.unwrap();
+        assert_eq!(saved.smtp_secure.as_deref(), Some("NONE"));
+        assert_eq!(saved.imap_secure.as_deref(), Some("UNENCRYPTED"));
+
+        let domains = SqlxUserRepository::list_domains(&pool).await.unwrap();
+        assert_eq!(domains.len(), 2);
+
+        let resolved = SqlxUserRepository::resolve_domain_for_email(&pool, "alice@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.imap_host.as_deref(), Some("imap.example.com"));
+        assert_eq!(resolved.imap_port, Some(993));
+
+        assert!(
+            SqlxUserRepository::resolve_domain_for_email(&pool, "alice@other.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SqlxUserRepository::resolve_domain_for_email(&pool, "not-an-email")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_rejects_invalid_domain_rows() {
+        let pool = sqlite_pool().await;
+
+        for bad in [
+            "",
+            "no-dot",
+            "-bad.test",
+            "bad-.test",
+            "a..test",
+            &"x".repeat(300),
+        ] {
+            let mut input = test_domain(bad);
+            input.name = bad.to_string();
+            assert!(
+                SqlxUserRepository::save_domain(&pool, input).await.is_err(),
+                "must reject {bad:?}"
+            );
+        }
+
+        let mut bad_port = test_domain("ports.test");
+        bad_port.imap_port = Some(0);
+        assert!(SqlxUserRepository::save_domain(&pool, bad_port)
+            .await
+            .is_err());
+
+        let mut bad_secure = test_domain("secure.test");
+        bad_secure.smtp_secure = Some("ROT13".to_string());
+        assert!(SqlxUserRepository::save_domain(&pool, bad_secure)
+            .await
+            .is_err());
+
+        assert!(SqlxUserRepository::list_domains(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_disables_deletes_and_aliases_domains() {
+        let pool = sqlite_pool().await;
+        SqlxUserRepository::save_domain(&pool, test_domain("example.com"))
+            .await
+            .unwrap();
+
+        let alias = SqlxUserRepository::save_domain_alias(&pool, "example.com", "alias.test")
+            .await
+            .unwrap();
+        assert_eq!(alias.alias_of.as_deref(), Some("example.com"));
+
+        let resolved = SqlxUserRepository::resolve_domain_for_email(&pool, "bob@alias.test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.name, "example.com");
+
+        assert!(
+            SqlxUserRepository::save_domain_alias(&pool, "example.com", "example.com")
+                .await
+                .is_err()
+        );
+        assert!(
+            SqlxUserRepository::save_domain_alias(&pool, "missing.test", "new.test")
+                .await
+                .is_err()
+        );
+
+        let disabled = SqlxUserRepository::set_domain_disabled(&pool, "example.com", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(disabled.disabled);
+        assert!(
+            SqlxUserRepository::resolve_domain_for_email(&pool, "alice@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SqlxUserRepository::resolve_domain_for_email(&pool, "bob@alias.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(
+            SqlxUserRepository::set_domain_disabled(&pool, "missing.test", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(SqlxUserRepository::delete_domain(&pool, "example.com")
+            .await
+            .unwrap());
+        // Deleting the target removes its aliases so resolution cannot dangle.
+        assert!(SqlxUserRepository::get_domain(&pool, "alias.test")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(SqlxUserRepository::list_domains(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Transitive aliases leave no orphans: outer.test points at mid.test
+        // which points at root.test, so deleting root.test removes the chain.
+        SqlxUserRepository::save_domain(&pool, test_domain("root.test"))
+            .await
+            .unwrap();
+        SqlxUserRepository::save_domain_alias(&pool, "root.test", "mid.test")
+            .await
+            .unwrap();
+        SqlxUserRepository::save_domain_alias(&pool, "mid.test", "outer.test")
+            .await
+            .unwrap();
+        let resolved = SqlxUserRepository::resolve_domain_for_email(&pool, "x@outer.test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.name, "root.test");
+        SqlxUserRepository::delete_domain(&pool, "root.test")
+            .await
+            .unwrap();
+        assert!(SqlxUserRepository::get_domain(&pool, "mid.test")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(SqlxUserRepository::get_domain(&pool, "outer.test")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(SqlxUserRepository::list_domains(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_backfills_account_hosts_from_domain_template() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_mail_account_tables(&pool).await;
+        insert_user(&pool, 31, json!({})).await;
+        SqlxUserRepository::save_domain(&pool, test_domain("example.com"))
+            .await
+            .unwrap();
+
+        let key = [7u8; super::CREDENTIAL_KEY_BYTES];
+        let id = SqlxUserRepository::add_mail_account(
+            &pool,
+            31,
+            super::NewMailAccount {
+                label: None,
+                email: "alice@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: None,
+                imap_port: None,
+                imap_secure: None,
+                smtp_host: None,
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: None,
+                oauth_tenant: None,
+                is_primary: true,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 31)
+            .await
+            .unwrap();
+        let account = accounts.iter().find(|account| account.id == id).unwrap();
+        assert_eq!(account.imap_host.as_deref(), Some("imap.example.com"));
+        assert_eq!(account.imap_port, Some(993));
+        assert_eq!(account.smtp_host.as_deref(), Some("smtp.example.com"));
+        assert_eq!(account.smtp_port, Some(465));
+
+        // Explicit values always win over the template.
+        let explicit = SqlxUserRepository::add_mail_account(
+            &pool,
+            31,
+            super::NewMailAccount {
+                label: None,
+                email: "bob@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: Some("imap.other.test".to_string()),
+                imap_port: Some(143),
+                imap_secure: Some("STARTTLS".to_string()),
+                smtp_host: Some("smtp.other.test".to_string()),
+                smtp_port: Some(587),
+                smtp_secure: Some("STARTTLS".to_string()),
+                login: None,
+                password: None,
+                oauth_tenant: None,
+                is_primary: false,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 31)
+            .await
+            .unwrap();
+        let account = accounts
+            .iter()
+            .find(|account| account.id == explicit)
+            .unwrap();
+        assert_eq!(account.imap_host.as_deref(), Some("imap.other.test"));
+        assert_eq!(account.imap_port, Some(143));
+
+        // A blank host with explicit port/secure keeps the explicit fields and
+        // takes only the host (plus unset fields) from the template.
+        let partial = SqlxUserRepository::add_mail_account(
+            &pool,
+            31,
+            super::NewMailAccount {
+                label: None,
+                email: "carol@example.com".to_string(),
+                account_type: "imap".to_string(),
+                imap_host: None,
+                imap_port: Some(143),
+                imap_secure: Some("STARTTLS".to_string()),
+                smtp_host: None,
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: None,
+                oauth_tenant: None,
+                is_primary: false,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 31)
+            .await
+            .unwrap();
+        let account = accounts
+            .iter()
+            .find(|account| account.id == partial)
+            .unwrap();
+        assert_eq!(account.imap_host.as_deref(), Some("imap.example.com"));
+        assert_eq!(account.imap_port, Some(143));
+        assert_eq!(account.imap_secure.as_deref(), Some("STARTTLS"));
+        assert_eq!(account.smtp_host.as_deref(), Some("smtp.example.com"));
+        assert_eq!(account.smtp_port, Some(465));
+
+        // Updating an explicit host never mixes in the template's port.
+        SqlxUserRepository::update_mail_account(
+            &pool,
+            31,
+            super::UpdateMailAccount {
+                id: explicit,
+                label: None,
+                imap_host: Some("imap.explicit.test".to_string()),
+                imap_port: None,
+                imap_secure: None,
+                smtp_host: None,
+                smtp_port: None,
+                smtp_secure: None,
+                login: None,
+                password: None,
+            },
+            &key,
+        )
+        .await
+        .unwrap();
+        let accounts = SqlxUserRepository::list_mail_accounts(&pool, 31)
+            .await
+            .unwrap();
+        let account = accounts
+            .iter()
+            .find(|account| account.id == explicit)
+            .unwrap();
+        assert_eq!(account.imap_host.as_deref(), Some("imap.explicit.test"));
+        // Pre-existing explicit port survives; the template port is not mixed in.
+        assert_eq!(account.imap_port, Some(143));
     }
 }
