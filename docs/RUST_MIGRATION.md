@@ -36,7 +36,72 @@ database-wins-for-curated-keys precedence, effective-value readers rewired at
 the current env read sites, and `GET/PUT /admin/settings`. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
-## Progress Snapshot — 2026-09-15 03:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-16 10:30:00 CEST (UTC+02:00)
+
+The pending admin-UI slice makes Phase 4 operator tasks usable without the
+legacy PHP admin controller: `frickmail-ui/v1/admin.html` shell (bootstrap →
+operator dashboard or token login) plus `js/admin.js` (operator login form,
+domain table with edit/disable/delete, domain editor, alias form, settings
+form with database/environment provenance badges) over new `ApiClient`
+methods (`adminLogin/adminLogout`, domain CRUD/alias/disable, settings
+get/save/reset) and the pure `domainPayload` builder. `js/admin.test.mjs`
+pins payloads, endpoint method/path/body shapes, failure copy, rendering
+(incl. HTML escaping), form collectors with stub roots, and dashboard shape
+normalization.
+
+Verification so far (Docker-only): `node --test
+"frickmail-ui/v1/js/*.test.mjs"` 81 passed / 0 failed (17 new); `npx
+eslint` on touched JS clean; `build.mjs` ships the new files automatically
+(v1 copy excluding tests).
+
+Independent senior review APPROVED (all 11 client paths match the server
+contract; CSRF via ApiClient only; all interpolations escaped; single
+submit-listener registration; tests 81/17 green; eslint clean).
+
+Docker-only validation is done: production image builds, `/health` 200,
+`/static/v1/admin.html` 200 with `admin.js` served and `admin.test.mjs`
+correctly excluded from the bundle, no errors or panics in logs.
+
+This slice is verified but NOT yet committed or pushed. `gitea` still 503;
+`d6de75651` + `a841103d4` gitea sync PENDING retry. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-16 09:30:00 CEST (UTC+02:00)
+
+The settings slice is published (`a841103d4`): curated database-backed admin
+settings overrides with effective readers rewired at all env read sites,
+`GET/PUT/DELETE /admin/settings`, plus the cross-backend compat suite that
+caught and fixed four MySQL bugs (CASE-projected booleans, TEXT/BLOB and
+integer decode fallbacks incl. pre-existing `get_app_setting`, native
+transactions for settings writes).
+
+Independent senior review APPROVED twice (slice + compat/MySQL delta).
+Docker-only validation is done: `/health` 200, `GET /admin/settings` live
+(403 anonymous), no errors or panics.
+
+Published `a841103d4` to `master` + `rust-full-migration` on `origin` (both
+tips `a841103d4`, verified via `ls-remote`); `d6de75651` rust-ci + naming
+terminal success; `a841103d4` CI running. `gitea` (housefz.com) returns HTTP
+503 on all requests since ~09:00 CEST — full service outage, not auth;
+`d6de75651` + `a841103d4` sync to gitea is PENDING retry and will be
+backfilled when the service recovers.
+
+Verification: `cargo fmt --all` clean; `cargo test -p fm-http --lib --
+api_v1` 50 passed / 0 failed; `cargo test -p fm-user --lib` 61 passed / 0
+failed; compat suite 3/3 backends green locally (MySQL 8.0, Postgres 16,
+SQLite); `cargo clippy --workspace --all-targets -- -D warnings` clean.
+
+Known follow-ups: raw-BEGIN transaction code shares the latent MySQL-1295
+risk (migrate to native transactions separately); domain
+Match/Autoconfig/connection-Test endpoints deferred; Sieve template fields
+and whitelist rules deferred.
+
+The next slice is the v1 admin UI (login + domains + settings screens),
+making Phase 4 operator tasks usable without the legacy PHP admin
+controller. The major remaining gates toward the final Rust-only goal are
+unchanged.
+
+## Prior Snapshot — 2026-09-15 03:30:00 CEST (UTC+02:00)
 
 The pending settings slice adds the admin settings runtime (Phase 4):
 curated database-backed overrides for `open_signup`,

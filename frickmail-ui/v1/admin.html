@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Frickmail administration</title>
+<link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+<main id="app" aria-live="polite"><p>Loading administration…</p></main>
+<noscript><p>Frickmail administration needs JavaScript enabled.</p></noscript>
+<script type="module">
+import { ApiClient } from './js/api.js';
+import {
+	collectDomainForm,
+	collectSettingsPatch,
+	describeAdminFailure,
+	loadAdminDashboard,
+	renderAdminDashboard,
+	renderAdminLogin,
+	renderDomainEditor,
+	renderDomainsTable,
+	renderSettingsForm
+} from './js/admin.js';
+
+const api = new ApiClient('');
+const root = document.getElementById('app');
+
+function setStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text || '';
+	}
+}
+
+async function refreshDashboard() {
+	try {
+		const data = await loadAdminDashboard(api);
+		root.innerHTML = renderAdminDashboard(data);
+		wireDashboard();
+	} catch (error) {
+		setStatus(describeAdminFailure(error));
+	}
+}
+
+async function refreshDomains() {
+	try {
+		const data = await api.listDomains();
+		const wrap = root.querySelector('[data-fm="domains-wrap"]');
+		if (wrap) {
+			wrap.innerHTML = renderDomainsTable(data.domains);
+		}
+	} catch (error) {
+		setStatus(describeAdminFailure(error));
+	}
+}
+
+function wireLogin() {
+	const form = root.querySelector('[data-fm="form"]');
+	form.addEventListener('submit', async (event) => {
+		event.preventDefault();
+		try {
+			await api.adminLogin(root.querySelector('[data-fm="token"]').value);
+			await refreshDashboard();
+		} catch (error) {
+			setStatus(describeAdminFailure(error));
+		}
+	});
+}
+
+function wireDashboard() {
+	const logout = root.querySelector('[data-fm="logout"]');
+	if (logout) {
+		logout.addEventListener('click', async () => {
+			try {
+				await api.adminLogout();
+			} catch (error) {
+				void error;
+			}
+			try {
+				await api.bootstrap();
+			} catch (error) {
+				void error;
+			}
+			root.innerHTML = renderAdminLogin();
+			wireLogin();
+		});
+	}
+
+	const rows = root.querySelector('[data-fm="domains-wrap"]');
+	if (rows) {
+		rows.addEventListener('click', async (event) => {
+			const button = event.target.closest('[data-fm]');
+			if (!button) {
+				return;
+			}
+			const row = event.target.closest('[data-fm="domain-row"]');
+			const name = row ? row.getAttribute('data-name') : '';
+			const action = button.getAttribute('data-fm');
+			try {
+				if (action === 'domain-edit' && name) {
+					const data = await api.getDomain(name);
+					const editor = root.querySelector('[data-fm="editor-wrap"]');
+					if (editor) {
+						editor.innerHTML = renderDomainEditor(data.domain);
+					}
+				} else if (action === 'domain-delete' && name) {
+					await api.deleteDomain(name);
+					await refreshDomains();
+				} else if (action === 'domain-toggle' && name) {
+					const data = await api.getDomain(name);
+					await api.disableDomain(name, !(data.domain && data.domain.disabled));
+					await refreshDomains();
+				}
+		} catch (error) {
+			setStatus(describeAdminFailure(error));
+		}
+		});
+	}
+}
+
+	const fresh = root.querySelector('[data-fm="domain-new"]');
+	if (fresh) {
+		fresh.addEventListener('click', () => {
+			const editor = root.querySelector('[data-fm="editor-wrap"]');
+			if (editor) {
+				editor.innerHTML = renderDomainEditor(null);
+			}
+		});
+	}
+
+	// The root element persists across re-renders, so the delegated submit
+	// listener is registered exactly once.
+	if (!root.dataset.fmAdminWired) {
+		root.dataset.fmAdminWired = '1';
+		root.addEventListener('submit', async (event) => {
+		const form = event.target.closest('[data-fm="domain-form"],[data-fm="alias-form"],[data-fm="settings-form"]');
+		if (!form) {
+			return;
+		}
+		event.preventDefault();
+		const kind = form.getAttribute('data-fm');
+		try {
+			if (kind === 'domain-form') {
+				await api.saveDomain(collectDomainForm(form));
+				const editor = root.querySelector('[data-fm="editor-wrap"]');
+				if (editor) {
+					editor.innerHTML = '';
+				}
+				await refreshDomains();
+			} else if (kind === 'alias-form') {
+				const name = form.querySelector('[data-fm="alias-name"]').value;
+				const alias = form.querySelector('[data-fm="alias-value"]').value;
+				await api.saveDomainAlias(name, alias);
+				await refreshDomains();
+			} else if (kind === 'settings-form') {
+				await api.saveSettings(collectSettingsPatch(form));
+				const data = await api.getSettings();
+				const wrap = root.querySelector('[data-fm="settings-wrap"]');
+				if (wrap) {
+					wrap.innerHTML = renderSettingsForm(data.settings);
+				}
+			}
+		} catch (error) {
+			setStatus(describeAdminFailure(error));
+		}
+	});
+}
+
+try {
+	const session = await api.bootstrap();
+	if (session && session.is_admin) {
+		await refreshDashboard();
+	} else {
+		root.innerHTML = renderAdminLogin();
+		wireLogin();
+	}
+} catch (error) {
+	root.innerHTML = '<p>Cannot reach the Frickmail server.</p>';
+}
+</script>
+</body>
+</html>

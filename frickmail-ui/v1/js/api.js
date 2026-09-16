@@ -49,6 +49,42 @@ export function loginPayload(username, password, totpCode) {
 	return payload;
 }
 
+/// Builds the domain save payload exactly as the v1 admin route expects:
+/// trimmed strings, empty optionals omitted, ports as integers when valid.
+/// Pure helper so the shape is pinned by tests, not by the DOM layer.
+export function domainPayload(input) {
+	const source = input && typeof input === 'object' ? input : {};
+	const payload = { name: String(source.name || '').trim() };
+	const text = (value) => {
+		const trimmed = String(value === undefined || value === null ? '' : value).trim();
+		return trimmed === '' ? undefined : trimmed;
+	};
+	const port = (value) => {
+		if (value === undefined || value === null || String(value).trim() === '') {
+			return undefined;
+		}
+		const parsed = Number(String(value).trim());
+		return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+	};
+	const fields = [
+		['imap_host', text(source.imap_host)],
+		['imap_port', port(source.imap_port)],
+		['imap_secure', text(source.imap_secure)],
+		['smtp_host', text(source.smtp_host)],
+		['smtp_port', port(source.smtp_port)],
+		['smtp_secure', text(source.smtp_secure)]
+	];
+	for (const [key, value] of fields) {
+		if (value !== undefined) {
+			payload[key] = value;
+		}
+	}
+	if (source.disabled !== undefined) {
+		payload.disabled = !!source.disabled;
+	}
+	return payload;
+}
+
 export class ApiClient {
 	constructor(baseUrl, fetchImpl) {
 		// Same-origin path prefix (usually ''). When an absolute origin is
@@ -119,5 +155,63 @@ export class ApiClient {
 		const data = await this.request('POST', '/logout');
 		this.token = '';
 		return data;
+	}
+
+	/// Establishes the operator session flag; the session stays anonymous
+	/// as a user unless a user login happens too.
+	async adminLogin(token) {
+		const data = await this.request('POST', '/admin/login', {
+			body: { token: String(token || '') }
+		});
+		return data;
+	}
+
+	/// Clears only the operator flag, preserving any user session.
+	async adminLogout() {
+		const data = await this.request('POST', '/admin/logout');
+		return data;
+	}
+
+	async listDomains() {
+		return this.request('GET', '/admin/domains');
+	}
+
+	async getDomain(name) {
+		return this.request('GET', '/admin/domains/' + encodeURIComponent(String(name || '')));
+	}
+
+	async saveDomain(domain) {
+		return this.request('POST', '/admin/domains', { body: domainPayload(domain) });
+	}
+
+	async deleteDomain(name) {
+		return this.request('DELETE', '/admin/domains/' + encodeURIComponent(String(name || '')));
+	}
+
+	async disableDomain(name, disabled) {
+		return this.request('POST', '/admin/domains/' + encodeURIComponent(String(name || '')) + '/disable', {
+			body: { disabled: !!disabled }
+		});
+	}
+
+	async saveDomainAlias(name, alias) {
+		return this.request('POST', '/admin/domains/aliases', {
+			body: { name: String(name || '').trim(), alias: String(alias || '').trim() }
+		});
+	}
+
+	/// Reads effective values with provenance (`value` + `source` per key).
+	async getSettings() {
+		return this.request('GET', '/admin/settings');
+	}
+
+	/// Saves a `{key: value}` map; the server validates everything before
+	/// committing and answers the refreshed settings shape.
+	async saveSettings(settings) {
+		return this.request('PUT', '/admin/settings', { body: { settings: settings || {} } });
+	}
+
+	async resetSetting(name) {
+		return this.request('DELETE', '/admin/settings/' + encodeURIComponent(String(name || '')));
 	}
 }
