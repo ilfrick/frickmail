@@ -7,52 +7,70 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-15 02:00:00 CEST (UTC+02:00)
 
-The pending domain slice continues Phase 4 with operator-scoped mail domains
-wired into connection resolution (per operator direction): new
-`frickmail_domains` table (PostgreSQL/MySQL/SQLite DDL, lazily ensured)
-holding normalized lowercase-ASCII names, disabled flags, IMAP/SMTP
-host/port/secure templates, and alias rows; `resolve_domain_for_email`
-matches exact domains, follows alias chains (depth-bounded, cycle-safe), and
-skips disabled templates. Account creation and IMAP-account updates backfill
-only blank hosts from the enabled template (explicit values always win;
-existing accounts untouched); the SMTP builder resolves stored, then domain
-template, then environment defaults (resolution failure degrades to the old
-stored-then-default behavior). v1 admin endpoints `GET/POST /admin/domains`,
-`GET/DELETE /admin/domains/{name}`, `POST /admin/domains/{name}/disable`,
-and `POST /admin/domains/aliases` share one operator+CSRF+database gate
-(`v1_admin_pool`): anonymous/user sessions get 403, missing CSRF on
-state-changing routes gets 403, unknown names get 404, invalid rows get 400
-with the repository message. Deleting a domain removes its aliases so
-resolution cannot dangle; aliases never shadow real domain rows.
+The domain slice is published (`9c64e58d6`): `frickmail_domains` table with
+operator CRUD, aliasing, disable, exact/alias resolution, account
+create/update backfill (explicit wins, per-field gating), and SMTP
+stored→template→env fallback. v1 admin endpoints share one
+operator+CSRF+database gate with 403/404/400 mapping.
+
+Independent senior review APPROVED after one BLOCK round (precedence fixes).
+Docker-only validation is done: production image builds, `/health` 200, new
+`GET /admin/domains` live (403 anonymous), session envelope intact, no errors
+or panics.
+
+Published `9c64e58d6` to `master` + `rust-full-migration` on `origin` and
+`gitea` (all 4 tips identical, verified via `ls-remote`); exact-SHA `rust-ci`
+(×2) + `naming` (×2) runs terminal success.
+
+Verification: `cargo fmt --all` clean; `cargo test -p fm-http --lib --
+api_v1` 47 passed / 0 failed; `cargo test -p fm-user --lib` 60 passed / 0
+failed; `cargo clippy --workspace --all-targets -- -D warnings` clean.
+
+Deferred to follow-ups: domain Match/Autoconfig/connection-Test endpoints,
+Sieve template fields, whitelist rules, IMAP connection-time fallback.
+
+The next slice starts the admin settings runtime: curated database-backed
+overrides (`open_signup`, `security.auto_verify_signatures`,
+`frickmail_user.allow_export`, `export_folder_max_messages/bytes`) with
+database-wins-for-curated-keys precedence, effective-value readers rewired at
+the current env read sites, and `GET/PUT /admin/settings`. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
+## Progress Snapshot — 2026-09-15 03:30:00 CEST (UTC+02:00)
+
+The pending settings slice adds the admin settings runtime (Phase 4):
+curated database-backed overrides for `open_signup`,
+`security.auto_verify_signatures`, `frickmail_user.allow_export`, and
+`frickmail_user.export_folder_max_messages/bytes`, stored as
+`admin_override:<name>` strings in `frickmail_app_settings` (database wins
+for curated keys only; everything else stays env-immutable). New fm-user KV
+API (`get/set/delete_app_setting_value`, transactional
+`set_app_setting_values`) with key charset/length validation; effective
+readers rewired at all six env read sites (register, three export gates,
+both auto-verify sites, folder export limits); corrupt stored values warn
+and fall back to env. v1 endpoints `GET /admin/settings` (value + source
+provenance), `PUT /admin/settings` (validate-all-first then one
+transaction; unknown keys, wrong types, out-of-bounds integers, and empty
+maps are 400), and `DELETE /admin/settings/{name}` (unknown keys 400,
+missing overrides 404) share the operator+CSRF+database gate.
 
 Verification so far (Docker-only): `cargo fmt --all` clean; `cargo test -p
-fm-http --lib -- api_v1` 47 passed / 0 failed (8 admin incl. 3 new domain
-tests); `cargo test -p fm-user --lib` 60 passed / 0 failed (4 new domain
-tests); `cargo clippy --workspace --all-targets -- -D warnings` clean.
+fm-http --lib -- api_v1` 50 passed / 0 failed (11 admin incl. 3 new settings
+tests; plus 1 new effective-settings behavioral test in router tests);
+`cargo test -p fm-user --lib` 61 passed / 0 failed (1 new KV test);
+`cargo clippy --workspace --all-targets -- -D warnings` clean.
 
-Independent senior review BLOCKED the first revision (inverted port/secure
-precedence in create/update backfill); fixed by backfilling at the
-`NewMailAccount` input level with per-field gating, gating update
-port/secure fallback on blank-filled hosts, mapping SMTP PLAIN/UNENCRYPTED
-to NONE, widening disabled parsing (bool/i32/i64), and sweeping transitive
-aliases on delete, with new tests pinning explicit-field preservation.
-Independent senior review APPROVED the revision (both blockers + all
-non-blocking findings fixed; fm-user domain tests 4/4 re-run by reviewer).
+Independent senior review APPROVED (bind order, transaction, validation,
+auth, fail-safe readers, rewire completeness all verified; reviewer re-ran
+the KV + settings suites green).
 
 Docker-only validation is done: production image builds, `/health` 200, new
-`GET /admin/domains` live (403 anonymous), anonymous `/session` envelope
-intact, no errors or panics in logs.
+`GET /admin/settings` live (403 anonymous), no errors or panics in logs.
 
-Docker image validation is pending.
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
 
-This slice is verified but NOT yet committed or pushed. The prior publication
-note for `cfd7730fd` is folded into this commit. Deferred to follow-ups:
-domain Match/Autoconfig/connection-Test endpoints (network-dependent), Sieve
-template fields, whitelist rules, and IMAP connection-time fallback (covered
-at create/update time instead). The major remaining gates toward the final
-Rust-only goal are unchanged.
-
-## Prior Snapshot — 2026-09-12 19:30:00 CEST (UTC+02:00)
+## Prior Snapshot — 2026-09-15 02:00:00 CEST (UTC+02:00)
 
 The admin-auth slice is the first published Phase 4 work (`cfd7730fd`):
 `POST /api/frickmail/v1/admin/login` verifies the bearer token in a blocking

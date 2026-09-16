@@ -24,7 +24,7 @@ use axum::{
     extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use serde::Deserialize;
@@ -61,6 +61,11 @@ pub fn routes() -> Router<AppState> {
             get(admin_get_domain).delete(admin_delete_domain),
         )
         .route("/admin/domains/{name}/disable", post(admin_disable_domain))
+        .route(
+            "/admin/settings",
+            get(admin_get_settings).put(admin_set_settings),
+        )
+        .route("/admin/settings/{name}", delete(admin_reset_setting))
         .route("/contacts", get(contacts))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
@@ -524,6 +529,167 @@ async fn admin_save_domain_alias(
         )
             .into_response(),
         Err(err) => v1_domain_error(err, "alias save"),
+    }
+}
+
+/// Returns the effective value and provenance (`database` override vs
+/// `environment` default) of every curated admin setting. Operator-only;
+/// GET, so no CSRF check.
+async fn admin_get_settings(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+) -> Response {
+    if let Err(response) = v1_admin_pool(&state, &session, None).await {
+        return response;
+    }
+    let mut settings = serde_json::Map::new();
+    for schema in super::ADMIN_SETTING_SCHEMA {
+        let effective = super::admin_setting_effective(&state, schema).await;
+        settings.insert(
+            schema.name.to_string(),
+            json!({ "value": effective.value, "source": effective.source }),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({ "settings": settings }))),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminSettingsRequest {
+    settings: std::collections::HashMap<String, Value>,
+}
+
+/// Replaces curated admin settings atomically: every entry is validated
+/// first (unknown keys, wrong JSON types, and out-of-bounds integers are
+/// 400), then all rows commit in one transaction. Operator-only with CSRF.
+async fn admin_set_settings(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<AdminSettingsRequest>, JsonRejection>,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, Some(&headers)).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid settings body",
+        );
+    };
+    if request.settings.is_empty() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "No settings provided",
+        );
+    }
+    let mut rows: Vec<(String, String)> = Vec::with_capacity(request.settings.len());
+    for (name, value) in &request.settings {
+        let Some(schema) = super::admin_setting_schema(name) else {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "unknown_setting",
+                format!("Unknown admin setting '{name}'"),
+            );
+        };
+        let canonical = match (&schema.kind, value) {
+            (super::AdminSettingKind::Bool, Value::Bool(flag)) => flag.to_string(),
+            (super::AdminSettingKind::BoundedInt { min, max }, Value::Number(number)) => {
+                match number.as_u64() {
+                    Some(int) if (*min..=*max).contains(&int) => int.to_string(),
+                    _ => {
+                        return v1_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            format!("Admin setting '{name}' is out of bounds"),
+                        );
+                    }
+                }
+            }
+            _ => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    format!("Admin setting '{name}' has the wrong type"),
+                );
+            }
+        };
+        rows.push((format!("admin_override:{name}"), canonical));
+    }
+    let refs: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.clone()))
+        .collect();
+    match fm_user::SqlxUserRepository::set_app_setting_values(&pool, &refs).await {
+        Ok(()) => admin_get_settings(state, session).await,
+        Err(err) => {
+            tracing::warn!("v1 settings save failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail settings save failed",
+            )
+        }
+    }
+}
+
+/// Drops a database override so the environment default applies again.
+/// Operator-only with CSRF; unknown keys are 400, keys without an override
+/// are 404.
+async fn admin_reset_setting(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    name: Result<axum::extract::Path<String>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    let pool = match v1_admin_pool(&state, &session, Some(&headers)).await {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let Ok(axum::extract::Path(name)) = name else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid setting path",
+        );
+    };
+    if super::admin_setting_schema(&name).is_none() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "unknown_setting",
+            format!("Unknown admin setting '{name}'"),
+        );
+    }
+    match fm_user::SqlxUserRepository::delete_app_setting_value(
+        &pool,
+        &format!("admin_override:{name}"),
+    )
+    .await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "reset": true }))),
+        )
+            .into_response(),
+        Ok(false) => v1_error(
+            StatusCode::NOT_FOUND,
+            "setting_not_overridden",
+            format!("Admin setting '{name}' has no database override"),
+        ),
+        Err(err) => {
+            tracing::warn!("v1 settings reset failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail settings reset failed",
+            )
+        }
     }
 }
 
@@ -1276,7 +1442,7 @@ where
             )
         }
     };
-    let auto_verify = state.config().security.auto_verify_signatures;
+    let auto_verify = super::effective_auto_verify_signatures(state).await;
     let pgp_verify_connection = auto_verify.then(|| {
         (
             imap_config.clone(),
@@ -5117,6 +5283,242 @@ mod tests {
                 &cookie,
                 Some(&token),
                 Some(serde_json::json!({"name": "missing.test", "alias": "new.test"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn admin_settings_operator() -> (Router, String, String) {
+        let app = admin_domain_app().await;
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = admin_operator_cookie(app.clone(), &cookie, &token).await;
+        (app, cookie, token)
+    }
+
+    #[tokio::test]
+    async fn v1_admin_settings_require_operator_sessions() {
+        let app = admin_domain_app().await;
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Operator session without CSRF is still rejected on PUT.
+        let cookie = admin_operator_cookie(app.clone(), &cookie, &token).await;
+        let response = app
+            .oneshot(admin_domain_request(
+                Method::PUT,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                None,
+                Some(serde_json::json!({"settings": {"open_signup": true}})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn v1_admin_settings_roundtrip() {
+        let (app, cookie, token) = admin_settings_operator().await;
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["settings"]["open_signup"]["value"], false);
+        assert_eq!(
+            body["data"]["settings"]["open_signup"]["source"],
+            "environment"
+        );
+        assert_eq!(
+            body["data"]["settings"]["frickmail_user.allow_export"]["value"],
+            true
+        );
+        assert_eq!(
+            body["data"]["settings"]["frickmail_user.export_folder_max_messages"]["value"],
+            5000
+        );
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::PUT,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                Some(&token),
+                Some(serde_json::json!({"settings": {
+                    "open_signup": true,
+                    "frickmail_user.export_folder_max_messages": 500
+                }})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["settings"]["open_signup"]["value"], true);
+        assert_eq!(
+            body["data"]["settings"]["open_signup"]["source"],
+            "database"
+        );
+        assert_eq!(
+            body["data"]["settings"]["frickmail_user.export_folder_max_messages"]["value"],
+            500
+        );
+        // Untouched keys still report the environment.
+        assert_eq!(
+            body["data"]["settings"]["frickmail_user.allow_export"]["source"],
+            "environment"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::DELETE,
+                "/api/frickmail/v1/admin/settings/open_signup",
+                &cookie,
+                Some(&token),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await["data"]["reset"], true);
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["settings"]["open_signup"]["value"], false);
+        assert_eq!(
+            body["data"]["settings"]["open_signup"]["source"],
+            "environment"
+        );
+
+        // Resetting a key without an override is 404, not silent success.
+        let response = app
+            .oneshot(admin_domain_request(
+                Method::DELETE,
+                "/api/frickmail/v1/admin/settings/open_signup",
+                &cookie,
+                Some(&token),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn v1_admin_settings_reject_invalid_writes() {
+        let (app, cookie, token) = admin_settings_operator().await;
+
+        for (uri, body) in [
+            (
+                "/api/frickmail/v1/admin/settings",
+                serde_json::json!({"settings": {"bogus.key": true}}),
+            ),
+            (
+                "/api/frickmail/v1/admin/settings",
+                serde_json::json!({"settings": {"open_signup": "yes"}}),
+            ),
+            (
+                "/api/frickmail/v1/admin/settings",
+                serde_json::json!({"settings": {"open_signup": 1}}),
+            ),
+            (
+                "/api/frickmail/v1/admin/settings",
+                serde_json::json!({"settings": {"frickmail_user.export_folder_max_messages": 0}}),
+            ),
+            (
+                "/api/frickmail/v1/admin/settings",
+                serde_json::json!({"settings": {"frickmail_user.export_folder_max_bytes": 1.5}}),
+            ),
+            (
+                "/api/frickmail/v1/admin/settings",
+                serde_json::json!({"settings": {}}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(admin_domain_request(
+                    Method::PUT,
+                    uri,
+                    &cookie,
+                    Some(&token),
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // A batch mixing a valid and an unknown key persists nothing.
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::PUT,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                Some(&token),
+                Some(serde_json::json!({"settings": {"open_signup": true, "bogus.key": true}})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert_eq!(
+            body["data"]["settings"]["open_signup"]["source"],
+            "environment"
+        );
+
+        // Resetting an unknown key is 400, not 404.
+        let response = app
+            .oneshot(admin_domain_request(
+                Method::DELETE,
+                "/api/frickmail/v1/admin/settings/bogus.key",
+                &cookie,
+                Some(&token),
+                None,
             ))
             .await
             .unwrap();

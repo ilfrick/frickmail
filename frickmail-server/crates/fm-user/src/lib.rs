@@ -5395,6 +5395,134 @@ fn app_setting_insert_if_absent_query(backend: &str) -> &'static str {
     }
 }
 
+fn app_setting_update_query(backend: &str) -> &'static str {
+    // Binds always run (setting_value, setting_key) on every backend.
+    match backend {
+        "PostgreSQL" => {
+            "UPDATE frickmail_app_settings SET setting_value = $1 WHERE setting_key = $2"
+        }
+        _ => "UPDATE frickmail_app_settings SET setting_value = ? WHERE setting_key = ?",
+    }
+}
+
+fn app_setting_delete_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => "DELETE FROM frickmail_app_settings WHERE setting_key = $1",
+        _ => "DELETE FROM frickmail_app_settings WHERE setting_key = ?",
+    }
+}
+
+fn app_setting_insert_query(backend: &str) -> &'static str {
+    match backend {
+        "PostgreSQL" => {
+            "INSERT INTO frickmail_app_settings (setting_key, setting_value) VALUES ($1, $2)"
+        }
+        _ => "INSERT INTO frickmail_app_settings (setting_key, setting_value) VALUES (?, ?)",
+    }
+}
+
+/// Validates an application settings key: bounded ASCII so it always fits
+/// `VARCHAR(191)` and cannot smuggle whitespace or control characters.
+fn normalize_app_setting_key(key: &str) -> Result<String> {
+    let key = key.trim().to_string();
+    if key.is_empty() || key.len() > 191 {
+        return Err(FrickmailError::BadRequest(
+            "Invalid setting key".to_string(),
+        ));
+    }
+    if !key
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b".:_-".contains(&byte))
+    {
+        return Err(FrickmailError::BadRequest(
+            "Invalid setting key".to_string(),
+        ));
+    }
+    Ok(key)
+}
+
+impl SqlxUserRepository {
+    /// Reads a raw application setting. Returns `None` when absent.
+    pub async fn get_app_setting_value(pool: &AnyPool, key: &str) -> Result<Option<String>> {
+        let key = normalize_app_setting_key(key)?;
+        ensure_app_settings_table(pool).await?;
+        get_app_setting(pool, &key).await
+    }
+
+    /// Creates or replaces an application setting.
+    pub async fn set_app_setting_value(pool: &AnyPool, key: &str, value: String) -> Result<()> {
+        Self::set_app_setting_values(pool, &[(key, value)]).await
+    }
+
+    /// Deletes an application setting, returning whether a row existed.
+    pub async fn delete_app_setting_value(pool: &AnyPool, key: &str) -> Result<bool> {
+        let key = normalize_app_setting_key(key)?;
+        ensure_app_settings_table(pool).await?;
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        sqlx::query(app_setting_delete_query(&backend))
+            .bind(&key)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)
+            .map(|result| result.rows_affected() > 0)
+    }
+
+    /// Atomically creates or replaces several application settings: all rows
+    /// commit together or none do, so a failed admin save never leaves a
+    /// half-applied configuration.
+    pub async fn set_app_setting_values(pool: &AnyPool, settings: &[(&str, String)]) -> Result<()> {
+        let mut validated = Vec::with_capacity(settings.len());
+        for (key, value) in settings {
+            validated.push((normalize_app_setting_key(key)?, value.clone()));
+        }
+        ensure_app_settings_table(pool).await?;
+        let mut conn = pool.acquire().await.map_err(db_error)?;
+        let backend = conn.backend_name().to_string();
+        let begin = if backend == "SQLite" {
+            "BEGIN IMMEDIATE"
+        } else {
+            "BEGIN"
+        };
+        sqlx::query(begin)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+        let result = async {
+            for (key, value) in &validated {
+                let updated = sqlx::query(app_setting_update_query(&backend))
+                    .bind(value)
+                    .bind(key)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(db_error)?
+                    .rows_affected();
+                if updated == 0 {
+                    sqlx::query(app_setting_insert_query(&backend))
+                        .bind(key)
+                        .bind(value)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(db_error)?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => sqlx::query("COMMIT")
+                .execute(&mut *conn)
+                .await
+                .map(|_| ())
+                .map_err(db_error),
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(err)
+            }
+        }
+    }
+}
+
 fn oidc_links_query(backend: &str) -> &'static str {
     match backend {
         "PostgreSQL" => {
@@ -10519,6 +10647,71 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_reads_writes_and_deletes_app_settings() {
+        let pool = sqlite_pool().await;
+
+        assert!(
+            SqlxUserRepository::get_app_setting_value(&pool, "admin_override:open_signup")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:open_signup",
+            "true".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            SqlxUserRepository::get_app_setting_value(&pool, "admin_override:open_signup")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:open_signup",
+            "false".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            SqlxUserRepository::get_app_setting_value(&pool, "admin_override:open_signup")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+        assert!(
+            SqlxUserRepository::delete_app_setting_value(&pool, "admin_override:open_signup")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !SqlxUserRepository::delete_app_setting_value(&pool, "admin_override:open_signup")
+                .await
+                .unwrap()
+        );
+        assert!(
+            SqlxUserRepository::get_app_setting_value(&pool, "admin_override:open_signup")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        for bad in ["", "has space", "semi;colon", &"k".repeat(192)] {
+            assert!(
+                SqlxUserRepository::set_app_setting_value(&pool, bad, "v".to_string())
+                    .await
+                    .is_err(),
+                "must reject {bad:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1959,7 +1959,7 @@ async fn native_compat_response(
             Some(native_frickmail_push_unsubscribe(state, original_action, payload, session).await)
         }
         "FrickmailExportMessage" => {
-            if state.config().frickmail_user.allow_export {
+            if effective_allow_export(state).await {
                 Some(
                     native_frickmail_export_message(state, original_action, payload, session).await,
                 )
@@ -1968,14 +1968,14 @@ async fn native_compat_response(
             }
         }
         "FrickmailExportFolder" => {
-            if state.config().frickmail_user.allow_export {
+            if effective_allow_export(state).await {
                 Some(native_frickmail_export_folder(state, original_action, payload, session).await)
             } else {
                 None
             }
         }
         "FrickmailImportEml" => {
-            if state.config().frickmail_user.allow_export {
+            if effective_allow_export(state).await {
                 Some(native_frickmail_import_eml(state, original_action, payload, session).await)
             } else {
                 None
@@ -6281,6 +6281,215 @@ async fn legacy_send_message_flag_draft_source(
     }
 }
 
+/// Curated admin-overridable runtime settings (Phase 4). The Rust config is
+/// otherwise env-immutable; for exactly these keys a database override wins
+/// over the environment default, mirroring the legacy PHP admin settings
+/// writes. Overrides are stored as `admin_override:<name>` strings in
+/// `frickmail_app_settings`. A corrupt stored value warns and falls back to
+/// the environment default (fail-safe); the PUT endpoint validates strictly
+/// so corruption only arises from manual database edits.
+enum AdminSettingKind {
+    Bool,
+    BoundedInt { min: u64, max: u64 },
+}
+
+struct AdminSettingSchema {
+    name: &'static str,
+    kind: AdminSettingKind,
+}
+
+const ADMIN_SETTING_SCHEMA: &[AdminSettingSchema] = &[
+    AdminSettingSchema {
+        name: "open_signup",
+        kind: AdminSettingKind::Bool,
+    },
+    AdminSettingSchema {
+        name: "security.auto_verify_signatures",
+        kind: AdminSettingKind::Bool,
+    },
+    AdminSettingSchema {
+        name: "frickmail_user.allow_export",
+        kind: AdminSettingKind::Bool,
+    },
+    AdminSettingSchema {
+        name: "frickmail_user.export_folder_max_messages",
+        kind: AdminSettingKind::BoundedInt {
+            min: 1,
+            max: 100_000,
+        },
+    },
+    AdminSettingSchema {
+        name: "frickmail_user.export_folder_max_bytes",
+        kind: AdminSettingKind::BoundedInt {
+            min: 1024,
+            max: 1_073_741_824,
+        },
+    },
+];
+
+fn admin_setting_schema(name: &str) -> Option<&'static AdminSettingSchema> {
+    ADMIN_SETTING_SCHEMA
+        .iter()
+        .find(|schema| schema.name == name)
+}
+
+async fn admin_override_value(state: &AppState, name: &str) -> Option<String> {
+    let pool = state.db_pool()?;
+    // A store failure degrades to the environment default rather than
+    // failing the request; the settings endpoints surface store errors.
+    SqlxUserRepository::get_app_setting_value(pool, &format!("admin_override:{name}"))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn effective_admin_bool(state: &AppState, name: &str, env_default: bool) -> bool {
+    match admin_override_value(state, name).await.as_deref() {
+        Some("true") => true,
+        Some("false") => false,
+        Some(corrupt) => {
+            tracing::warn!("ignoring corrupt admin override {name}={corrupt:?}");
+            env_default
+        }
+        None => env_default,
+    }
+}
+
+async fn effective_admin_bounded_int(state: &AppState, name: &str, env_default: u64) -> u64 {
+    let value = admin_override_value(state, name).await;
+    let parsed = value.as_deref().and_then(|raw| raw.parse::<u64>().ok());
+    match parsed {
+        Some(value) => {
+            let in_bounds = admin_setting_schema(name).is_none_or(|schema| match schema.kind {
+                AdminSettingKind::BoundedInt { min, max } => (min..=max).contains(&value),
+                AdminSettingKind::Bool => false,
+            });
+            if in_bounds {
+                value
+            } else {
+                tracing::warn!("ignoring out-of-bounds admin override {name}={value}");
+                env_default
+            }
+        }
+        None => {
+            if value.is_some() {
+                tracing::warn!("ignoring corrupt admin override {name}={value:?}");
+            }
+            env_default
+        }
+    }
+}
+
+async fn effective_open_signup(state: &AppState) -> bool {
+    effective_admin_bool(state, "open_signup", state.config().open_signup).await
+}
+
+async fn effective_allow_export(state: &AppState) -> bool {
+    effective_admin_bool(
+        state,
+        "frickmail_user.allow_export",
+        state.config().frickmail_user.allow_export,
+    )
+    .await
+}
+
+async fn effective_auto_verify_signatures(state: &AppState) -> bool {
+    effective_admin_bool(
+        state,
+        "security.auto_verify_signatures",
+        state.config().security.auto_verify_signatures,
+    )
+    .await
+}
+
+async fn effective_export_folder_max_messages(state: &AppState) -> usize {
+    effective_admin_bounded_int(
+        state,
+        "frickmail_user.export_folder_max_messages",
+        state.config().frickmail_user.export_folder_max_messages as u64,
+    )
+    .await as usize
+}
+
+async fn effective_export_folder_max_bytes(state: &AppState) -> usize {
+    effective_admin_bounded_int(
+        state,
+        "frickmail_user.export_folder_max_bytes",
+        state.config().frickmail_user.export_folder_max_bytes as u64,
+    )
+    .await as usize
+}
+
+struct AdminSettingState {
+    value: serde_json::Value,
+    source: &'static str,
+}
+
+/// Resolves one curated setting to its effective value and provenance in a
+/// single read: a well-formed database override reports `database`, anything
+/// else (absent or corrupt) reports the environment default as `environment`.
+async fn admin_setting_effective(
+    state: &AppState,
+    schema: &AdminSettingSchema,
+) -> AdminSettingState {
+    let raw = admin_override_value(state, schema.name).await;
+    match schema.kind {
+        AdminSettingKind::Bool => {
+            let env = match schema.name {
+                "open_signup" => state.config().open_signup,
+                "security.auto_verify_signatures" => state.config().security.auto_verify_signatures,
+                "frickmail_user.allow_export" => state.config().frickmail_user.allow_export,
+                _ => false,
+            };
+            match raw.as_deref() {
+                Some("true") => AdminSettingState {
+                    value: serde_json::json!(true),
+                    source: "database",
+                },
+                Some("false") => AdminSettingState {
+                    value: serde_json::json!(false),
+                    source: "database",
+                },
+                _ => {
+                    if raw.is_some() {
+                        tracing::warn!("ignoring corrupt admin override {}={raw:?}", schema.name);
+                    }
+                    AdminSettingState {
+                        value: serde_json::json!(env),
+                        source: "environment",
+                    }
+                }
+            }
+        }
+        AdminSettingKind::BoundedInt { min, max } => {
+            let env = match schema.name {
+                "frickmail_user.export_folder_max_messages" => {
+                    state.config().frickmail_user.export_folder_max_messages as u64
+                }
+                "frickmail_user.export_folder_max_bytes" => {
+                    state.config().frickmail_user.export_folder_max_bytes as u64
+                }
+                _ => min,
+            };
+            match raw.as_deref().and_then(|raw| raw.parse::<u64>().ok()) {
+                Some(value) if (min..=max).contains(&value) => AdminSettingState {
+                    value: serde_json::json!(value),
+                    source: "database",
+                },
+                _ => {
+                    if raw.is_some() {
+                        tracing::warn!("ignoring corrupt admin override {}={raw:?}", schema.name);
+                    }
+                    AdminSettingState {
+                        value: serde_json::json!(env),
+                        source: "environment",
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Resolves the SMTP endpoint, preferring the per-account record, then the
 /// enabled domain template matching the account email, and finally the
 /// server-wide mail defaults.
@@ -9836,7 +10045,7 @@ async fn native_frickmail_register(
 
     match SqlxUserRepository::register_user(
         pool,
-        state.config().open_signup,
+        effective_open_signup(state).await,
         payload_string(payload, "username").unwrap_or_default(),
         email,
         payload_string(payload, "password").unwrap_or_default(),
@@ -13468,7 +13677,7 @@ async fn native_frickmail_export_folder(
     payload: &Value,
     session: &fm_session::Session,
 ) -> Response {
-    let limits = export_folder_limits(state.config());
+    let limits = export_folder_limits(state).await;
     native_frickmail_export_folder_with_fetcher(
         state,
         original_action,
@@ -15503,7 +15712,7 @@ where
         (Vec::new(), Vec::new())
     };
 
-    let auto_verify = state.config().security.auto_verify_signatures;
+    let auto_verify = effective_auto_verify_signatures(state).await;
     let pgp_verify_connection = auto_verify.then(|| {
         (
             config.clone(),
@@ -21545,10 +21754,10 @@ fn plugin_safe_filename(value: &str, fallback: &str, trim_edges: bool) -> String
     filename.chars().take(80).collect()
 }
 
-fn export_folder_limits(config: &fm_core::FrickmailConfig) -> RawFolderFetchLimits {
+async fn export_folder_limits(state: &AppState) -> RawFolderFetchLimits {
     RawFolderFetchLimits {
-        max_messages: config.frickmail_user.export_folder_max_messages,
-        max_bytes: config.frickmail_user.export_folder_max_bytes,
+        max_messages: effective_export_folder_max_messages(state).await,
+        max_bytes: effective_export_folder_max_bytes(state).await,
     }
 }
 
@@ -39760,5 +39969,69 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(!demo.allows_recipient("external@example.net"));
 
         assert!(!fm_core::DemoAccountConfig::default().is_demo_sender("demo@example.com"));
+    }
+
+    #[tokio::test]
+    async fn effective_admin_settings_follow_database_overrides() {
+        let pool = user_db_pool().await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+
+        // Environment defaults apply with no overrides stored.
+        assert!(!super::effective_open_signup(&state).await);
+        assert!(super::effective_allow_export(&state).await);
+        assert!(!super::effective_auto_verify_signatures(&state).await);
+        assert_eq!(
+            super::effective_export_folder_max_messages(&state).await,
+            5_000
+        );
+
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:open_signup",
+            "true".to_string(),
+        )
+        .await
+        .unwrap();
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:frickmail_user.allow_export",
+            "false".to_string(),
+        )
+        .await
+        .unwrap();
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:frickmail_user.export_folder_max_messages",
+            "77".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(super::effective_open_signup(&state).await);
+        assert!(!super::effective_allow_export(&state).await);
+        assert_eq!(
+            super::effective_export_folder_max_messages(&state).await,
+            77
+        );
+
+        // Corrupt and out-of-bounds values warn and fall back to the env default.
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:open_signup",
+            "maybe".to_string(),
+        )
+        .await
+        .unwrap();
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:frickmail_user.export_folder_max_messages",
+            "0".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(!super::effective_open_signup(&state).await);
+        assert_eq!(
+            super::effective_export_folder_max_messages(&state).await,
+            5_000
+        );
     }
 }
