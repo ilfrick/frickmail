@@ -54,10 +54,20 @@ transaction; unknown keys, wrong types, out-of-bounds integers, and empty
 maps are 400), and `DELETE /admin/settings/{name}` (unknown keys 400,
 missing overrides 404) share the operator+CSRF+database gate.
 
+New `fm-user/tests/admin_tables_compatibility.rs` exercises domains CRUD,
+aliasing, disable, resolution, and the settings KV round-trip against live
+SQLite/PostgreSQL/MySQL (same skip-if-unset harness as the address book
+tests). Running it locally against real MySQL 8.0/Postgres 16 caught and
+fixed four backend bugs: `disabled` projected through `CASE WHEN ... THEN 1
+ELSE 0` (Any cannot decode MySQL TINYINT), text columns decoded via
+String-or-UTF8-bytes fallback (Any surfaces MySQL TEXT as BLOB; also fixed
+in pre-existing `get_app_setting`, which had the same latent trap), integer
+columns via i64-or-i32 fallback, and driver-native transactions for settings
+writes (MySQL rejects raw `BEGIN` in the prepared-statement protocol).
+
 Verification so far (Docker-only): `cargo fmt --all` clean; `cargo test -p
-fm-http --lib -- api_v1` 50 passed / 0 failed (11 admin incl. 3 new settings
-tests; plus 1 new effective-settings behavioral test in router tests);
-`cargo test -p fm-user --lib` 61 passed / 0 failed (1 new KV test);
+fm-http --lib -- api_v1` 50 passed / 0 failed; `cargo test -p fm-user --lib`
+61 passed / 0 failed; compat suite 3/3 backends green locally;
 `cargo clippy --workspace --all-targets -- -D warnings` clean.
 
 Independent senior review APPROVED (bind order, transaction, validation,
@@ -66,6 +76,11 @@ the KV + settings suites green).
 
 Docker-only validation is done: production image builds, `/health` 200, new
 `GET /admin/settings` live (403 anonymous), no errors or panics in logs.
+
+Known follow-up (reviewer-flagged, non-blocking): pre-existing raw-BEGIN
+transaction code (`begin_account_primary_transaction_query` users) shares
+the latent MySQL-1295 prepared-protocol risk fixed here for settings with
+driver-native transactions; migrate those call sites separately.
 
 This slice is verified but NOT yet committed or pushed. The major remaining
 gates toward the final Rust-only goal are unchanged.

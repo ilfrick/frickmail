@@ -3065,8 +3065,26 @@ async fn get_app_setting(pool: &AnyPool, key: &str) -> Result<Option<String>> {
         .bind(key)
         .fetch_optional(&mut *conn)
         .await
-        .map(|row| row.map(|row| row.get::<String, _>("setting_value")))
-        .map_err(db_error)
+        .map_err(db_error)?
+        .map(|row| {
+            // MySQL surfaces TEXT as BLOB through the Any driver; accept both.
+            row.try_get::<String, _>("setting_value").or_else(|_| {
+                row.try_get::<Vec<u8>, _>("setting_value")
+                    .map_err(|_| {
+                        FrickmailError::Upstream(
+                            "app setting value has an unsupported type".to_string(),
+                        )
+                    })
+                    .and_then(|bytes| {
+                        String::from_utf8(bytes).map_err(|_| {
+                            FrickmailError::Upstream(
+                                "app setting value is not valid UTF-8".to_string(),
+                            )
+                        })
+                    })
+            })
+        })
+        .transpose()
 }
 
 async fn ensure_app_settings_table(pool: &AnyPool) -> Result<()> {
@@ -5470,7 +5488,8 @@ impl SqlxUserRepository {
 
     /// Atomically creates or replaces several application settings: all rows
     /// commit together or none do, so a failed admin save never leaves a
-    /// half-applied configuration.
+    /// half-applied configuration. Uses a driver-native transaction because
+    /// MySQL rejects raw `BEGIN` in the prepared-statement protocol.
     pub async fn set_app_setting_values(pool: &AnyPool, settings: &[(&str, String)]) -> Result<()> {
         let mut validated = Vec::with_capacity(settings.len());
         for (key, value) in settings {
@@ -5479,21 +5498,13 @@ impl SqlxUserRepository {
         ensure_app_settings_table(pool).await?;
         let mut conn = pool.acquire().await.map_err(db_error)?;
         let backend = conn.backend_name().to_string();
-        let begin = if backend == "SQLite" {
-            "BEGIN IMMEDIATE"
-        } else {
-            "BEGIN"
-        };
-        sqlx::query(begin)
-            .execute(&mut *conn)
-            .await
-            .map_err(db_error)?;
+        let mut tx = conn.begin().await.map_err(db_error)?;
         let result = async {
             for (key, value) in &validated {
                 let updated = sqlx::query(app_setting_update_query(&backend))
                     .bind(value)
                     .bind(key)
-                    .execute(&mut *conn)
+                    .execute(&mut *tx)
                     .await
                     .map_err(db_error)?
                     .rows_affected();
@@ -5501,7 +5512,7 @@ impl SqlxUserRepository {
                     sqlx::query(app_setting_insert_query(&backend))
                         .bind(key)
                         .bind(value)
-                        .execute(&mut *conn)
+                        .execute(&mut *tx)
                         .await
                         .map_err(db_error)?;
                 }
@@ -5510,13 +5521,9 @@ impl SqlxUserRepository {
         }
         .await;
         match result {
-            Ok(()) => sqlx::query("COMMIT")
-                .execute(&mut *conn)
-                .await
-                .map(|_| ())
-                .map_err(db_error),
+            Ok(()) => tx.commit().await.map_err(db_error),
             Err(err) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = tx.rollback().await;
                 Err(err)
             }
         }
@@ -6680,14 +6687,19 @@ fn domain_create_table_query(backend: &str) -> &'static str {
 }
 
 fn domain_select_query(backend: &str) -> &'static str {
+    // `disabled` is projected through CASE so every backend (including MySQL,
+    // whose BOOLEAN is TINYINT(1) that the Any driver cannot decode) returns
+    // a plain integer, mirroring the `is_primary` reads.
     match backend {
         "PostgreSQL" => {
-            "SELECT name, disabled, imap_host, imap_port, imap_secure, \
+            "SELECT name, CASE WHEN disabled THEN 1 ELSE 0 END AS disabled, \
+             imap_host, imap_port, imap_secure, \
              smtp_host, smtp_port, smtp_secure, alias_of \
              FROM frickmail_domains WHERE name = $1"
         }
         _ => {
-            "SELECT name, disabled, imap_host, imap_port, imap_secure, \
+            "SELECT name, CASE WHEN disabled THEN 1 ELSE 0 END AS disabled, \
+             imap_host, imap_port, imap_secure, \
              smtp_host, smtp_port, smtp_secure, alias_of \
              FROM frickmail_domains WHERE name = ?"
         }
@@ -6695,7 +6707,8 @@ fn domain_select_query(backend: &str) -> &'static str {
 }
 
 fn domain_list_query() -> &'static str {
-    "SELECT name, disabled, imap_host, imap_port, imap_secure, \
+    "SELECT name, CASE WHEN disabled THEN 1 ELSE 0 END AS disabled, \
+     imap_host, imap_port, imap_secure, \
      smtp_host, smtp_port, smtp_secure, alias_of \
      FROM frickmail_domains ORDER BY name ASC"
 }
@@ -6740,39 +6753,62 @@ fn domain_delete_query(backend: &str) -> &'static str {
 }
 
 fn row_to_mail_domain(row: sqlx::any::AnyRow) -> Result<MailDomain> {
-    // Boolean representation varies by backend driver (SQLite INTEGER,
-    // PostgreSQL BOOLEAN, MySQL TINYINT as integer): accept every shape the
-    // Any driver decodes.
+    // The selects project `disabled` through CASE to a plain integer on every
+    // backend; the bool arm covers drivers that still surface native booleans.
     let disabled = row
-        .try_get::<bool, _>("disabled")
+        .try_get::<i64, _>("disabled")
+        .map(|value| value != 0)
         .or_else(|_| row.try_get::<i32, _>("disabled").map(|value| value != 0))
-        .or_else(|_| row.try_get::<i64, _>("disabled").map(|value| value != 0))
+        .or_else(|_| row.try_get::<bool, _>("disabled"))
         .map_err(db_error)?;
     Ok(MailDomain {
-        name: row.try_get::<String, _>("name").map_err(db_error)?,
+        name: row_text(&row, "name")?,
         disabled,
-        imap_host: row
-            .try_get::<Option<String>, _>("imap_host")
-            .map_err(db_error)?,
-        imap_port: row
-            .try_get::<Option<i64>, _>("imap_port")
-            .map_err(db_error)?,
-        imap_secure: row
-            .try_get::<Option<String>, _>("imap_secure")
-            .map_err(db_error)?,
-        smtp_host: row
-            .try_get::<Option<String>, _>("smtp_host")
-            .map_err(db_error)?,
-        smtp_port: row
-            .try_get::<Option<i64>, _>("smtp_port")
-            .map_err(db_error)?,
-        smtp_secure: row
-            .try_get::<Option<String>, _>("smtp_secure")
-            .map_err(db_error)?,
-        alias_of: row
-            .try_get::<Option<String>, _>("alias_of")
-            .map_err(db_error)?,
+        imap_host: row_opt_text(&row, "imap_host")?,
+        imap_port: row_opt_i64(&row, "imap_port")?,
+        imap_secure: row_opt_text(&row, "imap_secure")?,
+        smtp_host: row_opt_text(&row, "smtp_host")?,
+        smtp_port: row_opt_i64(&row, "smtp_port")?,
+        smtp_secure: row_opt_text(&row, "smtp_secure")?,
+        alias_of: row_opt_text(&row, "alias_of")?,
     })
+}
+
+/// Decodes an optional integer column portably: narrow backend integers
+/// (MySQL INTEGER) surface as i32 through the `any` driver.
+fn row_opt_i64(row: &sqlx::any::AnyRow, column: &str) -> Result<Option<i64>> {
+    if let Ok(value) = row.try_get::<Option<i64>, _>(column) {
+        return Ok(value);
+    }
+    row.try_get::<Option<i32>, _>(column)
+        .map(|value| value.map(i64::from))
+        .map_err(db_error)
+}
+
+/// Decodes a text column portably: MySQL reports TEXT/VARCHAR-as-BLOB shapes
+/// through the `any` driver, which strict `String` decoding rejects
+/// (mirrors `address_book::row_string`).
+fn row_text(row: &sqlx::any::AnyRow, column: &str) -> Result<String> {
+    if let Ok(value) = row.try_get::<String, _>(column) {
+        return Ok(value);
+    }
+    let bytes: Vec<u8> = row.try_get(column).map_err(db_error)?;
+    String::from_utf8(bytes)
+        .map_err(|_| FrickmailError::Upstream(format!("domain column {column} is not valid UTF-8")))
+}
+
+fn row_opt_text(row: &sqlx::any::AnyRow, column: &str) -> Result<Option<String>> {
+    if let Ok(value) = row.try_get::<Option<String>, _>(column) {
+        return Ok(value);
+    }
+    let bytes: Option<Vec<u8>> = row.try_get(column).map_err(db_error)?;
+    bytes
+        .map(|bytes| {
+            String::from_utf8(bytes).map_err(|_| {
+                FrickmailError::Upstream(format!("domain column {column} is not valid UTF-8"))
+            })
+        })
+        .transpose()
 }
 
 async fn ensure_domains_table(pool: &AnyPool) -> Result<()> {
