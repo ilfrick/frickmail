@@ -1,4 +1,5 @@
 pub mod api_v1;
+mod avatar;
 pub mod calendar;
 pub mod contacts;
 
@@ -2150,6 +2151,7 @@ async fn native_compat_response(
             Some(native_send_read_receipt_message(state, original_action, payload, session).await)
         }
         "HibpCheck" => Some(native_hibp_check(state, original_action, session).await),
+        "Avatar" => Some(native_avatar(state, original_action, payload, session).await),
         "SGetFilters" => {
             Some(native_search_filters_get(state, original_action, payload, session).await)
         }
@@ -2217,6 +2219,46 @@ async fn native_frickmail_me(
             "Result": result
         }),
     )
+}
+
+/// Native replacement for the Avatars plugin `DoAvatar` JSON hook: resolves
+/// a sender avatar to `{type, data}` (base64) or `null` on a miss, mirroring
+/// the legacy response shape. Requires an authenticated user session so the
+/// remote-fetch path cannot be used as an anonymous SSRF oracle. The
+/// `bimiSelector` parameter is accepted for shape compatibility but currently
+/// only gates bundled service icons (BIMI DNS fetching is a follow-up).
+async fn native_avatar(
+    state: &AppState,
+    original_action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(_user) = (match load_session_user(state, original_action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(original_action, "Not authenticated");
+    };
+
+    let email = payload_string(payload, "email").unwrap_or_default();
+    let bimi = payload.get("bimi").is_some_and(|value| match value {
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_i64().is_some_and(|n| n != 0),
+        Value::String(text) => !text.trim().is_empty() && text.trim() != "0",
+        _ => false,
+    });
+    match avatar::resolve_avatar(state, &email, bimi).await {
+        Some((mime, bytes)) => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({ "Result": { "type": mime, "data": STANDARD.encode(&bytes) } }),
+        ),
+        None => json_value_envelope(
+            StatusCode::OK,
+            original_action,
+            json!({ "Result": Value::Null }),
+        ),
+    }
 }
 
 async fn native_hibp_check(
@@ -35205,6 +35247,7 @@ Subject: Empty body metadata\r\n\r\n"
             frickmail_user: Default::default(),
             transactional_smtp: Default::default(),
             hibp: Default::default(),
+            avatar: Default::default(),
             demo_account: Default::default(),
             change_password: Default::default(),
             private_data_dir: None,
@@ -40033,5 +40076,53 @@ Subject: Empty body metadata\r\n\r\n"
             super::effective_export_folder_max_messages(&state).await,
             5_000
         );
+    }
+
+    #[tokio::test]
+    async fn native_avatar_serves_bundled_icons_without_network() {
+        let state = AppState::new(test_config(None));
+        let key = [9u8; CREDENTIAL_KEY_BYTES];
+        let session = credential_session(1801, "avatar-user", Some("user@example.com"), &key).await;
+
+        // DKIM-valid sender on a bundled brand: icon, no network touched.
+        let response = super::native_avatar(
+            &state,
+            "Avatar",
+            &json!({ "email": "boss@github.com", "bimi": true }),
+            &session,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["Result"]["type"], "image/png");
+        assert!(!parsed["Result"]["data"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty());
+
+        // Without the DKIM assertion and with remotes off: a miss is null.
+        let response = super::native_avatar(
+            &state,
+            "Avatar",
+            &json!({ "email": "boss@github.com" }),
+            &session,
+        )
+        .await;
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert!(parsed["Result"].is_null());
+
+        // Invalid addresses miss instead of erroring, like the plugin.
+        let response = super::native_avatar(
+            &state,
+            "Avatar",
+            &json!({ "email": "not-an-email", "bimi": true }),
+            &session,
+        )
+        .await;
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert!(parsed["Result"].is_null());
     }
 }

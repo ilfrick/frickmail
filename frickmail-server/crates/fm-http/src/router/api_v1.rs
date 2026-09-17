@@ -66,6 +66,7 @@ pub fn routes() -> Router<AppState> {
             get(admin_get_settings).put(admin_set_settings),
         )
         .route("/admin/settings/{name}", delete(admin_reset_setting))
+        .route("/avatar", get(avatar))
         .route("/contacts", get(contacts))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
@@ -716,6 +717,83 @@ async fn admin_logout(
         Json(ApiV1Envelope::ok(json!({ "logged_out": true }))),
     )
         .into_response()
+}
+
+/// Serves a sender avatar image: `GET /avatar?email=a@b.c&bimi=1`. Requires
+/// an authenticated user session (never anonymous, never operator-only) so
+/// the remote-fetch path cannot be used as an unauthenticated SSRF oracle.
+/// `bimi=1` asserts DKIM validity and unlocks bundled service icons, like
+/// the legacy plugin. 200 carries the bytes with a private day-long cache
+/// lifetime; misses are 404, invalid emails 400. GET-only, so no CSRF check
+/// applies.
+async fn avatar(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_session_user_id(&session).await {
+        return response;
+    }
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid avatar query",
+        );
+    };
+    let Some(email) = params
+        .get("email")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "An email query parameter is required",
+        );
+    };
+    let Some(normalized) = super::avatar::normalize_avatar_email(&email) else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid email address",
+        );
+    };
+    let bimi = params.get("bimi").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    match super::avatar::resolve_avatar(&state, &normalized, bimi).await {
+        Some((mime, bytes)) => {
+            let etag = super::avatar::avatar_cache_key(&normalized);
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, mime),
+                    (
+                        axum::http::header::CACHE_CONTROL,
+                        format!(
+                            "private, max-age={}",
+                            super::avatar::AVATAR_CACHE_MAX_AGE_SECS
+                        ),
+                    ),
+                    (axum::http::header::ETAG, format!("\"{etag}\"")),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        None => v1_error(
+            StatusCode::NOT_FOUND,
+            "avatar_not_found",
+            "No avatar found for this address",
+        ),
+    }
 }
 
 /// Lists the authenticated user's address-book contact summaries (id, uid,
@@ -2458,6 +2536,7 @@ mod tests {
             frickmail_user: Default::default(),
             transactional_smtp: Default::default(),
             hibp: Default::default(),
+            avatar: Default::default(),
             demo_account: Default::default(),
             change_password: Default::default(),
             private_data_dir: None,
@@ -2471,6 +2550,13 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn read_body(response: Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
     }
 
     #[tokio::test]
@@ -5523,5 +5609,148 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn avatar_user_cookie() -> (Router, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1601, "v1avatar", "correct-horse", None).await;
+        let app = Router::new()
+            .nest("/api/frickmail/v1", super::routes())
+            .layer(fm_session::session_layer(
+                fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+            ))
+            .with_state(AppState::with_db_pool(test_api_config(), Some(pool)));
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1avatar", "correct-horse").await;
+        (app, cookie)
+    }
+
+    #[tokio::test]
+    async fn v1_avatar_requires_user_sessions() {
+        let (app, _) = avatar_user_cookie().await;
+        let (anon_cookie, _) = bootstrap_csrf(app.clone()).await;
+
+        // Anonymous callers are rejected even for harmless lookups.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/avatar?email=a%40github.com&bimi=1")
+                    .header("cookie", &anon_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Operator-only sessions (no user) are rejected too.
+        let op_app = admin_login_app(Some("opensesame"));
+        let (op_cookie, op_token) = admin_bootstrapped(op_app.clone()).await;
+        let op_cookie = {
+            let response = op_app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/frickmail/v1/admin/login")
+                        .header("content-type", "application/json")
+                        .header("cookie", &op_cookie)
+                        .header("x-sm-token", &op_token)
+                        .body(Body::from(
+                            serde_json::json!({"token": "opensesame"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            session_cookie(&response)
+        };
+        let response = op_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/avatar?email=a%40github.com&bimi=1")
+                    .header("cookie", &op_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn v1_avatar_serves_bundled_icons_and_validates() {
+        let (app, cookie) = avatar_user_cookie().await;
+
+        for uri in [
+            "/api/frickmail/v1/avatar",
+            "/api/frickmail/v1/avatar?email=",
+            "/api/frickmail/v1/avatar?email=not-an-email&bimi=1",
+            "/api/frickmail/v1/avatar?email=a%40nodot&bimi=1",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // No DKIM assertion and remotes off: miss, without network.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/avatar?email=boss%40github.com")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // DKIM-asserted sender on a bundled brand: PNG bytes with cache headers.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/avatar?email=boss%40github.com&bimi=1")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("image/png")
+        );
+        assert!(
+            response.headers().contains_key("cache-control"),
+            "avatar responses carry a cache lifetime"
+        );
+        assert!(
+            response.headers().contains_key("etag"),
+            "avatar responses carry an etag"
+        );
+        let body = read_body(response).await;
+        assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 }

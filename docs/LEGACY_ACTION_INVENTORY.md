@@ -189,7 +189,7 @@ features unless noted elsewhere.
 
 | Plugin area | Actions |
 |---|---|
-| Avatars | `Avatar` |
+| Avatars | `Avatar` (native: file cache, bundled service icons on caller-asserted DKIM, opt-in SSRF-safe Gravatar/favicon; third-party favicon aggregators and BIMI DNS are follow-ups) |
 | Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` (native settings CRUD under the legacy `Plugins["Search Filters"]` namespace; invalid add/edit and empty renamed queries are rejected as an intentional safety boundary, while login-time IMAP application remains pending) |
 | Kolab | `KolabFolder` |
 | Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` (native, operator-gated bounded legacy private-data archive/restore; requires `FRICKMAIL__ADMIN__TOKEN_HASH` and `FRICKMAIL__PRIVATE_DATA_DIR`, excludes cache and symlinks, and enforces entry/size/path/symlink limits) |
@@ -224,7 +224,7 @@ Part hooks must remain compatible while the SnappyMail plugin API is supported:
 - `StartLoginOIDC` — native (see previous slice).
 - `LoginOIDC` — native (see previous slice).
 - `RemoteAutoLogin`
-- `Avatar`
+- `Avatar` — native (legacy JSON hook + v1 `GET /avatar` share one resolver; the `/?Avatar/` part-hook URL is a follow-up)
 - `ExternalLogin`
 - `cPanelAutoLogin`
 - `ProxyAuth`

@@ -40,6 +40,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub hibp: HibpConfig,
     #[serde(default)]
+    pub avatar: AvatarConfig,
+    #[serde(default)]
     pub demo_account: DemoAccountConfig,
     #[serde(default)]
     pub change_password: ChangePasswordConfig,
@@ -190,6 +192,35 @@ pub struct TransactionalSmtpConfig {
 pub struct HibpConfig {
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+/// Sender avatar lookup (native replacement for the SnappyMail Avatars
+/// plugin). Remote lookups are off by default: sender avatars otherwise leak
+/// read receipts to favicon/gravatar hosts. Local sources (file cache,
+/// bundled service icons gated on caller-asserted DKIM) always apply.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AvatarConfig {
+    #[serde(default = "default_avatar_enable_remote")]
+    pub enable_remote: bool,
+    #[serde(default = "default_avatar_enable_gravatar")]
+    pub enable_gravatar: bool,
+}
+
+impl Default for AvatarConfig {
+    fn default() -> Self {
+        Self {
+            enable_remote: default_avatar_enable_remote(),
+            enable_gravatar: default_avatar_enable_gravatar(),
+        }
+    }
+}
+
+fn default_avatar_enable_remote() -> bool {
+    false
+}
+
+fn default_avatar_enable_gravatar() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

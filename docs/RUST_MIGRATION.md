@@ -36,7 +36,63 @@ database-wins-for-curated-keys precedence, effective-value readers rewired at
 the current env read sites, and `GET/PUT /admin/settings`. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
-## Progress Snapshot — 2026-09-16 10:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-16 12:30:00 CEST (UTC+02:00)
+
+The pending avatar slice natively replaces the Avatars plugin lookup
+(first of the operator-confirmed hook series): new `router::avatar` module
+with email normalization, SHA-1 file cache (magic-byte verified, atomic
+writes, 256 KiB cap), 21 bundled MIT service icons (exact + normalized
+domain match, DKIM-gated), opt-in SSRF-safe Gravatar (`d=404`) and direct
+`favicon.ico` chain over public-IP-only HTTPS with no redirects; new
+`AvatarConfig` (`FRICKMAIL__AVATAR__ENABLE_REMOTE/GRAVATAR`, both default
+off — remotes leak read receipts). Legacy JSON `Avatar` hook returns
+`{type, data}`/`null` like `DoAvatar`; v1 `GET /avatar?email=&bimi=`
+requires a user session (never anonymous/operator-only), serves bytes with
+private day-long cache lifetime + ETag, 404 on miss, 400 on bad email.
+
+Verification so far (Docker-only): `cargo fmt --all` clean; 7 avatar unit
+tests + 1 legacy hook test + 2 v1 avatar tests green (full-suite + clippy
+rerun pending before publish).
+
+Independent senior review APPROVED (SSRF safety, cache safety, gating,
+parity, config, attribution all verified; reviewer re-ran avatar tests +
+lib clippy green). Two review nits applied afterwards: SVG sniffing
+tightened to XML prologues declaring inline SVG, v1 `bimi` parsing aligned
+(case-insensitive + `on`).
+
+Docker-only validation is done: production image builds, `/health` 200, no
+errors or panics in logs.
+
+This slice is verified but NOT yet committed or pushed. Deferred: BIMI DNS
+fetching, third-party favicon aggregators (excluded by design), `/?Avatar/`
+part-hook URL, favicon `<link>` parsing, cache TTL/GC. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-16 11:30:00 CEST (UTC+02:00)
+
+The admin-UI slice is published (`326111a34`): `static/v1/admin.html` +
+`admin.js` operator dashboard (login, domain CRUD/alias/disable, settings
+with provenance) over 11 new `ApiClient` methods, with 17 UI tests (81
+total green, eslint clean).
+
+Independent senior review APPROVED (contract match on all paths, CSRF,
+XSS-escaped interpolation, single submit registration).
+
+Docker-only validation is done: `/health` 200, `/static/v1/admin.html` 200,
+`admin.js` served, `admin.test.mjs` excluded from the bundle, no errors.
+
+Published `326111a34` to `master` + `rust-full-migration` on `origin` (both
+tips verified via `ls-remote`); exact-SHA `naming` runs terminal success;
+no `rust-ci` run is expected (UI-only change outside its path filter).
+`a841103d4` rust-ci (×2) + naming terminal success. `gitea` still 503;
+`d6de75651` + `a841103d4` + `326111a34` gitea sync PENDING retry.
+
+The next slice surveys the Phase 5 remaining part hooks (RemoteAutoLogin,
+ExternalLogin, cPanelAutoLogin, ProxyAuth, UserHeaderSet, ExternalSso,
+Avatar) for Frickmail-mode relevance. The major remaining gates toward the
+final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-16 10:30:00 CEST (UTC+02:00)
 
 The pending admin-UI slice makes Phase 4 operator tasks usable without the
 legacy PHP admin controller: `frickmail-ui/v1/admin.html` shell (bootstrap →
