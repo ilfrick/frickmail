@@ -1461,6 +1461,15 @@ async fn json_api_request(
         (body, None)
     };
 
+    // External-login part-hook entry: like the plugin, this accepts tokenless
+    // POSTs from external sites, so it runs before connection-token
+    // enforcement and stays behind its own default-off flag.
+    if let Some(response) =
+        native_external_login_request(&state, &session, &method, &query, &headers, &body).await
+    {
+        return response;
+    }
+
     let request = match plugin_request_from_http(&query, &headers, &body, route_action) {
         Ok(request) => {
             let request = attach_legacy_json_raw_key(request, &uri);
@@ -2219,6 +2228,168 @@ async fn native_frickmail_me(
             "Result": result
         }),
     )
+}
+
+/// Native replacement for the Login External plugin's `ExternalLogin` part
+/// hook: `POST /?ExternalLogin` with urlencoded (or JSON) `Email`/`Password`
+/// fields authenticates by email against Frickmail users and establishes the
+/// user session, answering the legacy `{Action, Result, ErrorCode}` envelope
+/// when `Output=json` (case-insensitive) and redirecting to `./` otherwise.
+///
+/// Like the plugin, this entry point intentionally accepts tokenless POSTs
+/// (external sites cannot hold our CSRF token), so it stays behind the
+/// default-off `external_login_enabled` flag: enabling it accepts the same
+/// login-CSRF tradeoff the PHP plugin had. Accounts with TOTP enabled are
+/// rejected because external forms cannot complete the second factor. The
+/// session id is rotated before the user session is stored, so a successful
+/// login never fixes the pre-login session.
+async fn native_external_login_request(
+    state: &AppState,
+    session: &fm_session::Session,
+    method: &Method,
+    query: &HashMap<String, String>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<Response> {
+    if !query.contains_key("ExternalLogin") {
+        return None;
+    }
+    if !state.config().external_login_enabled {
+        return None;
+    }
+    const ACTION: &str = "ExternalLogin";
+    let json_output = |params: &HashMap<String, String>| {
+        params
+            .get("Output")
+            .is_some_and(|output| output.eq_ignore_ascii_case("json"))
+    };
+    // GET carries its parameters in the query string; POST in the body.
+    let params: HashMap<String, String> = if method == Method::POST {
+        let content_type = headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if content_type_contains(content_type, "application/json") {
+            match serde_json::from_slice::<Value>(body) {
+                Ok(Value::Object(map)) => map
+                    .into_iter()
+                    .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
+                    .collect(),
+                _ => {
+                    return Some(json_value_envelope(
+                        StatusCode::OK,
+                        ACTION,
+                        compat_error(INVALID_INPUT_ARGUMENT, "Invalid JSON body".to_string()),
+                    ));
+                }
+            }
+        } else if content_type.is_empty()
+            || content_type_contains(content_type, "application/x-www-form-urlencoded")
+        {
+            match serde_urlencoded::from_bytes::<HashMap<String, String>>(body) {
+                Ok(form) => form,
+                Err(_) => {
+                    return Some(json_value_envelope(
+                        StatusCode::OK,
+                        ACTION,
+                        compat_error(INVALID_INPUT_ARGUMENT, "Invalid form body".to_string()),
+                    ));
+                }
+            }
+        } else {
+            HashMap::new()
+        }
+    } else {
+        query.clone()
+    };
+
+    let Some(pool) = state.db_pool() else {
+        return Some(json_result_error(
+            ACTION,
+            "Frickmail database is not configured",
+        ));
+    };
+    let email = params.get("Email").map(String::as_str).unwrap_or_default();
+    let password = params
+        .get("Password")
+        .map(String::as_str)
+        .unwrap_or_default();
+
+    let ok: Result<bool, String> = async {
+        let user = fm_user::SqlxUserRepository::find_by_email(pool, email)
+            .await
+            .map_err(|err| err.public_message())?;
+        // Burns equal time for unknown addresses (dummy hash) so the
+        // endpoint is not a user-enumeration oracle.
+        if !fm_user::verify_login_password(password, user.as_ref())
+            .map_err(|err| err.public_message())?
+        {
+            return Ok(false);
+        }
+        let user = user.expect("verified login requires a user");
+        if user
+            .totp_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty() && secret != "0")
+        {
+            return Ok(false);
+        }
+        let credential_key = fm_user::derive_credential_key(password, &user.kdf_salt)
+            .map_err(|err| err.public_message())?;
+        native_login_establish_session(
+            session,
+            &NativeLoginCredentials {
+                user_id: user.id,
+                username: user.username.clone(),
+                email: user.email.clone(),
+                credential_key: credential_key.to_vec(),
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(true)
+    }
+    .await;
+
+    match ok {
+        Ok(true) => {
+            if json_output(&params) {
+                Some(json_value_envelope(
+                    StatusCode::OK,
+                    ACTION,
+                    json!({ "Result": true, "ErrorCode": 0 }),
+                ))
+            } else {
+                Some(
+                    (
+                        StatusCode::FOUND,
+                        [("location", "./")],
+                        "redirecting to Frickmail",
+                    )
+                        .into_response(),
+                )
+            }
+        }
+        Ok(false) => {
+            if json_output(&params) {
+                Some(json_value_envelope(
+                    StatusCode::OK,
+                    ACTION,
+                    json!({ "Result": false, "ErrorCode": 102 }),
+                ))
+            } else {
+                Some(
+                    (
+                        StatusCode::FOUND,
+                        [("location", "./")],
+                        "redirecting to Frickmail",
+                    )
+                        .into_response(),
+                )
+            }
+        }
+        Err(message) => Some(json_result_error(ACTION, &message)),
+    }
 }
 
 /// Native replacement for the Avatars plugin `DoAvatar` JSON hook: resolves
@@ -24838,6 +25009,174 @@ mod tests {
         assert_eq!(body["Result"]["no_primary"], true);
     }
 
+    fn external_login_config() -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.external_login_enabled = true;
+        config
+    }
+
+    async fn post_external_login(
+        state: AppState,
+        session: Session,
+        body: &str,
+        content_type: &str,
+    ) -> axum::response::Response {
+        super::json_api_request(
+            state,
+            "/?ExternalLogin".parse().unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?ExternalLogin")
+                .header("content-type", content_type)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+            session,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn external_login_authenticates_by_email_without_csrf_token() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1601,
+            "external-user",
+            Some("external@example.com"),
+            "correct-horse",
+            &[11_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        // CSRF stays enabled (the default): the part-hook entry is
+        // tokenless by design, like the plugin.
+        let state = AppState::with_db_pool(external_login_config(), Some(pool));
+
+        let response = post_external_login(
+            state,
+            test_session(),
+            "Email=external%40example.com&Password=correct-horse&Output=json",
+            "application/x-www-form-urlencoded",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["Action"], "ExternalLogin");
+        assert_eq!(body["Result"], true);
+        assert_eq!(body["ErrorCode"], 0);
+    }
+
+    #[tokio::test]
+    async fn external_login_rejects_bad_credentials_with_auth_error() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1602,
+            "external-user",
+            Some("external@example.com"),
+            "correct-horse",
+            &[11_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(external_login_config(), Some(pool));
+
+        for body in [
+            "Email=external%40example.com&Password=wrong-horse&Output=json",
+            "Email=unknown%40example.com&Password=correct-horse&Output=json",
+            "Email=&Password=&Output=json",
+        ] {
+            let response = post_external_login(
+                state.clone(),
+                test_session(),
+                body,
+                "application/x-www-form-urlencoded",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let parsed = read_json(response).await;
+            assert_eq!(parsed["Action"], "ExternalLogin");
+            assert_eq!(parsed["Result"], false);
+            assert_eq!(parsed["ErrorCode"], 102);
+        }
+    }
+
+    #[tokio::test]
+    async fn external_login_rejects_totp_accounts_and_redirects() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1603,
+            "external-totp",
+            Some("totp@example.com"),
+            "correct-horse",
+            &[11_u8; fm_user::KDF_SALT_BYTES],
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        let state = AppState::with_db_pool(external_login_config(), Some(pool));
+
+        // TOTP-gated accounts cannot complete an external form login.
+        let response = post_external_login(
+            state.clone(),
+            test_session(),
+            "Email=totp%40example.com&Password=correct-horse&Output=json",
+            "application/x-www-form-urlencoded",
+        )
+        .await;
+        let parsed = read_json(response).await;
+        assert_eq!(parsed["Result"], false);
+
+        // Without Output=json the plugin redirects to ./ either way.
+        let response = post_external_login(
+            state,
+            test_session(),
+            "Email=totp%40example.com&Password=correct-horse",
+            "application/x-www-form-urlencoded",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok()),
+            Some("./")
+        );
+    }
+
+    #[tokio::test]
+    async fn external_login_stays_invisible_when_disabled() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1604,
+            "external-user",
+            Some("external@example.com"),
+            "correct-horse",
+            &[11_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+
+        // Disabled (the default): the route falls through to the normal
+        // dispatcher, which rejects the tokenless POST.
+        let response = post_external_login(
+            state,
+            test_session(),
+            "Email=external%40example.com&Password=correct-horse&Output=json",
+            "application/x-www-form-urlencoded",
+        )
+        .await;
+        let parsed = read_json(response).await;
+        assert_ne!(parsed["Action"], "ExternalLogin");
+    }
+
     #[tokio::test]
     async fn native_frickmail_discover_services_matches_provider_shape() {
         let pool = user_db_pool().await;
@@ -35240,6 +35579,7 @@ Subject: Empty body metadata\r\n\r\n"
             redis_url: "redis://redis:6379/0".to_string(),
             app_salt: Some("test-app-salt-for-oidc-ci".to_string()),
             open_signup: false,
+            external_login_enabled: false,
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),

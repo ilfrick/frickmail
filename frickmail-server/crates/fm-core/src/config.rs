@@ -26,6 +26,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub open_signup: bool,
     #[serde(default)]
+    pub external_login_enabled: bool,
+    #[serde(default)]
     pub oidc: OidcConfig,
     #[serde(default)]
     pub oauth2: Oauth2Config,

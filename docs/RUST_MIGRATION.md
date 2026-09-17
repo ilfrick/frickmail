@@ -36,7 +36,59 @@ database-wins-for-curated-keys precedence, effective-value readers rewired at
 the current env read sites, and `GET/PUT /admin/settings`. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
-## Progress Snapshot — 2026-09-16 12:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-16 14:30:00 CEST (UTC+02:00)
+
+The pending external-login slice natively replaces the Login External
+plugin's `ExternalLogin` part hook (second of the hook series): `POST (or
+GET) /?ExternalLogin` with `Email`/`Password`/`Output` form-or-JSON fields
+authenticates by email against Frickmail users (new case-insensitive
+`find_by_email`), burns equal time on unknown addresses via the dummy hash,
+rejects TOTP-gated accounts, rotates the session id, and answers the legacy
+`{Action, Result, ErrorCode}` envelope (`ErrorCode` 0/102 like PHP
+`AuthError`) for `Output=json` or a `./` redirect otherwise. Like the
+plugin, the entry runs before connection-token enforcement (external sites
+hold no CSRF token) and stays behind default-off
+`FRICKMAIL__EXTERNAL_LOGIN_ENABLED`.
+
+Verification so far (Docker-only): `cargo fmt --all` clean; 4 router
+external-login tests green (auth without token, bad/unknown/empty creds →
+102, TOTP reject + redirect, disabled-invisible); fm-user email assertions
+green; `cargo clippy --workspace --all-targets -- -D warnings` clean.
+
+Independent senior review APPROVED (bypass narrowness, default-off,
+credential handling, enumeration resistance, TOTP/session-fixation, parity,
+parsing, injection safety all verified; reviewer re-ran the 4 tests green).
+
+Docker-only validation is done: production image builds, `/health` 200,
+tokenless `POST /?ExternalLogin` against default config falls through to
+the legacy unknown-action envelope (invisible when disabled), no errors or
+panics in logs.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-16 13:30:00 CEST (UTC+02:00)
+
+The avatar slice is published (`ad40d7114`, naming fix `368d0267c`):
+native sender avatar lookup (cache, bundled DKIM-gated service icons,
+opt-in SSRF-safe Gravatar/favicon), legacy JSON `Avatar` hook, v1 `GET
+/avatar`, `AvatarConfig` defaulting remotes off.
+
+The `naming` gate failed on `ad40d7114` (5 descriptive SnappyMail/RainLoop
+mentions in comments/attribution); fixed in `368d0267c` by rewording to
+"legacy" and allowlisting only the mandatory MIT copyright line — gate
+passes locally (53 hits, 10 entries, none stale) and on CI.
+
+Published `368d0267c` to `master` + `rust-full-migration` on `origin` (tips
+verified via `ls-remote`); `rust-ci` running; exact-SHA `naming` runs
+terminal success. `gitea` still 503; now 4 commits pending gitea sync
+(`d6de75651`, `a841103d4`, `326111a34`, `ad40d7114`, `368d0267c` — retry
+ongoing).
+
+The next slice is native `ExternalLogin` (second of the hook series). The
+major remaining gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-16 12:30:00 CEST (UTC+02:00)
 
 The pending avatar slice natively replaces the Avatars plugin lookup
 (first of the operator-confirmed hook series): new `router::avatar` module

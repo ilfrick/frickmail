@@ -453,6 +453,16 @@ impl SqlxUserRepository {
         fetch_optional_user_by(pool, "username", normalize_username(username)).await
     }
 
+    /// Finds a user by email address, case-insensitively. Used by external
+    /// login flows that only carry an email (no username).
+    pub async fn find_by_email(pool: &AnyPool, email: &str) -> Result<Option<FrickmailUser>> {
+        let email = email.trim().to_ascii_lowercase();
+        if email.is_empty() {
+            return Ok(None);
+        }
+        fetch_optional_user_by(pool, "LOWER(email)", email).await
+    }
+
     pub async fn user_count(pool: &AnyPool) -> Result<i64> {
         sqlx::query("SELECT COUNT(*) AS count FROM frickmail_users")
             .fetch_one(pool)
@@ -7372,6 +7382,25 @@ mod tests {
         assert_eq!(by_id.totp_secret.as_deref(), Some("123456"));
         assert_eq!(by_id.oidc_escrow_key, Some(vec![9, 8, 7]));
         assert_eq!(SqlxUserRepository::user_count(&pool).await.unwrap(), 1);
+
+        // Email lookup is case-insensitive and trims, for external logins.
+        let by_email = SqlxUserRepository::find_by_email(&pool, "  ALICE@Example.COM ")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_email, by_id);
+        assert!(
+            SqlxUserRepository::find_by_email(&pool, "nobody@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SqlxUserRepository::find_by_email(&pool, "   ")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

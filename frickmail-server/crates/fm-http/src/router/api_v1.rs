@@ -2529,6 +2529,7 @@ mod tests {
             redis_url: "redis://redis:6379/0".to_string(),
             app_salt: Some("test-app-salt-for-api-v1".to_string()),
             open_signup: false,
+            external_login_enabled: false,
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),
