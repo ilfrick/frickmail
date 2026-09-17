@@ -7395,12 +7395,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            SqlxUserRepository::find_by_email(&pool, "   ")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(SqlxUserRepository::find_by_email(&pool, "   ")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

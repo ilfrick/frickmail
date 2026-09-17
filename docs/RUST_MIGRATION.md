@@ -36,7 +36,56 @@ database-wins-for-curated-keys precedence, effective-value readers rewired at
 the current env read sites, and `GET/PUT /admin/settings`. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
-## Progress Snapshot — 2026-09-16 14:30:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-16 18:00:00 CEST (UTC+02:00)
+
+The pending remote-auto-login slice natively replaces the Login Remote
+plugin's `RemoteAutoLogin` part hook (third of the hook series): `GET
+/?RemoteAutoLogin` signs the session in as the
+`FRICKMAIL__REMOTE_AUTO_LOGIN__*` user (email lookup, password verify,
+empty-credential guard, TOTP reject, session rotation) and always redirects
+to `./` like the plugin; existing sessions pass through untouched.
+Default-off: URL reachability equals authentication, so operators must gate
+it at the edge. Config Debug output redacts the password.
+
+Verification so far (Docker-only): `docker compose -f
+docker-compose.rust.yml` dev-image fmt/check/test/clippy all clean —
+workspace `cargo test`: 804 passed, 0 failed (MySQL + Postgres services
+up); production image rebuilt after the final test tweak.
+
+Independent senior review: first pass BLOCKED (vacuous passthrough/near-miss
+coverage, stale snapshot, Debug password exposure, empty-password and
+failure-immutability qualifications) — all addressed; re-review APPROVED
+(non-vacuous passthrough/near-miss coverage, guard ordering, redacting Debug
+confirmed).
+
+Docker image validation is done: production image (immutable
+sha256:b8e26e09269a279c039c5a50f66c299a365006888a008a1ddba8733d1f28e29d,
+user frickmail:frickmail, read-only rootfs, cap-drop ALL,
+no-new-privileges) builds; `/health` 200; disabled `/?RemoteAutoLogin`
+stays invisible (200 normal page, no redirect); no panics/errors in logs;
+OOM false, restarts 0, healthcheck reaches healthy.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-16 15:30:00 CEST (UTC+02:00)
+
+The external-login slice is published (`1626bb26c`): native `ExternalLogin`
+part hook (form/JSON Email+Password, email lookup, TOTP reject, session
+rotation, legacy envelope/redirect parity) behind default-off
+`FRICKMAIL__EXTERNAL_LOGIN_ENABLED`.
+
+Independent senior review APPROVED. Docker-only validation is done:
+`/health` 200, disabled-by-default invisibility verified live, no errors.
+
+Published `1626bb26c` to `master` + `rust-full-migration` on `origin`
+(verified via `ls-remote`); CI running. `gitea` still 503; now 6 commits
+pending gitea sync — retry ongoing.
+
+The next slice is native `RemoteAutoLogin`. The major remaining gates
+toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-16 14:30:00 CEST (UTC+02:00)
 
 The pending external-login slice natively replaces the Login External
 plugin's `ExternalLogin` part hook (second of the hook series): `POST (or

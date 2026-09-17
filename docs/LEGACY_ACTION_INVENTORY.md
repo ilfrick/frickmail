@@ -223,9 +223,9 @@ Part hooks must remain compatible while the SnappyMail plugin API is supported:
   Graph userinfo.
 - `StartLoginOIDC` — native (see previous slice).
 - `LoginOIDC` — native (see previous slice).
-- `RemoteAutoLogin`
+- `RemoteAutoLogin` — native (`GET /?RemoteAutoLogin`, env credentials, TOTP reject, always-redirect, default-off flag)
 - `Avatar` — native (legacy JSON hook + v1 `GET /avatar` share one resolver; the `/?Avatar/` part-hook URL is a follow-up)
-- `ExternalLogin`
+- `ExternalLogin` — native (`POST/GET /?ExternalLogin`, email lookup, TOTP reject, legacy envelope/redirect parity, default-off flag)
 - `cPanelAutoLogin`
 - `ProxyAuth`
 - `UserHeaderSet`

@@ -2530,6 +2530,7 @@ mod tests {
             app_salt: Some("test-app-salt-for-api-v1".to_string()),
             open_signup: false,
             external_login_enabled: false,
+            remote_auto_login: Default::default(),
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),

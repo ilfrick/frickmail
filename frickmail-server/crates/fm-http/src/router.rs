@@ -498,6 +498,10 @@ async fn root_get(
         return json_api_request(state, uri, request, session).await;
     }
 
+    if let Some(response) = native_remote_auto_login(&state, &uri, &session).await {
+        return response;
+    }
+
     if let Some(response) = native_oidc_part_hook(&state, &uri, &session).await {
         return response;
     }
@@ -2228,6 +2232,93 @@ async fn native_frickmail_me(
             "Result": result
         }),
     )
+}
+
+/// Native replacement for the Login Remote plugin's `RemoteAutoLogin` part
+/// hook: `GET /?RemoteAutoLogin` signs the session in as the user configured
+/// via `FRICKMAIL__REMOTE_AUTO_LOGIN__*` and redirects to `./`, exactly like
+/// the plugin (which always redirects, success or failure). Already
+/// authenticated sessions pass straight through to the redirect without
+/// re-verifying. Accounts with TOTP enabled are never auto-logged-in.
+/// Default-off: reachability of the URL equals authentication, so operators
+/// must gate it at the network edge.
+async fn native_remote_auto_login(
+    state: &AppState,
+    uri: &Uri,
+    session: &fm_session::Session,
+) -> Option<Response> {
+    let query = uri.query().unwrap_or_default();
+    if !query
+        .split('&')
+        .any(|pair| pair == "RemoteAutoLogin" || pair.starts_with("RemoteAutoLogin="))
+    {
+        return None;
+    }
+    let redirect = || {
+        Some(
+            (
+                StatusCode::FOUND,
+                [("location", "./")],
+                "redirecting to Frickmail",
+            )
+                .into_response(),
+        )
+    };
+    if !state.config().remote_auto_login.enabled {
+        return None;
+    }
+    if session
+        .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+        .unwrap_or(None)
+        .is_some()
+    {
+        return redirect();
+    }
+    let config = &state.config().remote_auto_login;
+    if config.password.is_empty() || config.email.trim().is_empty() {
+        return redirect();
+    }
+    let Some(pool) = state.db_pool() else {
+        return redirect();
+    };
+    let ok: Result<bool, String> = async {
+        let user = fm_user::SqlxUserRepository::find_by_email(pool, &config.email)
+            .await
+            .map_err(|err| err.public_message())?;
+        if !fm_user::verify_login_password(&config.password, user.as_ref())
+            .map_err(|err| err.public_message())?
+        {
+            return Ok(false);
+        }
+        let user = user.expect("verified login requires a user");
+        if user
+            .totp_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty() && secret != "0")
+        {
+            return Ok(false);
+        }
+        let credential_key = fm_user::derive_credential_key(&config.password, &user.kdf_salt)
+            .map_err(|err| err.public_message())?;
+        native_login_establish_session(
+            session,
+            &NativeLoginCredentials {
+                user_id: user.id,
+                username: user.username.clone(),
+                email: user.email.clone(),
+                credential_key: credential_key.to_vec(),
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(true)
+    }
+    .await;
+    if let Err(err) = ok {
+        tracing::warn!("remote auto-login failed: {err}");
+    }
+    redirect()
 }
 
 /// Native replacement for the Login External plugin's `ExternalLogin` part
@@ -25177,6 +25268,237 @@ mod tests {
         assert_ne!(parsed["Action"], "ExternalLogin");
     }
 
+    fn remote_login_config(email: &str, password: &str) -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.remote_auto_login.enabled = true;
+        config.remote_auto_login.email = email.to_string();
+        config.remote_auto_login.password = password.to_string();
+        config
+    }
+
+    async fn remote_session_user(session: &Session) -> Option<i64> {
+        session
+            .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+            .await
+            .unwrap_or(None)
+            .map(|user| user.user_id)
+    }
+
+    #[tokio::test]
+    async fn remote_auto_login_signs_in_configured_user() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1611,
+            "remote-user",
+            Some("remote@example.com"),
+            "correct-horse",
+            &[12_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(
+            remote_login_config("remote@example.com", "correct-horse"),
+            Some(pool),
+        );
+        let session = test_session();
+
+        let response = super::native_remote_auto_login(
+            &state,
+            &"/?RemoteAutoLogin".parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("enabled hook handles the route");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok()),
+            Some("./")
+        );
+        assert_eq!(remote_session_user(&session).await, Some(1611));
+    }
+
+    #[tokio::test]
+    async fn remote_auto_login_rejects_misconfigurations_without_session_change() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1612,
+            "remote-user",
+            Some("remote@example.com"),
+            "correct-horse",
+            &[12_u8; fm_user::KDF_SALT_BYTES],
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        seed_login_user(
+            &pool,
+            1613,
+            "plain-user",
+            Some("plain@example.com"),
+            "correct-horse",
+            &[12_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+
+        // Wrong password: redirect, session untouched.
+        let state = AppState::with_db_pool(
+            remote_login_config("plain@example.com", "wrong-horse"),
+            Some(pool.clone()),
+        );
+        let session = test_session();
+        let response = super::native_remote_auto_login(
+            &state,
+            &"/?RemoteAutoLogin".parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("failures still redirect");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(remote_session_user(&session).await, None);
+
+        // TOTP-gated accounts are never auto-logged-in.
+        let totp_state = AppState::with_db_pool(
+            remote_login_config("remote@example.com", "correct-horse"),
+            Some(pool.clone()),
+        );
+        let session = test_session();
+        let response = super::native_remote_auto_login(
+            &totp_state,
+            &"/?RemoteAutoLogin".parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("failures still redirect");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("./")
+        );
+        assert_eq!(remote_session_user(&session).await, None);
+
+        // Empty configured email or password never reaches the database.
+        for config in [
+            remote_login_config("", "correct-horse"),
+            remote_login_config("remote@example.com", ""),
+            remote_login_config("   ", "correct-horse"),
+        ] {
+            let state = AppState::with_db_pool(config, Some(pool.clone()));
+            let session = test_session();
+            let response = super::native_remote_auto_login(
+                &state,
+                &"/?RemoteAutoLogin".parse().unwrap(),
+                &session,
+            )
+            .await
+            .expect("misconfiguration still redirects");
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(remote_session_user(&session).await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_auto_login_keeps_existing_sessions_and_hides_when_disabled() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1614,
+            "remote-user",
+            Some("remote@example.com"),
+            "correct-horse",
+            &[12_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        seed_login_user(
+            &pool,
+            1615,
+            "other-user",
+            Some("other@example.com"),
+            "other-horse",
+            &[14_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+
+        // An already-authenticated session for a DIFFERENT user passes
+        // through untouched: same session id and same credential key.
+        let state = AppState::with_db_pool(
+            remote_login_config("remote@example.com", "correct-horse"),
+            Some(pool.clone()),
+        );
+        let key = [13_u8; CREDENTIAL_KEY_BYTES];
+        let session = credential_session(1615, "other-user", Some("other@example.com"), &key).await;
+        session.save().await.unwrap();
+        let session_id = session.id().expect("persisted session has an id");
+        let response = super::native_remote_auto_login(
+            &state,
+            &"/?RemoteAutoLogin".parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("existing sessions redirect");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("./")
+        );
+        assert_eq!(remote_session_user(&session).await, Some(1615));
+        assert_eq!(
+            session
+                .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+                .await
+                .unwrap_or(None),
+            Some(STANDARD.encode(key))
+        );
+        assert_eq!(session.id(), Some(session_id));
+
+        // Disabled (the default): invisible, falls through to normal routing.
+        let plain = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        assert!(super::native_remote_auto_login(
+            &plain,
+            &"/?RemoteAutoLogin".parse().unwrap(),
+            &test_session(),
+        )
+        .await
+        .is_none());
+        // With the hook ENABLED, only the exact query key triggers it:
+        // near-misses and values containing the name are normal traffic.
+        let enabled = AppState::with_db_pool(
+            remote_login_config("remote@example.com", "correct-horse"),
+            Some(pool),
+        );
+        for uri in [
+            "/",
+            "/?RemoteAutoLoginx=1",
+            "/?xRemoteAutoLogin",
+            "/?Page=RemoteAutoLogin",
+            "/?RemoteAutoLogin=1&Other=2"
+                .replace("RemoteAutoLogin=1", "Note=RemoteAutoLogin")
+                .as_str(),
+        ] {
+            assert!(
+                super::native_remote_auto_login(&enabled, &uri.parse().unwrap(), &test_session(),)
+                    .await
+                    .is_none(),
+                "unexpected trigger for {uri}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn native_frickmail_discover_services_matches_provider_shape() {
         let pool = user_db_pool().await;
@@ -35580,6 +35902,7 @@ Subject: Empty body metadata\r\n\r\n"
             app_salt: Some("test-app-salt-for-oidc-ci".to_string()),
             open_signup: false,
             external_login_enabled: false,
+            remote_auto_login: Default::default(),
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),

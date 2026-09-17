@@ -28,6 +28,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub external_login_enabled: bool,
     #[serde(default)]
+    pub remote_auto_login: RemoteAutoLoginConfig,
+    #[serde(default)]
     pub oidc: OidcConfig,
     #[serde(default)]
     pub oauth2: Oauth2Config,
@@ -223,6 +225,31 @@ fn default_avatar_enable_remote() -> bool {
 
 fn default_avatar_enable_gravatar() -> bool {
     false
+}
+
+/// Environment-driven auto-login (native replacement for the Login Remote
+/// plugin's `RemoteAutoLogin` part hook). Off unless explicitly enabled: any
+/// client that can reach `/?RemoteAutoLogin` is signed in as the configured
+/// user, so operators must gate it at the network edge exactly like the PHP
+/// plugin required.
+#[derive(Clone, Deserialize, Default)]
+pub struct RemoteAutoLoginConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+impl std::fmt::Debug for RemoteAutoLoginConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteAutoLoginConfig")
+            .field("enabled", &self.enabled)
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -754,9 +781,21 @@ fn default_export_folder_max_bytes() -> usize {
 mod tests {
     use super::{
         DemoAccountConfig, FrickmailCacheConfig, MailDefaults, MessageListDomainOverride,
-        SecurityConfig,
+        RemoteAutoLoginConfig, SecurityConfig,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn remote_auto_login_debug_redacts_password() {
+        let config = RemoteAutoLoginConfig {
+            enabled: true,
+            email: "auto@example.com".to_string(),
+            password: "secret-horse".to_string(),
+        };
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("secret-horse"));
+    }
 
     #[test]
     fn message_list_domain_overrides_match_legacy_precedence() {
