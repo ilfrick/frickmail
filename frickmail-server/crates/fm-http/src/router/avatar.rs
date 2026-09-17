@@ -1,4 +1,4 @@
-//! Sender avatar lookup (native replacement for the SnappyMail Avatars plugin).
+//! Sender avatar lookup (native replacement for the legacy Avatars plugin).
 //!
 //! Resolution order mirrors the plugin: private file cache, then bundled
 //! service icons (only when the caller asserts DKIM validity, like the
@@ -8,8 +8,8 @@
 //! receipts), and BIMI DNS fetching is a follow-up (the `bimi` flag
 //! currently gates service icons exactly like the plugin).
 //!
-//! Service icons are baked in from `plugins/avatars/images/services/`
-//! (MIT, RainLoop Team — see `assets/avatars/ATTRIBUTION.md`) so the
+//! Service icons are baked in from the legacy plugin image bundle
+//! (MIT-licensed — see `assets/avatars/ATTRIBUTION.md`) so the
 //! production image needs no legacy plugin files at runtime.
 
 use std::path::{Path, PathBuf};

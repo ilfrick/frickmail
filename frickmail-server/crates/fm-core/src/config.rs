@@ -194,7 +194,7 @@ pub struct HibpConfig {
     pub api_key: Option<String>,
 }
 
-/// Sender avatar lookup (native replacement for the SnappyMail Avatars
+/// Sender avatar lookup (native replacement for the legacy Avatars
 /// plugin). Remote lookups are off by default: sender avatars otherwise leak
 /// read receipts to favicon/gravatar hosts. Local sources (file cache,
 /// bundled service icons gated on caller-asserted DKIM) always apply.

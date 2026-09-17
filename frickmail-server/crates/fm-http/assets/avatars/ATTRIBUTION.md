@@ -1,7 +1,8 @@
 # Avatar service icon attribution
 
-The PNG brand icons in `services/` are copied verbatim from the SnappyMail
-Avatars plugin (`plugins/avatars/images/services/` in this repository).
+The PNG brand icons in `services/` are copied verbatim from the legacy
+Avatars plugin image bundle (`plugins/avatars/images/services/` in this
+repository).
 
 ```
 The MIT License (MIT)

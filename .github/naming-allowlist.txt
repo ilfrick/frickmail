@@ -22,3 +22,4 @@ frickmail-server/crates/fm-http/src/router.rs|SNAPPYMAIL_APP_VERSION|http|PHP-ru
 frickmail-server/crates/fm-http/src/router.rs|rainloop_ab_|db-compat|PHP-bridge-removal-plus-schema-decision|Compatibility-suite query against the shared address-book schema
 .docker/release/rust/Dockerfile|snappymail/v/0\.0\.0/|packaging|legacy-UI-removal|Strangler-phase UI bundle build inputs (static, templates, themes, localization)
 frickmail-ui/build.mjs|snappymail/v/0\.0\.0/|packaging|legacy-UI-removal|Strangler-phase static-bundle source paths
+frickmail-server/crates/fm-http/assets/avatars/ATTRIBUTION.md|RainLoop Team|legal|legacy-tree-removal|Required MIT copyright notice for the baked-in brand icons
