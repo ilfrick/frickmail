@@ -583,6 +583,14 @@ async fn admin_set_settings(
             "Invalid settings body",
         );
     };
+    if request
+        .settings
+        .contains_key("external_auth.allow_provisioning")
+    {
+        if let Err(response) = v1_require_connection_token(&session, &headers).await {
+            return response;
+        }
+    }
     if request.settings.is_empty() {
         return v1_error(
             StatusCode::BAD_REQUEST,
@@ -660,6 +668,11 @@ async fn admin_reset_setting(
             "Invalid setting path",
         );
     };
+    if name == "external_auth.allow_provisioning" {
+        if let Err(response) = v1_require_connection_token(&session, &headers).await {
+            return response;
+        }
+    }
     if super::admin_setting_schema(&name).is_none() {
         return v1_error(
             StatusCode::BAD_REQUEST,
@@ -2455,6 +2468,13 @@ async fn v1_require_token(
     if !state.config().security.csrf_enabled || state.config().php_bridge_url.is_some() {
         return Ok(());
     }
+    v1_require_connection_token(session, headers).await
+}
+
+async fn v1_require_connection_token(
+    session: &fm_session::Session,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), Response> {
     let expected = match expected_connection_token(session).await {
         Ok(expected) => expected,
         Err(_) => {
@@ -5382,6 +5402,244 @@ mod tests {
         let (cookie, token) = bootstrap_csrf(app.clone()).await;
         let cookie = admin_operator_cookie(app.clone(), &cookie, &token).await;
         (app, cookie, token)
+    }
+
+    #[tokio::test]
+    async fn external_provisioning_api_requires_operator_and_csrf() {
+        for bypass in ["none", "csrf_disabled", "php_bridge"] {
+            let pool = login_db_pool().await;
+            seed_login_user(&pool, 1501, "policy-user", "correct-horse", None).await;
+            let mut config = test_api_config();
+            config.admin.token_hash = Some(fm_user::hash_admin_token("opensesame").unwrap());
+            if bypass == "csrf_disabled" {
+                config.security.csrf_enabled = false;
+            } else if bypass == "php_bridge" {
+                config.php_bridge_url = Some("http://unused.invalid".to_string());
+            }
+            let app = Router::new()
+                .nest("/api/frickmail/v1", super::routes())
+                .layer(fm_session::session_layer(
+                    fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+                ))
+                .with_state(AppState::with_db_pool(config, Some(pool.clone())));
+            let (anonymous_cookie, anonymous_token) = bootstrap_csrf(app.clone()).await;
+            let (user_cookie, user_token) = bootstrap_csrf(app.clone()).await;
+            let user_cookie = login_as(
+                app.clone(),
+                &user_cookie,
+                &user_token,
+                "policy-user",
+                "correct-horse",
+            )
+            .await;
+
+            for (cookie, token) in [
+                (&anonymous_cookie, &anonymous_token),
+                (&user_cookie, &user_token),
+            ] {
+                for (method, uri, body) in [
+                    (Method::GET, "/api/frickmail/v1/admin/settings", None),
+                    (
+                        Method::PUT,
+                        "/api/frickmail/v1/admin/settings",
+                        Some(json!({"settings": {"external_auth.allow_provisioning": true}})),
+                    ),
+                    (
+                        Method::DELETE,
+                        "/api/frickmail/v1/admin/settings/external_auth.allow_provisioning",
+                        None,
+                    ),
+                ] {
+                    let response = app
+                        .clone()
+                        .oneshot(admin_domain_request(method, uri, cookie, Some(token), body))
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::FORBIDDEN, "{bypass}");
+                    assert_eq!(
+                        read_json(response).await["error"]["code"],
+                        "admin_forbidden"
+                    );
+                }
+            }
+
+            let cookie =
+                admin_operator_cookie(app.clone(), &anonymous_cookie, &anonymous_token).await;
+            for token in [None, Some("wrong-token")] {
+                for (method, uri, body) in [
+                    (
+                        Method::PUT,
+                        "/api/frickmail/v1/admin/settings",
+                        Some(json!({"settings": {"external_auth.allow_provisioning": true}})),
+                    ),
+                    (
+                        Method::DELETE,
+                        "/api/frickmail/v1/admin/settings/external_auth.allow_provisioning",
+                        None,
+                    ),
+                ] {
+                    let mut request = admin_domain_request(method, uri, &cookie, token, body);
+                    request.headers_mut().insert(
+                        "content-type",
+                        axum::http::HeaderValue::from_static("application/json"),
+                    );
+                    let response = app.clone().oneshot(request).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::FORBIDDEN, "{bypass}");
+                    assert_eq!(read_json(response).await["error"]["code"], "invalid_token");
+                }
+            }
+            assert_eq!(
+                fm_user::SqlxUserRepository::get_app_setting_value(
+                    &pool,
+                    "admin_override:external_auth.allow_provisioning",
+                )
+                .await
+                .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn external_provisioning_api_enable_disable_reset() {
+        let (app, cookie, token) = admin_settings_operator().await;
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::PUT,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                Some(&token),
+                Some(json!({"settings": {"open_signup": true}})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["settings"]["open_signup"]["value"], true);
+        assert_eq!(
+            body["data"]["settings"]["external_auth.allow_provisioning"],
+            json!({"value": false, "source": "default"})
+        );
+
+        for enabled in [true, false, true] {
+            let response = app
+                .clone()
+                .oneshot(admin_domain_request(
+                    Method::PUT,
+                    "/api/frickmail/v1/admin/settings",
+                    &cookie,
+                    Some(&token),
+                    Some(json!({"settings": {"external_auth.allow_provisioning": enabled}})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                read_json(response).await["data"]["settings"]["external_auth.allow_provisioning"],
+                json!({"value": enabled, "source": "database"})
+            );
+            let response = app
+                .clone()
+                .oneshot(admin_domain_request(
+                    Method::GET,
+                    "/api/frickmail/v1/admin/settings",
+                    &cookie,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                read_json(response).await["data"]["settings"]["external_auth.allow_provisioning"],
+                json!({"value": enabled, "source": "database"})
+            );
+        }
+
+        let response = app
+            .clone()
+            .oneshot(admin_domain_request(
+                Method::DELETE,
+                "/api/frickmail/v1/admin/settings/external_auth.allow_provisioning",
+                &cookie,
+                Some(&token),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await["data"]["reset"], true);
+        let response = app
+            .oneshot(admin_domain_request(
+                Method::GET,
+                "/api/frickmail/v1/admin/settings",
+                &cookie,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["settings"]["open_signup"]["value"], true);
+        assert_eq!(
+            body["data"]["settings"]["external_auth.allow_provisioning"],
+            json!({"value": false, "source": "default"})
+        );
+    }
+
+    #[tokio::test]
+    async fn external_provisioning_api_rejects_non_boolean_values() {
+        let (app, cookie, token) = admin_settings_operator().await;
+        for invalid in [
+            json!("true"),
+            json!("false"),
+            json!("yes"),
+            json!(1),
+            json!(0),
+            json!(null),
+            json!([]),
+            json!({}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(admin_domain_request(
+                    Method::PUT,
+                    "/api/frickmail/v1/admin/settings",
+                    &cookie,
+                    Some(&token),
+                    Some(json!({"settings": {
+                        "external_auth.allow_provisioning": invalid,
+                        "open_signup": true
+                    }})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                read_json(response).await["error"]["code"],
+                "invalid_request"
+            );
+            let response = app
+                .clone()
+                .oneshot(admin_domain_request(
+                    Method::GET,
+                    "/api/frickmail/v1/admin/settings",
+                    &cookie,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = read_json(response).await;
+            assert_eq!(body["data"]["settings"]["open_signup"]["value"], false);
+            assert_eq!(
+                body["data"]["settings"]["external_auth.allow_provisioning"],
+                json!({"value": false, "source": "default"})
+            );
+        }
     }
 
     #[tokio::test]

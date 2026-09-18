@@ -6608,6 +6608,10 @@ const ADMIN_SETTING_SCHEMA: &[AdminSettingSchema] = &[
         kind: AdminSettingKind::Bool,
     },
     AdminSettingSchema {
+        name: "external_auth.allow_provisioning",
+        kind: AdminSettingKind::Bool,
+    },
+    AdminSettingSchema {
         name: "security.auto_verify_signatures",
         kind: AdminSettingKind::Bool,
     },
@@ -6731,7 +6735,8 @@ struct AdminSettingState {
 
 /// Resolves one curated setting to its effective value and provenance in a
 /// single read: a well-formed database override reports `database`, anything
-/// else (absent or corrupt) reports the environment default as `environment`.
+/// else (absent or corrupt) reports the setting's safe fallback (the
+/// environment default, or the fixed default for settings without one).
 async fn admin_setting_effective(
     state: &AppState,
     schema: &AdminSettingSchema,
@@ -6739,11 +6744,17 @@ async fn admin_setting_effective(
     let raw = admin_override_value(state, schema.name).await;
     match schema.kind {
         AdminSettingKind::Bool => {
-            let env = match schema.name {
-                "open_signup" => state.config().open_signup,
-                "security.auto_verify_signatures" => state.config().security.auto_verify_signatures,
-                "frickmail_user.allow_export" => state.config().frickmail_user.allow_export,
-                _ => false,
+            let (fallback, source) = match schema.name {
+                "external_auth.allow_provisioning" => (false, "default"),
+                "open_signup" => (state.config().open_signup, "environment"),
+                "security.auto_verify_signatures" => (
+                    state.config().security.auto_verify_signatures,
+                    "environment",
+                ),
+                "frickmail_user.allow_export" => {
+                    (state.config().frickmail_user.allow_export, "environment")
+                }
+                _ => (false, "environment"),
             };
             match raw.as_deref() {
                 Some("true") => AdminSettingState {
@@ -6759,8 +6770,8 @@ async fn admin_setting_effective(
                         tracing::warn!("ignoring corrupt admin override {}={raw:?}", schema.name);
                     }
                     AdminSettingState {
-                        value: serde_json::json!(env),
-                        source: "environment",
+                        value: serde_json::json!(fallback),
+                        source,
                     }
                 }
             }
@@ -40675,6 +40686,85 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(!demo.allows_recipient("external@example.net"));
 
         assert!(!fm_core::DemoAccountConfig::default().is_demo_sender("demo@example.com"));
+    }
+
+    #[tokio::test]
+    async fn external_provisioning_requires_explicit_valid_database_true() {
+        let pool = user_db_pool().await;
+        let mut config = test_config(None);
+        config.open_signup = true;
+        config.external_login_enabled = true;
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        let schema = super::admin_setting_schema("external_auth.allow_provisioning").unwrap();
+        assert!(matches!(schema.kind, super::AdminSettingKind::Bool));
+
+        let effective = super::admin_setting_effective(&state, schema).await;
+        assert_eq!(effective.value, false);
+        assert_eq!(effective.source, "default");
+        assert!(super::effective_open_signup(&state).await);
+
+        for (raw, expected, source) in [
+            ("true", true, "database"),
+            ("false", false, "database"),
+            ("TRUE", false, "default"),
+            ("1", false, "default"),
+            ("yes", false, "default"),
+            (" true ", false, "default"),
+            ("\"true\"", false, "default"),
+            ("null", false, "default"),
+            ("{}", false, "default"),
+            ("", false, "default"),
+        ] {
+            SqlxUserRepository::set_app_setting_value(
+                &pool,
+                "admin_override:external_auth.allow_provisioning",
+                raw.to_string(),
+            )
+            .await
+            .unwrap();
+            let effective = super::admin_setting_effective(&state, schema).await;
+            assert_eq!(effective.value, expected, "stored value: {raw:?}");
+            assert_eq!(effective.source, source, "stored value: {raw:?}");
+        }
+
+        SqlxUserRepository::delete_app_setting_value(
+            &pool,
+            "admin_override:external_auth.allow_provisioning",
+        )
+        .await
+        .unwrap();
+        let effective = super::admin_setting_effective(&state, schema).await;
+        assert_eq!(effective.value, false);
+        assert_eq!(effective.source, "default");
+    }
+
+    #[tokio::test]
+    async fn external_provisioning_denies_when_store_unavailable() {
+        let mut config = test_config(None);
+        config.open_signup = true;
+        let schema = super::admin_setting_schema("external_auth.allow_provisioning").unwrap();
+        let state = AppState::with_db_pool(config.clone(), None);
+        let effective = super::admin_setting_effective(&state, schema).await;
+        assert_eq!(effective.value, false);
+        assert_eq!(effective.source, "default");
+
+        let pool = user_db_pool().await;
+        SqlxUserRepository::set_app_setting_value(
+            &pool,
+            "admin_override:external_auth.allow_provisioning",
+            "true".to_string(),
+        )
+        .await
+        .unwrap();
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        assert_eq!(
+            super::admin_setting_effective(&state, schema).await.value,
+            true
+        );
+        pool.close().await;
+        let effective = super::admin_setting_effective(&state, schema).await;
+        assert_eq!(effective.value, false);
+        assert_eq!(effective.source, "default");
     }
 
     #[tokio::test]

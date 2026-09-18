@@ -5,7 +5,43 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-15 02:00:00 CEST (UTC+02:00)
+## Progress Snapshot — 2026-09-18 21:30:00 UTC
+
+The remote-auto-login slice is published (`91dd1ffb8`): native
+`RemoteAutoLogin` part hook (env credentials, TOTP reject, always-redirect,
+default-off flag, redacting Debug). Published `91dd1ffb8` to `master` +
+`rust-full-migration` on `origin` and `gitea` (all 4 tips identical,
+verified via `ls-remote`); exact-SHA `rust-ci` (×2) + `naming` (×2) runs
+terminal success.
+
+The pending external-provisioning-policy slice adds the default-off
+`external_auth.allow_provisioning` curated admin setting (fixed-false
+fallback independent of `open_signup`; strict boolean DB resolution;
+operator+CSRF enforced on writes including bypass configurations; generic
+v1 admin UI renders it automatically). Policy prerequisite only: no
+mapping, provisioning, unlock, or escrow handlers yet.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo test -p fm-http --lib -- external_provisioning` 5 passed / 0
+failed; `cargo check --workspace` clean; `cargo clippy --workspace
+--all-targets -- -D warnings` clean.
+
+Independent senior review APPROVED (fail-closed fallback, operator/CSRF,
+strict typing confirmed; mapping/unlock flows explicitly out of scope).
+
+Docker production-image validation is done: image
+sha256:86e08fb82af370f2c8c6dd77a2ffbcf6f593b16d19d4e8359169bced376b6928
+(user frickmail:frickmail, read-only rootfs, cap-drop ALL,
+no-new-privileges); `/health` 200; no panics/errors in logs; OOM false,
+restarts 0, healthcheck reaches healthy.
+
+This slice is verified but NOT yet committed or pushed. The next decision
+needed from the operator is the trusted external identity transport
+(reverse-proxy assertion vs signed assertions vs defer adapters) before
+proxy/cPanel login handlers are implemented. The major remaining gates
+toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-15 02:00:00 CEST (UTC+02:00)
 
 The domain slice is published (`9c64e58d6`): `frickmail_domains` table with
 operator CRUD, aliasing, disable, exact/alias resolution, account
