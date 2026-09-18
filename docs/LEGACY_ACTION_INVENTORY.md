@@ -227,8 +227,8 @@ Part hooks must remain compatible while the SnappyMail plugin API is supported:
 - `Avatar` — native (legacy JSON hook + v1 `GET /avatar` share one resolver; the `/?Avatar/` part-hook URL is a follow-up)
 - `ExternalLogin` — native (`POST/GET /?ExternalLogin`, email lookup, TOTP reject, legacy envelope/redirect parity, default-off flag)
 - `cPanelAutoLogin`
-- `ProxyAuth`
-- `UserHeaderSet`
+- `ProxyAuth` — native (`GET /?ProxyAuth`, trusted-peer TCP check with exact-IP/CIDR v4/v6 matching, OIDC-style identity link + escrow under provider `proxy`, TOTP reject, always-redirect, admin-gated provisioning without session, default-off flag)
+- `UserHeaderSet` — native (`GET /?UserHeaderSet`, 200 when the configured identity header is nonempty else 401, never touches the session)
 - `ExternalSso`
 
 ## Legacy Transport Shapes

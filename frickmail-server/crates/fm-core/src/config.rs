@@ -28,6 +28,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub external_login_enabled: bool,
     #[serde(default)]
+    pub proxy_auth: ProxyAuthConfig,
+    #[serde(default)]
     pub remote_auto_login: RemoteAutoLoginConfig,
     #[serde(default)]
     pub oidc: OidcConfig,
@@ -225,6 +227,35 @@ fn default_avatar_enable_remote() -> bool {
 
 fn default_avatar_enable_gravatar() -> bool {
     false
+}
+
+/// Trusted reverse-proxy auto-login (native replacement for the Proxy Auth
+/// plugin's `ProxyAuth` part hook). Off unless explicitly enabled: the
+/// configured identity header is only honored when the TCP peer address
+/// matches `trusted_peers` (exact IP or CIDR, v4/v6). Header names and peer
+/// ranges are not secrets, so plain `Debug` is safe here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProxyAuthConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub trusted_peers: Vec<String>,
+    #[serde(default = "default_proxy_auth_identity_header")]
+    pub identity_header: String,
+}
+
+impl Default for ProxyAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trusted_peers: Vec::new(),
+            identity_header: default_proxy_auth_identity_header(),
+        }
+    }
+}
+
+fn default_proxy_auth_identity_header() -> String {
+    "X-Proxy-User".to_string()
 }
 
 /// Environment-driven auto-login (native replacement for the Login Remote

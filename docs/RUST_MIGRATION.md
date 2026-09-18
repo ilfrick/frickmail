@@ -5,7 +5,48 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-18 21:30:00 UTC
+## Progress Snapshot — 2026-09-18 22:30:00 UTC
+
+The pending proxy-auth slice natively replaces the Proxy Auth plugin's
+`ProxyAuth` + `UserHeaderSet` hooks (fourth of the hook series): `GET
+/?ProxyAuth` accepts the identity header ONLY from explicitly configured
+trusted TCP peers (`FRICKMAIL__PROXY_AUTH__*`, default-off, empty peers =
+deny; X-Forwarded-For never trusted), always redirects to `./` like the
+plugin. Anonymous sessions enter login mode (explicit provider-"proxy"
+identity link + escrow key recovery, TOTP reject, session rotation);
+authenticated sessions with a credential key enter link mode (binds the
+proxy-asserted identity; conflicts with another user fail without
+reassignment). Unknown identities are denied unless effective
+`external_auth.allow_provisioning` is true — and then the user row is
+created with NO session (local credentials via the reset flow, then link).
+`/?UserHeaderSet` returns 200/401 without touching sessions.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http` clean; `cargo test -p fm-http --lib --
+proxy_auth` 10 passed / 0 failed; `cargo test -p fm-user --lib --
+provision_external` 3 passed / 0 failed; `cargo clippy --workspace
+--all-targets -- -D warnings` clean.
+
+Independent senior review APPROVED (TCP-peer-only trust, fail-closed
+disabled/untrusted paths, link-conflict no-reassignment, provisioning
+never gated on open_signup, auto-link of fresh accounts safe, snapshot
+honest). Non-blocking follow-ups recorded: static error mapping for DB
+errors in auth warn paths, conditional-write hardening for the
+check-then-act link guard, orphan-row cleanup on concurrent duplicate
+provisions.
+
+Docker production-image validation is done: image
+sha256:880b0de922498e727584d62428368689a931628fccf90875d65925452e942b14
+(user frickmail:frickmail, read-only rootfs, cap-drop ALL,
+no-new-privileges); `/health` 200; untrusted `/?ProxyAuth` stays
+invisible (200 normal page, no redirect, no session); no panics/errors
+in logs; OOM false, restarts 0, healthcheck healthy.
+
+This slice is verified but NOT yet committed or pushed. The remaining
+hook-series items are `cPanelAutoLogin` and `ExternalSso`. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
+## Prior Snapshot — 2026-09-18 21:30:00 UTC
 
 The external-provisioning-policy slice is published (`8270a06d3`):
 default-off `external_auth.allow_provisioning` curated admin setting

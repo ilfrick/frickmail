@@ -20,7 +20,7 @@ use std::{
 use axum::body::to_bytes as axum_to_bytes;
 use axum::{
     body::{to_bytes, Body, Bytes},
-    extract::{OriginalUri, Request as AxumRequest, State},
+    extract::{ConnectInfo, FromRequestParts, OriginalUri, Request as AxumRequest, State},
     http::{
         header::{
             ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, EXPIRES, IF_MATCH,
@@ -474,6 +474,7 @@ async fn root_get(
     State(state): State<AppState>,
     session: fm_session::Session,
     OriginalUri(uri): OriginalUri,
+    OptionalPeerAddr(peer): OptionalPeerAddr,
     request: AxumRequest,
 ) -> Response {
     let index_root = std::path::PathBuf::from(state.config().static_root.clone());
@@ -499,6 +500,15 @@ async fn root_get(
     }
 
     if let Some(response) = native_remote_auto_login(&state, &uri, &session).await {
+        return response;
+    }
+
+    if let Some(response) = native_user_header_set(&state, &uri, request.headers()).await {
+        return response;
+    }
+
+    if let Some(response) = native_proxy_auth(&state, &uri, request.headers(), &session, peer).await
+    {
         return response;
     }
 
@@ -2319,6 +2329,348 @@ async fn native_remote_auto_login(
         tracing::warn!("remote auto-login failed: {err}");
     }
     redirect()
+}
+
+/// Maximum byte length of a proxy-supplied identity. The subject is opaque
+/// (case preserved, like OIDC subjects); over-long values fail closed.
+const PROXY_AUTH_IDENTITY_MAX_BYTES: usize = 320;
+
+/// Provider label under which proxy identities are stored in the shared
+/// OIDC identity-link table, reusing the OIDC escrow machinery.
+const PROXY_AUTH_PROVIDER: &str = "proxy";
+
+/// Optional TCP peer address for `root_get`.
+///
+/// axum 0.8's `ConnectInfo` implements only `FromRequestParts` (missing
+/// connect info is a rejection), so `Option<ConnectInfo<SocketAddr>>` is not
+/// a valid extractor. This wrapper maps that absence — e.g. oneshot tests
+/// without connect info — to `None`, which every peer-gated hook treats as
+/// untrusted (fail-closed).
+struct OptionalPeerAddr(Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for OptionalPeerAddr
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
+            .await
+            .ok()
+            .map(|info| info.0);
+        Ok(Self(peer))
+    }
+}
+
+fn proxy_auth_provider_hash() -> String {
+    fm_oidc::provider_hash(PROXY_AUTH_PROVIDER)
+}
+
+/// Matches a TCP peer address against one trusted-peer entry: an exact IP
+/// (`127.0.0.1`, `::1`) or a CIDR range (`10.1.0.0/24`, `fd00::/64`).
+/// Malformed entries never match (fail-closed); v4 and v6 never mix.
+fn proxy_auth_peer_entry_matches(peer: &IpAddr, entry: &str) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    if let Some((network, prefix)) = entry.split_once('/') {
+        let Ok(network) = network.trim().parse::<IpAddr>() else {
+            return false;
+        };
+        let Ok(prefix) = prefix.trim().parse::<u8>() else {
+            return false;
+        };
+        return proxy_auth_cidr_contains(&network, prefix, peer);
+    }
+    entry
+        .parse::<IpAddr>()
+        .is_ok_and(|address| &address == peer)
+}
+
+fn proxy_auth_cidr_contains(network: &IpAddr, prefix: u8, peer: &IpAddr) -> bool {
+    match (network, peer) {
+        (IpAddr::V4(network), IpAddr::V4(peer)) => {
+            if prefix > 32 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0_u32
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            (u32::from_be_bytes(network.octets()) & mask)
+                == (u32::from_be_bytes(peer.octets()) & mask)
+        }
+        (IpAddr::V6(network), IpAddr::V6(peer)) => {
+            if prefix > 128 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0_u128
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            (u128::from_be_bytes(network.octets()) & mask)
+                == (u128::from_be_bytes(peer.octets()) & mask)
+        }
+        _ => false,
+    }
+}
+
+fn proxy_auth_peer_trusted(peer: &IpAddr, trusted_peers: &[String]) -> bool {
+    trusted_peers
+        .iter()
+        .any(|entry| proxy_auth_peer_entry_matches(peer, entry))
+}
+
+/// Reads the configured identity header case-insensitively and normalizes
+/// the value: trimmed, length-capped, case preserved. Returns `None` for a
+/// misconfigured header name or an empty/over-long value. Never logs the
+/// value; callers only report static failure reasons.
+fn proxy_auth_identity(headers: &HeaderMap, configured_header: &str) -> Option<String> {
+    let configured = configured_header.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    let name =
+        axum::http::HeaderName::from_bytes(configured.to_ascii_lowercase().as_bytes()).ok()?;
+    let value = headers.get(name)?.to_str().ok()?;
+    let identity = value.trim();
+    if identity.is_empty() || identity.len() > PROXY_AUTH_IDENTITY_MAX_BYTES {
+        return None;
+    }
+    Some(identity.to_string())
+}
+
+fn proxy_auth_header_present(headers: &HeaderMap, configured_header: &str) -> bool {
+    proxy_auth_identity(headers, configured_header).is_some()
+}
+
+fn proxy_auth_redirect() -> Response {
+    (
+        StatusCode::FOUND,
+        [("location", "./")],
+        "redirecting to Frickmail",
+    )
+        .into_response()
+}
+
+/// Native replacement for the Proxy Auth plugin's `UserHeaderSet` part hook:
+/// `GET /?UserHeaderSet` answers 200 when the configured identity header is
+/// nonempty and 401 otherwise. It never touches the session. Returns `None`
+/// when disabled or when the request is not a `UserHeaderSet` probe.
+async fn native_user_header_set(
+    state: &AppState,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    if !state.config().proxy_auth.enabled {
+        return None;
+    }
+    if !query_map(uri).contains_key("UserHeaderSet") {
+        return None;
+    }
+    let status = if proxy_auth_header_present(headers, &state.config().proxy_auth.identity_header) {
+        StatusCode::OK
+    } else {
+        StatusCode::UNAUTHORIZED
+    };
+    Some((status, "proxy auth header probe").into_response())
+}
+
+/// Native replacement for the Proxy Auth plugin's `ProxyAuth` part hook:
+/// `GET /?ProxyAuth` trusts the configured identity header only from TCP
+/// peers in `proxy_auth.trusted_peers` (never `X-Forwarded-For`).
+///
+/// Like the plugin this always redirects to `./` once enabled, triggered,
+/// and peer-trusted; every failure mode redirects without changing the
+/// session. Returns `None` while disabled, untriggered, or untrusted so the
+/// request falls through to the remaining hooks.
+///
+/// An authenticated session (link mode) binds the identity to the current
+/// user and escrows the session credential key, reusing the OIDC
+/// identity-link machinery with provider `"proxy"`. Conflicting mappings
+/// fail rather than reassign. An anonymous session (login mode) recovers
+/// the credential key from escrow, rejects TOTP-gated accounts like the
+/// other auto-login hooks, and establishes a rotated session. Unknown
+/// identities are provisioned only under the effective
+/// `external_auth.allow_provisioning` policy (fixed-false fallback, never
+/// `open_signup`), and provisioning never establishes a session: the new
+/// account must be claimed via the password-reset flow and then linked.
+async fn native_proxy_auth(
+    state: &AppState,
+    uri: &Uri,
+    headers: &HeaderMap,
+    session: &fm_session::Session,
+    peer: Option<SocketAddr>,
+) -> Option<Response> {
+    if !state.config().proxy_auth.enabled {
+        return None;
+    }
+    if !query_map(uri).contains_key("ProxyAuth") {
+        return None;
+    }
+    let peer = peer.map(|addr| addr.ip())?;
+    if !proxy_auth_peer_trusted(&peer, &state.config().proxy_auth.trusted_peers) {
+        return None;
+    }
+    let Some(identity) = proxy_auth_identity(headers, &state.config().proxy_auth.identity_header)
+    else {
+        return Some(proxy_auth_redirect());
+    };
+    let Some(pool) = state.db_pool() else {
+        return Some(proxy_auth_redirect());
+    };
+
+    let current = session
+        .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+        .unwrap_or(None);
+    if current.is_some() {
+        proxy_auth_link_identity(state, pool, session, &identity).await;
+    } else {
+        proxy_auth_login(state, pool, session, &identity).await;
+    }
+    Some(proxy_auth_redirect())
+}
+
+/// Link mode: the session is already authenticated, so bind the proxy
+/// identity to the current user and escrow the session credential key for
+/// later passwordless logins. Any failure leaves the session untouched.
+async fn proxy_auth_link_identity(
+    state: &AppState,
+    pool: &sqlx::AnyPool,
+    session: &fm_session::Session,
+    identity: &str,
+) {
+    let result: Result<(), String> = async {
+        let current = session
+            .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+            .await
+            .map_err(|err| format!("Frickmail session read failed: {err}"))?
+            .ok_or_else(|| "Not authenticated".to_string())?;
+        let user = SqlxUserRepository::find_by_id(pool, current.user_id)
+            .await
+            .map_err(|err| err.public_message())?
+            .ok_or_else(|| "Frickmail account not found".to_string())?;
+        let encoded = session
+            .get::<String>(fm_session::CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .map_err(|err| format!("Frickmail session read failed: {err}"))?;
+        let credential_key = encoded
+            .as_deref()
+            .and_then(|value| STANDARD.decode(value.trim()).ok())
+            .filter(|key| key.len() == CREDENTIAL_KEY_BYTES)
+            .ok_or_else(|| "Missing session credential key".to_string())?;
+
+        let provider_hash = proxy_auth_provider_hash();
+        SqlxUserRepository::ensure_oidc_link_unclaimed(pool, &provider_hash, identity, user.id)
+            .await
+            .map_err(|err| err.public_message())?;
+        SqlxUserRepository::upsert_oidc_identity(pool, user.id, &provider_hash, identity)
+            .await
+            .map_err(|err| err.public_message())?;
+        let salt = state.config().app_salt.as_deref().unwrap_or("");
+        let escrow = fm_oidc::encrypt_escrow_key(&credential_key, salt);
+        SqlxUserRepository::set_oidc_escrow_key(pool, user.id, &escrow)
+            .await
+            .map_err(|err| err.public_message())?;
+        Ok(())
+    }
+    .await;
+    if let Err(err) = result {
+        tracing::warn!("proxy auth link failed: {err}");
+    }
+}
+
+/// Login mode: resolve the proxy identity to a linked user, recover the
+/// credential key from escrow, and establish a rotated session. Unknown
+/// identities fall through to the provisioning decision; every failure
+/// leaves the session untouched.
+async fn proxy_auth_login(
+    state: &AppState,
+    pool: &sqlx::AnyPool,
+    session: &fm_session::Session,
+    identity: &str,
+) {
+    let result: Result<(), String> = async {
+        let provider_hash = proxy_auth_provider_hash();
+        let linked = SqlxUserRepository::find_oidc_identity(pool, &provider_hash, identity)
+            .await
+            .map_err(|err| err.public_message())?;
+        let Some(user_id) = linked else {
+            proxy_auth_provision(state, pool, identity).await?;
+            return Ok(());
+        };
+        let user = SqlxUserRepository::find_by_id(pool, user_id)
+            .await
+            .map_err(|err| err.public_message())?
+            .ok_or_else(|| "Frickmail account not found".to_string())?;
+        if user
+            .totp_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty() && secret != "0")
+        {
+            return Err("Proxy login is unavailable for two-factor accounts".to_string());
+        }
+        let escrow = SqlxUserRepository::get_oidc_escrow_key(pool, user.id)
+            .await
+            .map_err(|err| err.public_message())?
+            .ok_or_else(|| {
+                "Proxy escrow key missing — link the account from an authenticated session"
+                    .to_string()
+            })?;
+        let salt = state.config().app_salt.as_deref().unwrap_or("");
+        let credential_key = fm_oidc::decrypt_escrow_key(&escrow, salt)
+            .filter(|key| key.len() == CREDENTIAL_KEY_BYTES)
+            .ok_or_else(|| "Proxy escrow key could not be decrypted".to_string())?;
+        native_login_establish_session(
+            session,
+            &NativeLoginCredentials {
+                user_id: user.id,
+                username: user.username.clone(),
+                email: user.email.clone(),
+                credential_key,
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+    .await;
+    if let Err(err) = result {
+        tracing::warn!("proxy auth login failed: {err}");
+    }
+}
+
+/// Provisioning decision for unknown proxy identities. Consults only the
+/// effective `external_auth.allow_provisioning` policy (fixed-false
+/// fallback) — never `open_signup` — and never establishes a session.
+async fn proxy_auth_provision(
+    state: &AppState,
+    pool: &sqlx::AnyPool,
+    identity: &str,
+) -> Result<(), String> {
+    if !effective_admin_bool(state, "external_auth.allow_provisioning", false).await {
+        return Err("Proxy identity is not linked to a Frickmail account".to_string());
+    }
+    let email = identity.contains('@').then(|| identity.to_string());
+    let user = SqlxUserRepository::provision_external_user(pool, identity, email.as_deref())
+        .await
+        .map_err(|err| err.public_message())?;
+    let provider_hash = proxy_auth_provider_hash();
+    SqlxUserRepository::ensure_oidc_link_unclaimed(pool, &provider_hash, identity, user.id)
+        .await
+        .map_err(|err| err.public_message())?;
+    SqlxUserRepository::upsert_oidc_identity(pool, user.id, &provider_hash, identity)
+        .await
+        .map_err(|err| err.public_message())?;
+    Ok(())
 }
 
 /// Native replacement for the Login External plugin's `ExternalLogin` part
@@ -25510,6 +25862,582 @@ mod tests {
         }
     }
 
+    fn proxy_auth_config(peers: &[&str]) -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.proxy_auth.enabled = true;
+        config.proxy_auth.trusted_peers = peers.iter().map(ToString::to_string).collect();
+        config
+    }
+
+    fn proxy_auth_headers(identity: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(identity) = identity {
+            headers.insert("x-proxy-user", identity.parse().unwrap());
+        }
+        headers
+    }
+
+    fn proxy_auth_peer(ip: &str) -> Option<std::net::SocketAddr> {
+        format!("{ip}:443").parse().ok()
+    }
+
+    async fn proxy_auth_pool() -> AnyPool {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        create_oidc_identity_tables(&pool).await;
+        pool
+    }
+
+    async fn enable_proxy_provisioning(pool: &AnyPool) {
+        create_app_settings_table(pool).await;
+        sqlx::query(
+            "INSERT INTO frickmail_app_settings (setting_key, setting_value) VALUES (?, ?)",
+        )
+        .bind("admin_override:external_auth.allow_provisioning")
+        .bind("true")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn assert_proxy_redirect(response: &axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok()),
+            Some("./")
+        );
+    }
+
+    #[test]
+    fn proxy_auth_peer_matcher_supports_exact_and_cidr_v4_v6() {
+        use std::net::IpAddr;
+
+        let lan: IpAddr = "10.1.2.3".parse().unwrap();
+        let outside: IpAddr = "10.1.3.1".parse().unwrap();
+        let v6: IpAddr = "fd00::42".parse().unwrap();
+        let v6_outside: IpAddr = "fd00:0:0:1::1".parse().unwrap();
+
+        // Exact matches (surrounding whitespace tolerated).
+        assert!(super::proxy_auth_peer_trusted(
+            &lan,
+            &["10.1.2.3".to_string()]
+        ));
+        assert!(super::proxy_auth_peer_trusted(
+            &lan,
+            &["  10.1.2.3  ".to_string()]
+        ));
+        assert!(!super::proxy_auth_peer_trusted(
+            &lan,
+            &["10.1.2.4".to_string()]
+        ));
+
+        // IPv4 CIDR ranges and prefix edge cases.
+        assert!(super::proxy_auth_peer_trusted(
+            &lan,
+            &["10.1.2.0/24".to_string()]
+        ));
+        assert!(!super::proxy_auth_peer_trusted(
+            &outside,
+            &["10.1.2.0/24".to_string()]
+        ));
+        assert!(super::proxy_auth_peer_trusted(
+            &lan,
+            &["10.1.2.3/32".to_string()]
+        ));
+        assert!(!super::proxy_auth_peer_trusted(
+            &outside,
+            &["10.1.2.3/32".to_string()]
+        ));
+        assert!(super::proxy_auth_peer_trusted(
+            &outside,
+            &["0.0.0.0/0".to_string()]
+        ));
+
+        // IPv6 exact and CIDR matches.
+        let loopback_v6: IpAddr = "::1".parse().unwrap();
+        assert!(super::proxy_auth_peer_trusted(
+            &loopback_v6,
+            &["::1".to_string()]
+        ));
+        assert!(super::proxy_auth_peer_trusted(
+            &v6,
+            &["fd00::/64".to_string()]
+        ));
+        assert!(!super::proxy_auth_peer_trusted(
+            &v6_outside,
+            &["fd00::/64".to_string()]
+        ));
+
+        // v4 and v6 never mix, even under covering ranges.
+        assert!(!super::proxy_auth_peer_trusted(
+            &v6,
+            &["0.0.0.0/0".to_string()]
+        ));
+        assert!(!super::proxy_auth_peer_trusted(&lan, &["::/0".to_string()]));
+
+        // Malformed entries never match (fail-closed).
+        for entry in [
+            "",
+            "   ",
+            "not-an-ip",
+            "10.0.0.0/33",
+            "10.0.0.0/abc",
+            "10.0.0.0/",
+            "/24",
+            "10.0.0.0/-1",
+            "fd00::/129",
+        ] {
+            assert!(
+                !super::proxy_auth_peer_trusted(&lan, &[entry.to_string()]),
+                "malformed entry matched: {entry:?}"
+            );
+        }
+
+        // An empty peer list trusts nobody.
+        assert!(!super::proxy_auth_peer_trusted(&lan, &[]));
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_disabled_and_untriggered_stay_invisible() {
+        let pool = proxy_auth_pool().await;
+        let uri: Uri = "/?ProxyAuth".parse().unwrap();
+
+        // Disabled (the default): invisible even from a trusted peer.
+        let disabled = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        assert!(super::native_proxy_auth(
+            &disabled,
+            &uri,
+            &proxy_auth_headers(Some("someone@example.com")),
+            &test_session(),
+            proxy_auth_peer("10.1.2.3"),
+        )
+        .await
+        .is_none());
+
+        // Enabled but untriggered: ordinary traffic falls through.
+        let enabled =
+            AppState::with_db_pool(proxy_auth_config(&["10.1.2.0/24"]), Some(pool.clone()));
+        for uri in ["/", "/?ProxyAuthx=1", "/?Page=ProxyAuth", "/?UserHeaderSet"] {
+            assert!(
+                super::native_proxy_auth(
+                    &enabled,
+                    &uri.parse().unwrap(),
+                    &proxy_auth_headers(Some("someone@example.com")),
+                    &test_session(),
+                    proxy_auth_peer("10.1.2.3"),
+                )
+                .await
+                .is_none(),
+                "unexpected trigger for {uri}"
+            );
+        }
+
+        // The probe is equally invisible while disabled or untriggered.
+        assert!(super::native_user_header_set(
+            &disabled,
+            &"/?UserHeaderSet".parse().unwrap(),
+            &proxy_auth_headers(Some("someone@example.com")),
+        )
+        .await
+        .is_none());
+        assert!(super::native_user_header_set(
+            &enabled,
+            &"/".parse().unwrap(),
+            &proxy_auth_headers(Some("someone@example.com")),
+        )
+        .await
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_untrusted_peer_denied_without_session_change() {
+        let pool = proxy_auth_pool().await;
+        seed_login_user(
+            &pool,
+            1700,
+            "proxy-user",
+            Some("proxy-user@example.com"),
+            "correct-horse",
+            &[15_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(proxy_auth_config(&["10.1.2.0/24"]), Some(pool.clone()));
+        let uri: Uri = "/?ProxyAuth".parse().unwrap();
+        let headers = proxy_auth_headers(Some("proxy-user@example.com"));
+
+        // Outside the trusted range: no handling, session untouched.
+        assert!(super::native_proxy_auth(
+            &state,
+            &uri,
+            &headers,
+            &test_session(),
+            proxy_auth_peer("192.168.1.1"),
+        )
+        .await
+        .is_none());
+
+        // Empty peer list trusts nobody.
+        let no_peers = AppState::with_db_pool(proxy_auth_config(&[]), Some(pool.clone()));
+        assert!(super::native_proxy_auth(
+            &no_peers,
+            &uri,
+            &headers,
+            &test_session(),
+            proxy_auth_peer("10.1.2.3"),
+        )
+        .await
+        .is_none());
+
+        // Missing connect info (no TCP peer) is untrusted too, and an
+        // authenticated session passes through unchanged.
+        let key = [15_u8; CREDENTIAL_KEY_BYTES];
+        let session =
+            credential_session(1700, "proxy-user", Some("proxy-user@example.com"), &key).await;
+        assert!(
+            super::native_proxy_auth(&state, &uri, &headers, &session, None)
+                .await
+                .is_none()
+        );
+        assert_eq!(remote_session_user(&session).await, Some(1700));
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_missing_or_empty_header_redirects_without_session() {
+        let pool = proxy_auth_pool().await;
+        let state = AppState::with_db_pool(proxy_auth_config(&["10.1.2.3"]), Some(pool));
+        let uri: Uri = "/?ProxyAuth".parse().unwrap();
+        let peer = proxy_auth_peer("10.1.2.3");
+
+        // Missing, empty, blank, and over-long identities all redirect
+        // without touching the session.
+        let mut missing = HeaderMap::new();
+        missing.insert("x-other-header", "proxy-user".parse().unwrap());
+        let mut cases = vec![
+            missing,
+            proxy_auth_headers(None),
+            proxy_auth_headers(Some("")),
+            proxy_auth_headers(Some("   ")),
+        ];
+        let mut over_long = HeaderMap::new();
+        over_long.insert("x-proxy-user", "a".repeat(321).parse().unwrap());
+        cases.push(over_long);
+
+        // Header-name lookup is case-insensitive: differently-cased
+        // configured names still resolve the same header.
+        let mut remote = HeaderMap::new();
+        remote.insert("remote-user", "someone@example.com".parse().unwrap());
+        assert!(super::proxy_auth_identity(&remote, "REMOTE-USER").is_some());
+        assert!(super::proxy_auth_identity(&remote, "Remote-User").is_some());
+        assert!(super::proxy_auth_identity(&remote, "X-Proxy-User").is_none());
+
+        for headers in cases {
+            let session = test_session();
+            let response = super::native_proxy_auth(&state, &uri, &headers, &session, peer)
+                .await
+                .expect("handled paths always redirect");
+            assert_proxy_redirect(&response);
+            assert_eq!(remote_session_user(&session).await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_unknown_identity_redirects_without_session_and_ignores_open_signup() {
+        let pool = proxy_auth_pool().await;
+        seed_login_user(
+            &pool,
+            1701,
+            "proxy-user",
+            Some("proxy-user@example.com"),
+            "correct-horse",
+            &[15_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        // open_signup must never gate proxy provisioning.
+        let mut config = proxy_auth_config(&["10.1.2.3"]);
+        config.open_signup = true;
+        let state = AppState::with_db_pool(config, Some(pool.clone()));
+        let session = test_session();
+        let response = super::native_proxy_auth(
+            &state,
+            &"/?ProxyAuth".parse().unwrap(),
+            &proxy_auth_headers(Some("stranger@example.com")),
+            &session,
+            proxy_auth_peer("10.1.2.3"),
+        )
+        .await
+        .expect("unknown identity still redirects");
+        assert_proxy_redirect(&response);
+        assert_eq!(remote_session_user(&session).await, None);
+        assert_eq!(SqlxUserRepository::user_count(&pool).await.unwrap(), 1);
+        assert!(
+            SqlxUserRepository::find_by_username(&pool, "stranger@example.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_provisioning_creates_user_without_session() {
+        let pool = proxy_auth_pool().await;
+        enable_proxy_provisioning(&pool).await;
+        let state = AppState::with_db_pool(proxy_auth_config(&["10.1.2.3"]), Some(pool.clone()));
+        let uri: Uri = "/?ProxyAuth".parse().unwrap();
+        let peer = proxy_auth_peer("10.1.2.3");
+
+        let session = test_session();
+        let response = super::native_proxy_auth(
+            &state,
+            &uri,
+            &proxy_auth_headers(Some("newbie@example.com")),
+            &session,
+            peer,
+        )
+        .await
+        .expect("provisioning path still redirects");
+        assert_proxy_redirect(&response);
+        // The user row is created and the identity claimed, but no session
+        // is established: the account must be claimed via password reset.
+        assert_eq!(remote_session_user(&session).await, None);
+        let user = SqlxUserRepository::find_by_username(&pool, "newbie@example.com")
+            .await
+            .unwrap()
+            .expect("provisioned user row exists");
+        assert_eq!(user.email.as_deref(), Some("newbie@example.com"));
+        let provider_hash = super::proxy_auth_provider_hash();
+        assert_eq!(
+            SqlxUserRepository::find_oidc_identity(&pool, &provider_hash, "newbie@example.com")
+                .await
+                .unwrap(),
+            Some(user.id)
+        );
+        assert!(SqlxUserRepository::get_oidc_escrow_key(&pool, user.id)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Without escrow material the follow-up login still cannot proceed.
+        let retry = test_session();
+        let response = super::native_proxy_auth(
+            &state,
+            &uri,
+            &proxy_auth_headers(Some("newbie@example.com")),
+            &retry,
+            peer,
+        )
+        .await
+        .expect("escrow-less login still redirects");
+        assert_proxy_redirect(&response);
+        assert_eq!(remote_session_user(&retry).await, None);
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_link_conflict_fails_without_reassignment() {
+        let pool = proxy_auth_pool().await;
+        for (id, name) in [(1710_i64, "proxy-a"), (1711_i64, "proxy-b")] {
+            seed_login_user(
+                &pool,
+                id,
+                name,
+                Some(&format!("{name}@example.com")),
+                "correct-horse",
+                &[15_u8; fm_user::KDF_SALT_BYTES],
+                None,
+            )
+            .await;
+        }
+        let state = AppState::with_db_pool(proxy_auth_config(&["10.1.2.3"]), Some(pool.clone()));
+        let uri: Uri = "/?ProxyAuth".parse().unwrap();
+        let peer = proxy_auth_peer("10.1.2.3");
+        let headers = proxy_auth_headers(Some("shared@example.com"));
+
+        // User A links the identity first.
+        let key_a = [16_u8; CREDENTIAL_KEY_BYTES];
+        let session_a =
+            credential_session(1710, "proxy-a", Some("proxy-a@example.com"), &key_a).await;
+        let response = super::native_proxy_auth(&state, &uri, &headers, &session_a, peer)
+            .await
+            .expect("link mode redirects");
+        assert_proxy_redirect(&response);
+        let provider_hash = super::proxy_auth_provider_hash();
+        assert_eq!(
+            SqlxUserRepository::find_oidc_identity(&pool, &provider_hash, "shared@example.com")
+                .await
+                .unwrap(),
+            Some(1710)
+        );
+
+        // User B's link attempt fails: the mapping stays with A and B gains
+        // no escrow material.
+        let key_b = [17_u8; CREDENTIAL_KEY_BYTES];
+        let session_b =
+            credential_session(1711, "proxy-b", Some("proxy-b@example.com"), &key_b).await;
+        let response = super::native_proxy_auth(&state, &uri, &headers, &session_b, peer)
+            .await
+            .expect("conflicting link still redirects");
+        assert_proxy_redirect(&response);
+        assert_eq!(
+            SqlxUserRepository::find_oidc_identity(&pool, &provider_hash, "shared@example.com")
+                .await
+                .unwrap(),
+            Some(1710)
+        );
+        assert!(SqlxUserRepository::get_oidc_escrow_key(&pool, 1711)
+            .await
+            .unwrap()
+            .is_none());
+        // B's own session is untouched by the failed link.
+        assert_eq!(remote_session_user(&session_b).await, Some(1711));
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_link_then_login_establishes_rotated_session() {
+        let pool = proxy_auth_pool().await;
+        let salt = [15_u8; fm_user::KDF_SALT_BYTES];
+        seed_login_user(
+            &pool,
+            1720,
+            "proxy-user",
+            Some("proxy-user@example.com"),
+            "correct-horse",
+            &salt,
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(proxy_auth_config(&["10.1.2.3"]), Some(pool.clone()));
+        let uri: Uri = "/?ProxyAuth".parse().unwrap();
+        let peer = proxy_auth_peer("10.1.2.3");
+        // Identity case is preserved end to end (opaque subject, like OIDC).
+        let headers = proxy_auth_headers(Some("Proxy-User@Example.com"));
+
+        // Link mode binds the identity and escrows the credential key.
+        let credential_key = fm_user::derive_credential_key("correct-horse", &salt).unwrap();
+        let link_session = credential_session(
+            1720,
+            "proxy-user",
+            Some("proxy-user@example.com"),
+            &credential_key,
+        )
+        .await;
+        let response = super::native_proxy_auth(&state, &uri, &headers, &link_session, peer)
+            .await
+            .expect("link mode redirects");
+        assert_proxy_redirect(&response);
+        let provider_hash = super::proxy_auth_provider_hash();
+        assert_eq!(
+            SqlxUserRepository::find_oidc_identity(&pool, &provider_hash, "Proxy-User@Example.com")
+                .await
+                .unwrap(),
+            Some(1720)
+        );
+
+        // Login mode on a fresh session recovers escrow and rotates the id.
+        let session = test_session();
+        session.save().await.unwrap();
+        let session_id = session.id().expect("persisted session has an id");
+        let response = super::native_proxy_auth(&state, &uri, &headers, &session, peer)
+            .await
+            .expect("login mode redirects");
+        assert_proxy_redirect(&response);
+        assert_eq!(remote_session_user(&session).await, Some(1720));
+        assert_ne!(session.id(), Some(session_id));
+        assert!(session
+            .get::<String>(CREDENTIAL_KEY_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_totp_account_rejected() {
+        let pool = proxy_auth_pool().await;
+        let salt = [15_u8; fm_user::KDF_SALT_BYTES];
+        seed_login_user(
+            &pool,
+            1730,
+            "proxy-totp",
+            Some("proxy-totp@example.com"),
+            "correct-horse",
+            &salt,
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        // Link the TOTP-gated account directly so login reaches the gate.
+        let provider_hash = super::proxy_auth_provider_hash();
+        SqlxUserRepository::upsert_oidc_identity(
+            &pool,
+            1730,
+            &provider_hash,
+            "proxy-totp@example.com",
+        )
+        .await
+        .unwrap();
+        let credential_key = fm_user::derive_credential_key("correct-horse", &salt).unwrap();
+        let escrow = fm_oidc::encrypt_escrow_key(
+            &credential_key,
+            test_config(None).app_salt.as_deref().unwrap_or(""),
+        );
+        SqlxUserRepository::set_oidc_escrow_key(&pool, 1730, &escrow)
+            .await
+            .unwrap();
+
+        let state = AppState::with_db_pool(proxy_auth_config(&["10.1.2.3"]), Some(pool));
+        let session = test_session();
+        let response = super::native_proxy_auth(
+            &state,
+            &"/?ProxyAuth".parse().unwrap(),
+            &proxy_auth_headers(Some("proxy-totp@example.com")),
+            &session,
+            proxy_auth_peer("10.1.2.3"),
+        )
+        .await
+        .expect("TOTP rejection still redirects");
+        assert_proxy_redirect(&response);
+        assert_eq!(remote_session_user(&session).await, None);
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_user_header_set_probe_reports_header_presence() {
+        let enabled = AppState::with_db_pool(proxy_auth_config(&["10.1.2.3"]), None);
+        let uri: Uri = "/?UserHeaderSet".parse().unwrap();
+
+        let response = super::native_user_header_set(
+            &enabled,
+            &uri,
+            &proxy_auth_headers(Some("someone@example.com")),
+        )
+        .await
+        .expect("probe handles the route");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Header-name lookup is case-insensitive.
+        let mut upper = HeaderMap::new();
+        upper.insert("REMOTE-USER", "someone@example.com".parse().unwrap());
+        let mut renamed = proxy_auth_config(&["10.1.2.3"]);
+        renamed.proxy_auth.identity_header = "remote-user".to_string();
+        let renamed_state = AppState::with_db_pool(renamed, None);
+        let response = super::native_user_header_set(&renamed_state, &uri, &upper)
+            .await
+            .expect("probe handles renamed headers");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        for headers in [
+            proxy_auth_headers(None),
+            proxy_auth_headers(Some("")),
+            proxy_auth_headers(Some("   ")),
+        ] {
+            let response = super::native_user_header_set(&enabled, &uri, &headers)
+                .await
+                .expect("absent header still answers");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
     #[tokio::test]
     async fn native_frickmail_discover_services_matches_provider_shape() {
         let pool = user_db_pool().await;
@@ -35913,6 +36841,7 @@ Subject: Empty body metadata\r\n\r\n"
             app_salt: Some("test-app-salt-for-oidc-ci".to_string()),
             open_signup: false,
             external_login_enabled: false,
+            proxy_auth: Default::default(),
             remote_auto_login: Default::default(),
             oidc: Default::default(),
             oauth2: Default::default(),

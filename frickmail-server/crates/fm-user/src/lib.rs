@@ -1292,6 +1292,77 @@ impl SqlxUserRepository {
         register_user(pool, signup_open, username, email, password).await
     }
 
+    /// Provisions a user for an external auto-login hook (ProxyAuth). This is
+    /// intentionally independent of [`register_user`]: it ignores the
+    /// `open_signup` gate and the closed-signup first-user exception, so
+    /// callers must consult the effective `external_auth.allow_provisioning`
+    /// policy themselves before calling. The account gets a random
+    /// unguessable password hash plus a fresh salt and therefore no usable
+    /// local credentials: the owner must claim it through the existing
+    /// password-reset flow and then link the external identity.
+    pub async fn provision_external_user(
+        pool: &AnyPool,
+        username: &str,
+        email: Option<&str>,
+    ) -> Result<FrickmailUser> {
+        let username = username.trim().to_string();
+        if username.is_empty() {
+            return Err(FrickmailError::BadRequest(
+                "Provisioned username must not be empty".to_string(),
+            ));
+        }
+        let email = email.and_then(|value| {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        });
+
+        let mut random = [0_u8; 32];
+        OsRng.fill_bytes(&mut random);
+        let password_hash = hash_login_password(&URL_SAFE_NO_PAD.encode(random))?;
+        let kdf_salt = generate_kdf_salt();
+
+        // Scope the acquired connection so it is released before the
+        // follow-up lookup: single-connection pools (tests, embedded
+        // deployments) would otherwise deadlock waiting for a second slot.
+        let id = {
+            let mut conn = pool.acquire().await.map_err(db_error)?;
+            let backend = conn.backend_name().to_string();
+            insert_user_on_conn(
+                &mut conn,
+                &backend,
+                &username,
+                email.as_deref(),
+                &password_hash,
+                &kdf_salt,
+            )
+            .await?
+        };
+        Self::find_by_id(pool, id).await?.ok_or_else(|| {
+            FrickmailError::Upstream("provisioned external user is unavailable".to_string())
+        })
+    }
+
+    /// Fails when `(provider_hash, subject)` already maps to a different user,
+    /// so external-identity linking never reassigns an existing mapping.
+    /// Unclaimed mappings and re-links by the owning user pass through.
+    pub async fn ensure_oidc_link_unclaimed(
+        pool: &AnyPool,
+        provider_hash: &str,
+        subject: &str,
+        user_id: i64,
+    ) -> Result<()> {
+        match Self::find_oidc_identity(pool, provider_hash, subject).await? {
+            Some(owner) if owner != user_id => Err(FrickmailError::BadRequest(
+                "External identity is already linked to a different Frickmail account".to_string(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub async fn activate_service(
         pool: &AnyPool,
         user_id: i64,
@@ -9436,6 +9507,112 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.public_message(), "provider_hash required");
+    }
+
+    #[tokio::test]
+    async fn provision_external_user_creates_unusable_password_account() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+
+        let user = SqlxUserRepository::provision_external_user(
+            &pool,
+            "proxy-user",
+            Some("proxy-user@example.com"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(user.username, "proxy-user");
+        assert_eq!(user.email.as_deref(), Some("proxy-user@example.com"));
+        assert_eq!(user.kdf_salt.len(), KDF_SALT_BYTES);
+        assert!(user.password_hash.starts_with("$argon2id$"));
+        // The random escrow password is never returned, so no guess can verify.
+        assert!(!verify_login_password("password", Some(&user)).unwrap());
+        assert!(!verify_login_password("", Some(&user)).unwrap());
+
+        // Empty usernames are rejected instead of inserting blank rows.
+        SqlxUserRepository::provision_external_user(&pool, "   ", None)
+            .await
+            .unwrap_err();
+
+        // Duplicate usernames fail rather than creating a second row.
+        SqlxUserRepository::provision_external_user(&pool, "proxy-user", None)
+            .await
+            .unwrap_err();
+        let stored = SqlxUserRepository::find_by_id(&pool, user.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.username, "proxy-user");
+    }
+
+    #[tokio::test]
+    async fn provision_external_user_ignores_signup_gates() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        insert_user(&pool, 23, json!({})).await;
+
+        // Closed signup with existing users blocks register_user, but the
+        // external provisioning path stays independent of that gate.
+        super::register_user(
+            &pool,
+            false,
+            "another".to_string(),
+            None,
+            "password123".to_string(),
+        )
+        .await
+        .unwrap_err();
+        let provisioned = SqlxUserRepository::provision_external_user(&pool, "proxy-new", None)
+            .await
+            .unwrap();
+        assert_eq!(provisioned.username, "proxy-new");
+        assert_eq!(provisioned.email, None);
+    }
+
+    #[tokio::test]
+    async fn provision_external_link_guard_rejects_conflicting_mappings() {
+        let pool = sqlite_pool().await;
+        create_users_table(&pool, "TEXT").await;
+        create_oidc_identity_tables(&pool).await;
+        insert_user(&pool, 23, json!({})).await;
+        insert_user(&pool, 24, json!({})).await;
+        insert_oidc_identity(
+            &pool,
+            23,
+            "provider-proxy",
+            "proxy-subject",
+            "2026-06-02 10:00:00",
+        )
+        .await;
+
+        // The owning user may re-link; unclaimed mappings pass through.
+        SqlxUserRepository::ensure_oidc_link_unclaimed(
+            &pool,
+            "provider-proxy",
+            "proxy-subject",
+            23,
+        )
+        .await
+        .unwrap();
+        SqlxUserRepository::ensure_oidc_link_unclaimed(&pool, "provider-proxy", "new-subject", 24)
+            .await
+            .unwrap();
+
+        // A different user must fail rather than reassign the mapping.
+        SqlxUserRepository::ensure_oidc_link_unclaimed(
+            &pool,
+            "provider-proxy",
+            "proxy-subject",
+            24,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            SqlxUserRepository::find_oidc_identity(&pool, "provider-proxy", "proxy-subject")
+                .await
+                .unwrap(),
+            Some(23)
+        );
     }
 
     #[tokio::test]
