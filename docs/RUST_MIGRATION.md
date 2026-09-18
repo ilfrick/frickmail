@@ -7,19 +7,16 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-18 22:30:00 UTC
 
-The pending proxy-auth slice natively replaces the Proxy Auth plugin's
-`ProxyAuth` + `UserHeaderSet` hooks (fourth of the hook series): `GET
-/?ProxyAuth` accepts the identity header ONLY from explicitly configured
-trusted TCP peers (`FRICKMAIL__PROXY_AUTH__*`, default-off, empty peers =
-deny; X-Forwarded-For never trusted), always redirects to `./` like the
-plugin. Anonymous sessions enter login mode (explicit provider-"proxy"
-identity link + escrow key recovery, TOTP reject, session rotation);
-authenticated sessions with a credential key enter link mode (binds the
-proxy-asserted identity; conflicts with another user fail without
-reassignment). Unknown identities are denied unless effective
-`external_auth.allow_provisioning` is true — and then the user row is
-created with NO session (local credentials via the reset flow, then link).
-`/?UserHeaderSet` returns 200/401 without touching sessions.
+The proxy-auth slice is published (`f8dccb069`): native `ProxyAuth` +
+`UserHeaderSet` (trusted-TCP-peer-only identity header, default-off;
+link/login modes with escrow recovery, TOTP reject, session rotation;
+conflicting mappings fail without reassignment; unknown identities denied
+unless effective `external_auth.allow_provisioning`, then user row with NO
+session).
+
+Published `f8dccb069` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`);
+exact-SHA `rust-ci` (×2) + `naming` (×2) runs terminal success.
 
 Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
 `cargo check -p fm-http` clean; `cargo test -p fm-http --lib --
@@ -42,9 +39,8 @@ no-new-privileges); `/health` 200; untrusted `/?ProxyAuth` stays
 invisible (200 normal page, no redirect, no session); no panics/errors
 in logs; OOM false, restarts 0, healthcheck healthy.
 
-This slice is verified but NOT yet committed or pushed. The remaining
-hook-series items are `cPanelAutoLogin` and `ExternalSso`. The major
-remaining gates toward the final Rust-only goal are unchanged.
+The remaining hook-series items are `cPanelAutoLogin` and `ExternalSso`.
+The major remaining gates toward the final Rust-only goal are unchanged.
 
 ## Prior Snapshot — 2026-09-18 21:30:00 UTC
 
