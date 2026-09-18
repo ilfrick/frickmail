@@ -7,39 +7,35 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-18 21:30:00 UTC
 
-The remote-auto-login slice is published (`91dd1ffb8`): native
-`RemoteAutoLogin` part hook (env credentials, TOTP reject, always-redirect,
-default-off flag, redacting Debug). Published `91dd1ffb8` to `master` +
-`rust-full-migration` on `origin` and `gitea` (all 4 tips identical,
-verified via `ls-remote`); exact-SHA `rust-ci` (×2) + `naming` (×2) runs
-terminal success.
+The external-provisioning-policy slice is published (`8270a06d3`):
+default-off `external_auth.allow_provisioning` curated admin setting
+(fixed-false fallback independent of `open_signup`; strict boolean DB
+resolution; operator+CSRF enforced on writes including bypass
+configurations; generic v1 admin UI renders it automatically). Policy
+prerequisite only: no mapping, provisioning, unlock, or escrow handlers.
 
-The pending external-provisioning-policy slice adds the default-off
-`external_auth.allow_provisioning` curated admin setting (fixed-false
-fallback independent of `open_signup`; strict boolean DB resolution;
-operator+CSRF enforced on writes including bypass configurations; generic
-v1 admin UI renders it automatically). Policy prerequisite only: no
-mapping, provisioning, unlock, or escrow handlers yet.
+Published `8270a06d3` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`);
+exact-SHA `rust-ci` (×2) + `naming` (×2) runs terminal success
+(master rust-ci 16m10s success confirmed).
 
-Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+Verification (Docker-only): `cargo fmt --all -- --check` clean;
 `cargo test -p fm-http --lib -- external_provisioning` 5 passed / 0
 failed; `cargo check --workspace` clean; `cargo clippy --workspace
---all-targets -- -D warnings` clean.
+--all-targets -- -D warnings` clean. Production image
+sha256:86e08fb82af370f2c8c6dd77a2ffbcf6f593b16d19d4e8359169bced376b6928
+builds; `/health` 200; no panics/errors; OOM false, restarts 0,
+healthcheck healthy.
 
 Independent senior review APPROVED (fail-closed fallback, operator/CSRF,
 strict typing confirmed; mapping/unlock flows explicitly out of scope).
 
-Docker production-image validation is done: image
-sha256:86e08fb82af370f2c8c6dd77a2ffbcf6f593b16d19d4e8359169bced376b6928
-(user frickmail:frickmail, read-only rootfs, cap-drop ALL,
-no-new-privileges); `/health` 200; no panics/errors in logs; OOM false,
-restarts 0, healthcheck reaches healthy.
-
-This slice is verified but NOT yet committed or pushed. The next decision
-needed from the operator is the trusted external identity transport
-(reverse-proxy assertion vs signed assertions vs defer adapters) before
-proxy/cPanel login handlers are implemented. The major remaining gates
-toward the final Rust-only goal are unchanged.
+Note: GitHub pushes briefly failed on an expired `gh` token; retried via
+the renewed `~/.netrc` credential (`git -c credential.helper= push`).
+The next decision needed from the operator is the trusted external
+identity transport (reverse-proxy assertion vs signed assertions vs
+defer adapters) before proxy/cPanel login handlers are implemented. The
+major remaining gates toward the final Rust-only goal are unchanged.
 
 ## Prior Snapshot — 2026-09-15 02:00:00 CEST (UTC+02:00)
 
