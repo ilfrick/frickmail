@@ -20,6 +20,19 @@ import { loadContacts, renderContacts } from './js/contacts.js';
 import { collectComposePayload, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
+import {
+	addMonths,
+	collectEventPayload,
+	deleteEvent,
+	formatMonthTitle,
+	groupEventsByDate,
+	loadCalendars,
+	loadEvents,
+	renderCalendarList,
+	renderEventEditor,
+	renderMonthGrid,
+	saveEvent
+} from './js/calendar.js';
 import { collectPreferencesPatch, loadPreferences, renderPreferencesForm, savePreferences } from './js/settings.js';
 
 const api = new ApiClient('');
@@ -30,6 +43,7 @@ function nav(active) {
 	const settings = active === 'settings' ? ' aria-current="page"' : '';
 	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
 	const rules = active === 'rules' ? ' aria-current="page"' : '';
+	const calendar = active === 'calendar' ? ' aria-current="page"' : '';
 	const contacts = active === 'contacts' ? ' aria-current="page"' : '';
 	const compose = active === 'compose' ? ' aria-current="page"' : '';
 	return '<nav data-fm="nav">'
@@ -37,6 +51,7 @@ function nav(active) {
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
 		+ '<button type="button" data-fm="nav-rules"' + rules + '>Rules</button>'
 		+ '<button type="button" data-fm="nav-contacts"' + contacts + '>Contacts</button>'
+		+ '<button type="button" data-fm="nav-calendar"' + calendar + '>Calendar</button>'
 		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
 		+ '<button type="button" data-fm="nav-compose"' + compose + '>Compose</button>'
 		+ '<button type="button" data-fm="nav-logout">Sign out</button>'
@@ -48,6 +63,7 @@ function wireNav() {
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
 	const rulesButton = root.querySelector('[data-fm="nav-rules"]');
 	const contactsButton = root.querySelector('[data-fm="nav-contacts"]');
+	const calendarButton = root.querySelector('[data-fm="nav-calendar"]');
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
 	const composeButton = root.querySelector('[data-fm="nav-compose"]');
 	const logoutButton = root.querySelector('[data-fm="nav-logout"]');
@@ -62,6 +78,9 @@ function wireNav() {
 	}
 	if (contactsButton) {
 		contactsButton.addEventListener('click', () => showContacts());
+	}
+	if (calendarButton) {
+		calendarButton.addEventListener('click', () => showCalendar());
 	}
 	if (settingsButton) {
 		settingsButton.addEventListener('click', showSettings);
@@ -117,6 +136,162 @@ async function showContacts() {
 		wireNav();
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load contacts.</p>';
+	}
+}
+
+/// Visible calendar state across re-renders: month view, checked calendars,
+/// and the last loaded payloads (events feed the editor without refetch).
+const calendarView = {
+	view: null,
+	selectedIds: null,
+	calendars: [],
+	events: []
+};
+
+function currentMonthView() {
+	const now = new Date();
+	return { year: now.getFullYear(), month: now.getMonth() + 1 };
+}
+
+function monthRangeIso(view) {
+	const pad = (value) => String(value).padStart(2, '0');
+	const last = new Date(Date.UTC(view.year, view.month, 0)).getUTCDate();
+	return {
+		start: view.year + '-' + pad(view.month) + '-01T00:00:00Z',
+		end: view.year + '-' + pad(view.month) + '-' + last + 'T23:59:59Z'
+	};
+}
+
+async function showCalendar(view, selectedIds) {
+	calendarView.view = view || calendarView.view || currentMonthView();
+	try {
+		const session = await api.bootstrap();
+		const accountId = session && session.selected_account_id
+			? session.selected_account_id
+			: undefined;
+		const calendars = await loadCalendars(api, accountId);
+		calendarView.calendars = calendars && Array.isArray(calendars.calendars)
+			? calendars.calendars
+			: [];
+		const allIds = calendarView.calendars.map((entry) => entry.id).filter((id) => id);
+		calendarView.selectedIds = selectedIds || calendarView.selectedIds || allIds;
+		const range = monthRangeIso(calendarView.view);
+		const data = await loadEvents(api, {
+			accountId,
+			calendarIds: calendarView.selectedIds,
+			start: range.start,
+			end: range.end
+		});
+		calendarView.events = data && Array.isArray(data.events) ? data.events : [];
+		root.innerHTML = nav('calendar')
+			+ '<h1 data-fm="title">Calendar</h1>'
+			+ '<div data-fm="pager">'
+			+ '<button type="button" data-fm="prev">‹</button>'
+			+ '<span data-fm="month">' + formatMonthTitle(calendarView.view) + '</span>'
+			+ '<button type="button" data-fm="today">Today</button>'
+			+ '<button type="button" data-fm="next">›</button>'
+			+ ' <button type="button" data-fm="new">New event</button>'
+			+ '</div>'
+			+ renderCalendarList({ calendars: calendarView.calendars }, calendarView.selectedIds)
+			+ renderMonthGrid(calendarView.view, groupEventsByDate(calendarView.events))
+			+ '<div data-fm="editor-wrap"></div>'
+			+ '<p data-fm="status"></p>';
+		wireNav();
+		wireCalendar();
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load the calendar.</p>';
+	}
+}
+
+function wireCalendar() {
+	const prev = root.querySelector('[data-fm="prev"]');
+	const next = root.querySelector('[data-fm="next"]');
+	const today = root.querySelector('[data-fm="today"]');
+	const create = root.querySelector('[data-fm="new"]');
+	if (prev) {
+		prev.addEventListener('click', () => showCalendar(addMonths(calendarView.view, -1)));
+	}
+	if (next) {
+		next.addEventListener('click', () => showCalendar(addMonths(calendarView.view, 1)));
+	}
+	if (today) {
+		today.addEventListener('click', () => showCalendar(currentMonthView()));
+	}
+	if (create) {
+		create.addEventListener('click', () => openEventEditor(null));
+	}
+	for (const box of root.querySelectorAll('[data-fm="calendar"]')) {
+		box.addEventListener('change', () => {
+			const checked = [];
+			for (const item of root.querySelectorAll('[data-fm="calendar"]:checked')) {
+				checked.push(item.value);
+			}
+			showCalendar(calendarView.view, checked);
+		});
+	}
+	for (const chip of root.querySelectorAll('[data-fm="event"]')) {
+		chip.addEventListener('click', () => {
+			const found = calendarView.events.find((event) => String(event.id) === chip.getAttribute('data-id'));
+			openEventEditor(found || null);
+		});
+	}
+}
+
+function openEventEditor(event) {
+	const wrap = root.querySelector('[data-fm="editor-wrap"]');
+	if (!wrap) {
+		return;
+	}
+	wrap.innerHTML = renderEventEditor(event, calendarView.calendars);
+	const form = wrap.querySelector('[data-fm="editor"]');
+	if (form) {
+		form.addEventListener('submit', onEventSubmit);
+	}
+	const remove = wrap.querySelector('[data-fm="delete"]');
+	if (remove) {
+		remove.addEventListener('click', onEventDelete);
+	}
+}
+
+async function calendarAccountId() {
+	try {
+		const session = await api.bootstrap();
+		return session && session.selected_account_id
+			? session.selected_account_id
+			: undefined;
+	} catch (error) {
+		return undefined;
+	}
+}
+
+function calendarStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onEventSubmit(event) {
+	event.preventDefault();
+	try {
+		const payload = collectEventPayload(root, await calendarAccountId());
+		await saveEvent(api, payload);
+		await showCalendar();
+	} catch (error) {
+		calendarStatus(error && error.message ? error.message : 'Save failed.');
+	}
+}
+
+async function onEventDelete() {
+	const id = collectEventPayload(root).id;
+	if (!id) {
+		return;
+	}
+	try {
+		await deleteEvent(api, { id, accountId: await calendarAccountId() });
+		await showCalendar();
+	} catch (error) {
+		calendarStatus(error && error.message ? error.message : 'Delete failed.');
 	}
 }
 

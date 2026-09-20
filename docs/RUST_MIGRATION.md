@@ -5,6 +5,32 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-20 15:30:00 UTC
+
+The v1-calendar-UI slice is verified (commit pending): `frickmail-ui/v1`
+gains the calendar screen — nav entry, month pager (prev/today/next),
+calendar checkbox list, Monday-first month grid with event chips, and an
+event editor (create/update/delete) over new `calendar.js` loaders
+(`loadCalendars`, `loadEvents`, `saveEvent`, `deleteEvent`) against the
+v1 calendar API. All rendering passes through the shared `escapeHtml`;
+the editor collector takes a stub-able root like the compose/settings
+collectors.
+
+Verification so far (host node, Docker-free like prior UI slices):
+`node --test frickmail-ui/v1/js/calendar.test.mjs` 23 passed / 0
+failed; full `node --test frickmail-ui/v1/js/*.test.mjs` 104 passed / 0
+failed; `npx eslint` on touched JS clean; `build.mjs` ships
+`calendar.js` automatically (tests excluded, nav wired in the bundle);
+no legacy product names in the new files.
+
+Independent senior review APPROVED (contract match on all four API
+paths, X-SM-Token via ApiClient only, all interpolations escaped,
+single listener registration per control, editor prefill/delete
+parity with the API composite-id convention).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-20 13:29:00 UTC
 
 The v1-calendar-API slice is published (`39687eb83`): stable
