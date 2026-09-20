@@ -32,6 +32,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub remote_auto_login: RemoteAutoLoginConfig,
     #[serde(default)]
+    pub cpanel_auto_login: CpanelAutoLoginConfig,
+    #[serde(default)]
     pub oidc: OidcConfig,
     #[serde(default)]
     pub oauth2: Oauth2Config,
@@ -281,6 +283,19 @@ impl std::fmt::Debug for RemoteAutoLoginConfig {
             .field("password", &"<redacted>")
             .finish()
     }
+}
+
+/// cPanel environment auto-login (native replacement for the Login cPanel
+/// plugin's `cPanelAutoLogin` part hook). Off unless explicitly enabled: any
+/// client that can reach `/?cPanelAutoLogin` while the process environment
+/// carries `REMOTE_USER`/`REMOTE_PASSWORD` is signed in as that user, so
+/// operators must gate it at the network edge exactly like the PHP plugin
+/// required. Credentials are read from the process environment at request
+/// time and never stored in config, so plain `Debug` is safe here.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CpanelAutoLoginConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

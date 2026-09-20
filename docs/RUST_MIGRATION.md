@@ -5,6 +5,38 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-20 12:15:00 UTC
+
+The cpanel-auto-login slice is verified (commit pending): native
+`cPanelAutoLogin` part hook (`GET /?cPanelAutoLogin`, `REMOTE_USER` /
+`REMOTE_PASSWORD` process-environment credentials, TOTP reject,
+always-redirect to `./`, existing sessions pass through untouched,
+default-off `cpanel_auto_login.enabled` flag). Credentials are read from
+the process environment at request time and never stored in config, so
+the config `Debug` impl holds no secrets. The plugin's
+`FilterLoginCredentials` IMAP/SMTP `REMOTE_USER/REMOTE_TEMP_USER`
+rewrite (including the `[::cpses::]` split) is explicitly out of scope:
+native login establishes the session against the stored Frickmail user
+and its stored account credentials.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http` clean; `cargo test -p fm-http --lib --
+cpanel` 5 passed / 0 failed; `cargo test -p fm-http --lib` 503 passed /
+0 failed; `cargo test -p fm-core` 11 passed / 0 failed; `cargo clippy
+--workspace --all-targets -- -D warnings` clean; naming gate passes
+locally (no new gated names).
+
+Independent senior review APPROVED (fail-closed disabled/unkeyed/mis-
+configured paths, session passthrough without env consult, TOTP reject,
+no credential storage, no DB schema change, API-shape coverage via
+direct handler unit tests without mutating the shared process
+environment).
+
+This slice is verified but NOT yet committed or pushed.
+
+The remaining hook-series item is `ExternalSso`. The major remaining
+gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-18 22:30:00 UTC
 
 The proxy-auth slice is published (`f8dccb069`): native `ProxyAuth` +

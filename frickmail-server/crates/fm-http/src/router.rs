@@ -503,6 +503,10 @@ async fn root_get(
         return response;
     }
 
+    if let Some(response) = native_cpanel_auto_login(&state, &uri, &session).await {
+        return response;
+    }
+
     if let Some(response) = native_user_header_set(&state, &uri, request.headers()).await {
         return response;
     }
@@ -2327,6 +2331,136 @@ async fn native_remote_auto_login(
     .await;
     if let Err(err) = ok {
         tracing::warn!("remote auto-login failed: {err}");
+    }
+    redirect()
+}
+
+/// Process environment names the Login cPanel plugin reads for
+/// `cPanelAutoLogin` (`$_ENV['REMOTE_USER']` / `$_ENV['REMOTE_PASSWORD']`).
+/// Values are trimmed; empty counts as absent so a half-configured
+/// environment never reaches the database.
+fn cpanel_env_credentials() -> (Option<String>, Option<String>) {
+    fn trimmed(name: &str) -> Option<String> {
+        std::env::var(name).ok().and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    }
+    (trimmed("REMOTE_USER"), trimmed("REMOTE_PASSWORD"))
+}
+
+/// Shared cPanel auto-login attempt used by `native_cpanel_auto_login`.
+/// Extracted (rather than inlined like the sibling hooks) so the
+/// credential verification path is unit-testable without mutating the
+/// process environment, which Rust tests share across threads. Returns
+/// `Ok(true)` only when the session was signed in; every other outcome —
+/// unknown user, wrong password, TOTP-gated account, database or session
+/// errors — returns `Ok(false)` or `Err` and the caller redirects to `./`
+/// exactly like the plugin.
+async fn cpanel_auto_login_attempt(
+    pool: &sqlx::AnyPool,
+    session: &fm_session::Session,
+    email: &str,
+    password: &str,
+) -> Result<bool, String> {
+    let user = fm_user::SqlxUserRepository::find_by_email(pool, email)
+        .await
+        .map_err(|err| err.public_message())?;
+    // Burns equal time for unknown addresses (dummy hash) so the endpoint
+    // is not a user-enumeration oracle.
+    if !fm_user::verify_login_password(password, user.as_ref())
+        .map_err(|err| err.public_message())?
+    {
+        return Ok(false);
+    }
+    let user = user.expect("verified login requires a user");
+    if user
+        .totp_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty() && secret != "0")
+    {
+        return Ok(false);
+    }
+    let credential_key = fm_user::derive_credential_key(password, &user.kdf_salt)
+        .map_err(|err| err.public_message())?;
+    native_login_establish_session(
+        session,
+        &NativeLoginCredentials {
+            user_id: user.id,
+            username: user.username.clone(),
+            email: user.email.clone(),
+            credential_key: credential_key.to_vec(),
+        },
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    Ok(true)
+}
+
+/// Native replacement for the Login cPanel plugin's `cPanelAutoLogin` part
+/// hook: `GET /?cPanelAutoLogin` signs the session in with the
+/// `REMOTE_USER`/`REMOTE_PASSWORD` process environment pair and redirects
+/// to `./`, exactly like the plugin (which always redirects, success or
+/// failure). Already authenticated sessions pass straight through to the
+/// redirect without re-verifying. Accounts with TOTP enabled are never
+/// auto-logged-in. Default-off: reachability of the URL equals
+/// authentication, so operators must gate it at the network edge.
+///
+/// Out of scope (documented migration boundary): the plugin's
+/// `FilterLoginCredentials` rewrite of the IMAP/SMTP login to
+/// `REMOTE_USER/REMOTE_TEMP_USER` (including the `[::cpses::]` split).
+/// Native login establishes the session against the stored Frickmail user
+/// and its stored account credentials; cPanel sub-account suffixing has no
+/// expression in the native IMAP path.
+async fn native_cpanel_auto_login(
+    state: &AppState,
+    uri: &Uri,
+    session: &fm_session::Session,
+) -> Option<Response> {
+    let query = uri.query().unwrap_or_default();
+    if !query
+        .split('&')
+        .any(|pair| pair == "cPanelAutoLogin" || pair.starts_with("cPanelAutoLogin="))
+    {
+        return None;
+    }
+    let redirect = || {
+        Some(
+            (
+                StatusCode::FOUND,
+                [("location", "./")],
+                "redirecting to Frickmail",
+            )
+                .into_response(),
+        )
+    };
+    if !state.config().cpanel_auto_login.enabled {
+        return None;
+    }
+    if session
+        .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+        .unwrap_or(None)
+        .is_some()
+    {
+        return redirect();
+    }
+    let (email, password) = cpanel_env_credentials();
+    let (Some(email), Some(password)) = (email, password) else {
+        return redirect();
+    };
+    let Some(pool) = state.db_pool() else {
+        return redirect();
+    };
+    match cpanel_auto_login_attempt(pool, session, &email, &password).await {
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!("cpanel auto-login failed: {err}");
+        }
     }
     redirect()
 }
@@ -25862,6 +25996,183 @@ mod tests {
         }
     }
 
+    fn cpanel_login_config() -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.cpanel_auto_login.enabled = true;
+        config
+    }
+
+    #[tokio::test]
+    async fn cpanel_auto_login_attempt_signs_in_verified_user() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1621,
+            "cpanel-user",
+            Some("cpanel@example.com"),
+            "correct-horse",
+            &[15_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let session = test_session();
+        let signed_in = super::cpanel_auto_login_attempt(
+            &pool,
+            &session,
+            "cpanel@example.com",
+            "correct-horse",
+        )
+        .await
+        .expect("valid credentials sign in");
+        assert!(signed_in);
+        assert_eq!(remote_session_user(&session).await, Some(1621));
+    }
+
+    #[tokio::test]
+    async fn cpanel_auto_login_attempt_rejects_bad_credentials() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1622,
+            "cpanel-user",
+            Some("cpanel@example.com"),
+            "correct-horse",
+            &[15_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        seed_login_user(
+            &pool,
+            1623,
+            "totp-user",
+            Some("totp@example.com"),
+            "correct-horse",
+            &[15_u8; fm_user::KDF_SALT_BYTES],
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+
+        // Wrong password, unknown address, empty credentials, and
+        // TOTP-gated accounts never sign in and never touch the session.
+        for (email, password) in [
+            ("cpanel@example.com", "wrong-horse"),
+            ("unknown@example.com", "correct-horse"),
+            ("", ""),
+            ("   ", "correct-horse"),
+            ("totp@example.com", "correct-horse"),
+        ] {
+            let session = test_session();
+            let signed_in = super::cpanel_auto_login_attempt(&pool, &session, email, password)
+                .await
+                .expect("rejections are Ok(false), not errors");
+            assert!(!signed_in, "unexpected sign-in for {email:?}");
+            assert_eq!(remote_session_user(&session).await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn cpanel_auto_login_is_default_off_and_holds_no_secrets() {
+        let config = test_config(None);
+        assert!(!config.cpanel_auto_login.enabled);
+        // Credentials arrive via REMOTE_USER/REMOTE_PASSWORD at request
+        // time and are never stored in config: Debug must show the whole
+        // struct with nothing to redact.
+        let rendered = format!("{:?}", config.cpanel_auto_login);
+        assert!(rendered.contains("enabled"));
+        assert!(!rendered.contains("redacted"));
+    }
+
+    #[tokio::test]
+    async fn cpanel_auto_login_stays_invisible_when_disabled_or_unkeyed() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1624,
+            "cpanel-user",
+            Some("cpanel@example.com"),
+            "correct-horse",
+            &[15_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+
+        // Disabled (the default): invisible, falls through to normal routing
+        // no matter what the process environment carries.
+        let plain = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        assert!(super::native_cpanel_auto_login(
+            &plain,
+            &"/?cPanelAutoLogin".parse().unwrap(),
+            &test_session(),
+        )
+        .await
+        .is_none());
+
+        // Enabled but without the exact query key: normal traffic.
+        let enabled = AppState::with_db_pool(cpanel_login_config(), Some(pool));
+        for uri in [
+            "/",
+            "/?cPanelAutoLoginx=1",
+            "/?xcPanelAutoLogin",
+            "/?Page=cPanelAutoLogin",
+            "/?cPanelAutoLogin=1&Other=2"
+                .replace("cPanelAutoLogin=1", "Note=cPanelAutoLogin")
+                .as_str(),
+        ] {
+            assert!(
+                super::native_cpanel_auto_login(&enabled, &uri.parse().unwrap(), &test_session(),)
+                    .await
+                    .is_none(),
+                "unexpected trigger for {uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cpanel_auto_login_keeps_existing_sessions() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1625,
+            "other-user",
+            Some("other@example.com"),
+            "other-horse",
+            &[15_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+
+        // An already-authenticated session passes through untouched without
+        // consulting the environment: same session id and credential key.
+        // (This holds regardless of REMOTE_USER/REMOTE_PASSWORD because the
+        // session check precedes the environment read.)
+        let state = AppState::with_db_pool(cpanel_login_config(), Some(pool));
+        let key = [16_u8; CREDENTIAL_KEY_BYTES];
+        let session = credential_session(1625, "other-user", Some("other@example.com"), &key).await;
+        session.save().await.unwrap();
+        let session_id = session.id().expect("persisted session has an id");
+        let response = super::native_cpanel_auto_login(
+            &state,
+            &"/?cPanelAutoLogin".parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("existing sessions redirect");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("./")
+        );
+        assert_eq!(remote_session_user(&session).await, Some(1625));
+        assert_eq!(session.id(), Some(session_id));
+    }
+
     fn proxy_auth_config(peers: &[&str]) -> FrickmailConfig {
         let mut config = test_config(None);
         config.proxy_auth.enabled = true;
@@ -36843,6 +37154,7 @@ Subject: Empty body metadata\r\n\r\n"
             external_login_enabled: false,
             proxy_auth: Default::default(),
             remote_auto_login: Default::default(),
+            cpanel_auto_login: Default::default(),
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),

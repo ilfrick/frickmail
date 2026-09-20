@@ -2552,6 +2552,7 @@ mod tests {
             external_login_enabled: false,
             proxy_auth: Default::default(),
             remote_auto_login: Default::default(),
+            cpanel_auto_login: Default::default(),
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),
