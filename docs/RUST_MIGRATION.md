@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-20 15:30:00 UTC
 
-The v1-calendar-UI slice is verified (commit pending): `frickmail-ui/v1`
+The v1-calendar-UI slice is published (`ab61b6bde`): `frickmail-ui/v1`
 gains the calendar screen — nav entry, month pager (prev/today/next),
 calendar checkbox list, Monday-first month grid with event chips, and an
 event editor (create/update/delete) over new `calendar.js` loaders
@@ -28,7 +28,10 @@ paths, X-SM-Token via ApiClient only, all interpolations escaped,
 single listener registration per control, editor prefill/delete
 parity with the API composite-id convention).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `ab61b6bde` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-20 13:29:00 UTC
