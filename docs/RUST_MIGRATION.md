@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-20 12:55:00 UTC
 
-The external-sso slice is verified (commit pending): native `ExternalSso`
+The external-sso slice is published (`2ef4efcfc`): native `ExternalSso`
 issuance (`POST /?ExternalSso` mints single-use login hashes, plain text
 or the legacy `{"Action":"ExternalSso","Result":hash}` JSON envelope when
 `Output=json`) plus the native `?Sso&hash=` consumer (single-use Redis
@@ -37,7 +37,10 @@ store consult, no DB schema change, API-shape coverage without mutating
 shared process state; one earlier full-suite single failure did not
 reproduce on re-run — treated as flake, suite green twice since).
 
-This slice is verified but NOT yet committed or pushed.
+Published `2ef4efcfc` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above.
 
 The hook series is now complete (`RemoteAutoLogin`, `ExternalLogin`,
 `cPanelAutoLogin`, `ProxyAuth`, `UserHeaderSet`, `ExternalSso`, `Avatar`).
