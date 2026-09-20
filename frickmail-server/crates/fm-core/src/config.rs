@@ -34,6 +34,8 @@ pub struct FrickmailConfig {
     #[serde(default)]
     pub cpanel_auto_login: CpanelAutoLoginConfig,
     #[serde(default)]
+    pub external_sso: ExternalSsoConfig,
+    #[serde(default)]
     pub oidc: OidcConfig,
     #[serde(default)]
     pub oauth2: Oauth2Config,
@@ -296,6 +298,29 @@ impl std::fmt::Debug for RemoteAutoLoginConfig {
 pub struct CpanelAutoLoginConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// External SSO hash issuance (native replacement for the Login External
+/// SSO plugin's `ExternalSso` part hook plus the `?Sso&hash=` consumer).
+/// Off unless explicitly enabled: possession of the shared `key` mints
+/// single-use login hashes, so the key must be strong, rotated on
+/// suspicion, and never logged. The key is a secret, so `Debug` redacts it
+/// exactly like the remote-auto-login password.
+#[derive(Clone, Deserialize, Default)]
+pub struct ExternalSsoConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub key: String,
+}
+
+impl std::fmt::Debug for ExternalSsoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalSsoConfig")
+            .field("enabled", &self.enabled)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -826,8 +851,8 @@ fn default_export_folder_max_bytes() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        DemoAccountConfig, FrickmailCacheConfig, MailDefaults, MessageListDomainOverride,
-        RemoteAutoLoginConfig, SecurityConfig,
+        DemoAccountConfig, ExternalSsoConfig, FrickmailCacheConfig, MailDefaults,
+        MessageListDomainOverride, RemoteAutoLoginConfig, SecurityConfig,
     };
     use std::collections::HashMap;
 
@@ -841,6 +866,17 @@ mod tests {
         let rendered = format!("{config:?}");
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("secret-horse"));
+    }
+
+    #[test]
+    fn external_sso_debug_redacts_shared_key() {
+        let config = ExternalSsoConfig {
+            enabled: true,
+            key: "shared-secret-key".to_string(),
+        };
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("shared-secret-key"));
     }
 
     #[test]

@@ -229,7 +229,7 @@ Part hooks must remain compatible while the SnappyMail plugin API is supported:
 - `cPanelAutoLogin` — native (`GET /?cPanelAutoLogin`, REMOTE_USER/REMOTE_PASSWORD process env, TOTP reject, always-redirect, default-off flag)
 - `ProxyAuth` — native (`GET /?ProxyAuth`, trusted-peer TCP check with exact-IP/CIDR v4/v6 matching, OIDC-style identity link + escrow under provider `proxy`, TOTP reject, always-redirect, admin-gated provisioning without session, default-off flag)
 - `UserHeaderSet` — native (`GET /?UserHeaderSet`, 200 when the configured identity header is nonempty else 401, never touches the session)
-- `ExternalSso`
+- `ExternalSso` — native (`POST /?ExternalSso` mints single-use `app_salt`-encrypted Redis hashes with constant-time shared-key check, credential verify + TOTP reject at issuance, PHP-parity empty-200 failures; `GET /?Sso&hash=` consumes single-use within 10 s into a rotated session, always-redirect, default-off flag)
 
 ## Legacy Transport Shapes
 

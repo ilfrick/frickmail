@@ -507,6 +507,10 @@ async fn root_get(
         return response;
     }
 
+    if let Some(response) = native_sso_consume(&state, &uri, &session).await {
+        return response;
+    }
+
     if let Some(response) = native_user_header_set(&state, &uri, request.headers()).await {
         return response;
     }
@@ -1488,6 +1492,12 @@ async fn json_api_request(
         return response;
     }
 
+    if let Some(response) =
+        native_external_sso_request(&state, &session, &method, &query, &headers, &body).await
+    {
+        return response;
+    }
+
     let request = match plugin_request_from_http(&query, &headers, &body, route_action) {
         Ok(request) => {
             let request = attach_legacy_json_raw_key(request, &uri);
@@ -2465,6 +2475,363 @@ async fn native_cpanel_auto_login(
     redirect()
 }
 
+/// Random bytes in an SSO lookup hash (64 lowercase hex chars on the wire).
+const EXTERNAL_SSO_HASH_BYTES: usize = 32;
+
+/// Redis TTL for a minted SSO hash, in seconds. The PHP plugin enforces a
+/// 10-second validity window on read (`Time` field); the TTL is a slightly
+/// larger backstop so expired hashes disappear even if never consumed.
+const EXTERNAL_SSO_REDIS_TTL_SECONDS: u64 = 30;
+
+/// Maximum age, in seconds, of a consumed SSO bundle. Mirrors the PHP
+/// `ServiceSso` check (`time() - 10 < Time`).
+const EXTERNAL_SSO_WINDOW_SECONDS: i64 = 10;
+
+/// Redis key prefix for minted SSO hashes. The random hash itself is the
+/// secret; the prefix only namespaces the store.
+const EXTERNAL_SSO_REDIS_PREFIX: &str = "frickmail:sso:";
+
+/// Single-use SSO credential bundle stored server-side, encrypted with the
+/// server `app_salt` (same URL-safe XChaCha20-Poly1305 envelope as OIDC
+/// state via `fm_oidc::encrypt_state`). The password is password-equivalent material:
+/// it lives only in Redis under a random key, with a 30-second TTL and a
+/// 10-second consume window, and is deleted atomically on first read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExternalSsoBundle {
+    email: String,
+    password: String,
+    issued_unix: i64,
+}
+
+/// Constant-time comparison for the shared SSO key, so a wrong key learns
+/// nothing about the configured value beyond rejection.
+fn sso_key_matches(configured: &str, supplied: &str) -> bool {
+    if configured.is_empty() || supplied.is_empty() {
+        return false;
+    }
+    let left = configured.as_bytes();
+    let right = supplied.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
+/// Whether a decrypted SSO bundle is still inside its consume window.
+/// Timestamps from the future (clock skew) or older than the PHP-parity
+/// 10-second window fail closed. `issued_unix` must be positive: a zero or
+/// negative value is a malformed bundle, not the epoch.
+fn sso_bundle_fresh(bundle: &ExternalSsoBundle, now_unix: i64) -> bool {
+    if bundle.issued_unix <= 0 {
+        return false;
+    }
+    let age = now_unix.saturating_sub(bundle.issued_unix);
+    (0..=EXTERNAL_SSO_WINDOW_SECONDS).contains(&age)
+}
+
+/// Shared credential verification for SSO issuance and consumption:
+/// email lookup with dummy-hash timing (no user-enumeration oracle),
+/// password check, and TOTP reject (a hash cannot complete a second
+/// factor). Returns the verified user on success.
+async fn sso_verify_credentials(
+    pool: &sqlx::AnyPool,
+    email: &str,
+    password: &str,
+) -> Result<Option<fm_user::FrickmailUser>, String> {
+    let user = fm_user::SqlxUserRepository::find_by_email(pool, email)
+        .await
+        .map_err(|err| err.public_message())?;
+    if !fm_user::verify_login_password(password, user.as_ref())
+        .map_err(|err| err.public_message())?
+    {
+        return Ok(None);
+    }
+    let user = user.expect("verified login requires a user");
+    if user
+        .totp_secret
+        .as_deref()
+        .is_some_and(|secret| !secret.is_empty() && secret != "0")
+    {
+        return Ok(None);
+    }
+    Ok(Some(user))
+}
+
+/// Signs the session in as an SSO-verified user with a rotated session id,
+/// exactly like the sibling auto-login hooks.
+async fn sso_establish_session(
+    session: &fm_session::Session,
+    user: &fm_user::FrickmailUser,
+    password: &str,
+) -> Result<(), String> {
+    let credential_key = fm_user::derive_credential_key(password, &user.kdf_salt)
+        .map_err(|err| err.public_message())?;
+    native_login_establish_session(
+        session,
+        &NativeLoginCredentials {
+            user_id: user.id,
+            username: user.username.clone(),
+            email: user.email.clone(),
+            credential_key: credential_key.to_vec(),
+        },
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// Mints a single-use SSO hash: random lookup key, `app_salt`-encrypted
+/// bundle in Redis with a bounded TTL. Returns the hash on the wire.
+/// Every failure (no Redis, no `app_salt`, store error) is `Err` and the
+/// caller answers with the PHP-parity empty 200.
+async fn sso_mint_hash(state: &AppState, email: &str, password: &str) -> Result<String, String> {
+    let salt = state.config().app_salt.clone().unwrap_or_default();
+    if salt.trim().is_empty() {
+        return Err("SSO server secret (app_salt) is not configured".to_string());
+    }
+    let Some(redis) = state.redis_pool().cloned() else {
+        return Err("SSO store (Redis) is not configured".to_string());
+    };
+    let mut hash_bytes = [0u8; EXTERNAL_SSO_HASH_BYTES];
+    OsRng.fill_bytes(&mut hash_bytes);
+    let hash = hex::encode(hash_bytes);
+    let bundle = ExternalSsoBundle {
+        email: email.to_string(),
+        password: password.to_string(),
+        issued_unix: Utc::now().timestamp(),
+    };
+    let sealed = fm_oidc::encrypt_state(&bundle, &salt);
+    if sealed.is_empty() {
+        return Err("SSO bundle encryption failed".to_string());
+    }
+    let mut connection = redis.get().await.map_err(|err| err.to_string())?;
+    deadpool_redis::redis::cmd("SETEX")
+        .arg(format!("{EXTERNAL_SSO_REDIS_PREFIX}{hash}"))
+        .arg(EXTERNAL_SSO_REDIS_TTL_SECONDS)
+        .arg(sealed)
+        .query_async::<()>(&mut connection)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(hash)
+}
+
+/// Atomically consumes a minted SSO hash (single-use via `GETDEL`) and
+/// returns the decrypted bundle. `None` covers every failure: unknown or
+/// already-consumed hash, store error, or undecryptable payload.
+async fn sso_consume_bundle(state: &AppState, hash: &str) -> Option<ExternalSsoBundle> {
+    let salt = state.config().app_salt.clone().unwrap_or_default();
+    if salt.trim().is_empty() {
+        return None;
+    }
+    let redis = state.redis_pool().cloned()?;
+    let mut connection = redis.get().await.ok()?;
+    let sealed: Option<String> = deadpool_redis::redis::cmd("GETDEL")
+        .arg(format!("{EXTERNAL_SSO_REDIS_PREFIX}{hash}"))
+        .query_async(&mut connection)
+        .await
+        .ok()?;
+    let sealed = sealed?;
+    fm_oidc::decrypt_state::<ExternalSsoBundle>(&sealed, &salt)
+}
+
+/// Native replacement for the Login External SSO plugin's `ExternalSso`
+/// part hook: `POST /?ExternalSso` with `Email`, `Password`, and the shared
+/// `SsoKey` mints a single-use login hash (plain text, or the legacy
+/// `{"Action":"ExternalSso","Result":hash}` JSON envelope when
+/// `Output=json`). Like the plugin this entry point intentionally accepts
+/// tokenless POSTs (external sites cannot hold our CSRF token), so it stays
+/// behind the default-off `external_sso.enabled` flag plus a non-empty
+/// shared key. Every failure answers with the PHP-parity empty 200.
+///
+/// Deliberate deviations from the plugin, both fail-closed: credentials are
+/// verified at issuance (the plugin mints first and fails at consume), and
+/// TOTP-gated accounts are rejected (a hash cannot complete a second
+/// factor). Consumed via `GET /?Sso&hash=` within 10 seconds, single-use.
+async fn native_external_sso_request(
+    state: &AppState,
+    _session: &fm_session::Session,
+    method: &Method,
+    query: &HashMap<String, String>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<Response> {
+    if *method != Method::POST {
+        return None;
+    }
+    if !query.contains_key("ExternalSso") {
+        return None;
+    }
+    const ACTION: &str = "ExternalSso";
+    let empty_ok = || {
+        Some(
+            (
+                StatusCode::OK,
+                [("content-type", "text/plain; charset=utf-8")],
+                "",
+            )
+                .into_response(),
+        )
+    };
+    if !state.config().external_sso.enabled {
+        return None;
+    }
+    let configured_key = state.config().external_sso.key.clone();
+    if configured_key.is_empty() {
+        return None;
+    }
+    // The plugin reads `$_POST` only; accept form bodies and JSON objects.
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let params: HashMap<String, String> = if content_type_contains(content_type, "application/json")
+    {
+        match serde_json::from_slice::<Value>(body) {
+            Ok(Value::Object(map)) => map
+                .into_iter()
+                .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
+                .collect(),
+            _ => return empty_ok(),
+        }
+    } else if content_type.is_empty()
+        || content_type_contains(content_type, "application/x-www-form-urlencoded")
+    {
+        match serde_urlencoded::from_bytes::<HashMap<String, String>>(body) {
+            Ok(form) => form,
+            Err(_) => return empty_ok(),
+        }
+    } else {
+        return empty_ok();
+    };
+
+    let supplied_key = params.get("SsoKey").map(String::as_str).unwrap_or_default();
+    if supplied_key.is_empty() || !sso_key_matches(&configured_key, supplied_key) {
+        return empty_ok();
+    }
+    let email = params.get("Email").map(String::as_str).unwrap_or_default();
+    let password = params
+        .get("Password")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let email = email.trim();
+    if email.is_empty() || password.is_empty() {
+        return empty_ok();
+    }
+    let Some(pool) = state.db_pool() else {
+        return empty_ok();
+    };
+    let verified = match sso_verify_credentials(pool, email, password).await {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(err) => {
+            tracing::warn!("external SSO issuance failed: {err}");
+            return empty_ok();
+        }
+    };
+    if !verified {
+        return empty_ok();
+    }
+    let hash = match sso_mint_hash(state, email, password).await {
+        Ok(hash) => hash,
+        Err(err) => {
+            tracing::warn!("external SSO issuance failed: {err}");
+            return empty_ok();
+        }
+    };
+    let json_output = params
+        .get("Output")
+        .is_some_and(|output| output.eq_ignore_ascii_case("json"));
+    if json_output {
+        Some(json_value_envelope(
+            StatusCode::OK,
+            ACTION,
+            json!({ "Result": hash }),
+        ))
+    } else {
+        Some(
+            (
+                StatusCode::OK,
+                [("content-type", "text/plain; charset=utf-8")],
+                hash,
+            )
+                .into_response(),
+        )
+    }
+}
+
+/// Native replacement for the `?Sso&hash=` consumer (`ServiceSso`): signs
+/// the session in from a minted, single-use, 10-second SSO hash and
+/// redirects to `./`. Already authenticated sessions pass straight through
+/// to the redirect. Every failure (unknown/consumed/expired/tampered hash,
+/// unknown user, TOTP-gated account, store or session error) redirects to
+/// `./` exactly like the sibling auto-login hooks. `AdditionalOptions`
+/// (e.g. account language) have no expression in native session
+/// establishment and are ignored: documented migration boundary.
+async fn native_sso_consume(
+    state: &AppState,
+    uri: &Uri,
+    session: &fm_session::Session,
+) -> Option<Response> {
+    let query = uri.query().unwrap_or_default();
+    if !query
+        .split('&')
+        .any(|pair| pair == "Sso" || pair.starts_with("Sso="))
+    {
+        return None;
+    }
+    let redirect = || {
+        Some(
+            (
+                StatusCode::FOUND,
+                [("location", "./")],
+                "redirecting to Frickmail",
+            )
+                .into_response(),
+        )
+    };
+    if !state.config().external_sso.enabled {
+        return None;
+    }
+    if session
+        .get::<fm_core::UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+        .unwrap_or(None)
+        .is_some()
+    {
+        return redirect();
+    }
+    let params: HashMap<String, String> = serde_urlencoded::from_str(query).unwrap_or_default();
+    let Some(hash) = params.get("hash").map(|hash| hash.trim().to_string()) else {
+        return redirect();
+    };
+    if hash.is_empty() || hash.len() > 128 {
+        return redirect();
+    }
+    let Some(pool) = state.db_pool() else {
+        return redirect();
+    };
+    let ok: Result<bool, String> = async {
+        let Some(bundle) = sso_consume_bundle(state, &hash).await else {
+            return Ok(false);
+        };
+        if !sso_bundle_fresh(&bundle, Utc::now().timestamp()) {
+            return Ok(false);
+        }
+        let Some(user) = sso_verify_credentials(pool, &bundle.email, &bundle.password).await?
+        else {
+            return Ok(false);
+        };
+        sso_establish_session(session, &user, &bundle.password).await?;
+        Ok(true)
+    }
+    .await;
+    if let Err(err) = ok {
+        tracing::warn!("SSO consume failed: {err}");
+    }
+    redirect()
+}
 /// Maximum byte length of a proxy-supplied identity. The subject is opaque
 /// (case preserved, like OIDC subjects); over-long values fail closed.
 const PROXY_AUTH_IDENTITY_MAX_BYTES: usize = 320;
@@ -26173,6 +26540,381 @@ mod tests {
         assert_eq!(session.id(), Some(session_id));
     }
 
+    fn sso_test_config() -> FrickmailConfig {
+        let mut config = test_config(None);
+        config.external_sso.enabled = true;
+        config.external_sso.key = "test-sso-key".to_string();
+        config
+    }
+
+    async fn post_external_sso(
+        state: AppState,
+        session: Session,
+        body: &str,
+        content_type: &str,
+    ) -> axum::response::Response {
+        let mut query = HashMap::new();
+        query.insert("ExternalSso".to_string(), String::new());
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", content_type.parse().unwrap());
+        super::native_external_sso_request(
+            &state,
+            &session,
+            &Method::POST,
+            &query,
+            &headers,
+            body.as_bytes(),
+        )
+        .await
+        .expect("enabled hook answers SSO issuance requests")
+    }
+
+    async fn read_text(response: axum::response::Response) -> (StatusCode, String) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn sso_key_matches_is_exact_and_length_safe() {
+        assert!(super::sso_key_matches("test-sso-key", "test-sso-key"));
+        assert!(!super::sso_key_matches("test-sso-key", "test-sso-keY"));
+        assert!(!super::sso_key_matches("test-sso-key", "test-sso-key-2"));
+        assert!(!super::sso_key_matches("test-sso-key", "short"));
+        assert!(!super::sso_key_matches("", ""));
+        assert!(!super::sso_key_matches("test-sso-key", ""));
+    }
+
+    #[tokio::test]
+    async fn sso_bundle_fresh_enforces_php_parity_window() {
+        let now = 1_786_000_000;
+        let bundle = |issued_unix| super::ExternalSsoBundle {
+            email: "sso@example.com".to_string(),
+            password: "correct-horse".to_string(),
+            issued_unix,
+        };
+        assert!(super::sso_bundle_fresh(&bundle(now), now));
+        assert!(super::sso_bundle_fresh(&bundle(now - 10), now));
+        assert!(!super::sso_bundle_fresh(&bundle(now - 11), now));
+        // Future timestamps (clock skew) and non-positive values fail closed.
+        assert!(!super::sso_bundle_fresh(&bundle(now + 1), now));
+        assert!(!super::sso_bundle_fresh(&bundle(0), now));
+        assert!(!super::sso_bundle_fresh(&bundle(-5), now));
+    }
+
+    #[tokio::test]
+    async fn external_sso_is_default_off_and_key_empty() {
+        let config = test_config(None);
+        assert!(!config.external_sso.enabled);
+        assert!(config.external_sso.key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_sso_stays_invisible_when_disabled_or_unkeyed() {
+        // Disabled (the default): invisible on both the issuance and the
+        // consume routes, no matter the parameters.
+        let plain = AppState::with_db_pool(test_config(None), None);
+        let mut query = HashMap::new();
+        query.insert("ExternalSso".to_string(), String::new());
+        assert!(super::native_external_sso_request(
+            &plain,
+            &test_session(),
+            &Method::POST,
+            &query,
+            &HeaderMap::new(),
+            b"Email=a&Password=b&SsoKey=test-sso-key",
+        )
+        .await
+        .is_none());
+        assert!(super::native_sso_consume(
+            &plain,
+            &"/?Sso&hash=abc".parse().unwrap(),
+            &test_session(),
+        )
+        .await
+        .is_none());
+
+        // Enabled: only POST + the exact query key triggers issuance...
+        let enabled = AppState::with_db_pool(sso_test_config(), None);
+        assert!(super::native_external_sso_request(
+            &enabled,
+            &test_session(),
+            &Method::GET,
+            &query,
+            &HeaderMap::new(),
+            b"",
+        )
+        .await
+        .is_none());
+        let mut other = HashMap::new();
+        other.insert("Other".to_string(), String::new());
+        assert!(super::native_external_sso_request(
+            &enabled,
+            &test_session(),
+            &Method::POST,
+            &other,
+            &HeaderMap::new(),
+            b"",
+        )
+        .await
+        .is_none());
+        // ...and only the exact `Sso` query key triggers consume.
+        for uri in ["/", "/?Ssox&hash=abc", "/?xSso&hash=abc", "/?Page=Sso"] {
+            assert!(
+                super::native_sso_consume(&enabled, &uri.parse().unwrap(), &test_session(),)
+                    .await
+                    .is_none(),
+                "unexpected trigger for {uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn external_sso_issuance_rejects_bad_key_and_credentials() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1631,
+            "sso-user",
+            Some("sso@example.com"),
+            "correct-horse",
+            &[17_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        seed_login_user(
+            &pool,
+            1632,
+            "totp-user",
+            Some("totp@example.com"),
+            "correct-horse",
+            &[17_u8; fm_user::KDF_SALT_BYTES],
+            Some("JBSWY3DPEHPK3PXP"),
+        )
+        .await;
+        let state = AppState::with_db_pool(sso_test_config(), Some(pool));
+        let form = "application/x-www-form-urlencoded";
+
+        // Wrong key, missing key, unknown user, wrong password, empty
+        // fields, and TOTP-gated accounts all answer with the PHP-parity
+        // empty 200 — and never touch the session.
+        for body in [
+            "Email=sso%40example.com&Password=correct-horse&SsoKey=wrong-key",
+            "Email=sso%40example.com&Password=correct-horse",
+            "Email=unknown%40example.com&Password=correct-horse&SsoKey=test-sso-key",
+            "Email=sso%40example.com&Password=wrong-horse&SsoKey=test-sso-key",
+            "Email=&Password=&SsoKey=test-sso-key",
+            "Email=totp%40example.com&Password=correct-horse&SsoKey=test-sso-key",
+        ] {
+            let session = test_session();
+            let response = post_external_sso(state.clone(), session.clone(), body, form).await;
+            let (status, text) = read_text(response).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(text.is_empty(), "unexpected body for {body:?}");
+            assert_eq!(remote_session_user(&session).await, None);
+        }
+
+        // Malformed JSON bodies fail the same closed way.
+        let session = test_session();
+        let response =
+            post_external_sso(state.clone(), session, "{not-json", "application/json").await;
+        let (status, text) = read_text(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_sso_issuance_fails_closed_without_store_or_secret() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1633,
+            "sso-user",
+            Some("sso@example.com"),
+            "correct-horse",
+            &[17_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let body = "Email=sso%40example.com&Password=correct-horse&SsoKey=test-sso-key";
+        let form = "application/x-www-form-urlencoded";
+
+        // Enabled with valid credentials but no Redis store: empty 200.
+        let state = AppState::with_db_pool(sso_test_config(), Some(pool.clone()));
+        let (status, text) =
+            read_text(post_external_sso(state, test_session(), body, form).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(text.is_empty());
+
+        // Enabled with a store absent AND no app_salt: still empty 200.
+        let mut config = sso_test_config();
+        config.app_salt = None;
+        let state = AppState::with_db_pool(config, Some(pool));
+        let (status, text) =
+            read_text(post_external_sso(state, test_session(), body, form).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sso_consume_redirects_without_store_and_keeps_sessions() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1634,
+            "other-user",
+            Some("other@example.com"),
+            "other-horse",
+            &[17_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let state = AppState::with_db_pool(sso_test_config(), Some(pool));
+
+        // No Redis store: every hash redirects without touching the session.
+        let session = test_session();
+        let response = super::native_sso_consume(
+            &state,
+            &"/?Sso&hash=0123456789abcdef".parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("failures still redirect");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(remote_session_user(&session).await, None);
+
+        // Missing or over-long hashes redirect the same closed way.
+        for uri in ["/?Sso", "/?Sso&hash=", "/?Sso&other=1"] {
+            let session = test_session();
+            let response = super::native_sso_consume(&state, &uri.parse().unwrap(), &session)
+                .await
+                .expect("failures still redirect");
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(remote_session_user(&session).await, None);
+        }
+        let long = format!("/?Sso&hash={}", "a".repeat(129));
+        let session = test_session();
+        let response = super::native_sso_consume(&state, &long.parse().unwrap(), &session)
+            .await
+            .expect("failures still redirect");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(remote_session_user(&session).await, None);
+
+        // An already-authenticated session passes through untouched.
+        let key = [18_u8; CREDENTIAL_KEY_BYTES];
+        let session = credential_session(1634, "other-user", Some("other@example.com"), &key).await;
+        session.save().await.unwrap();
+        let session_id = session.id().expect("persisted session has an id");
+        let response = super::native_sso_consume(
+            &state,
+            &"/?Sso&hash=0123456789abcdef".parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("existing sessions redirect");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(remote_session_user(&session).await, Some(1634));
+        assert_eq!(session.id(), Some(session_id));
+    }
+
+    #[tokio::test]
+    async fn external_sso_full_round_trip_when_redis_configured() {
+        let Ok(redis_url) = std::env::var("FRICKMAIL_TEST_REDIS_URL") else {
+            return;
+        };
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_login_user(
+            &pool,
+            1635,
+            "sso-user",
+            Some("sso@example.com"),
+            "correct-horse",
+            &[17_u8; fm_user::KDF_SALT_BYTES],
+            None,
+        )
+        .await;
+        let mut config = sso_test_config();
+        config.redis_url = redis_url;
+        let state = AppState::with_db_pool(config, Some(pool));
+        let form = "application/x-www-form-urlencoded";
+
+        // Issuance returns a 64-hex-char single-use hash as plain text.
+        let response = post_external_sso(
+            state.clone(),
+            test_session(),
+            "Email=sso%40example.com&Password=correct-horse&SsoKey=test-sso-key",
+            form,
+        )
+        .await;
+        let (status, hash) = read_text(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        // With Output=json the hash arrives in the legacy envelope.
+        let response = post_external_sso(
+            state.clone(),
+            test_session(),
+            "Email=sso%40example.com&Password=correct-horse&SsoKey=test-sso-key&Output=json",
+            form,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let envelope = read_json(response).await;
+        assert_eq!(envelope["Action"], "ExternalSso");
+        let json_hash = envelope["Result"].as_str().unwrap().to_string();
+        assert_eq!(json_hash.len(), 64);
+
+        // Consuming signs the session in and redirects.
+        let session = test_session();
+        let response = super::native_sso_consume(
+            &state,
+            &format!("/?Sso&hash={hash}").parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("valid hash redirects");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("./")
+        );
+        assert_eq!(remote_session_user(&session).await, Some(1635));
+
+        // Single-use: the same hash redirects a fresh session nowhere.
+        let replay = test_session();
+        let response = super::native_sso_consume(
+            &state,
+            &format!("/?Sso&hash={hash}").parse().unwrap(),
+            &replay,
+        )
+        .await
+        .expect("replay still redirects");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(remote_session_user(&replay).await, None);
+
+        // The JSON-issued hash consumes exactly the same way.
+        let session = test_session();
+        let response = super::native_sso_consume(
+            &state,
+            &format!("/?Sso&hash={json_hash}").parse().unwrap(),
+            &session,
+        )
+        .await
+        .expect("valid hash redirects");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(remote_session_user(&session).await, Some(1635));
+    }
+
     fn proxy_auth_config(peers: &[&str]) -> FrickmailConfig {
         let mut config = test_config(None);
         config.proxy_auth.enabled = true;
@@ -37155,6 +37897,7 @@ Subject: Empty body metadata\r\n\r\n"
             proxy_auth: Default::default(),
             remote_auto_login: Default::default(),
             cpanel_auto_login: Default::default(),
+            external_sso: Default::default(),
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),

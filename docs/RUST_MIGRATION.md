@@ -5,6 +5,44 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-20 12:55:00 UTC
+
+The external-sso slice is verified (commit pending): native `ExternalSso`
+issuance (`POST /?ExternalSso` mints single-use login hashes, plain text
+or the legacy `{"Action":"ExternalSso","Result":hash}` JSON envelope when
+`Output=json`) plus the native `?Sso&hash=` consumer (single-use Redis
+`GETDEL`, 10-second PHP-parity consume window, rotated session,
+always-redirect to `./`). Hashes are 32 random bytes (64 hex chars);
+bundles are password-equivalent material encrypted with the server
+`app_salt` via the OIDC-state envelope, Redis TTL 30 s. Shared-key check
+is constant-time and rejects empties; issuance verifies credentials with
+dummy-hash timing and rejects TOTP-gated accounts (a hash cannot complete
+a second factor); failures answer with the PHP-parity empty 200
+(issuance) or redirect (consume). Default-off `external_sso.enabled` flag
+plus non-empty shared key (Debug-redacted). `AdditionalOptions`/language
+has no expression in native session establishment: documented boundary.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http` clean; `cargo test -p fm-http --lib -- sso` 8
+passed / 0 failed (incl. a live-Redis mint→consume→replay round trip);
+`cargo test -p fm-http --lib` 511 passed / 0 failed; `cargo test -p
+fm-core` 12 passed / 0 failed; `cargo clippy --workspace --all-targets
+-- -D warnings` clean (one `manual_range_contains` fixed); naming gate
+passes locally.
+
+Independent senior review APPROVED (single-use atomic consume, bounded
+TTL + 10 s window, no credential storage in config, fail-closed
+disabled/unkeyed/storeless/secretless paths, session passthrough without
+store consult, no DB schema change, API-shape coverage without mutating
+shared process state; one earlier full-suite single failure did not
+reproduce on re-run — treated as flake, suite green twice since).
+
+This slice is verified but NOT yet committed or pushed.
+
+The hook series is now complete (`RemoteAutoLogin`, `ExternalLogin`,
+`cPanelAutoLogin`, `ProxyAuth`, `UserHeaderSet`, `ExternalSso`, `Avatar`).
+The major remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-20 12:15:00 UTC
 
 The cpanel-auto-login slice is published (`d245ead72`): native

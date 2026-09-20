@@ -2553,6 +2553,7 @@ mod tests {
             proxy_auth: Default::default(),
             remote_auto_login: Default::default(),
             cpanel_auto_login: Default::default(),
+            external_sso: Default::default(),
             oidc: Default::default(),
             oauth2: Default::default(),
             mail: Default::default(),
