@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-20 12:15:00 UTC
 
-The cpanel-auto-login slice is verified (commit pending): native
+The cpanel-auto-login slice is published (`d245ead72`): native
 `cPanelAutoLogin` part hook (`GET /?cPanelAutoLogin`, `REMOTE_USER` /
 `REMOTE_PASSWORD` process-environment credentials, TOTP reject,
 always-redirect to `./`, existing sessions pass through untouched,
@@ -18,6 +18,9 @@ the config `Debug` impl holds no secrets. The plugin's
 rewrite (including the `[::cpses::]` split) is explicitly out of scope:
 native login establishes the session against the stored Frickmail user
 and its stored account credentials.
+
+Published `d245ead72` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
 
 Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
 `cargo check -p fm-http` clean; `cargo test -p fm-http --lib --
@@ -32,7 +35,7 @@ no credential storage, no DB schema change, API-shape coverage via
 direct handler unit tests without mutating the shared process
 environment).
 
-This slice is verified but NOT yet committed or pushed.
+This slice is published as described above.
 
 The remaining hook-series item is `ExternalSso`. The major remaining
 gates toward the final Rust-only goal are unchanged.
