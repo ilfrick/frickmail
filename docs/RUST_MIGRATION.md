@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-20 13:29:00 UTC
 
-The v1-calendar-API slice is verified (commit pending): stable
+The v1-calendar-API slice is published (`39687eb83`): stable
 Rust-owned calendar endpoints reusing the exact provider pipelines as
 the legacy hooks — `GET /api/frickmail/v1/calendars` (list),
 `GET /api/frickmail/v1/calendars/events` (merged start-sorted events,
@@ -35,7 +35,10 @@ deadline-bounded fetcher, no new blocking, session gate before DB,
 generic error messages verified by test, no DB schema or config change,
 API-shape coverage via stub fetchers plus HTTP-level token tests).
 
-This slice is verified but NOT yet committed or pushed.
+Published `39687eb83` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above.
 
 The v1 UI screen (calendar.js + ApiClient methods + node tests) is the
 natural follow-up. The major remaining gates toward the final Rust-only
