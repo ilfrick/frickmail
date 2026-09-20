@@ -75,6 +75,13 @@ pub fn routes() -> Router<AppState> {
         .route("/rules", get(rules))
         .route("/tasks", get(tasks))
         .route("/folders", get(folders))
+        .route("/calendars", get(calendars))
+        .route(
+            "/calendars/events",
+            get(calendar_events)
+                .post(calendar_save_event)
+                .delete(calendar_delete_event),
+        )
         .fallback(unknown_path)
         .method_not_allowed_fallback(v1_method_not_allowed)
 }
@@ -1368,6 +1375,439 @@ async fn tasks(
             )
         }
     }
+}
+
+/// Classifies a native legacy calendar `Result.error` message onto the v1
+/// contract without leaking provider text to clients (details stay in
+/// server logs via the caller's `tracing::warn!`, like `map_send_response`).
+/// Session/account problems map to 401/404/400; provider rejections become
+/// a generic 502.
+fn calendar_error_status(message: &str) -> (StatusCode, &'static str, &'static str) {
+    if message == "Not authenticated" {
+        (
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        )
+    } else if message == "Account not found" {
+        (
+            StatusCode::NOT_FOUND,
+            "account_not_found",
+            "Mail account not found",
+        )
+    } else if message == "Frickmail database is not configured" {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        )
+    } else if message == "Account id required"
+        || message == "title/start/end required"
+        || message == "Too many calendar ids"
+        || message == "id required"
+        || message == "Calendar requires a Gmail or Office 365 account"
+        || message.starts_with("No OAuth2 refresh token")
+    {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid calendar request",
+        )
+    } else {
+        (
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Calendar provider request failed",
+        )
+    }
+}
+
+/// Maps a native legacy calendar response onto the v1 contract: a legacy
+/// `Result` object without an `error` field becomes 200 `data`; a legacy
+/// `Result.error` becomes a classified 4xx/502 with a generic message;
+/// anything else becomes a generic 502. Legacy error text never reaches v1
+/// clients.
+async fn map_calendar_response(response: Response) -> Response {
+    if response.status() != StatusCode::OK {
+        tracing::warn!(
+            "v1 calendar request failed with legacy status {}",
+            response.status().as_u16()
+        );
+        return v1_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Calendar provider request failed",
+        );
+    }
+    let body = match axum::body::to_bytes(response.into_body(), 64 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Calendar provider request failed",
+            )
+        }
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(body) => body,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Calendar provider request failed",
+            )
+        }
+    };
+    match body.get("Result") {
+        Some(Value::Object(result)) if result.get("error").is_none() => {
+            (StatusCode::OK, Json(ApiV1Envelope::ok(result))).into_response()
+        }
+        Some(result) => {
+            let message = result
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let (status, code, generic) = calendar_error_status(message);
+            tracing::warn!("v1 calendar request failed: {code}");
+            v1_error(status, code, generic)
+        }
+        _ => v1_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Calendar provider request failed",
+        ),
+    }
+}
+
+/// Builds the legacy calendar payload account selector: an explicit
+/// `account_id` wins, otherwise the key is omitted so the legacy handler
+/// falls back to the session-selected account.
+fn calendar_account_payload(account_id: Option<i64>) -> Value {
+    match account_id {
+        Some(id) => json!({ "account_id": id }),
+        None => json!({}),
+    }
+}
+
+/// Lists the Gmail/Office 365 calendars of the selected or explicit
+/// account, reusing the exact provider pipeline as legacy
+/// `JsonCalendarList`. Read-only, so no connection token is required.
+async fn calendars(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    calendars_with_fetcher(&state, &session, query, &|request| {
+        super::calendar::calendar_http_via_reqwest(request)
+    })
+    .await
+}
+
+async fn calendars_with_fetcher<F, Fut>(
+    state: &AppState,
+    session: &fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+    fetcher: &F,
+) -> Response
+where
+    F: Fn(super::calendar::CalendarHttpRequest) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<super::calendar::CalendarHttpResponse, fm_core::FrickmailError>,
+    >,
+{
+    if let Err(response) = v1_session_user_id(session).await {
+        return response;
+    }
+    if state.db_pool().is_none() {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    }
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid calendars query",
+        );
+    };
+    let account_id = params
+        .get("account_id")
+        .and_then(|value| value.parse::<i64>().ok());
+    let payload = calendar_account_payload(account_id);
+    let response = super::calendar::native_frickmail_calendar_list_with_fetcher(
+        state,
+        "JsonCalendarList",
+        &payload,
+        session,
+        fetcher,
+    )
+    .await;
+    map_calendar_response(response).await
+}
+
+/// Lists merged, start-sorted events across calendars, reusing the exact
+/// provider pipeline as legacy `JsonCalendarEvents`. `calendar_ids` is a
+/// comma-separated list (default `primary`); `start`/`end` default to the
+/// legacy current-month-through-next-month window. Read-only.
+async fn calendar_events(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    calendar_events_with_fetcher(&state, &session, query, &|request| {
+        super::calendar::calendar_http_via_reqwest(request)
+    })
+    .await
+}
+
+async fn calendar_events_with_fetcher<F, Fut>(
+    state: &AppState,
+    session: &fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+    fetcher: &F,
+) -> Response
+where
+    F: Fn(super::calendar::CalendarHttpRequest) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<super::calendar::CalendarHttpResponse, fm_core::FrickmailError>,
+    >,
+{
+    if let Err(response) = v1_session_user_id(session).await {
+        return response;
+    }
+    if state.db_pool().is_none() {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    }
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid calendar events query",
+        );
+    };
+    let mut payload = calendar_account_payload(
+        params
+            .get("account_id")
+            .and_then(|value| value.parse::<i64>().ok()),
+    );
+    if let Some(ids) = params.get("calendar_ids") {
+        let ids: Vec<String> = ids
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
+        payload["calendar_ids"] = json!(ids);
+    }
+    for key in ["start", "end"] {
+        if let Some(value) = params.get(key) {
+            payload[key] = json!(value);
+        }
+    }
+    let response = super::calendar::native_frickmail_calendar_events_with_fetcher(
+        state,
+        "JsonCalendarEvents",
+        &payload,
+        session,
+        fetcher,
+    )
+    .await;
+    map_calendar_response(response).await
+}
+
+/// Request body for `POST /api/frickmail/v1/calendars/events`. Field names
+/// mirror the legacy `JsonCalendarSave` payload (`_calendar` stays
+/// `calendar` here); `id` selects update mode, matching the legacy
+/// composite `calendar:raw` convention. Required-field validation stays in
+/// the native handler so both surfaces share it.
+#[derive(Debug, Deserialize, Default)]
+struct CalendarSaveRequest {
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    calendar: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    end: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    all_day: Option<bool>,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+/// Creates or updates a calendar event through the selected or explicit
+/// account, reusing the exact provider pipeline as legacy
+/// `JsonCalendarSave`. State-changing, so the connection token is required.
+async fn calendar_save_event(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<CalendarSaveRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    calendar_save_event_with_fetcher(&state, &session, &headers, body, &|request| {
+        super::calendar::calendar_http_via_reqwest(request)
+    })
+    .await
+}
+
+async fn calendar_save_event_with_fetcher<F, Fut>(
+    state: &AppState,
+    session: &fm_session::Session,
+    headers: &axum::http::HeaderMap,
+    body: Result<axum::extract::Json<CalendarSaveRequest>, axum::extract::rejection::JsonRejection>,
+    fetcher: &F,
+) -> Response
+where
+    F: Fn(super::calendar::CalendarHttpRequest) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<super::calendar::CalendarHttpResponse, fm_core::FrickmailError>,
+    >,
+{
+    if let Err(response) = v1_require_token(state, session, headers).await {
+        return response;
+    }
+    if state.db_pool().is_none() {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    }
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid calendar event body",
+        );
+    };
+    let mut payload = calendar_account_payload(request.account_id);
+    if let Some(calendar) = request.calendar {
+        payload["_calendar"] = json!(calendar);
+    }
+    for (key, value) in [
+        ("title", request.title),
+        ("start", request.start),
+        ("end", request.end),
+        ("description", request.description),
+        ("location", request.location),
+        ("id", request.id),
+    ] {
+        if let Some(value) = value {
+            payload[key] = json!(value);
+        }
+    }
+    if let Some(all_day) = request.all_day {
+        payload["allDay"] = json!(all_day);
+    }
+    let response = super::calendar::native_frickmail_calendar_save_with_fetcher(
+        state,
+        "JsonCalendarSave",
+        &payload,
+        session,
+        fetcher,
+    )
+    .await;
+    map_calendar_response(response).await
+}
+
+/// Deletes a calendar event through the selected or explicit account,
+/// reusing the exact provider pipeline as legacy `JsonCalendarDelete`
+/// (410 Gone counts as deleted). State-changing, so the connection token
+/// is required.
+async fn calendar_delete_event(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    calendar_delete_event_with_fetcher(&state, &session, &headers, query, &|request| {
+        super::calendar::calendar_http_via_reqwest(request)
+    })
+    .await
+}
+
+async fn calendar_delete_event_with_fetcher<F, Fut>(
+    state: &AppState,
+    session: &fm_session::Session,
+    headers: &axum::http::HeaderMap,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+    fetcher: &F,
+) -> Response
+where
+    F: Fn(super::calendar::CalendarHttpRequest) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<super::calendar::CalendarHttpResponse, fm_core::FrickmailError>,
+    >,
+{
+    if let Err(response) = v1_require_token(state, session, headers).await {
+        return response;
+    }
+    if state.db_pool().is_none() {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    }
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid calendar delete query",
+        );
+    };
+    let mut payload = calendar_account_payload(
+        params
+            .get("account_id")
+            .and_then(|value| value.parse::<i64>().ok()),
+    );
+    if let Some(id) = params.get("id") {
+        payload["id"] = json!(id);
+    }
+    if let Some(calendar) = params.get("calendar") {
+        payload["_calendar"] = json!(calendar);
+    }
+    let response = super::calendar::native_frickmail_calendar_delete_with_fetcher(
+        state,
+        "JsonCalendarDelete",
+        &payload,
+        session,
+        fetcher,
+    )
+    .await;
+    map_calendar_response(response).await
 }
 
 /// Query parameters for `GET /api/frickmail/v1/messages/{uid}`.
@@ -4817,6 +5257,395 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn calendar_session(
+        user_id: i64,
+        username: &str,
+        email: Option<&str>,
+        credential_key: &[u8],
+    ) -> fm_session::Session {
+        use base64::Engine as _;
+        let session = fm_session::Session::new(
+            None,
+            std::sync::Arc::new(fm_session::MemoryStore::default()),
+            None,
+        );
+        session
+            .insert(
+                fm_session::USER_SESSION_KEY,
+                fm_core::UserSession {
+                    user_id,
+                    username: username.to_string(),
+                    email: email.map(ToOwned::to_owned),
+                },
+            )
+            .await
+            .unwrap();
+        session
+            .insert(
+                fm_session::CREDENTIAL_KEY_SESSION_KEY,
+                base64::engine::general_purpose::STANDARD.encode(credential_key),
+            )
+            .await
+            .unwrap();
+        session
+    }
+
+    async fn seed_gmail_oauth_account(
+        pool: &sqlx::AnyPool,
+        account_id: i64,
+        user_id: i64,
+        email: &str,
+        credential_key: &[u8],
+    ) {
+        seed_mail_account(pool, account_id, user_id, "Gmail").await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET email = ?, login = ?, type = 'gmail',
+                 encrypted_oauth_refresh_token = ?
+             WHERE id = ?",
+        )
+        .bind(email)
+        .bind(email)
+        .bind(fm_user::encrypt_account_secret("test-refresh-token", credential_key).unwrap())
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn calendar_test_config() -> fm_core::FrickmailConfig {
+        let mut config = test_api_config();
+        config.oauth2.gmail.client_id = Some("cal-client".to_string());
+        config
+    }
+
+    fn calendar_state(pool: sqlx::AnyPool) -> crate::AppState {
+        crate::AppState::with_db_pool(calendar_test_config(), Some(pool))
+    }
+
+    fn calendar_ok_stub(
+        json: serde_json::Value,
+    ) -> impl Fn(
+        super::super::calendar::CalendarHttpRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                Output = Result<
+                    super::super::calendar::CalendarHttpResponse,
+                    fm_core::FrickmailError,
+                >,
+            >,
+        >,
+    > {
+        move |request: super::super::calendar::CalendarHttpRequest| {
+            let json = json.clone();
+            Box::pin(async move {
+                if request.url.contains("accounts.google.com/o/oauth2/token") {
+                    Ok(super::super::calendar::CalendarHttpResponse {
+                        status: 200,
+                        json: serde_json::json!({"access_token": "g-access"}),
+                    })
+                } else {
+                    Ok(super::super::calendar::CalendarHttpResponse { status: 200, json })
+                }
+            })
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                            Output = Result<
+                                super::super::calendar::CalendarHttpResponse,
+                                fm_core::FrickmailError,
+                            >,
+                        >,
+                    >,
+                >
+        }
+    }
+
+    fn calendar_query(
+        pairs: &[(&str, &str)],
+    ) -> Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    > {
+        Ok(axum::extract::Query(
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn v1_calendars_rejects_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/calendars")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "unauthenticated");
+    }
+
+    #[tokio::test]
+    async fn v1_calendars_lists_provider_calendars() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1401, "v1cal", "correct-horse", None).await;
+        let key = [21_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        seed_gmail_oauth_account(&pool, 1401, 1401, "v1cal@gmail.com", &key).await;
+        let state = calendar_state(pool);
+        let session = calendar_session(1401, "v1cal", Some("v1cal@gmail.com"), &key).await;
+
+        let response = super::calendars_with_fetcher(
+            &state,
+            &session,
+            calendar_query(&[("account_id", "1401")]),
+            &calendar_ok_stub(serde_json::json!({"items": [
+                {"id": "primary", "summary": "V1 Cal"},
+                {"id": "work", "summary": "Work"},
+            ]})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        let calendars = body["data"]["calendars"].as_array().unwrap();
+        assert_eq!(calendars.len(), 2);
+        assert_eq!(calendars[0]["name"], "V1 Cal");
+        assert_eq!(body["data"]["provider"], "gmail");
+    }
+
+    #[tokio::test]
+    async fn v1_calendars_rejects_non_oauth_accounts_without_provider_text() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1402, "v1calplain", "correct-horse", None).await;
+        seed_mail_account(&pool, 1402, 1402, "Primary").await;
+        let key = [22_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let state = calendar_state(pool);
+        let session =
+            calendar_session(1402, "v1calplain", Some("v1calplain@example.com"), &key).await;
+
+        let response = super::calendars_with_fetcher(
+            &state,
+            &session,
+            calendar_query(&[("account_id", "1402")]),
+            &calendar_ok_stub(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+        assert_eq!(body["error"]["message"], "Invalid calendar request");
+    }
+
+    #[tokio::test]
+    async fn v1_calendar_events_lists_merged_events() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1403, "v1calev", "correct-horse", None).await;
+        let key = [23_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        seed_gmail_oauth_account(&pool, 1403, 1403, "v1calev@gmail.com", &key).await;
+        let state = calendar_state(pool);
+        let session = calendar_session(1403, "v1calev", Some("v1calev@gmail.com"), &key).await;
+
+        let response = super::calendar_events_with_fetcher(
+            &state,
+            &session,
+            calendar_query(&[
+                ("account_id", "1403"),
+                ("calendar_ids", "primary, second"),
+                ("start", "2026-09-01T00:00:00Z"),
+                ("end", "2026-09-30T23:59:59Z"),
+            ]),
+            &calendar_ok_stub(serde_json::json!({"items": [
+                {"id": "ev-1", "summary": "Standup",
+                 "start": {"dateTime": "2026-09-02T09:00:00Z"},
+                 "end": {"dateTime": "2026-09-02T09:30:00Z"}},
+            ]})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let events = body["data"]["events"].as_array().unwrap();
+        // The stub answers both calendars identically; the merge keeps both.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["title"], "Standup");
+    }
+
+    #[tokio::test]
+    async fn v1_calendar_events_rejects_too_many_calendars() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1404, "v1calmany", "correct-horse", None).await;
+        let key = [24_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        seed_gmail_oauth_account(&pool, 1404, 1404, "v1calmany@gmail.com", &key).await;
+        let state = calendar_state(pool);
+        let session = calendar_session(1404, "v1calmany", Some("v1calmany@gmail.com"), &key).await;
+        let ids: Vec<String> = (0..60).map(|index| format!("cal-{index}")).collect();
+
+        let response = super::calendar_events_with_fetcher(
+            &state,
+            &session,
+            calendar_query(&[("account_id", "1404"), ("calendar_ids", &ids.join(","))]),
+            &calendar_ok_stub(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn v1_calendar_save_validates_and_returns_new_id() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1405, "v1calsave", "correct-horse", None).await;
+        let key = [25_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        seed_gmail_oauth_account(&pool, 1405, 1405, "v1calsave@gmail.com", &key).await;
+        let state = calendar_state(pool);
+        let session = calendar_session(1405, "v1calsave", Some("v1calsave@gmail.com"), &key).await;
+        let token = super::super::ensure_connection_token(&state, &session, None)
+            .await
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-sm-token", token.parse().unwrap());
+
+        // Missing title/start/end never reaches the provider.
+        let response = super::calendar_save_event_with_fetcher(
+            &state,
+            &session,
+            &headers,
+            Ok(axum::extract::Json(super::CalendarSaveRequest {
+                title: None,
+                start: Some("2026-09-02T09:00:00Z".to_string()),
+                end: Some("2026-09-02T10:00:00Z".to_string()),
+                ..Default::default()
+            })),
+            &calendar_ok_stub(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = super::calendar_save_event_with_fetcher(
+            &state,
+            &session,
+            &headers,
+            Ok(axum::extract::Json(super::CalendarSaveRequest {
+                account_id: Some(1405),
+                title: Some("Planning".to_string()),
+                start: Some("2026-09-02T09:00:00Z".to_string()),
+                end: Some("2026-09-02T10:00:00Z".to_string()),
+                ..Default::default()
+            })),
+            &calendar_ok_stub(serde_json::json!({"id": "new-ev-9"})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+        assert_eq!(body["data"]["id"], "new-ev-9");
+    }
+
+    #[tokio::test]
+    async fn v1_calendar_delete_removes_event_and_requires_token() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1406, "v1caldel", "correct-horse", None).await;
+        let key = [26_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        seed_gmail_oauth_account(&pool, 1406, 1406, "v1caldel@gmail.com", &key).await;
+        let state = calendar_state(pool);
+        let session = calendar_session(1406, "v1caldel", Some("v1caldel@gmail.com"), &key).await;
+
+        // Missing id is a 400 without provider contact.
+        let token = super::super::ensure_connection_token(&state, &session, None)
+            .await
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-sm-token", token.parse().unwrap());
+        let response = super::calendar_delete_event_with_fetcher(
+            &state,
+            &session,
+            &headers,
+            calendar_query(&[("account_id", "1406")]),
+            &calendar_ok_stub(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A provider 410 Gone still counts as deleted. The stub answers
+        // the token refresh normally and reports Gone only for the
+        // delete call itself.
+        let gone = |request: super::super::calendar::CalendarHttpRequest| async move {
+            if request.url.contains("accounts.google.com/o/oauth2/token") {
+                Ok(super::super::calendar::CalendarHttpResponse {
+                    status: 200,
+                    json: serde_json::json!({"access_token": "g-access"}),
+                })
+            } else {
+                Ok(super::super::calendar::CalendarHttpResponse {
+                    status: 410,
+                    json: serde_json::json!({}),
+                })
+            }
+        };
+        let response = super::calendar_delete_event_with_fetcher(
+            &state,
+            &session,
+            &headers,
+            calendar_query(&[("account_id", "1406"), ("id", "primary:ev-1")]),
+            &gone,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+
+        // Without the connection token the delete is forbidden before any
+        // provider contact.
+        let response = super::calendar_delete_event_with_fetcher(
+            &state,
+            &session,
+            &axum::http::HeaderMap::new(),
+            calendar_query(&[("account_id", "1406"), ("id", "primary:ev-1")]),
+            &calendar_ok_stub(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
+    }
+
+    #[tokio::test]
+    async fn v1_calendar_save_rejects_missing_token_over_http() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1407, "v1caltok", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1caltok", "correct-horse").await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/calendars/events")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"title": "No token"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {

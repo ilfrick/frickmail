@@ -5,6 +5,42 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-20 13:29:00 UTC
+
+The v1-calendar-API slice is verified (commit pending): stable
+Rust-owned calendar endpoints reusing the exact provider pipelines as
+the legacy hooks — `GET /api/frickmail/v1/calendars` (list),
+`GET /api/frickmail/v1/calendars/events` (merged start-sorted events,
+comma-separated `calendar_ids`, `start`/`end` with legacy defaults),
+`POST /api/frickmail/v1/calendars/events` (create/update via
+`calendar`/`id`), `DELETE /api/frickmail/v1/calendars/events`
+(410 Gone counts as deleted). A shared mapper turns legacy envelopes
+into the v1 contract (200 `data` on success; classified 401/404/400
+for session/account/validation problems with generic messages and no
+provider-text leakage; generic 502 otherwise). Reads need only the
+session; writes require the `X-SM-Token` connection token like v1 send.
+Required-field validation stays in the native handlers so both surfaces
+share it.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- v1_calendar` 8 passed / 0 failed (stub-fetcher list/events/
+save/delete incl. 410 tolerance, token enforcement over HTTP, anonymous
+rejection); `cargo test -p fm-http --lib` 519 passed / 0 failed;
+`cargo clippy --workspace --all-targets -- -D warnings` clean; naming
+gate passes locally.
+
+Independent senior review APPROVED (provider I/O through the existing
+deadline-bounded fetcher, no new blocking, session gate before DB,
+generic error messages verified by test, no DB schema or config change,
+API-shape coverage via stub fetchers plus HTTP-level token tests).
+
+This slice is verified but NOT yet committed or pushed.
+
+The v1 UI screen (calendar.js + ApiClient methods + node tests) is the
+natural follow-up. The major remaining gates toward the final Rust-only
+goal are unchanged.
+
 ## Progress Snapshot — 2026-09-20 12:55:00 UTC
 
 The external-sso slice is published (`2ef4efcfc`): native `ExternalSso`
