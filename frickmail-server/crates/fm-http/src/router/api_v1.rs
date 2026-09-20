@@ -75,6 +75,8 @@ pub fn routes() -> Router<AppState> {
         .route("/rules", get(rules))
         .route("/tasks", get(tasks))
         .route("/folders", get(folders))
+        .route("/search", get(search))
+        .route("/unified-inbox", get(unified_inbox))
         .route("/calendars", get(calendars))
         .route(
             "/calendars/events",
@@ -1372,6 +1374,122 @@ async fn tasks(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "Frickmail tasks listing failed",
+            )
+        }
+    }
+}
+
+/// Parses a v1 result-window limit the same way the legacy dispatcher
+/// does (default 50, clamped to 1–100); the repository clamps again as a
+/// backstop.
+fn search_result_limit(params: &std::collections::HashMap<String, String>) -> i64 {
+    params
+        .get("limit")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(50)
+        .clamp(1, 100)
+}
+
+/// Full-text search over the user's indexed messages, mirroring legacy
+/// `FrickmailSearch` (minimum query length and BadRequest mapping
+/// included). Read-only.
+async fn search(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid search query",
+        );
+    };
+    let text = params.get("q").map(String::as_str).unwrap_or_default();
+    let limit = search_result_limit(&params);
+    match fm_user::SqlxUserRepository::search_messages(pool, user_id, text.to_string(), limit).await
+    {
+        Ok(results) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({
+                "query": text.trim(),
+                "results": results,
+            }))),
+        )
+            .into_response(),
+        Err(err) => {
+            if matches!(err, fm_core::FrickmailError::BadRequest(_)) {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Invalid search request",
+                );
+            }
+            tracing::warn!("v1 search failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail search failed",
+            )
+        }
+    }
+}
+
+/// Merged cross-account inbox over indexed INBOX messages, mirroring
+/// legacy `FrickmailUnifiedInbox`. Read-only.
+async fn unified_inbox(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid unified inbox query",
+        );
+    };
+    let limit = search_result_limit(&params);
+    match fm_user::SqlxUserRepository::unified_inbox_messages(pool, user_id, limit).await {
+        Ok(messages) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "messages": messages }))),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("v1 unified inbox failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail unified inbox failed",
             )
         }
     }
@@ -5646,6 +5764,182 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "invalid_token");
+    }
+
+    async fn seed_search_index(pool: &sqlx::AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_message_index (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                folder TEXT NOT NULL,
+                imap_uid INTEGER NOT NULL,
+                message_id TEXT,
+                subject TEXT,
+                from_addr TEXT,
+                from_name TEXT,
+                date_ts TEXT,
+                snippet TEXT
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        for (id, user_id, account_id, folder, imap_uid, subject) in [
+            (1_i64, 1501_i64, 1501_i64, "INBOX", 31_i64, "Invoice"),
+            (2, 1501, 1501, "Archive", 32, "Invoice reminder"),
+            (3, 1502, 1502, "INBOX", 33, "Invoice from another user"),
+        ] {
+            sqlx::query(
+                "INSERT INTO frickmail_message_index
+                    (id, user_id, account_id, folder, imap_uid, message_id, subject,
+                     from_addr, from_name, date_ts, snippet)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(account_id)
+            .bind(folder)
+            .bind(imap_uid)
+            .bind(format!("search-{id}"))
+            .bind(subject)
+            .bind("billing@example.com")
+            .bind("Billing")
+            .bind("2026-06-01 10:00:00")
+            .bind("First invoice")
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn search_test_state() -> (Router, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1501, "v1search", "correct-horse", None).await;
+        seed_login_user(&pool, 1502, "v1other", "correct-horse", None).await;
+        seed_mail_account(&pool, 1501, 1501, "Primary").await;
+        seed_mail_account(&pool, 1502, 1502, "Primary").await;
+        seed_search_index(&pool).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1search", "correct-horse").await;
+        (app, cookie)
+    }
+
+    #[tokio::test]
+    async fn v1_search_rejects_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        for uri in [
+            "/api/frickmail/v1/search?q=invoice",
+            "/api/frickmail/v1/unified-inbox",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_search_requires_a_usable_query() {
+        let (app, cookie) = search_test_state().await;
+
+        for uri in [
+            "/api/frickmail/v1/search",
+            "/api/frickmail/v1/search?q=",
+            "/api/frickmail/v1/search?q=x",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "for {uri}");
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_search_returns_user_scoped_results_with_limit() {
+        let (app, cookie) = search_test_state().await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/search?q=invoice")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["query"], "invoice");
+        let results = body["data"]["results"].as_array().unwrap();
+        // Both own folders match; the other user's message never leaks.
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result["account_id"] == 1501));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/search?q=invoice&limit=1")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["results"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v1_unified_inbox_returns_indexed_inbox_only() {
+        let (app, cookie) = search_test_state().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/unified-inbox")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        let messages = body["data"]["messages"].as_array().unwrap();
+        // Only INBOX rows of the caller's own password-backed account.
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["folder"], "INBOX");
+        assert_eq!(messages[0]["subject"], "Invoice");
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {

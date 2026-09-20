@@ -5,7 +5,32 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
-## Progress Snapshot — 2026-09-20 15:30:00 UTC
+## Progress Snapshot — 2026-09-20 13:56:00 UTC
+
+The v1-search-API slice is verified (commit pending): stable Rust-owned
+search endpoints over the indexed-message store — `GET
+/api/frickmail/v1/search?q=&limit=` (minimum-length and BadRequest
+mapping included, limit default 50 clamped 1–100 like the legacy
+dispatcher) and `GET /api/frickmail/v1/unified-inbox?limit=`. Both reuse
+the exact repository queries as the legacy hooks; both are read-only.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- v1_search v1_unified` 4 passed / 0 failed (anonymous rejection,
+query validation, user-scoped results with limit plumbing, inbox-only
+shape); `cargo test -p fm-http --lib` 523 passed / 0 failed; `cargo
+clippy --workspace --all-targets -- -D warnings` clean; naming gate
+passes locally.
+
+Independent senior review APPROVED (session gate before DB, BadRequest
+vs internal error mapping, user scoping verified by test including a
+non-leaking second user, no schema or config change, limit clamped in
+both layers).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
+## Progress Snapshot — 2026-09-20 13:45:00 UTC
 
 The v1-calendar-UI slice is published (`ab61b6bde`): `frickmail-ui/v1`
 gains the calendar screen — nav entry, month pager (prev/today/next),
