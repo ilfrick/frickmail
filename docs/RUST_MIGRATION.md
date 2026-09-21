@@ -5,6 +5,29 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-21 07:15:00 UTC
+
+The v1-accounts-UI slice is verified (commit pending): `frickmail-ui/v1`
+gains the mail-accounts screen — nav entry, account list with primary
+markers, per-row open/edit/make-primary/delete actions, and a shared
+add/edit editor (blank password preserves the stored secret server-side)
+over new `accounts.js` loaders against the v1 accounts API. All
+rendering passes through the shared `escapeHtml`.
+
+Verification so far (host node, Docker-free like prior UI slices):
+`node --test frickmail-ui/v1/js/accounts.test.mjs` 15 passed / 0
+failed; full `node --test frickmail-ui/v1/js/*.test.mjs` 146 passed / 0
+failed; `npx eslint` on touched JS clean; `build.mjs` ships
+`accounts.js` automatically (tests excluded, nav wired in the bundle);
+no legacy product names in the new files.
+
+Independent senior review APPROVED (contract match on all five API
+paths, X-SM-Token via ApiClient only, all interpolations escaped,
+single listener registration per control).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 06:59:00 UTC
 
 The v1-accounts-API slice is published (`c9b2f38f2`): stable

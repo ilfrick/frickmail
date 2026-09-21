@@ -21,6 +21,17 @@ import { collectComposePayload, renderComposeForm, sendMessage } from './js/comp
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
 import {
+	addAccount,
+	collectAccountPayload,
+	deleteAccount,
+	loadAccounts,
+	renderAccountEditor,
+	renderAccounts,
+	setPrimaryAccount,
+	switchAccount,
+	updateAccount
+} from './js/accounts.js';
+import {
 	collectCertImport,
 	collectP12Import,
 	deleteSmimeCert,
@@ -57,6 +68,7 @@ const root = document.getElementById('app');
 
 function nav(active) {
 	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
+	const accounts = active === 'accounts' ? ' aria-current="page"' : '';
 	const settings = active === 'settings' ? ' aria-current="page"' : '';
 	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
 	const search = active === 'search' ? ' aria-current="page"' : '';
@@ -68,6 +80,7 @@ function nav(active) {
 	const compose = active === 'compose' ? ' aria-current="page"' : '';
 	return '<nav data-fm="nav">'
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
+		+ '<button type="button" data-fm="nav-accounts"' + accounts + '>Accounts</button>'
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
 		+ '<button type="button" data-fm="nav-search"' + search + '>Search</button>'
 		+ '<button type="button" data-fm="nav-unified"' + unified + '>Unified</button>'
@@ -83,6 +96,7 @@ function nav(active) {
 
 function wireNav() {
 	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
+	const accountsButton = root.querySelector('[data-fm="nav-accounts"]');
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
 	const searchButton = root.querySelector('[data-fm="nav-search"]');
 	const unifiedButton = root.querySelector('[data-fm="nav-unified"]');
@@ -95,6 +109,9 @@ function wireNav() {
 	const logoutButton = root.querySelector('[data-fm="nav-logout"]');
 	if (inboxButton) {
 		inboxButton.addEventListener('click', () => showMailbox('INBOX'));
+	}
+	if (accountsButton) {
+		accountsButton.addEventListener('click', () => showAccounts());
 	}
 	if (tasksButton) {
 		tasksButton.addEventListener('click', () => showTasks('all'));
@@ -582,6 +599,90 @@ async function enterApp() {
 		void error;
 	}
 	await showMailbox('INBOX');
+}
+
+async function showAccounts(editingId) {
+	try {
+		const data = await loadAccounts(api);
+		const accounts = data && Array.isArray(data.accounts) ? data.accounts : [];
+		const editing = editingId
+			? accounts.find((account) => String(account.id) === String(editingId)) || null
+			: null;
+		root.innerHTML = nav('accounts')
+			+ '<h1 data-fm="title">Mail accounts</h1>'
+			+ renderAccounts(data)
+			+ '<h2 data-fm="subtitle">' + (editing ? 'Edit account' : 'Add account') + '</h2>'
+			+ renderAccountEditor(editing)
+			+ '<p data-fm="status"></p>';
+		wireNav();
+		wireAccounts();
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load mail accounts.</p>';
+	}
+}
+
+function wireAccounts() {
+	const form = root.querySelector('[data-fm="editor"]');
+	if (form) {
+		form.addEventListener('submit', onAccountSubmit);
+	}
+	for (const button of root.querySelectorAll('[data-fm="switch"]')) {
+		button.addEventListener('click', async () => {
+			try {
+				await switchAccount(api, button.getAttribute('data-id'));
+				await showMailbox('INBOX');
+			} catch (error) {
+				accountsStatus(error && error.message ? error.message : 'Switch failed.');
+			}
+		});
+	}
+	for (const button of root.querySelectorAll('[data-fm="edit"]')) {
+		button.addEventListener('click', () => showAccounts(button.getAttribute('data-id')));
+	}
+	for (const button of root.querySelectorAll('[data-fm="make-primary"]')) {
+		button.addEventListener('click', async () => {
+			try {
+				await setPrimaryAccount(api, button.getAttribute('data-id'));
+				await showAccounts();
+			} catch (error) {
+				accountsStatus(error && error.message ? error.message : 'Set primary failed.');
+			}
+		});
+	}
+	for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+		button.addEventListener('click', async () => {
+			try {
+				await deleteAccount(api, button.getAttribute('data-id'));
+				await showAccounts();
+			} catch (error) {
+				accountsStatus(error && error.message ? error.message : 'Delete failed.');
+			}
+		});
+	}
+}
+
+function accountsStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onAccountSubmit(event) {
+	event.preventDefault();
+	try {
+		const payload = collectAccountPayload(root);
+		if (payload.id) {
+			const id = payload.id;
+			delete payload.id;
+			await updateAccount(api, id, payload);
+		} else {
+			await addAccount(api, payload);
+		}
+		await showAccounts();
+	} catch (error) {
+		accountsStatus(error && error.message ? error.message : 'Save failed.');
+	}
 }
 
 async function showMailbox(folder) {
