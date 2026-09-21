@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-21 07:00:00 UTC
 
-The v1-search-open slice is verified (commit pending): search and
+The v1-search-open slice is published (`2898d392a`): search and
 unified rows open messages in place — `showMessage` accepts
 `{accountId, back}`, search rows carry `data-folder` and return to the
 query, unified rows return to the list. The server side was already
@@ -23,7 +23,10 @@ outside the `rust-ci` path filter like prior UI slices).
 Independent senior review APPROVED (no new API surface, user-scoped
 reads confirmed, back-navigation preserves context).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `2898d392a` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 06:45:00 UTC
