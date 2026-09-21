@@ -77,6 +77,13 @@ pub fn routes() -> Router<AppState> {
         .route("/folders", get(folders))
         .route("/search", get(search))
         .route("/unified-inbox", get(unified_inbox))
+        .route(
+            "/smime/certs",
+            get(smime_certs)
+                .post(smime_import_cert)
+                .delete(smime_delete_cert),
+        )
+        .route("/smime/p12", post(smime_import_p12))
         .route("/calendars", get(calendars))
         .route(
             "/calendars/events",
@@ -1492,6 +1499,304 @@ async fn unified_inbox(
                 "Frickmail unified inbox failed",
             )
         }
+    }
+}
+
+/// Maps S/MIME repository errors onto the v1 contract: `BadRequest` is a
+/// client error (404 only for the unknown-account/cert cases), everything
+/// else is a generic 500. Certificate text never reaches clients.
+fn smime_error(message: &str, action: &'static str) -> Response {
+    if message == "Account not found" {
+        return v1_error(
+            StatusCode::NOT_FOUND,
+            "account_not_found",
+            "Mail account not found",
+        );
+    }
+    if message == "Certificate not found or already deleted" {
+        return v1_error(
+            StatusCode::NOT_FOUND,
+            "certificate_not_found",
+            "S/MIME certificate not found",
+        );
+    }
+    tracing::warn!("v1 {action} failed: {message}");
+    v1_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "Frickmail S/MIME request failed",
+    )
+}
+
+/// Lists the caller's S/MIME certificates (metadata only — key material
+/// never leaves the server). Read-only.
+async fn smime_certs(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    match fm_user::SqlxUserRepository::list_smime_certs(pool, user_id).await {
+        Ok(certs) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "certs": certs }))),
+        )
+            .into_response(),
+        Err(err) => smime_error(&err.public_message(), "certificate listing"),
+    }
+}
+
+/// Request body for `POST /api/frickmail/v1/smime/certs`: a base64 PEM
+/// recipient certificate for the explicit account.
+#[derive(Debug, Deserialize, Default)]
+struct SmimeImportCertRequest {
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    pem_b64: Option<String>,
+}
+
+/// Imports a recipient S/MIME certificate, mirroring legacy
+/// `FrickmailSmimeImportCert` validation (base64, size, PEM parse, email
+/// extraction). State-changing, so the connection token is required.
+async fn smime_import_cert(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<
+        axum::extract::Json<SmimeImportCertRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid certificate body",
+        );
+    };
+    let account_id = request.account_id.unwrap_or(0);
+    let pem_b64 = request.pem_b64.unwrap_or_default();
+    if pem_b64.trim().is_empty() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid certificate request",
+        );
+    }
+    use base64::Engine as _;
+    let pem = match base64::engine::general_purpose::STANDARD.decode(pem_b64.trim()) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Invalid certificate request",
+                )
+            }
+        },
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid certificate request",
+            )
+        }
+    };
+    match fm_user::SqlxUserRepository::import_smime_cert(
+        pool,
+        user_id,
+        fm_user::NewSmimeCert { account_id, pem },
+    )
+    .await
+    {
+        Ok(result) => (StatusCode::OK, Json(ApiV1Envelope::ok(json!(result)))).into_response(),
+        Err(err) => match err {
+            fm_core::FrickmailError::BadRequest(message) if message == "Account not found" => {
+                v1_error(
+                    StatusCode::NOT_FOUND,
+                    "account_not_found",
+                    "Mail account not found",
+                )
+            }
+            fm_core::FrickmailError::BadRequest(_) => v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid certificate request",
+            ),
+            _ => smime_error(&err.public_message(), "certificate import"),
+        },
+    }
+}
+
+/// Request body for `POST /api/frickmail/v1/smime/p12`: a base64 PKCS#12
+/// bundle (private key + certificate) encrypted under the session
+/// credential key at rest.
+#[derive(Debug, Deserialize, Default)]
+struct SmimeImportP12Request {
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    p12_b64: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// Imports a PKCS#12 identity bundle, mirroring legacy
+/// `FrickmailSmimeImportP12`. State-changing and key-bearing, so the
+/// connection token is required.
+async fn smime_import_p12(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<
+        axum::extract::Json<SmimeImportP12Request>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let credential_key = match v1_session_credential_key(&session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid PKCS#12 body",
+        );
+    };
+    let account_id = request.account_id.unwrap_or(0);
+    use base64::Engine as _;
+    let p12_der = match request.p12_b64.unwrap_or_default() {
+        encoded if encoded.trim().is_empty() => Vec::new(),
+        encoded => match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Invalid certificate request",
+                )
+            }
+        },
+    };
+    match fm_user::SqlxUserRepository::import_smime_p12(
+        pool,
+        user_id,
+        fm_user::NewSmimeP12 {
+            account_id,
+            p12_der,
+            password: request.password.unwrap_or_default(),
+        },
+        &credential_key,
+    )
+    .await
+    {
+        Ok(result) => (StatusCode::OK, Json(ApiV1Envelope::ok(json!(result)))).into_response(),
+        Err(err) => match err {
+            fm_core::FrickmailError::BadRequest(message) if message == "Account not found" => {
+                v1_error(
+                    StatusCode::NOT_FOUND,
+                    "account_not_found",
+                    "Mail account not found",
+                )
+            }
+            fm_core::FrickmailError::BadRequest(_) => v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid certificate request",
+            ),
+            _ => smime_error(&err.public_message(), "PKCS#12 import"),
+        },
+    }
+}
+
+/// Deletes one of the caller's S/MIME certificates. State-changing, so the
+/// connection token is required.
+async fn smime_delete_cert(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid certificate delete query",
+        );
+    };
+    let id = params
+        .get("id")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    match fm_user::SqlxUserRepository::delete_smime_cert(pool, user_id, id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Ok(false) => v1_error(
+            StatusCode::NOT_FOUND,
+            "certificate_not_found",
+            "S/MIME certificate not found",
+        ),
+        Err(err) => smime_error(&err.public_message(), "certificate delete"),
     }
 }
 
@@ -5940,6 +6245,360 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["folder"], "INBOX");
         assert_eq!(messages[0]["subject"], "Invoice");
+    }
+
+    async fn seed_smime_cert_tables(pool: &sqlx::AnyPool) {
+        sqlx::query(
+            "CREATE TABLE frickmail_smime_certs (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                cert_pem TEXT NOT NULL,
+                encrypted_key_pem BLOB,
+                fingerprint TEXT NOT NULL,
+                subject TEXT,
+                not_before TEXT,
+                not_after TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn test_smime_cert_material(
+        email: &str,
+    ) -> (String, openssl::pkey::PKey<openssl::pkey::Private>) {
+        use openssl::{
+            asn1::Asn1Time,
+            bn::BigNum,
+            hash::MessageDigest,
+            nid::Nid,
+            pkey::PKey,
+            rsa::Rsa,
+            x509::{extension::SubjectAlternativeName, X509NameBuilder, X509},
+        };
+        let rsa = Rsa::generate(2048).unwrap();
+        let key = PKey::from_rsa(rsa).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, email).unwrap();
+        name.append_entry_by_nid(Nid::PKCS9_EMAILADDRESS, email)
+            .unwrap();
+        let name = name.build();
+        let mut builder = X509::builder().unwrap();
+        builder.set_version(2).unwrap();
+        let serial = BigNum::from_u32(43).unwrap().to_asn1_integer().unwrap();
+        builder.set_serial_number(&serial).unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(&key).unwrap();
+        builder
+            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        builder
+            .set_not_after(&Asn1Time::days_from_now(365).unwrap())
+            .unwrap();
+        let san = SubjectAlternativeName::new()
+            .email(email)
+            .build(&builder.x509v3_context(None, None))
+            .unwrap();
+        builder.append_extension(san).unwrap();
+        builder.sign(&key, MessageDigest::sha256()).unwrap();
+        let cert = builder.build();
+        let pem = String::from_utf8(cert.to_pem().unwrap()).unwrap();
+        (pem, key)
+    }
+
+    fn test_smime_cert_pem(email: &str) -> String {
+        test_smime_cert_material(email).0
+    }
+
+    fn test_smime_p12_b64(email: &str, password: &str) -> String {
+        use base64::Engine as _;
+        use openssl::{pkcs12::Pkcs12, x509::X509};
+        let (pem, key) = test_smime_cert_material(email);
+        let cert = X509::from_pem(pem.as_bytes()).unwrap();
+        let der = Pkcs12::builder()
+            .name(email)
+            .pkey(&key)
+            .cert(&cert)
+            .build2(password)
+            .unwrap()
+            .to_der()
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(der)
+    }
+
+    async fn smime_test_state() -> (Router, String, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1601, "v1smime", "correct-horse", None).await;
+        seed_mail_account(&pool, 1601, 1601, "Primary").await;
+        seed_smime_cert_tables(&pool).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1smime", "correct-horse").await;
+        // Like the switch-account tests, the bootstrap connection token
+        // stays valid after login.
+        (app, cookie, token)
+    }
+
+    #[tokio::test]
+    async fn v1_smime_rejects_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        // Reads hit the session gate; writes hit the connection-token gate
+        // first, exactly like v1 send.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/smime/certs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for request in [
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/smime/certs")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/smime/p12")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/frickmail/v1/smime/certs?id=1")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_smime_import_validates_input() {
+        let (app, cookie, token) = smime_test_state().await;
+        let post = |uri: &str, body: serde_json::Value| {
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("cookie", &cookie)
+                .header("x-sm-token", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Missing account.
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/smime/certs",
+                serde_json::json!({"pem_b64": "eA=="}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Bad base64.
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/smime/certs",
+                serde_json::json!({"account_id": 1601, "pem_b64": "!!!"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Well-formed base64 but not a certificate.
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/smime/certs",
+                serde_json::json!({"account_id": 1601, "pem_b64": "aGVsbG8="}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+
+        // Unknown account.
+        let response = app
+            .oneshot(post(
+                "/api/frickmail/v1/smime/certs",
+                serde_json::json!({"account_id": 9999, "pem_b64": "aGVsbG8="}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "account_not_found");
+    }
+
+    #[tokio::test]
+    async fn v1_smime_import_lists_and_deletes_cert_without_key_material() {
+        use base64::Engine as _;
+        let (app, cookie, token) = smime_test_state().await;
+        let pem_b64 =
+            base64::engine::general_purpose::STANDARD.encode(test_smime_cert_pem("v1@example.com"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/smime/certs")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"account_id": 1601, "pem_b64": pem_b64}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+        assert_eq!(body["data"]["email"], "v1@example.com");
+        assert!(body["data"]["fingerprint"].as_str().unwrap().len() > 10);
+        let id = body["data"]["id"].as_i64().unwrap();
+
+        // Listing exposes metadata only — never key material.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/smime/certs")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let certs = body["data"]["certs"].as_array().unwrap();
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0]["id"], id);
+        assert_eq!(certs[0]["has_key"], false);
+        assert!(certs[0].get("encrypted_key_pem").is_none());
+        assert!(certs[0].get("cert_pem").is_none());
+
+        // Delete removes; a second delete 404s.
+        for expected in [StatusCode::OK, StatusCode::NOT_FOUND] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::DELETE)
+                        .uri(format!("/api/frickmail/v1/smime/certs?id={id}"))
+                        .header("cookie", &cookie)
+                        .header("x-sm-token", &token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let body = read_json(
+            app.oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/smime/certs")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert!(body["data"]["certs"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn v1_smime_p12_import_stores_key_and_requires_token() {
+        let (app, cookie, token) = smime_test_state().await;
+        let p12 = test_smime_p12_b64("v1p12@example.com", "p12-secret");
+
+        // Without the connection token the key-bearing write is forbidden.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/smime/p12")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"account_id": 1601, "p12_b64": p12}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/smime/p12")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "account_id": 1601,
+                            "p12_b64": p12,
+                            "password": "p12-secret",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+        assert_eq!(body["data"]["email"], "v1p12@example.com");
+
+        let body = read_json(
+            app.oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/smime/certs")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let certs = body["data"]["certs"].as_array().unwrap();
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0]["has_key"], true);
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {

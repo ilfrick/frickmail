@@ -5,6 +5,38 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-21 06:27:00 UTC
+
+The v1-smime-API slice is verified (commit pending): stable Rust-owned
+certificate management — `GET /api/frickmail/v1/smime/certs` (metadata
+only), `POST /api/frickmail/v1/smime/certs` (base64 PEM import),
+`POST /api/frickmail/v1/smime/p12` (base64 PKCS#12 import, key encrypted
+under the session credential key at rest), `DELETE
+/api/frickmail/v1/smime/certs?id=` — all reusing the exact repository
+calls as the legacy hooks. Reads need only the session; writes require
+the `X-SM-Token` connection token. Mapping: unknown account/cert → 404,
+validation problems → 400 with generic messages, everything else → 500;
+key material never serializes (verified by test). Sign/verify stay on
+the legacy dispatcher (message-content ops, like compose attachments).
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- v1_smime` 4 passed / 0 failed (anonymous gating, input
+validation incl. account scoping, import→list→delete round trip with a
+generated certificate, P12 key storage with `has_key`, token
+enforcement); `cargo test -p fm-http --lib` 527 passed / 0 failed;
+`cargo clippy --workspace --all-targets -- -D warnings` clean
+(`needless_borrow` in the calendar fetchers fixed along the way);
+naming gate passes locally.
+
+Independent senior review APPROVED (base64/PEM validation mirrors the
+legacy handler before the repository call, credential key required for
+key-bearing writes, generic error messages, no schema or config change,
+API-shape coverage with generated fixtures).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 06:00:00 UTC
 
 Production-image validation round covering the six slices since Sept 18
