@@ -5,6 +5,36 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-21 06:59:00 UTC
+
+The v1-accounts-API slice is verified (commit pending): stable
+Rust-owned account management — `POST /api/frickmail/v1/accounts`
+(create, first account auto-primary), `PUT /accounts/{id}` (update,
+empty password preserves the stored one), `DELETE /accounts/{id}`
+(plus index cleanup), `POST /accounts/{id}/primary` — all reusing the
+exact repository calls as the legacy hooks. Reads need only the
+session; writes require the `X-SM-Token` connection token. Unknown ids
+404 via a user-scoped ownership check (the repository deletes/updates
+by key without confirming a row matched); validation problems 400;
+everything else 500 with generic messages; listings expose no secrets
+(verified by test).
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- v1_account` 5 passed / 0 failed (anonymous gating, token
+enforcement, validation, update/primary/delete round trips with
+ownership); `cargo test -p fm-http --lib` 531 passed / 0 failed;
+`cargo clippy --workspace --all-targets -- -D warnings` clean;
+naming gate passes locally.
+
+Independent senior review APPROVED (credential-bearing writes behind
+token + session key, user scoping verified incl. a second user whose
+account reads as unknown, generic error messages, no schema or config
+change, API-shape coverage over HTTP).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 07:00:00 UTC
 
 The v1-search-open slice is published (`2898d392a`): search and

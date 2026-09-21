@@ -24,7 +24,7 @@ use axum::{
     extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use serde::Deserialize;
@@ -45,7 +45,9 @@ pub fn routes() -> Router<AppState> {
         .route("/health", get(health))
         .route("/session", get(session))
         .route("/login", post(login))
-        .route("/accounts", get(accounts))
+        .route("/accounts", get(accounts).post(add_account))
+        .route("/accounts/{id}", put(update_account).delete(delete_account))
+        .route("/accounts/{id}/primary", post(set_primary_account))
         .route("/identities", get(identities))
         .route("/switch-account", post(switch_account))
         .route("/logout", post(logout))
@@ -3209,6 +3211,322 @@ async fn accounts(state: axum::extract::State<AppState>, session: fm_session::Se
     }
 }
 
+/// Maps mail-account repository errors onto the v1 contract: unknown
+/// accounts 404, validation problems 400, everything else 500 with a
+/// generic message.
+fn account_error(err: fm_core::FrickmailError, action: &'static str) -> Response {
+    match err {
+        fm_core::FrickmailError::BadRequest(message) if message == "Account not found" => v1_error(
+            StatusCode::NOT_FOUND,
+            "account_not_found",
+            "Mail account not found",
+        ),
+        fm_core::FrickmailError::BadRequest(_) => v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid mail account request",
+        ),
+        _ => {
+            tracing::warn!("v1 {action} failed");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail mail account request failed",
+            )
+        }
+    }
+}
+
+/// User-scoped existence check so unknown ids 404 instead of silently
+/// succeeding (the repository deletes/updates by key without confirming
+/// a row matched, mirroring legacy `ok:true` semantics).
+async fn v1_own_account(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_id: i64,
+) -> Result<bool, Response> {
+    match fm_user::SqlxUserRepository::list_mail_accounts(pool, user_id).await {
+        Ok(accounts) => Ok(accounts.iter().any(|account| account.id == account_id)),
+        Err(err) => {
+            tracing::warn!("v1 account lookup failed: {}", err.public_message());
+            Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail mail account request failed",
+            ))
+        }
+    }
+}
+
+/// Request body for `POST /api/frickmail/v1/accounts`. Field names mirror
+/// the legacy `FrickmailAddAccount` payload; `email` is the only required
+/// field (the repository validates the rest).
+#[derive(Debug, Deserialize, Default)]
+struct MailAccountWriteRequest {
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    account_type: Option<String>,
+    #[serde(default)]
+    imap_host: Option<String>,
+    #[serde(default)]
+    imap_port: Option<i64>,
+    #[serde(default)]
+    imap_secure: Option<String>,
+    #[serde(default)]
+    smtp_host: Option<String>,
+    #[serde(default)]
+    smtp_port: Option<i64>,
+    #[serde(default)]
+    smtp_secure: Option<String>,
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    tenant: Option<String>,
+    #[serde(default)]
+    is_primary: Option<bool>,
+}
+
+/// Adds a mail account, encrypting secrets with the session credential
+/// key exactly like legacy `FrickmailAddAccount` (first account becomes
+/// primary). Credential-bearing write, so the connection token is
+/// required.
+async fn add_account(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<
+        axum::extract::Json<MailAccountWriteRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let credential_key = match v1_session_credential_key(&session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid mail account body",
+        );
+    };
+    match fm_user::SqlxUserRepository::add_mail_account(
+        pool,
+        user_id,
+        fm_user::NewMailAccount {
+            label: request.label,
+            email: request.email.unwrap_or_default(),
+            account_type: request.account_type.unwrap_or_else(|| "imap".to_string()),
+            imap_host: request.imap_host,
+            imap_port: request.imap_port,
+            imap_secure: request.imap_secure,
+            smtp_host: request.smtp_host,
+            smtp_port: request.smtp_port,
+            smtp_secure: request.smtp_secure,
+            login: request.login,
+            password: request.password,
+            oauth_tenant: request.tenant,
+            is_primary: request.is_primary.unwrap_or(false),
+        },
+        &credential_key,
+    )
+    .await
+    {
+        Ok(id) => (StatusCode::OK, Json(ApiV1Envelope::ok(json!({ "id": id })))).into_response(),
+        Err(err) => account_error(err, "account creation"),
+    }
+}
+
+/// Updates a mail account; an empty password preserves the stored one,
+/// mirroring legacy `FrickmailUpdateAccount`. Unknown ids 404.
+async fn update_account(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+    body: Result<
+        axum::extract::Json<MailAccountWriteRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let credential_key = match v1_session_credential_key(&session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid mail account id",
+        );
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid mail account body",
+        );
+    };
+    match fm_user::SqlxUserRepository::update_mail_account(
+        pool,
+        user_id,
+        fm_user::UpdateMailAccount {
+            id,
+            label: request.label,
+            imap_host: request.imap_host,
+            imap_port: request.imap_port,
+            imap_secure: request.imap_secure,
+            smtp_host: request.smtp_host,
+            smtp_port: request.smtp_port,
+            smtp_secure: request.smtp_secure,
+            login: request.login,
+            password: request.password,
+        },
+        &credential_key,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Err(err) => account_error(err, "account update"),
+    }
+}
+
+/// Deletes a mail account (and its indexed messages, like legacy
+/// `FrickmailDeleteAccount`). Unknown ids 404 via an ownership check.
+async fn delete_account(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid mail account id",
+        );
+    };
+    match v1_own_account(pool, user_id, id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(response) => return response,
+    }
+    match fm_user::SqlxUserRepository::delete_mail_account(pool, user_id, id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Err(err) => account_error(err, "account delete"),
+    }
+}
+
+/// Marks an account primary. Unknown ids 404 via an ownership check.
+async fn set_primary_account(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid mail account id",
+        );
+    };
+    match v1_own_account(pool, user_id, id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(response) => return response,
+    }
+    match fm_user::SqlxUserRepository::set_primary_mail_account(pool, user_id, id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Err(err) => account_error(err, "set primary"),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
     #[serde(default)]
@@ -6071,9 +6389,9 @@ mod tests {
         assert_eq!(body["error"]["code"], "invalid_token");
     }
 
-    async fn seed_search_index(pool: &sqlx::AnyPool) {
+    async fn create_message_index_table(pool: &sqlx::AnyPool) {
         sqlx::query(
-            "CREATE TABLE frickmail_message_index (
+            "CREATE TABLE IF NOT EXISTS frickmail_message_index (
                 id INTEGER PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 account_id INTEGER NOT NULL,
@@ -6090,6 +6408,10 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn seed_search_index(pool: &sqlx::AnyPool) {
+        create_message_index_table(pool).await;
         for (id, user_id, account_id, folder, imap_uid, subject) in [
             (1_i64, 1501_i64, 1501_i64, "INBOX", 31_i64, "Invoice"),
             (2, 1501, 1501, "Archive", 32, "Invoice reminder"),
@@ -6599,6 +6921,319 @@ mod tests {
         let certs = body["data"]["certs"].as_array().unwrap();
         assert_eq!(certs.len(), 1);
         assert_eq!(certs[0]["has_key"], true);
+    }
+
+    async fn account_test_state() -> (Router, String, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1701, "v1acctmgr", "correct-horse", None).await;
+        // Account deletion cleans the message index, like the native hook.
+        create_message_index_table(&pool).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1acctmgr", "correct-horse").await;
+        // Like the switch-account tests, the bootstrap connection token
+        // stays valid after login.
+        (app, cookie, token)
+    }
+
+    fn account_post(
+        cookie: &str,
+        token: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("cookie", cookie)
+            .header("x-sm-token", token)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn account_ids(app: &Router, cookie: &str) -> Vec<(i64, bool)> {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/accounts")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        body["data"]["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|account| {
+                (
+                    account["id"].as_i64().unwrap(),
+                    account["is_primary"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn v1_account_writes_reject_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        // Reads hit the session gate; writes hit the connection-token gate
+        // first, exactly like v1 send.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/accounts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for request in [
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/accounts")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/frickmail/v1/accounts/1")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/frickmail/v1/accounts/1")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/accounts/1/primary")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_accounts_add_validates_and_makes_first_primary() {
+        let (app, cookie, token) = account_test_state().await;
+
+        // Missing email is a 400.
+        let response = app
+            .clone()
+            .oneshot(account_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/accounts",
+                serde_json::json!({"label": "No address"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+
+        let response = app
+            .clone()
+            .oneshot(account_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/accounts",
+                serde_json::json!({
+                    "label": "Primary",
+                    "email": "primary@example.com",
+                    "imap_host": "imap.example.com",
+                    "password": "secret-horse",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let id = body["data"]["id"].as_i64().unwrap();
+        assert!(id > 0);
+
+        // The first account is primary, and no secrets leak in listings.
+        let listed = account_ids(&app, &cookie).await;
+        assert_eq!(listed, vec![(id, true)]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/accounts")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        let account = &body["data"]["accounts"][0];
+        assert_eq!(account["email"], "primary@example.com");
+        assert!(account.get("encrypted_password").is_none());
+        assert!(account.get("password").is_none());
+    }
+
+    #[tokio::test]
+    async fn v1_accounts_update_changes_fields_and_404s_unknown() {
+        let (app, cookie, token) = account_test_state().await;
+        let response = app
+            .clone()
+            .oneshot(account_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/accounts",
+                serde_json::json!({
+                    "email": "update@example.com",
+                    "imap_host": "imap.example.com",
+                    "smtp_host": "smtp.example.com",
+                }),
+            ))
+            .await
+            .unwrap();
+        let id = read_json(response).await["data"]["id"].as_i64().unwrap();
+
+        let put = |uri: String, body: serde_json::Value| {
+            Request::builder()
+                .method(Method::PUT)
+                .uri(uri)
+                .header("cookie", &cookie)
+                .header("x-sm-token", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let response = app
+            .clone()
+            .oneshot(put(
+                "/api/frickmail/v1/accounts/999999".to_string(),
+                serde_json::json!({"label": "Ghost"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = app
+            .clone()
+            .oneshot(put(
+                format!("/api/frickmail/v1/accounts/{id}"),
+                serde_json::json!({"label": "Renamed"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let listed = account_ids(&app, &cookie).await;
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v1_accounts_delete_and_primary_need_ownership() {
+        let (app, cookie, token) = account_test_state().await;
+        let other_pool = login_db_pool().await;
+        seed_login_user(&other_pool, 1702, "v1bystander", "correct-horse", None).await;
+        seed_mail_account(&other_pool, 1702, 1702, "Foreign").await;
+
+        let response = app
+            .clone()
+            .oneshot(account_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/accounts",
+                serde_json::json!({"email": "first@example.com"}),
+            ))
+            .await
+            .unwrap();
+        let first = read_json(response).await["data"]["id"].as_i64().unwrap();
+        let response = app
+            .clone()
+            .oneshot(account_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/accounts",
+                serde_json::json!({"email": "second@example.com"}),
+            ))
+            .await
+            .unwrap();
+        let second = read_json(response).await["data"]["id"].as_i64().unwrap();
+
+        // Unknown and foreign ids 404 on both mutating routes. (The
+        // foreign account lives in another pool, so it reads as unknown
+        // here — the user scoping is what matters.)
+        for uri in [
+            "/api/frickmail/v1/accounts/999999",
+            "/api/frickmail/v1/accounts/999999/primary",
+        ] {
+            let (method, body) = if uri.ends_with("/primary") {
+                (Method::POST, Body::empty())
+            } else {
+                (Method::DELETE, Body::empty())
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .header("x-sm-token", &token)
+                        .header("content-type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        // Promoting the second account flips the primary flag.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/frickmail/v1/accounts/{second}/primary"))
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut listed = account_ids(&app, &cookie).await;
+        listed.sort();
+        assert_eq!(listed, vec![(first, false), (second, true)]);
+
+        // Deleting removes the account from the listing.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/frickmail/v1/accounts/{first}"))
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(account_ids(&app, &cookie).await, vec![(second, true)]);
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {
