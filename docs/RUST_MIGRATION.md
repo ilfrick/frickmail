@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-20 13:56:00 UTC
 
-The v1-search-API slice is verified (commit pending): stable Rust-owned
+The v1-search-API slice is published (`c13e91ee4`): stable Rust-owned
 search endpoints over the indexed-message store — `GET
 /api/frickmail/v1/search?q=&limit=` (minimum-length and BadRequest
 mapping included, limit default 50 clamped 1–100 like the legacy
@@ -27,7 +27,10 @@ vs internal error mapping, user scoping verified by test including a
 non-leaking second user, no schema or config change, limit clamped in
 both layers).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `c13e91ee4` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-20 13:45:00 UTC
