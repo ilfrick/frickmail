@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-21 06:59:00 UTC
 
-The v1-accounts-API slice is verified (commit pending): stable
+The v1-accounts-API slice is published (`c9b2f38f2`): stable
 Rust-owned account management — `POST /api/frickmail/v1/accounts`
 (create, first account auto-primary), `PUT /accounts/{id}` (update,
 empty password preserves the stored one), `DELETE /accounts/{id}`
@@ -32,7 +32,10 @@ token + session key, user scoping verified incl. a second user whose
 account reads as unknown, generic error messages, no schema or config
 change, API-shape coverage over HTTP).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `c9b2f38f2` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 07:00:00 UTC
