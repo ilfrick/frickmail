@@ -38,7 +38,7 @@ export function renderSearchRow(result) {
 	const account = Number(result && result.account_id) || 0;
 	const uid = Number(result && result.imap_uid) || 0;
 	return (
-		'<li data-fm="result" data-account="' + account + '" data-uid="' + uid + '">'
+		'<li data-fm="result" data-account="' + account + '" data-uid="' + uid + '" data-folder="' + folder + '">'
 		+ '<span data-fm="subject">' + subject + '</span>'
 		+ '<span data-fm="sender">' + sender + '</span>'
 		+ '<span data-fm="folder">' + folder + '</span>'

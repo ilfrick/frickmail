@@ -179,6 +179,16 @@ async function showSearch(query) {
 				showSearch(field ? field.value : '');
 			});
 		}
+		for (const row of root.querySelectorAll('[data-fm="result"]')) {
+			row.addEventListener('click', () => showMessage(
+				row.getAttribute('data-folder') || 'INBOX',
+				row.getAttribute('data-uid'),
+				{
+					accountId: row.getAttribute('data-account'),
+					back: () => showSearch(current)
+				}
+			));
+		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot search right now.</p>';
 	}
@@ -191,6 +201,16 @@ async function showUnifiedInbox() {
 			+ '<h1 data-fm="title">Unified inbox</h1>'
 			+ renderUnifiedInbox(data);
 		wireNav();
+		for (const row of root.querySelectorAll('[data-fm="unified"]')) {
+			row.addEventListener('click', () => showMessage(
+				'INBOX',
+				row.getAttribute('data-uid'),
+				{
+					accountId: row.getAttribute('data-account'),
+					back: showUnifiedInbox
+				}
+			));
+		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the unified inbox.</p>';
 	}
@@ -509,9 +529,13 @@ async function onComposeSubmit(event) {
 	}
 }
 
-async function showMessage(folder, uid) {
+async function showMessage(folder, uid, options) {
+	const settings = options || {};
+	const back = typeof settings.back === 'function'
+		? settings.back
+		: () => showMailbox(folder);
 	try {
-		const message = await loadMessage(api, folder, uid);
+		const message = await loadMessage(api, folder, uid, { accountId: settings.accountId });
 		const selected = selectMessageBody(message);
 		let viewer = '';
 		if (selected.kind === 'html') {
@@ -531,7 +555,7 @@ async function showMessage(folder, uid) {
 		if (frame && selected.kind === 'html') {
 			frame.srcdoc = selected.body;
 		}
-		root.querySelector('[data-fm="back"]').addEventListener('click', () => showMailbox(folder));
+		root.querySelector('[data-fm="back"]').addEventListener('click', () => back());
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the message.</p>';
 	}

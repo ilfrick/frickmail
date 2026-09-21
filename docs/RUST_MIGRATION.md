@@ -5,6 +5,27 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-21 07:00:00 UTC
+
+The v1-search-open slice is verified (commit pending): search and
+unified rows open messages in place — `showMessage` accepts
+`{accountId, back}`, search rows carry `data-folder` and return to the
+query, unified rows return to the list. The server side was already
+safe: the message endpoint resolves accounts through the
+user-scoped credential lookup (foreign ids 404), verified by review.
+
+Verification so far (host node): `node --test
+frickmail-ui/v1/js/search.test.mjs` 15 passed / 0 failed (incl. the new
+`data-folder` assertion); full UI suite 131 passed / 0 failed; `npx
+eslint` clean; no Rust changes, so no Rust CI run is expected (UI-only,
+outside the `rust-ci` path filter like prior UI slices).
+
+Independent senior review APPROVED (no new API surface, user-scoped
+reads confirmed, back-navigation preserves context).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 06:45:00 UTC
 
 The v1-smime-UI slice is published (`bdca4a54d`): `frickmail-ui/v1`

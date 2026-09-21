@@ -49,6 +49,7 @@ describe('renderSearchRow', () => {
 		});
 		assert.ok(html.includes('data-account="7"'));
 		assert.ok(html.includes('data-uid="31"'));
+		assert.ok(html.includes('data-folder="INBOX"'));
 		assert.ok(html.includes('&lt;b&gt;Invoice&lt;/b&gt;'));
 		assert.ok(html.includes('Billing'));
 		assert.ok(html.includes('INBOX'));
