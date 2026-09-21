@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-21 07:18:00 UTC
 
-The v1-oauth-providers-API slice is verified (commit pending): `GET
+The v1-oauth-providers-API slice is published (`62c6b3d6a`): `GET
 /api/frickmail/v1/oauth/providers` lists the sign-in providers
 configured on the server (Gmail/Microsoft OAuth2, generic OIDC) for the
 v1 login screen. Each entry appears only with its client id AND secret
@@ -28,7 +28,10 @@ Independent senior review APPROVED (no session/DB/CSRF surface on a
 presence-only endpoint, no secret serialization, provider URLs match
 the native part hooks).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `62c6b3d6a` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 07:15:00 UTC
