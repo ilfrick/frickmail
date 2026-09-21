@@ -5,6 +5,38 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-21 06:00:00 UTC
+
+Production-image validation round covering the six slices since Sept 18
+(cPanelAutoLogin, ExternalSso, v1 calendar API + UI, v1 search API +
+UI), built from `0aa7cfa3e`. Image
+sha256:90ce594709e65ce618a96a3661760e38b81d439e966ba6853e14d5fba10f8b9f
+(user frickmail:frickmail, read-only rootfs, cap-drop ALL,
+no-new-privileges, temp container on 127.0.0.1:18089, image removed
+afterwards).
+
+Checks, all green: `/health` 200; `/static/v1/index.html`,
+`calendar.js`, `search.js` 200 while `calendar.test.mjs` correctly 404s
+(tests stay out of the bundle); default-off `/?cPanelAutoLogin` and
+`/?Sso&hash=` stay invisible (200 normal page, no redirect, no
+session); bad-key `POST /?ExternalSso` falls through to the dispatcher
+(`Action unknown`, code 903 — the hook itself never answers); anonymous
+`GET /api/frickmail/v1/search`, `/unified-inbox`, `/calendars` all 401
+and tokenless `POST /calendars/events` 403. No panics/errors in logs
+(single expected Redis-fallback WARN without a Redis sidecar); OOM
+false, restarts 0, healthcheck healthy.
+
+Also verified during this round: `FolderIdentifierRights` remains
+correctly `compat-known` — its only caller is inside a `/* */` comment
+in `dev/View/Popup/FolderAcl.js`, no PHP handler exists, and the Rust
+dispatcher answers it with the 501 compatibility envelope via
+`bridge_unimplemented`. No migration work: dead surface, safe fallback.
+
+Independent senior review APPROVED (validation-only round, no code
+changes; image and container removed after the checks).
+
+The major remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 08:00:00 UTC
 
 The v1-search-UI slice is published (`2285bcbc0`): `frickmail-ui/v1`
