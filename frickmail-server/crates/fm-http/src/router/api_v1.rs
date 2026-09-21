@@ -79,6 +79,7 @@ pub fn routes() -> Router<AppState> {
         .route("/folders", get(folders))
         .route("/search", get(search))
         .route("/unified-inbox", get(unified_inbox))
+        .route("/oauth/providers", get(oauth_providers))
         .route(
             "/smime/certs",
             get(smime_certs)
@@ -1800,6 +1801,60 @@ async fn smime_delete_cert(
         ),
         Err(err) => smime_error(&err.public_message(), "certificate delete"),
     }
+}
+
+/// Lists the sign-in providers configured on the server for the v1 login
+/// screen: Gmail and Microsoft OAuth2 plus generic OIDC, each only when
+/// its client id AND secret (and issuer for OIDC) are configured.
+/// Intentionally anonymous (the login screen needs it pre-auth) and free
+/// of secrets — presence alone decides the list, and only the public
+/// part-hook start URLs are exposed. Labels mirror the legacy plugins
+/// (`provider_name` for OIDC, defaulting like the plugin default).
+async fn oauth_providers(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
+    fn configured(values: &[&Option<String>]) -> bool {
+        values
+            .iter()
+            .all(|value| value.as_deref().is_some_and(|text| !text.trim().is_empty()))
+    }
+    let config = state.config();
+    let mut providers = Vec::new();
+    if configured(&[
+        &config.oauth2.gmail.client_id,
+        &config.oauth2.gmail.client_secret,
+    ]) {
+        providers.push(json!({
+            "id": "gmail",
+            "label": "Google",
+            "url": "/?StartLoginGMail",
+        }));
+    }
+    if configured(&[
+        &config.oauth2.o365.client_id,
+        &config.oauth2.o365.client_secret,
+    ]) {
+        providers.push(json!({
+            "id": "o365",
+            "label": "Microsoft",
+            "url": "/?StartLoginO365",
+        }));
+    }
+    if configured(&[
+        &config.oidc.issuer,
+        &config.oidc.client_id,
+        &config.oidc.client_secret,
+    ]) {
+        let name = config.oidc.provider_name.trim();
+        providers.push(json!({
+            "id": "oidc",
+            "label": if name.is_empty() { "SSO".to_string() } else { name.to_string() },
+            "url": "/?StartLoginOIDC",
+        }));
+    }
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({ "providers": providers }))),
+    )
+        .into_response()
 }
 
 /// Classifies a native legacy calendar `Result.error` message onto the v1
@@ -7234,6 +7289,84 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(account_ids(&app, &cookie).await, vec![(second, true)]);
+    }
+
+    async fn oauth_provider_ids(config: fm_core::FrickmailConfig) -> Vec<String> {
+        let state = crate::AppState::new(config);
+        let response = super::oauth_providers(axum::extract::State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        body["data"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|provider| provider["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn v1_oauth_providers_empty_without_configured_clients() {
+        assert!(oauth_provider_ids(test_api_config()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v1_oauth_providers_needs_id_and_secret_pairs() {
+        let mut config = test_api_config();
+        // Secret alone is not enough; neither is a blank id.
+        config.oauth2.gmail.client_secret = Some("shh".to_string());
+        config.oauth2.o365.client_id = Some("  ".to_string());
+        config.oauth2.o365.client_secret = Some("shh".to_string());
+        config.oidc.issuer = Some("https://sso.example.com".to_string());
+        config.oidc.client_id = Some("id".to_string());
+        assert!(oauth_provider_ids(config).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v1_oauth_providers_lists_configured_entries_without_secrets() {
+        let mut config = test_api_config();
+        config.oauth2.gmail.client_id = Some("gmail-id".to_string());
+        config.oauth2.gmail.client_secret = Some("gmail-secret".to_string());
+        config.oauth2.o365.client_id = Some("o365-id".to_string());
+        config.oauth2.o365.client_secret = Some("o365-secret".to_string());
+        config.oidc.issuer = Some("https://sso.example.com".to_string());
+        config.oidc.client_id = Some("oidc-id".to_string());
+        config.oidc.client_secret = Some("oidc-secret".to_string());
+        config.oidc.provider_name = "Example SSO".to_string();
+        let state = crate::AppState::new(config);
+        let response = super::oauth_providers(axum::extract::State(state)).await;
+        let body = read_json(response).await;
+        let providers = body["data"]["providers"].as_array().unwrap();
+        assert_eq!(providers.len(), 3);
+        assert_eq!(providers[0]["id"], "gmail");
+        assert_eq!(providers[0]["label"], "Google");
+        assert_eq!(providers[0]["url"], "/?StartLoginGMail");
+        assert_eq!(providers[1]["id"], "o365");
+        assert_eq!(providers[2]["label"], "Example SSO");
+        assert_eq!(providers[2]["url"], "/?StartLoginOIDC");
+        let rendered = body.to_string();
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("gmail-id"));
+    }
+
+    #[tokio::test]
+    async fn v1_oauth_providers_anonymous_over_http() {
+        let app = login_app(login_db_pool().await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/oauth/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Anonymous by design: the login screen needs it pre-auth.
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(body["data"]["providers"].as_array().unwrap().is_empty());
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {

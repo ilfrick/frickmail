@@ -5,6 +5,32 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-21 07:18:00 UTC
+
+The v1-oauth-providers-API slice is verified (commit pending): `GET
+/api/frickmail/v1/oauth/providers` lists the sign-in providers
+configured on the server (Gmail/Microsoft OAuth2, generic OIDC) for the
+v1 login screen. Each entry appears only with its client id AND secret
+(plus issuer for OIDC) configured; output carries labels and public
+part-hook start URLs only — presence decides, secrets never serialize
+(verified by test). Anonymous by design (pre-auth login screen), no DB
+needed.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- oauth_providers` 4 passed / 0 failed (empty default,
+id+secret pairing incl. blank rejection, full matrix without secret
+leakage, anonymous HTTP 200); `cargo test -p fm-http --lib` 535 passed
+/ 0 failed; `cargo clippy --workspace --all-targets -- -D warnings`
+clean; naming gate passes locally.
+
+Independent senior review APPROVED (no session/DB/CSRF surface on a
+presence-only endpoint, no secret serialization, provider URLs match
+the native part hooks).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 07:15:00 UTC
 
 The v1-accounts-UI slice is published (`af9579f17`): `frickmail-ui/v1`
