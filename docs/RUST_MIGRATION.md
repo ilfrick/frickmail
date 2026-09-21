@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-21 06:45:00 UTC
 
-The v1-smime-UI slice is verified (commit pending): `frickmail-ui/v1`
+The v1-smime-UI slice is published (`bdca4a54d`): `frickmail-ui/v1`
 gains the S/MIME screen — nav entry, certificate list with key-state
 markers, per-row delete, and PEM/PKCS#12 import forms over new
 `smime.js` loaders (`loadSmimeCerts`, `importSmimeCert`,
@@ -27,7 +27,10 @@ Independent senior review APPROVED (contract match on all four API
 paths, X-SM-Token via ApiClient only, all interpolations escaped,
 single listener registration per control).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `bdca4a54d` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 06:27:00 UTC
