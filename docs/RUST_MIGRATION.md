@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-21 06:27:00 UTC
 
-The v1-smime-API slice is verified (commit pending): stable Rust-owned
+The v1-smime-API slice is published (`14d6da803`): stable Rust-owned
 certificate management — `GET /api/frickmail/v1/smime/certs` (metadata
 only), `POST /api/frickmail/v1/smime/certs` (base64 PEM import),
 `POST /api/frickmail/v1/smime/p12` (base64 PKCS#12 import, key encrypted
@@ -34,7 +34,10 @@ legacy handler before the repository call, credential key required for
 key-bearing writes, generic error messages, no schema or config change,
 API-shape coverage with generated fixtures).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `14d6da803` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 06:00:00 UTC
