@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-21 07:15:00 UTC
 
-The v1-accounts-UI slice is verified (commit pending): `frickmail-ui/v1`
+The v1-accounts-UI slice is published (`af9579f17`): `frickmail-ui/v1`
 gains the mail-accounts screen — nav entry, account list with primary
 markers, per-row open/edit/make-primary/delete actions, and a shared
 add/edit editor (blank password preserves the stored secret server-side)
@@ -25,7 +25,10 @@ Independent senior review APPROVED (contract match on all five API
 paths, X-SM-Token via ApiClient only, all interpolations escaped,
 single listener registration per control).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `af9579f17` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 06:59:00 UTC
