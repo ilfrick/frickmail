@@ -21,6 +21,13 @@ import { collectComposePayload, renderComposeForm, sendMessage } from './js/comp
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
 import {
+	loadUnifiedInbox,
+	renderSearchForm,
+	renderSearchResults,
+	renderUnifiedInbox,
+	runSearch
+} from './js/search.js';
+import {
 	addMonths,
 	collectEventPayload,
 	deleteEvent,
@@ -42,6 +49,8 @@ function nav(active) {
 	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
 	const settings = active === 'settings' ? ' aria-current="page"' : '';
 	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
+	const search = active === 'search' ? ' aria-current="page"' : '';
+	const unified = active === 'unified' ? ' aria-current="page"' : '';
 	const rules = active === 'rules' ? ' aria-current="page"' : '';
 	const calendar = active === 'calendar' ? ' aria-current="page"' : '';
 	const contacts = active === 'contacts' ? ' aria-current="page"' : '';
@@ -49,6 +58,8 @@ function nav(active) {
 	return '<nav data-fm="nav">'
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
+		+ '<button type="button" data-fm="nav-search"' + search + '>Search</button>'
+		+ '<button type="button" data-fm="nav-unified"' + unified + '>Unified</button>'
 		+ '<button type="button" data-fm="nav-rules"' + rules + '>Rules</button>'
 		+ '<button type="button" data-fm="nav-contacts"' + contacts + '>Contacts</button>'
 		+ '<button type="button" data-fm="nav-calendar"' + calendar + '>Calendar</button>'
@@ -61,6 +72,8 @@ function nav(active) {
 function wireNav() {
 	const inboxButton = root.querySelector('[data-fm="nav-inbox"]');
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
+	const searchButton = root.querySelector('[data-fm="nav-search"]');
+	const unifiedButton = root.querySelector('[data-fm="nav-unified"]');
 	const rulesButton = root.querySelector('[data-fm="nav-rules"]');
 	const contactsButton = root.querySelector('[data-fm="nav-contacts"]');
 	const calendarButton = root.querySelector('[data-fm="nav-calendar"]');
@@ -72,6 +85,12 @@ function wireNav() {
 	}
 	if (tasksButton) {
 		tasksButton.addEventListener('click', () => showTasks('all'));
+	}
+	if (searchButton) {
+		searchButton.addEventListener('click', () => showSearch(''));
+	}
+	if (unifiedButton) {
+		unifiedButton.addEventListener('click', showUnifiedInbox);
 	}
 	if (rulesButton) {
 		rulesButton.addEventListener('click', () => showRules());
@@ -124,6 +143,40 @@ async function showTasks(filter) {
 		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load tasks.</p>';
+	}
+}
+
+async function showSearch(query) {
+	const current = typeof query === 'string' ? query : '';
+	try {
+		const data = current.trim().length >= 2 ? await runSearch(api, { q: current }) : null;
+		root.innerHTML = nav('search')
+			+ '<h1 data-fm="title">Search</h1>'
+			+ renderSearchForm(current)
+			+ '<div data-fm="results-wrap">' + renderSearchResults(data) + '</div>';
+		wireNav();
+		const form = root.querySelector('[data-fm="search-form"]');
+		if (form) {
+			form.addEventListener('submit', (event) => {
+				event.preventDefault();
+				const field = root.querySelector('[data-fm="q"]');
+				showSearch(field ? field.value : '');
+			});
+		}
+	} catch (error) {
+		root.innerHTML = '<p>Cannot search right now.</p>';
+	}
+}
+
+async function showUnifiedInbox() {
+	try {
+		const data = await loadUnifiedInbox(api, { limit: 50 });
+		root.innerHTML = nav('unified')
+			+ '<h1 data-fm="title">Unified inbox</h1>'
+			+ renderUnifiedInbox(data);
+		wireNav();
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load the unified inbox.</p>';
 	}
 }
 

@@ -5,6 +5,30 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-21 08:00:00 UTC
+
+The v1-search-UI slice is verified (commit pending): `frickmail-ui/v1`
+gains search and unified-inbox screens — nav entries, query form with
+submit wiring, escaped result rows, and account-badged unified rows with
+unseen markers over new `search.js` loaders (`runSearch`,
+`loadUnifiedInbox`) against the v1 search API. Result rows stay
+read-only for now: cross-account message opening needs account-switch
+plumbing in `showMessage`, recorded as the follow-up.
+
+Verification so far (host node, Docker-free like prior UI slices):
+`node --test frickmail-ui/v1/js/search.test.mjs` 15 passed / 0 failed;
+full `node --test frickmail-ui/v1/js/*.test.mjs` 119 passed / 0 failed;
+`npx eslint` on touched JS clean; `build.mjs` ships `search.js`
+automatically (tests excluded, both nav entries wired in the bundle);
+no legacy product names in the new files.
+
+Independent senior review APPROVED (contract match on both API paths,
+all interpolations escaped, single listener registration per control,
+read-only rows avoid the cross-account fetch trap).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-20 13:56:00 UTC
 
 The v1-search-API slice is published (`c13e91ee4`): stable Rust-owned
