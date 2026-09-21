@@ -21,6 +21,16 @@ import { collectComposePayload, renderComposeForm, sendMessage } from './js/comp
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
 import {
+	collectCertImport,
+	collectP12Import,
+	deleteSmimeCert,
+	importSmimeCert,
+	importSmimeP12,
+	loadSmimeCerts,
+	renderSmimeCerts,
+	renderSmimeImportForms
+} from './js/smime.js';
+import {
 	loadUnifiedInbox,
 	renderSearchForm,
 	renderSearchResults,
@@ -51,6 +61,7 @@ function nav(active) {
 	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
 	const search = active === 'search' ? ' aria-current="page"' : '';
 	const unified = active === 'unified' ? ' aria-current="page"' : '';
+	const smime = active === 'smime' ? ' aria-current="page"' : '';
 	const rules = active === 'rules' ? ' aria-current="page"' : '';
 	const calendar = active === 'calendar' ? ' aria-current="page"' : '';
 	const contacts = active === 'contacts' ? ' aria-current="page"' : '';
@@ -60,6 +71,7 @@ function nav(active) {
 		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
 		+ '<button type="button" data-fm="nav-search"' + search + '>Search</button>'
 		+ '<button type="button" data-fm="nav-unified"' + unified + '>Unified</button>'
+		+ '<button type="button" data-fm="nav-smime"' + smime + '>S/MIME</button>'
 		+ '<button type="button" data-fm="nav-rules"' + rules + '>Rules</button>'
 		+ '<button type="button" data-fm="nav-contacts"' + contacts + '>Contacts</button>'
 		+ '<button type="button" data-fm="nav-calendar"' + calendar + '>Calendar</button>'
@@ -74,6 +86,7 @@ function wireNav() {
 	const tasksButton = root.querySelector('[data-fm="nav-tasks"]');
 	const searchButton = root.querySelector('[data-fm="nav-search"]');
 	const unifiedButton = root.querySelector('[data-fm="nav-unified"]');
+	const smimeButton = root.querySelector('[data-fm="nav-smime"]');
 	const rulesButton = root.querySelector('[data-fm="nav-rules"]');
 	const contactsButton = root.querySelector('[data-fm="nav-contacts"]');
 	const calendarButton = root.querySelector('[data-fm="nav-calendar"]');
@@ -91,6 +104,9 @@ function wireNav() {
 	}
 	if (unifiedButton) {
 		unifiedButton.addEventListener('click', showUnifiedInbox);
+	}
+	if (smimeButton) {
+		smimeButton.addEventListener('click', showSmime);
 	}
 	if (rulesButton) {
 		rulesButton.addEventListener('click', () => showRules());
@@ -177,6 +193,67 @@ async function showUnifiedInbox() {
 		wireNav();
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the unified inbox.</p>';
+	}
+}
+
+async function showSmime() {
+	try {
+		const data = await loadSmimeCerts(api);
+		root.innerHTML = nav('smime')
+			+ '<h1 data-fm="title">S/MIME certificates</h1>'
+			+ renderSmimeCerts(data)
+			+ renderSmimeImportForms()
+			+ '<p data-fm="status"></p>';
+		wireNav();
+		const certForm = root.querySelector('[data-fm="import-cert"]');
+		if (certForm) {
+			certForm.addEventListener('submit', onSmimeCertSubmit);
+		}
+		const p12Form = root.querySelector('[data-fm="import-p12"]');
+		if (p12Form) {
+			p12Form.addEventListener('submit', onSmimeP12Submit);
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onSmimeDelete(button.getAttribute('data-id')));
+		}
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load S/MIME certificates.</p>';
+	}
+}
+
+function smimeStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onSmimeCertSubmit(event) {
+	event.preventDefault();
+	try {
+		await importSmimeCert(api, collectCertImport(root));
+		await showSmime();
+	} catch (error) {
+		smimeStatus(error && error.message ? error.message : 'Import failed.');
+	}
+}
+
+async function onSmimeP12Submit(event) {
+	event.preventDefault();
+	try {
+		await importSmimeP12(api, collectP12Import(root));
+		await showSmime();
+	} catch (error) {
+		smimeStatus(error && error.message ? error.message : 'Import failed.');
+	}
+}
+
+async function onSmimeDelete(id) {
+	try {
+		await deleteSmimeCert(api, Number(id) || 0);
+		await showSmime();
+	} catch (error) {
+		smimeStatus(error && error.message ? error.message : 'Delete failed.');
 	}
 }
 
