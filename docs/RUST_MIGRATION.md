@@ -5,6 +5,34 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-22 06:48:00 UTC
+
+The v1-oauth-UI slice is verified (commit pending): `frickmail-ui/v1`
+login gains provider buttons — the boot flow loads
+`GET /oauth/providers` best-effort and appends `Sign in with …`
+buttons under the password form; each opens the same-origin part-hook
+start URL in a centered consent popup, then re-bootstraps the shared
+session (popups share the cookie jar) into `enterApp`, with a status
+line when sign-in does not complete and full-page navigation fallback
+when popups are blocked. New `oauth.js` keeps DOM access in thin
+wrappers; predicates, features math, rendering, and the poll loop are
+pure and unit-tested.
+
+Verification so far (host node, Docker-free like prior UI slices):
+`node --test frickmail-ui/v1/js/oauth.test.mjs` 13 passed / 0 failed;
+full `node --test frickmail-ui/v1/js/*.test.mjs` 159 passed / 0 failed;
+`npx eslint` on touched JS clean; `build.mjs` ships `oauth.js`
+automatically (tests excluded); no legacy product names in the new
+files.
+
+Independent senior review APPROVED (contract match on the providers
+endpoint, X-SM-Token untouched — the endpoint is anonymous by design,
+all interpolations escaped, popup completion re-verified server-side
+via bootstrap rather than trusted client signals).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 07:18:00 UTC
 
 The v1-oauth-providers-API slice is published (`62c6b3d6a`): `GET

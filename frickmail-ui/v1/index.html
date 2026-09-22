@@ -20,6 +20,7 @@ import { loadContacts, renderContacts } from './js/contacts.js';
 import { collectComposePayload, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
+import { loadProviders, renderProviderButtons, signInWithProvider } from './js/oauth.js';
 import {
 	addAccount,
 	collectAccountPayload,
@@ -716,9 +717,47 @@ try {
 		await enterApp();
 	} else {
 		renderLogin(root, api, enterApp);
+		await showOAuthProviders();
 	}
 } catch (error) {
 	root.innerHTML = '<p>Cannot reach the Frickmail server.</p>';
+}
+
+/// Appends configured OAuth/SSO provider buttons under the login form.
+/// Best-effort: password sign-in always works, providers only when the
+/// server has them configured.
+async function showOAuthProviders() {
+	let data = null;
+	try {
+		data = await loadProviders(api);
+	} catch (error) {
+		void error;
+		return;
+	}
+	const buttons = renderProviderButtons(data);
+	if (!buttons) {
+		return;
+	}
+	const form = root.querySelector('[data-fm="form"]');
+	if (!form) {
+		return;
+	}
+	const wrap = document.createElement('div');
+	wrap.innerHTML = buttons;
+	form.after(wrap);
+	const entries = data && Array.isArray(data.providers) ? data.providers : [];
+	for (const button of wrap.querySelectorAll('[data-fm="oauth"]')) {
+		button.addEventListener('click', () => {
+			const entry = entries.find((item) => item && item.id === button.getAttribute('data-id'))
+				|| { url: button.getAttribute('data-url') };
+			signInWithProvider(window, api, entry, enterApp, (text) => {
+				const status = root.querySelector('[data-fm="status"]');
+				if (status) {
+					status.textContent = text;
+				}
+			});
+		});
+	}
 }
 </script>
 </body>
