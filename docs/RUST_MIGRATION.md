@@ -38,7 +38,7 @@ remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 07:22:00 UTC
 
-The v1-identities-API slice is verified (commit pending): stable
+The v1-identities-API slice is published (`744739847`): stable
 Rust-owned sender-identity management — `POST
 /api/frickmail/v1/identities` (create), `DELETE /identities/{id}`,
 `POST /identities/{id}/default` — reusing the exact repository calls
@@ -63,7 +63,10 @@ verified by test, generic error messages, no secret material in the
 shapes, additive-only repository change, no schema or config change,
 API-shape coverage over HTTP).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `744739847` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 07:18:00 UTC
