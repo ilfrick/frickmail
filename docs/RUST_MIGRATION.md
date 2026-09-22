@@ -38,7 +38,7 @@ remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 08:54:00 UTC
 
-The v1-password-API slice is verified (commit pending): `POST
+The v1-password-API slice is published (`53d13c7a0`): `POST
 /api/frickmail/v1/security/password` changes the session user's login
 password through a new shared policy flow (`change_login_password_checked`
 in the router: length, strength, optional HIBP breach check, current
@@ -65,7 +65,10 @@ both surfaces, current-password proof required, session rotation plus
 credential reset mirrored from legacy, generic failure messages, no
 schema or config change, API-shape coverage over HTTP).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `53d13c7a0` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 08:27:00 UTC
