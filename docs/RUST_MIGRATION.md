@@ -38,7 +38,7 @@ remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 08:27:00 UTC
 
-The v1-totp-UI slice is verified (commit pending): the v1 settings
+The v1-totp-UI slice is published (`dcc972c8e`): the v1 settings
 screen gains a two-factor section — status with enable/disable entry,
 QR-plus-manual-secret enrollment form with confirmation, all over new
 `twofactor.js` loaders (`loadTotpStatus`, `startTotpSetup`,
@@ -58,7 +58,10 @@ Independent senior review APPROVED (contract match on all four API
 paths, X-SM-Token via ApiClient only, QR data URL is server-generated
 SVG inert in `<img>`, single listener registration per control).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `dcc972c8e` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 08:21:00 UTC
