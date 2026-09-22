@@ -36,6 +36,38 @@ and `gitea` (all 4 tips identical, verified via `ls-remote`).
 This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
+## Progress Snapshot — 2026-09-22 08:54:00 UTC
+
+The v1-password-API slice is verified (commit pending): `POST
+/api/frickmail/v1/security/password` changes the session user's login
+password through a new shared policy flow (`change_login_password_checked`
+in the router: length, strength, optional HIBP breach check, current
+verification, account re-encryption) also now used by legacy
+`ChangePassword`, so policy cannot drift between surfaces. Like the
+legacy action the session id rotates and the credential key drops, so
+callers sign in again. Targeted failure codes (`password_too_short`,
+`password_too_weak`, `password_breached`, `invalid_current_password`,
+`unavailable` when the feature flag is off); the connection token is
+required.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- v1_password` 4 passed / 0 failed (anonymous gating, feature
+flag, input validation incl. weak-but-long, rotation with old-rejected
+/ new-accepted login); `cargo test -p fm-http --lib` 547 passed / 0
+failed (incl. the pre-existing legacy change-password tests, proving
+the refactor preserved behavior); `cargo test -p fm-user --lib` 64
+passed / 0 failed; `cargo clippy --workspace --all-targets -- -D
+warnings` clean; naming gate passes locally.
+
+Independent senior review APPROVED (single policy implementation for
+both surfaces, current-password proof required, session rotation plus
+credential reset mirrored from legacy, generic failure messages, no
+schema or config change, API-shape coverage over HTTP).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-22 08:27:00 UTC
 
 The v1-totp-UI slice is published (`dcc972c8e`): the v1 settings

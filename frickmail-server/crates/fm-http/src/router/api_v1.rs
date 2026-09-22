@@ -86,6 +86,7 @@ pub fn routes() -> Router<AppState> {
         .route("/security/totp/setup", post(totp_setup))
         .route("/security/totp/confirm", post(totp_confirm))
         .route("/security/totp/disable", post(totp_disable))
+        .route("/security/password", post(change_password))
         .route(
             "/smime/certs",
             get(smime_certs)
@@ -2120,6 +2121,144 @@ async fn totp_disable(
             }
         },
     }
+}
+
+/// Request body for `POST /api/frickmail/v1/security/password`.
+#[derive(Debug, Deserialize, Default)]
+struct ChangePasswordRequest {
+    #[serde(default)]
+    current_password: Option<String>,
+    #[serde(default)]
+    new_password: Option<String>,
+}
+
+/// Changes the session user's login password through the exact policy
+/// flow as legacy `ChangePassword` (length, strength, optional HIBP
+/// breach check, current-password verification, account re-encryption).
+/// Like the legacy action the session id rotates and the credential key
+/// is dropped, so callers must sign in again afterwards. State-changing
+/// and credential-bearing, so the connection token is required.
+async fn change_password(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<
+        axum::extract::Json<ChangePasswordRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid password body",
+        );
+    };
+    if !state.config().change_password.enabled {
+        return v1_error(
+            StatusCode::FORBIDDEN,
+            "unavailable",
+            "Password change is unavailable",
+        );
+    }
+    match super::change_login_password_checked(
+        pool,
+        &state.config().change_password,
+        user_id,
+        request.current_password.as_deref().unwrap_or_default(),
+        request.new_password.unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(super::ChangePasswordFailure::TooShort) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "password_too_short",
+                "New password is too short",
+            )
+        }
+        Err(super::ChangePasswordFailure::TooWeak) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "password_too_weak",
+                "New password is too weak",
+            )
+        }
+        Err(super::ChangePasswordFailure::Breached) => {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "password_breached",
+                "New password has been breached",
+            )
+        }
+        Err(super::ChangePasswordFailure::BreachCheckUnavailable(_)) => {
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Password breach check unavailable",
+            )
+        }
+        Err(super::ChangePasswordFailure::WrongCurrentPassword) => {
+            return v1_error(
+                StatusCode::FORBIDDEN,
+                "invalid_current_password",
+                "Current password is incorrect",
+            )
+        }
+        Err(super::ChangePasswordFailure::NoSuchUser) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail password change failed",
+            )
+        }
+        Err(super::ChangePasswordFailure::Upstream(_)) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail password change failed",
+            )
+        }
+    }
+    if let Err(err) = session.cycle_id().await {
+        tracing::warn!("v1 password change session rotation failed: {err}");
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_error",
+            "Frickmail session rotation failed",
+        );
+    }
+    if let Err(err) = session
+        .remove::<String>(fm_session::CREDENTIAL_KEY_SESSION_KEY)
+        .await
+    {
+        tracing::warn!("v1 password change credential reset failed: {err}");
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_error",
+            "Frickmail credential session reset failed",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({ "changed": true }))),
+    )
+        .into_response()
 }
 
 /// Lists the sign-in providers configured on the server for the v1 login
@@ -8428,6 +8567,181 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!totp_status_of(&app, &cookie).await);
+    }
+
+    fn password_app(pool: sqlx::AnyPool) -> Router {
+        let mut config = test_api_config();
+        config.change_password.enabled = true;
+        Router::new()
+            .nest("/api/frickmail/v1", super::routes())
+            .layer(fm_session::session_layer(
+                fm_session::AppSessionStore::Memory(fm_session::MemoryStore::default()),
+            ))
+            .with_state(AppState::with_db_pool(config, Some(pool)))
+    }
+
+    async fn password_test_state() -> (Router, String, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1951, "v1passwd", "correct-horse", None).await;
+        let app = password_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1passwd", "correct-horse").await;
+        // Like the switch-account tests, the bootstrap connection token
+        // stays valid after login.
+        (app, cookie, token)
+    }
+
+    fn password_post(cookie: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/frickmail/v1/security/password")
+            .header("cookie", cookie)
+            .header("x-sm-token", token)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v1_password_change_rejects_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/security/password")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Token gate first, exactly like v1 send.
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn v1_password_change_needs_feature_flag() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1952, "v1passoff", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1passoff", "correct-horse").await;
+
+        let response = app
+            .oneshot(password_post(
+                &cookie,
+                &token,
+                serde_json::json!({
+                    "current_password": "correct-horse",
+                    "new_password": "a-brand-new-strong-passphrase",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn v1_password_change_validates_input() {
+        let (app, cookie, token) = password_test_state().await;
+
+        // Wrong current password.
+        let response = app
+            .clone()
+            .oneshot(password_post(
+                &cookie,
+                &token,
+                serde_json::json!({
+                    "current_password": "wrong-horse",
+                    "new_password": "a-brand-new-strong-passphrase",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_current_password");
+
+        // Too short.
+        let response = app
+            .clone()
+            .oneshot(password_post(
+                &cookie,
+                &token,
+                serde_json::json!({
+                    "current_password": "correct-horse",
+                    "new_password": "short",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "password_too_short");
+
+        // Long but weak.
+        let response = app
+            .oneshot(password_post(
+                &cookie,
+                &token,
+                serde_json::json!({
+                    "current_password": "correct-horse",
+                    "new_password": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "password_too_weak");
+    }
+
+    #[tokio::test]
+    async fn v1_password_change_rotates_session_and_rekeys_login() {
+        let (app, cookie, token) = password_test_state().await;
+
+        let response = app
+            .clone()
+            .oneshot(password_post(
+                &cookie,
+                &token,
+                serde_json::json!({
+                    "current_password": "correct-horse",
+                    "new_password": "a-brand-new-strong-passphrase",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["changed"], true);
+
+        // Old password rejected, new password accepted at login — on a
+        // fresh session, since the change rotated the session id.
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let login = |password: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/login")
+                .header("content-type", "application/json")
+                .header("x-sm-token", &token)
+                .header("cookie", &cookie)
+                .body(Body::from(
+                    serde_json::json!({"username": "v1passwd", "password": password}).to_string(),
+                ))
+                .unwrap()
+        };
+        let response = app.clone().oneshot(login("correct-horse")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(login("a-brand-new-strong-passphrase"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {

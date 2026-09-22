@@ -3783,6 +3783,64 @@ async fn native_search_filters_delete(
     .await
 }
 
+/// Failure modes of the shared password-change policy flow, mapping
+/// onto legacy numeric codes and v1 status codes respectively. Only
+/// `Upstream` carries free-form text; every other variant maps to a
+/// fixed generic message so callers cannot leak internals.
+#[derive(Debug, PartialEq, Eq)]
+enum ChangePasswordFailure {
+    TooShort,
+    TooWeak,
+    Breached,
+    BreachCheckUnavailable(String),
+    WrongCurrentPassword,
+    NoSuchUser,
+    Upstream(String),
+}
+
+/// Shared password-change policy: length, strength, optional HIBP breach
+/// check, then the repository update. Both the legacy `ChangePassword`
+/// action and the v1 endpoint run this exact flow so policy cannot drift
+/// between surfaces.
+async fn change_login_password_checked(
+    pool: &sqlx::AnyPool,
+    config: &fm_core::ChangePasswordConfig,
+    user_id: i64,
+    current_password: &str,
+    new_password: String,
+) -> Result<(), ChangePasswordFailure> {
+    use ChangePasswordFailure::*;
+    if new_password.len() < usize::try_from(config.pass_min_length).unwrap_or(usize::MAX) {
+        return Err(TooShort);
+    }
+    if config.pass_min_strength > legacy_password_strength(&new_password) {
+        return Err(TooWeak);
+    }
+    if config.check_hibp {
+        match hibp_check_password(&new_password).await {
+            Ok(count) => {
+                if count > 0 {
+                    return Err(Breached);
+                }
+            }
+            Err(message) => return Err(BreachCheckUnavailable(message)),
+        }
+    }
+    match fm_user::SqlxUserRepository::change_login_password(
+        pool,
+        user_id,
+        current_password,
+        new_password,
+    )
+    .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(NoSuchUser),
+        Err(fm_core::FrickmailError::Unauthorized) => Err(WrongCurrentPassword),
+        Err(err) => Err(Upstream(err.public_message())),
+    }
+}
+
 async fn native_change_password(
     state: &AppState,
     original_action: &str,
@@ -3824,63 +3882,60 @@ async fn native_change_password(
 
     let current_password = payload_string(payload, "PrevPassword").unwrap_or_default();
     let new_password = payload_string(payload, "NewPassword").unwrap_or_default();
-    if new_password.len() < usize::try_from(config.pass_min_length).unwrap_or(usize::MAX) {
-        return legacy_action_error(
-            original_action,
-            NEW_PASSWORD_SHORT,
-            "New password is too short",
-        );
-    }
-    if config.pass_min_strength > legacy_password_strength(&new_password) {
-        return legacy_action_error(
-            original_action,
-            NEW_PASSWORD_WEAK,
-            "New password is too weak",
-        );
-    }
-    if config.check_hibp {
-        let pwned_count = match hibp_check_password(&new_password).await {
-            Ok(count) => count,
-            Err(message) => {
-                return json_result_error(
-                    original_action,
-                    &format!("Password breach check unavailable: {message}"),
-                );
-            }
-        };
-        if pwned_count > 0 {
-            return legacy_action_error(
-                original_action,
-                NEW_PASSWORD_HIBP,
-                "Password has been breached",
-            );
-        }
-    }
-
-    match fm_user::SqlxUserRepository::change_login_password(
+    match change_login_password_checked(
         pool,
+        &config,
         user_session.user_id,
         &current_password,
         new_password,
     )
     .await
     {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(()) => {}
+        Err(ChangePasswordFailure::TooShort) => {
+            return legacy_action_error(
+                original_action,
+                NEW_PASSWORD_SHORT,
+                "New password is too short",
+            );
+        }
+        Err(ChangePasswordFailure::TooWeak) => {
+            return legacy_action_error(
+                original_action,
+                NEW_PASSWORD_WEAK,
+                "New password is too weak",
+            );
+        }
+        Err(ChangePasswordFailure::Breached) => {
+            return legacy_action_error(
+                original_action,
+                NEW_PASSWORD_HIBP,
+                "Password has been breached",
+            );
+        }
+        Err(ChangePasswordFailure::BreachCheckUnavailable(message)) => {
+            return json_result_error(
+                original_action,
+                &format!("Password breach check unavailable: {message}"),
+            );
+        }
+        Err(ChangePasswordFailure::NoSuchUser) => {
             return legacy_action_error(
                 original_action,
                 CHANGE_PASSWORD_FAILED,
                 "Change password failed",
             );
         }
-        Err(FrickmailError::Unauthorized) => {
+        Err(ChangePasswordFailure::WrongCurrentPassword) => {
             return legacy_action_error(
                 original_action,
                 CURRENT_PASSWORD_INCORRECT,
                 "Current password is incorrect",
             );
         }
-        Err(err) => return json_result_error(original_action, &err.public_message()),
+        Err(ChangePasswordFailure::Upstream(message)) => {
+            return json_result_error(original_action, &message);
+        }
     }
 
     if let Err(err) = session.cycle_id().await {
