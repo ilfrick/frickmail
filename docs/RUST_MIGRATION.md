@@ -7,7 +7,7 @@ frontend, theming, integrations, packaging, and the final production container.
 
 ## Progress Snapshot — 2026-09-22 06:48:00 UTC
 
-The v1-oauth-UI slice is verified (commit pending): `frickmail-ui/v1`
+The v1-oauth-UI slice is published (`bb3c321c1`): `frickmail-ui/v1`
 login gains provider buttons — the boot flow loads
 `GET /oauth/providers` best-effort and appends `Sign in with …`
 buttons under the password form; each opens the same-origin part-hook
@@ -30,7 +30,10 @@ endpoint, X-SM-Token untouched — the endpoint is anonymous by design,
 all interpolations escaped, popup completion re-verified server-side
 via bootstrap rather than trusted client signals).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `bb3c321c1` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-21 07:18:00 UTC
