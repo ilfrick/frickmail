@@ -20,6 +20,15 @@ import { loadContacts, renderContacts } from './js/contacts.js';
 import { collectComposePayload, loadIdentities, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
+import {
+	collectTotpCode,
+	confirmTotp,
+	disableTotp,
+	loadTotpStatus,
+	renderTotpSetup,
+	renderTotpStatus,
+	startTotpSetup
+} from './js/twofactor.js';
 import { loadProviders, renderProviderButtons, signInWithProvider } from './js/oauth.js';
 import {
 	addAccount,
@@ -484,13 +493,77 @@ async function showRules() {
 async function showSettings() {
 	try {
 		const data = await loadPreferences(api);
+		let totp = '';
+		try {
+			const status = await loadTotpStatus(api);
+			totp = '<h2 data-fm="subtitle">Two-factor authentication</h2>'
+				+ '<div data-fm="totp-wrap">'
+				+ renderTotpStatus(status && status.enabled)
+				+ '</div>';
+		} catch (error) {
+			void error;
+		}
 		root.innerHTML = nav('settings')
 			+ '<h1 data-fm="title">Settings</h1>'
-			+ renderPreferencesForm(data.preferences);
+			+ renderPreferencesForm(data.preferences)
+			+ totp;
 		wireNav();
 		wireSettingsForm();
+		wireTotp();
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load settings.</p>';
+	}
+}
+
+function wireTotp() {
+	const start = root.querySelector('[data-fm="totp-start"]');
+	if (start) {
+		start.addEventListener('click', onTotpStart);
+	}
+	const confirm = root.querySelector('[data-fm="totp-confirm"]');
+	if (confirm) {
+		confirm.addEventListener('submit', onTotpConfirm);
+	}
+	const disable = root.querySelector('[data-fm="totp-disable"]');
+	if (disable) {
+		disable.addEventListener('submit', onTotpDisable);
+	}
+}
+
+function totpWrap() {
+	return root.querySelector('[data-fm="totp-wrap"]');
+}
+
+async function onTotpStart() {
+	try {
+		const setup = await startTotpSetup(api);
+		const wrap = totpWrap();
+		if (wrap) {
+			wrap.innerHTML = renderTotpSetup(setup);
+			wireTotp();
+		}
+	} catch (error) {
+		showSettingsStatus(error && error.message ? error.message : 'Setup failed.');
+	}
+}
+
+async function onTotpConfirm(event) {
+	event.preventDefault();
+	try {
+		await confirmTotp(api, collectTotpCode(root));
+		await showSettings();
+	} catch (error) {
+		showSettingsStatus(error && error.message ? error.message : 'Confirmation failed.');
+	}
+}
+
+async function onTotpDisable(event) {
+	event.preventDefault();
+	try {
+		await disableTotp(api, collectTotpCode(root));
+		await showSettings();
+	} catch (error) {
+		showSettingsStatus(error && error.message ? error.message : 'Disable failed.');
 	}
 }
 

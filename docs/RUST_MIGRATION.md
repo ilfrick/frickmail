@@ -36,6 +36,31 @@ and `gitea` (all 4 tips identical, verified via `ls-remote`).
 This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
+## Progress Snapshot — 2026-09-22 08:27:00 UTC
+
+The v1-totp-UI slice is verified (commit pending): the v1 settings
+screen gains a two-factor section — status with enable/disable entry,
+QR-plus-manual-secret enrollment form with confirmation, all over new
+`twofactor.js` loaders (`loadTotpStatus`, `startTotpSetup`,
+`confirmTotp`, `disableTotp`) against the v1 TOTP API. The pending
+secret itself is never rendered, only the QR image and manual secret
+the user must scan or type; everything else passes through the shared
+`escapeHtml`.
+
+Verification so far (host node, Docker-free like prior UI slices):
+`node --test frickmail-ui/v1/js/twofactor.test.mjs` 10 passed / 0
+failed; full `node --test frickmail-ui/v1/js/*.test.mjs` 174 passed / 0
+failed; `npx eslint` on touched JS clean; `build.mjs` ships
+`twofactor.js` automatically (tests excluded); no legacy product names
+in the new files.
+
+Independent senior review APPROVED (contract match on all four API
+paths, X-SM-Token via ApiClient only, QR data URL is server-generated
+SVG inert in `<img>`, single listener registration per control).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-22 08:21:00 UTC
 
 The v1-totp-API slice is published (`849a6eefa`): stable Rust-owned
