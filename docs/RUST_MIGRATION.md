@@ -5,6 +5,31 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-23 10:00:00 UTC
+
+The v1-contacts-write-UI slice completes the contacts write API
+(`fff1deff6`) in the v1 contacts screen: `frickmail-ui/v1/index.html`
+now imports `addContact`, `deleteContact`, `deduplicateContacts`,
+`renderContactForm`, and `collectContactPayload` from `contacts.js`,
+and `showContacts()` renders the add form above the list, a
+deduplicate button, and per-row delete buttons wired to event
+handlers (`onContactAdd`, `onContactDelete`, `onDeduplicate`) that
+reload after each mutation and surface status text on failure.
+
+Verification so far (host node, Docker-free like prior UI slices):
+`node --test frickmail-ui/v1/js/contacts.test.mjs` 14 passed / 0
+failed (7 new covering form rendering, payload collection, add,
+delete, and deduplicate I/O wrappers); full
+`node --test frickmail-ui/v1/js/*.test.mjs` 186 passed / 0 failed;
+`npx eslint` on touched JS clean.
+
+Independent senior review criteria: DOM access kept in thin wrappers
+(`collectContactPayload` takes a stub-able root), all interpolations
+escaped via `escapeHtml`, delete button only emits for contacts with
+an id, `Number(id)` coercion matches the API wrapper contract.
+
+---
+
 ## Progress Snapshot — 2026-09-22 06:48:00 UTC
 
 The v1-oauth-UI slice is published (`bb3c321c1`): `frickmail-ui/v1`

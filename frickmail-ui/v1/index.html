@@ -16,7 +16,15 @@ import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadFolders, renderFolderList } from './js/folders.js';
 import { loadRules, renderRules } from './js/rules.js';
-import { loadContacts, renderContacts } from './js/contacts.js';
+import {
+	addContact,
+	collectContactPayload,
+	deleteContact,
+	deduplicateContacts,
+	loadContacts,
+	renderContactForm,
+	renderContacts
+} from './js/contacts.js';
 import { collectComposePayload, loadIdentities, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
@@ -305,13 +313,62 @@ async function onSmimeDelete(id) {
 	}
 }
 
+async function contactsStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onContactAdd(event) {
+	event.preventDefault();
+	try {
+		await addContact(api, collectContactPayload(root));
+		await showContacts();
+	} catch (error) {
+		contactsStatus(error && error.message ? error.message : 'Add failed.');
+	}
+}
+
+async function onContactDelete(id) {
+	try {
+		await deleteContact(api, Number(id) || 0);
+		await showContacts();
+	} catch (error) {
+		contactsStatus(error && error.message ? error.message : 'Delete failed.');
+	}
+}
+
+async function onDeduplicate() {
+	try {
+		await deduplicateContacts(api);
+		await showContacts();
+	} catch (error) {
+		contactsStatus(error && error.message ? error.message : 'Deduplication failed.');
+	}
+}
+
 async function showContacts() {
 	try {
 		const data = await loadContacts(api, { limit: 50 });
 		root.innerHTML = nav('contacts')
 			+ '<h1 data-fm="title">Contacts</h1>'
-			+ renderContacts(data);
+			+ renderContactForm()
+			+ '<button type="button" data-fm="dedupe">Deduplicate</button>'
+			+ renderContacts(data)
+			+ '<p data-fm="status"></p>';
 		wireNav();
+		const form = root.querySelector('[data-fm="add"]');
+		if (form) {
+			form.addEventListener('submit', onContactAdd);
+		}
+		const dedupeButton = root.querySelector('[data-fm="dedupe"]');
+		if (dedupeButton) {
+			dedupeButton.addEventListener('click', onDeduplicate);
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onContactDelete(button.getAttribute('data-id')));
+		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load contacts.</p>';
 	}
