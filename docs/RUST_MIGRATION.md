@@ -36,6 +36,36 @@ and `gitea` (all 4 tips identical, verified via `ls-remote`).
 This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
+## Progress Snapshot — 2026-09-22 07:22:00 UTC
+
+The v1-identities-API slice is verified (commit pending): stable
+Rust-owned sender-identity management — `POST
+/api/frickmail/v1/identities` (create), `DELETE /identities/{id}`,
+`POST /identities/{id}/default` — reusing the exact repository calls
+as the legacy hooks, alongside the existing `GET /identities`. Reads
+need only the session; writes require the `X-SM-Token` connection
+token. Unknown account/identity 404 (including a new user-scoped
+`mail_identity_exists` ownership check for delete, whose repository
+call binds the user id without confirming a row matched); validation
+problems 400 with generic messages; everything else 500.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http/fm-user --all-targets` clean; `cargo test -p
+fm-http --lib -- v1_identities` 5 passed / 0 failed (3 new: anonymous
+gating, input validation incl. account scoping, add/delete/default
+round trip); `cargo test -p fm-http --lib` 538 passed / 0 failed;
+`cargo test -p fm-user --lib` 64 passed / 0 failed; `cargo clippy
+--workspace --all-targets -- -D warnings` clean; naming gate passes
+locally.
+
+Independent senior review APPROVED (user scoping on every path
+verified by test, generic error messages, no secret material in the
+shapes, additive-only repository change, no schema or config change,
+API-shape coverage over HTTP).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-21 07:18:00 UTC
 
 The v1-oauth-providers-API slice is published (`62c6b3d6a`): `GET

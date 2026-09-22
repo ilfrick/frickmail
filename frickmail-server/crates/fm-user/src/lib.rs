@@ -869,6 +869,14 @@ impl SqlxUserRepository {
         delete_mail_identity(pool, user_id, identity_id).await
     }
 
+    pub async fn mail_identity_exists(
+        pool: &AnyPool,
+        user_id: i64,
+        identity_id: i64,
+    ) -> Result<bool> {
+        mail_identity_exists(pool, user_id, identity_id).await
+    }
+
     pub async fn set_default_mail_identity(
         pool: &AnyPool,
         user_id: i64,
@@ -2638,6 +2646,24 @@ async fn add_mail_identity(pool: &AnyPool, user_id: i64, input: NewMailIdentity)
             Err(err)
         }
     }
+}
+
+/// User-scoped existence check so API layers can 404 unknown ids (the
+/// mutating identity queries bind the user id without confirming a row
+/// matched, mirroring legacy `ok:true` semantics).
+async fn mail_identity_exists(pool: &AnyPool, user_id: i64, identity_id: i64) -> Result<bool> {
+    if identity_id <= 0 {
+        return Ok(false);
+    }
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    sqlx::query(mail_identity_account_query(&backend))
+        .bind(identity_id)
+        .bind(user_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map(|row| row.is_some())
+        .map_err(db_error)
 }
 
 async fn delete_mail_identity(pool: &AnyPool, user_id: i64, identity_id: i64) -> Result<()> {
