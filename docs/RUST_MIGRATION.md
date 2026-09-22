@@ -38,7 +38,7 @@ remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 09:05:00 UTC
 
-The v1-password-UI slice is verified (commit pending): the v1 settings
+The v1-password-UI slice is published (`9faf7c3ae`): the v1 settings
 screen gains a password form (current + new, never prefilled) over a new
 `password.js` loader against `POST /security/password`; success routes
 through sign-out into a fresh sign-in, matching the server's session
@@ -54,7 +54,10 @@ Independent senior review APPROVED (contract match, X-SM-Token via
 ApiClient only, no password rendering, post-change sign-in routing
 matches server session semantics).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `9faf7c3ae` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 08:54:00 UTC
