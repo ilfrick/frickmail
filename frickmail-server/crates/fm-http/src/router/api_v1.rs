@@ -82,6 +82,10 @@ pub fn routes() -> Router<AppState> {
         .route("/search", get(search))
         .route("/unified-inbox", get(unified_inbox))
         .route("/oauth/providers", get(oauth_providers))
+        .route("/security/totp", get(totp_status))
+        .route("/security/totp/setup", post(totp_setup))
+        .route("/security/totp/confirm", post(totp_confirm))
+        .route("/security/totp/disable", post(totp_disable))
         .route(
             "/smime/certs",
             get(smime_certs)
@@ -1849,6 +1853,272 @@ async fn smime_delete_cert(
             "S/MIME certificate not found",
         ),
         Err(err) => smime_error(&err.public_message(), "certificate delete"),
+    }
+}
+
+/// Maps a TOTP action result onto the v1 contract: verified ok becomes
+/// 200; a soft failure (wrong code) becomes a generic 400 without
+/// leaking which half failed.
+fn totp_result(result: fm_user::TotpActionResult) -> Response {
+    if result.ok {
+        (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response()
+    } else {
+        v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            result
+                .error
+                .or(result.message)
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| "Invalid two-factor code".to_string()),
+        )
+    }
+}
+
+/// Reads two-factor status for the session user. Read-only.
+async fn totp_status(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    match fm_user::SqlxUserRepository::totp_enabled(pool, user_id).await {
+        Ok(enabled) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "enabled": enabled }))),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("v1 totp status failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail two-factor request failed",
+            )
+        }
+    }
+}
+
+/// Starts two-factor enrollment, storing the pending secret server-side
+/// in the session exactly like legacy `FrickmailEnableTotp`. The secret
+/// and QR material go back to the caller, so the connection token is
+/// required.
+async fn totp_setup(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    match fm_user::SqlxUserRepository::begin_totp_setup(pool, user_id).await {
+        Ok(setup) => {
+            if let Err(err) = session
+                .insert(super::TOTP_PENDING_SESSION_KEY, setup.secret.clone())
+                .await
+            {
+                tracing::warn!("v1 totp setup session write failed: {err}");
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_error",
+                    "Frickmail session write failed",
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(ApiV1Envelope::ok(json!({
+                    "secret": setup.secret,
+                    "otpauth_uri": setup.otpauth_uri,
+                    "qr_data_url": setup.qr_data_url,
+                }))),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::warn!("v1 totp setup failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail two-factor request failed",
+            )
+        }
+    }
+}
+
+/// Request body for the TOTP confirm/disable routes: the live code from
+/// the authenticator app.
+#[derive(Debug, Deserialize, Default)]
+struct TotpCodeRequest {
+    #[serde(default)]
+    code: Option<String>,
+}
+
+/// Reads the pending enrollment secret or answers 400 when enrollment
+/// was never started (mirroring legacy `FrickmailConfirmTotp`).
+async fn totp_pending_secret(session: &fm_session::Session) -> Result<String, Response> {
+    match session.get::<String>(super::TOTP_PENDING_SESSION_KEY).await {
+        Ok(Some(secret)) => Ok(secret),
+        Ok(None) => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "No pending two-factor setup",
+        )),
+        Err(_) => Err(v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_error",
+            "Frickmail session read failed",
+        )),
+    }
+}
+
+/// Confirms enrollment with a live code, clearing the pending secret on
+/// success exactly like legacy `FrickmailConfirmTotp`. State-changing, so
+/// the connection token is required.
+async fn totp_confirm(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<TotpCodeRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid two-factor body",
+        );
+    };
+    let pending_secret = match totp_pending_secret(&session).await {
+        Ok(pending_secret) => pending_secret,
+        Err(response) => return response,
+    };
+    match fm_user::SqlxUserRepository::confirm_totp(
+        pool,
+        user_id,
+        pending_secret,
+        request.code.unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(result) => {
+            if result.ok {
+                if let Err(err) = session
+                    .remove::<String>(super::TOTP_PENDING_SESSION_KEY)
+                    .await
+                {
+                    tracing::warn!("v1 totp confirm session cleanup failed: {err}");
+                    return v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "session_error",
+                        "Frickmail session cleanup failed",
+                    );
+                }
+            }
+            totp_result(result)
+        }
+        Err(err) => match err {
+            fm_core::FrickmailError::BadRequest(_) => v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid two-factor request",
+            ),
+            _ => {
+                tracing::warn!("v1 totp confirm failed: {}", err.public_message());
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Frickmail two-factor request failed",
+                )
+            }
+        },
+    }
+}
+
+/// Disables two-factor with a live code. State-changing, so the
+/// connection token is required.
+async fn totp_disable(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<TotpCodeRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid two-factor body",
+        );
+    };
+    match fm_user::SqlxUserRepository::disable_totp(pool, user_id, request.code.unwrap_or_default())
+        .await
+    {
+        Ok(result) => totp_result(result),
+        Err(err) => match err {
+            fm_core::FrickmailError::BadRequest(_) => v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid two-factor request",
+            ),
+            _ => {
+                tracing::warn!("v1 totp disable failed: {}", err.public_message());
+                v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Frickmail two-factor request failed",
+                )
+            }
+        },
     }
 }
 
@@ -7966,6 +8236,198 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(identity_ids(&app, &cookie).await, vec![(first, true)]);
+    }
+
+    async fn totp_test_state() -> (Router, String, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1901, "v1totp", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1totp", "correct-horse").await;
+        // Like the switch-account tests, the bootstrap connection token
+        // stays valid after login.
+        (app, cookie, token)
+    }
+
+    fn totp_post(cookie: &str, token: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("cookie", cookie)
+            .header("x-sm-token", token)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn totp_status_of(app: &Router, cookie: &str) -> bool {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/security/totp")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        body["data"]["enabled"].as_bool().unwrap()
+    }
+
+    async fn totp_setup_secret(app: &Router, cookie: &str, token: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(totp_post(
+                cookie,
+                token,
+                "/api/frickmail/v1/security/totp/setup",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(body["data"]["otpauth_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/"));
+        assert!(body["data"]["qr_data_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/svg+xml;base64,"));
+        body["data"]["secret"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn v1_totp_rejects_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/security/totp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Writes hit the connection-token gate first, exactly like v1 send.
+        for uri in [
+            "/api/frickmail/v1/security/totp/setup",
+            "/api/frickmail/v1/security/totp/confirm",
+            "/api/frickmail/v1/security/totp/disable",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_totp_confirm_needs_pending_setup() {
+        let (app, cookie, token) = totp_test_state().await;
+        assert!(!totp_status_of(&app, &cookie).await);
+
+        let response = app
+            .oneshot(totp_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/security/totp/confirm",
+                serde_json::json!({"code": "123456"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn v1_totp_enrolls_confirms_and_disables() {
+        let (app, cookie, token) = totp_test_state().await;
+        assert!(!totp_status_of(&app, &cookie).await);
+
+        let secret = totp_setup_secret(&app, &cookie, &token).await;
+        let live_code = || test_totp_code(&secret, test_totp_counter());
+        // A code that cannot be the live one (last digit flipped).
+        let wrong_code = || {
+            let live = live_code();
+            let flipped = if live.ends_with('0') { '1' } else { '0' };
+            format!("{}{}", &live[..5], flipped)
+        };
+
+        // A wrong code never enrolls.
+        let response = app
+            .clone()
+            .oneshot(totp_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/security/totp/confirm",
+                serde_json::json!({"code": wrong_code()}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!totp_status_of(&app, &cookie).await);
+
+        // A live code enrolls and clears the pending secret.
+        let response = app
+            .clone()
+            .oneshot(totp_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/security/totp/confirm",
+                serde_json::json!({"code": live_code()}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(totp_status_of(&app, &cookie).await);
+
+        // Disabling needs a live code too.
+        let response = app
+            .clone()
+            .oneshot(totp_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/security/totp/disable",
+                serde_json::json!({"code": wrong_code()}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(totp_status_of(&app, &cookie).await);
+
+        let response = app
+            .clone()
+            .oneshot(totp_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/security/totp/disable",
+                serde_json::json!({"code": live_code()}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!totp_status_of(&app, &cookie).await);
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {

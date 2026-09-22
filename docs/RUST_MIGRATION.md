@@ -36,6 +36,36 @@ and `gitea` (all 4 tips identical, verified via `ls-remote`).
 This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
+## Progress Snapshot — 2026-09-22 08:21:00 UTC
+
+The v1-totp-API slice is verified (commit pending): stable Rust-owned
+two-factor enrollment — `GET /api/frickmail/v1/security/totp`
+(status), `POST /security/totp/setup` (pending secret in the session
+plus secret/otpauth-uri/QR material, exactly like legacy
+`FrickmailEnableTotp`), `POST /security/totp/confirm` (live code,
+pending cleared on success), `POST /security/totp/disable` (live code)
+— all reusing the exact repository calls as the legacy hooks. Reads
+need only the session; the three mutations require the `X-SM-Token`
+connection token. Soft failures (wrong code) become generic 400s;
+validation problems 400; everything else 500.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- v1_totp` 3 passed / 0 failed (anonymous gating, pending-setup
+requirement, full enroll→confirm→disable round trip with live codes
+and a guaranteed-wrong code); `cargo test -p fm-http --lib` 543 passed
+/ 0 failed; `cargo test -p fm-user --lib` 64 passed / 0 failed; `cargo
+clippy --workspace --all-targets -- -D warnings` clean; naming gate
+passes locally.
+
+Independent senior review APPROVED (pending secret server-side in the
+session, never accepted from clients; live-code verification with
+replay protection inherited from the repository; generic failure
+messages; no schema or config change; API-shape coverage over HTTP).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-22 07:51:00 UTC
 
 The v1-send-as-identity slice is published (`1107b54ee`): `POST
