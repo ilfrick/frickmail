@@ -38,7 +38,7 @@ remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 07:51:00 UTC
 
-The v1-send-as-identity slice is verified (commit pending): `POST
+The v1-send-as-identity slice is published (`1107b54ee`): `POST
 /api/frickmail/v1/send` accepts an optional `identity_id` resolved
 server-side against the sending account — display-name-preserving
 `From` plus the stored reply-to ride into the exact legacy compose
@@ -65,7 +65,10 @@ match on every send, no client-controlled From passthrough, reply-to
 only from the stored identity, generic 404s, no schema or config
 change, API-shape plus wire-level coverage).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `1107b54ee` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 07:22:00 UTC
