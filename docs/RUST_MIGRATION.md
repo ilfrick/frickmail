@@ -38,7 +38,7 @@ remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 09:27:00 UTC
 
-The v1-contacts-write-API slice is verified (commit pending): `POST
+The v1-contacts-write-API slice is published (`fff1deff6`): `POST
 /api/frickmail/v1/contacts` (add, reusing the exact jCard pipeline as
 legacy `JsonAddContact`), `POST /contacts/deduplicate`, and `DELETE
 /contacts/{id}` — alongside the existing list endpoint. Reads need
@@ -61,7 +61,10 @@ verified by test, email validation mirrored from native, generic
 error messages, additive-only address-book change, no schema or config
 change, API-shape coverage over HTTP).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `fff1deff6` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 09:05:00 UTC
