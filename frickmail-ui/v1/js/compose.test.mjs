@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { collectComposePayload, renderComposeForm, sendMessage } from './compose.js';
+import { collectComposePayload, loadIdentities, renderComposeForm, sendMessage } from './compose.js';
 
 describe('renderComposeForm', () => {
 	it('escapes seeded values', () => {
@@ -19,6 +19,21 @@ describe('renderComposeForm', () => {
 		const html = renderComposeForm();
 		assert.ok(html.includes('data-fm="compose"'));
 		assert.ok(html.includes('data-fm="send"'));
+	});
+
+	it('renders a sender select when identities exist', () => {
+		const html = renderComposeForm(null, [
+			{ id: 3, name: 'Work', email: 'w@example.com' },
+			{ id: 4, name: '<Other>', email: 'o@example.com' }
+		]);
+		assert.ok(html.includes('data-fm="identity"'));
+		assert.ok(html.includes('<option value="3">Work &lt;w@example.com&gt;</option>'));
+		assert.ok(!html.includes('<Other>'));
+	});
+
+	it('omits the sender select without identities', () => {
+		assert.ok(!renderComposeForm().includes('data-fm="identity"'));
+		assert.ok(!renderComposeForm(null, []).includes('data-fm="identity"'));
 	});
 });
 
@@ -41,6 +56,22 @@ describe('collectComposePayload', () => {
 			collectComposePayload(fakeRoot({ to: 'a@example.com', subject: 'Hi', text: 'Yo' })),
 			{ to: 'a@example.com', subject: 'Hi', text: 'Yo' }
 		);
+	});
+
+	it('carries the selected sender identity', () => {
+		const root = {
+			querySelector: (selector) => {
+				const table = {
+					'[data-fm="to"]': 'a@example.com',
+					'[data-fm="subject"]': '',
+					'[data-fm="body"]': '',
+					'[data-fm="identity"]': '3'
+				};
+				return selector in table ? { value: table[selector] } : null;
+			}
+		};
+		const payload = collectComposePayload(root);
+		assert.equal(payload.identity_id, 3);
 	});
 
 	it('defaults missing fields to empty strings', () => {
@@ -66,5 +97,25 @@ describe('sendMessage', () => {
 		assert.equal(seen.path, '/send');
 		assert.deepEqual(seen.options, { body: { to: 'a@example.com', text: 'Hi' } });
 		assert.deepEqual(data, { sent: true });
+	});
+});
+
+describe('loadIdentities', () => {
+	it('passes the account id', async () => {
+		let seen = null;
+		const api = { request: async (method, path, options) => { seen = { method, path, options }; return null; } };
+		await loadIdentities(api, 12);
+		assert.deepEqual(seen, {
+			method: 'GET',
+			path: '/identities',
+			options: { query: { account_id: 12 } }
+		});
+	});
+
+	it('omits empty account ids', async () => {
+		let seen = null;
+		const api = { request: async (method, path, options) => { seen = { method, path, options }; return null; } };
+		await loadIdentities(api, undefined);
+		assert.deepEqual(seen.options, { query: {} });
 	});
 });

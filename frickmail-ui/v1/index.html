@@ -17,7 +17,7 @@ import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadFolders, renderFolderList } from './js/folders.js';
 import { loadRules, renderRules } from './js/rules.js';
 import { loadContacts, renderContacts } from './js/contacts.js';
-import { collectComposePayload, renderComposeForm, sendMessage } from './js/compose.js';
+import { collectComposePayload, loadIdentities, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
 import { loadProviders, renderProviderButtons, signInWithProvider } from './js/oauth.js';
@@ -523,10 +523,21 @@ function showSettingsStatus(text) {
 	}
 }
 
-function showCompose(seed) {
+async function showCompose(seed) {
+	let identities = [];
+	try {
+		const session = await api.bootstrap();
+		const accountId = session && session.selected_account_id
+			? session.selected_account_id
+			: undefined;
+		const data = await loadIdentities(api, accountId);
+		identities = data && Array.isArray(data.identities) ? data.identities : [];
+	} catch (error) {
+		void error;
+	}
 	root.innerHTML = nav('compose')
 		+ '<h1 data-fm="title">Compose</h1>'
-		+ renderComposeForm(seed);
+		+ renderComposeForm(seed, identities);
 	wireNav();
 	const form = root.querySelector('[data-fm="compose"]');
 	if (form) {

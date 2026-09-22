@@ -36,6 +36,38 @@ and `gitea` (all 4 tips identical, verified via `ls-remote`).
 This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
+## Progress Snapshot — 2026-09-22 07:51:00 UTC
+
+The v1-send-as-identity slice is verified (commit pending): `POST
+/api/frickmail/v1/send` accepts an optional `identity_id` resolved
+server-side against the sending account — display-name-preserving
+`From` plus the stored reply-to ride into the exact legacy compose
+pipeline, so spoofing arbitrary addresses is impossible (unknown or
+foreign ids 404 with one code). The v1 compose screen grows the sender
+select (account identities via the new loader, account default when
+none) and posts the selection through. No identity means byte-identical
+behavior to before (existing send tests untouched apart from the new
+struct field).
+
+Verification so far (Docker-only Rust): `cargo fmt --all -- --check`
+clean; `cargo check -p fm-http --all-targets` clean; `cargo test -p
+fm-http --lib -- v1_send_uses_sender_identity_for_from
+v1_send_rejects_unknown_and_foreign_identities` 2 passed / 0 failed
+(exact `From:` header assertion, same-code 404s, no delivery on
+rejection); `cargo test -p fm-http --lib` 540 passed / 0 failed;
+`cargo test -p fm-user --lib` 64 passed / 0 failed; `cargo clippy
+--workspace --all-targets -- -D warnings` clean; naming gate passes.
+Host node: compose UI tests 10 passed / 0 failed, full UI suite 164
+passed / 0 failed, `npx eslint` clean, bundle ships automatically.
+
+Independent senior review APPROVED (server-side ownership + account
+match on every send, no client-controlled From passthrough, reply-to
+only from the stored identity, generic 404s, no schema or config
+change, API-shape plus wire-level coverage).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-22 07:22:00 UTC
 
 The v1-identities-API slice is published (`744739847`): stable

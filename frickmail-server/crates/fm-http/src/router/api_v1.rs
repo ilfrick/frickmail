@@ -980,6 +980,8 @@ struct SendRequest {
     #[serde(default)]
     account_id: Option<i64>,
     #[serde(default)]
+    identity_id: Option<i64>,
+    #[serde(default)]
     to: String,
     #[serde(default)]
     cc: Option<String>,
@@ -1113,6 +1115,51 @@ async fn send_with_sender_and_appender(
         "html": request.html,
     });
     let mut payload = payload;
+    // Optional send-as identity: resolved server-side and scoped to the
+    // sending account, so clients can never spoof arbitrary From
+    // addresses. Display names follow the read-receipt convention
+    // (`Name <email>`); a stored reply-to rides along.
+    if let Some(identity_id) = request.identity_id.filter(|id| *id > 0) {
+        let identities =
+            match fm_user::SqlxUserRepository::list_mail_identities(pool, user.user_id, account_id)
+                .await
+            {
+                Ok(identities) => identities,
+                Err(err) => {
+                    tracing::warn!("v1 send identity lookup failed: {}", err.public_message());
+                    return v1_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "Frickmail settings lookup failed",
+                    );
+                }
+            };
+        let Some(identity) = identities
+            .into_iter()
+            .find(|identity| identity.id == identity_id)
+        else {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "identity_not_found",
+                "Sender identity not found",
+            );
+        };
+        let name = identity.name.trim();
+        let email = identity.email.trim();
+        payload["from"] = if name.is_empty() {
+            json!(email)
+        } else {
+            json!(format!("{name} <{email}>"))
+        };
+        if let Some(reply_to) = identity
+            .reply_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            payload["replyTo"] = json!(reply_to);
+        }
+    }
     if request.save_to_sent {
         payload["saveFolder"] = json!(sent_folder.as_deref().unwrap_or("Sent"));
     }
@@ -6059,6 +6106,7 @@ mod tests {
             &session,
             Ok(axum::extract::Json(super::SendRequest {
                 account_id: Some(1201),
+                identity_id: None,
                 to: "recipient@example.net".to_string(),
                 cc: None,
                 bcc: None,
@@ -6103,6 +6151,7 @@ mod tests {
             &session,
             Ok(axum::extract::Json(super::SendRequest {
                 account_id: Some(1201),
+                identity_id: None,
                 to: "recipient@example.net".to_string(),
                 cc: None,
                 bcc: None,
@@ -6126,6 +6175,129 @@ mod tests {
         assert_eq!(body["data"]["sent"], true);
         assert!(sent.lock().unwrap().is_some());
         assert!(stored.lock().unwrap().is_none());
+    }
+
+    async fn seed_identity_row(
+        pool: &sqlx::AnyPool,
+        id: i64,
+        user_id: i64,
+        account_id: i64,
+        name: &str,
+        email: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO frickmail_identities
+                (id, account_id, user_id, name, email, reply_to, is_default, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(email)
+        .bind(None::<String>)
+        .bind(false)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn send_as_test_state() -> (AppState, fm_session::Session, String, sqlx::AnyPool) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1201, "v1send", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 1201, 1201, &blob).await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+             SET smtp_host = ?, smtp_port = ?, smtp_secure = ?
+             WHERE id = ?",
+        )
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(1201_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = AppState::with_db_pool(test_api_config(), Some(pool.clone()));
+        let session = authed_v1_session(1201, "v1send").await;
+        let token = super::super::ensure_connection_token(&state, &session, Some(1201))
+            .await
+            .unwrap();
+        (state, session, token, pool)
+    }
+
+    async fn send_with_identity(
+        state: &AppState,
+        session: &fm_session::Session,
+        token: &str,
+        identity_id: Option<i64>,
+        sent: &std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    ) -> axum::response::Response {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-sm-token", token.parse().unwrap());
+        super::send_with_sender_and_appender(
+            state,
+            session,
+            Ok(axum::extract::Json(super::SendRequest {
+                account_id: Some(1201),
+                identity_id,
+                to: "recipient@example.net".to_string(),
+                cc: None,
+                bcc: None,
+                subject: Some("Identity send".to_string()),
+                text: Some("Body text".to_string()),
+                html: None,
+                save_to_sent: false,
+            })),
+            &headers,
+            &RecordingSmtpSender {
+                message: std::sync::Arc::clone(sent),
+            },
+            &RecordingSentAppender {
+                message: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
+        )
+        .await
+        .into_response()
+    }
+
+    #[tokio::test]
+    async fn v1_send_uses_sender_identity_for_from() {
+        let (state, session, token, pool) = send_as_test_state().await;
+        seed_identity_row(&pool, 11, 1201, 1201, "Work Name", "work@example.com").await;
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        let response = send_with_identity(&state, &session, &token, Some(11), &sent).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent_text = String::from_utf8(sent.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(
+            sent_text.contains("From: \"Work Name\" <work@example.com>"),
+            "{sent_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_send_rejects_unknown_and_foreign_identities() {
+        let (state, session, token, pool) = send_as_test_state().await;
+        seed_identity_row(&pool, 12, 1201, 1201, "Work Name", "work@example.com").await;
+        seed_login_user(&pool, 1202, "v1other", "correct-horse", None).await;
+        seed_imap_account_with_password(&pool, 1202, 1202, &[1_u8, 2, 3]).await;
+        seed_identity_row(&pool, 13, 1202, 1202, "Other", "other@example.com").await;
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        // Unknown id and another user's identity both 404 with the same
+        // code, revealing nothing about which case applied.
+        for identity_id in [Some(999999_i64), Some(13)] {
+            let response = send_with_identity(&state, &session, &token, identity_id, &sent).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "identity_not_found");
+        }
+        assert!(sent.lock().unwrap().is_none());
     }
 
     #[tokio::test]
