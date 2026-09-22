@@ -38,7 +38,7 @@ remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 08:21:00 UTC
 
-The v1-totp-API slice is verified (commit pending): stable Rust-owned
+The v1-totp-API slice is published (`849a6eefa`): stable Rust-owned
 two-factor enrollment — `GET /api/frickmail/v1/security/totp`
 (status), `POST /security/totp/setup` (pending secret in the session
 plus secret/otpauth-uri/QR material, exactly like legacy
@@ -63,7 +63,10 @@ session, never accepted from clients; live-code verification with
 replay protection inherited from the repository; generic failure
 messages; no schema or config change; API-shape coverage over HTTP).
 
-This slice is verified but NOT yet committed or pushed. The major
+Published `849a6eefa` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
 ## Progress Snapshot — 2026-09-22 07:51:00 UTC
