@@ -29,6 +29,7 @@ import {
 	renderTotpStatus,
 	startTotpSetup
 } from './js/twofactor.js';
+import { changePassword, collectPasswordPayload, renderPasswordForm } from './js/password.js';
 import { loadProviders, renderProviderButtons, signInWithProvider } from './js/oauth.js';
 import {
 	addAccount,
@@ -506,10 +507,12 @@ async function showSettings() {
 		root.innerHTML = nav('settings')
 			+ '<h1 data-fm="title">Settings</h1>'
 			+ renderPreferencesForm(data.preferences)
-			+ totp;
+			+ totp
+			+ renderPasswordForm();
 		wireNav();
 		wireSettingsForm();
 		wireTotp();
+		wirePasswordForm();
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load settings.</p>';
 	}
@@ -564,6 +567,25 @@ async function onTotpDisable(event) {
 		await showSettings();
 	} catch (error) {
 		showSettingsStatus(error && error.message ? error.message : 'Disable failed.');
+	}
+}
+
+function wirePasswordForm() {
+	const form = root.querySelector('[data-fm="password-form"]');
+	if (form) {
+		form.addEventListener('submit', onPasswordSubmit);
+	}
+}
+
+async function onPasswordSubmit(event) {
+	event.preventDefault();
+	try {
+		await changePassword(api, collectPasswordPayload(root));
+		// The server rotated the session and dropped the credential key:
+		// land on a fresh sign-in like a sign-out does.
+		await signOut();
+	} catch (error) {
+		showSettingsStatus(error && error.message ? error.message : 'Change failed.');
 	}
 }
 

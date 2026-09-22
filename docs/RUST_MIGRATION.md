@@ -36,6 +36,27 @@ and `gitea` (all 4 tips identical, verified via `ls-remote`).
 This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
+## Progress Snapshot — 2026-09-22 09:05:00 UTC
+
+The v1-password-UI slice is verified (commit pending): the v1 settings
+screen gains a password form (current + new, never prefilled) over a new
+`password.js` loader against `POST /security/password`; success routes
+through sign-out into a fresh sign-in, matching the server's session
+rotation and credential reset.
+
+Verification so far (host node, Docker-free like prior UI slices):
+`node --test frickmail-ui/v1/js/password.test.mjs` 4 passed / 0 failed;
+full `node --test frickmail-ui/v1/js/*.test.mjs` 178 passed / 0 failed;
+`npx eslint` on touched JS clean; `build.mjs` ships `password.js`
+automatically; no legacy product names in the new files.
+
+Independent senior review APPROVED (contract match, X-SM-Token via
+ApiClient only, no password rendering, post-change sign-in routing
+matches server session semantics).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-22 08:54:00 UTC
 
 The v1-password-API slice is published (`53d13c7a0`): `POST
