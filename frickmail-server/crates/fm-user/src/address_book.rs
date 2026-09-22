@@ -432,6 +432,28 @@ pub async fn save_contact(
     Ok(contact_id)
 }
 
+/// User-scoped existence check for non-deleted contacts, so API layers
+/// can 404 unknown ids (bulk deletion binds the user id without
+/// confirming rows matched).
+pub async fn contact_exists(pool: &AnyPool, user_id: i64, contact_id: i64) -> Result<bool> {
+    if contact_id <= 0 {
+        return Ok(false);
+    }
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let row = sqlx::query(&format!(
+        "SELECT 1 FROM rainloop_ab_contacts WHERE id_user = {u} AND id_contact = {c} AND deleted = 0",
+        u = ab_placeholder(&backend, 1),
+        c = ab_placeholder(&backend, 2),
+    ))
+    .bind(user_id)
+    .bind(contact_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+    Ok(row.is_some())
+}
+
 /// Deletes property rows and soft-deletes the contact rows, matching
 /// `PdoAddressBook::DeleteContacts` (deleted = 1 keeps CardDAV history).
 pub async fn delete_contacts(pool: &AnyPool, user_id: i64, contact_ids: &[i64]) -> Result<bool> {

@@ -71,7 +71,9 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/admin/settings/{name}", delete(admin_reset_setting))
         .route("/avatar", get(avatar))
-        .route("/contacts", get(contacts))
+        .route("/contacts", get(contacts).post(add_contact))
+        .route("/contacts/deduplicate", post(deduplicate_contacts))
+        .route("/contacts/{id}", delete(delete_contact))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
         .route("/send", post(send))
@@ -891,6 +893,232 @@ async fn contacts(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "Frickmail contacts listing failed",
+            )
+        }
+    }
+}
+
+/// Maps a native legacy contacts response onto the v1 contract: a legacy
+/// `Result` object with `ok:true` becomes 200 `data`; a legacy
+/// `Result.error` becomes a classified 4xx/500 with a generic message.
+/// Legacy error text never reaches v1 clients.
+async fn map_contacts_response(response: Response) -> Response {
+    if response.status() != StatusCode::OK {
+        tracing::warn!(
+            "v1 contacts request failed with legacy status {}",
+            response.status().as_u16()
+        );
+        return v1_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Frickmail contacts request failed",
+        );
+    }
+    let body = match axum::body::to_bytes(response.into_body(), 64 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Frickmail contacts request failed",
+            )
+        }
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(body) => body,
+        Err(_) => {
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Frickmail contacts request failed",
+            )
+        }
+    };
+    match body.get("Result") {
+        Some(Value::Object(result)) if result.get("error").is_none() => {
+            (StatusCode::OK, Json(ApiV1Envelope::ok(result))).into_response()
+        }
+        Some(result) => {
+            let message = result
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if message == "invalid email address" {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Invalid contact request",
+                );
+            }
+            tracing::warn!("v1 contacts request failed");
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail contacts request failed",
+            )
+        }
+        _ => v1_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Frickmail contacts request failed",
+        ),
+    }
+}
+
+/// Request body for `POST /api/frickmail/v1/contacts`. Field names mirror
+/// the legacy `JsonAddContact` payload; the name defaults to the address
+/// server-side like the native hook.
+#[derive(Debug, Deserialize, Default)]
+struct ContactAddRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// Adds a manual contact, reusing the exact pipeline as legacy
+/// `JsonAddContact` (validation, jCard-shaped rows, random `manual:`
+/// UID). State-changing, so the connection token is required.
+async fn add_contact(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<ContactAddRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    if let Err(response) = v1_session_user_id(&session).await {
+        return response;
+    }
+    if state.db_pool().is_none() {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    }
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid contact body",
+        );
+    };
+    let payload = json!({
+        "name": request.name.unwrap_or_default(),
+        "email": request.email.unwrap_or_default(),
+    });
+    let response =
+        super::contacts::native_json_add_contact(&state, "JsonAddContact", &payload, &session)
+            .await;
+    map_contacts_response(response).await
+}
+
+/// Removes later duplicates sharing a UID (or display name), reusing the
+/// exact pipeline as legacy `JsonDeduplicateContacts`. State-changing, so
+/// the connection token is required.
+async fn deduplicate_contacts(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    if let Err(response) = v1_session_user_id(&session).await {
+        return response;
+    }
+    if state.db_pool().is_none() {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    }
+    let response = super::contacts::native_json_deduplicate_contacts(
+        &state,
+        "JsonDeduplicateContacts",
+        &json!({}),
+        &session,
+    )
+    .await;
+    map_contacts_response(response).await
+}
+
+/// Deletes one of the caller's contacts by address-book id. Unknown ids
+/// 404 (the repository reports whether a row matched). State-changing, so
+/// the connection token is required.
+async fn delete_contact(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid contact id",
+        );
+    };
+    if let Err(err) = fm_user::address_book::ensure_address_book_schema(pool).await {
+        tracing::warn!("v1 contacts schema check failed: {}", err.public_message());
+        return v1_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Frickmail contacts request failed",
+        );
+    }
+    let exists = match fm_user::address_book::contact_exists(pool, user_id, id).await {
+        Ok(exists) => exists,
+        Err(err) => {
+            tracing::warn!("v1 contact lookup failed: {}", err.public_message());
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail contacts request failed",
+            );
+        }
+    };
+    if !exists {
+        return v1_error(
+            StatusCode::NOT_FOUND,
+            "contact_not_found",
+            "Contact not found",
+        );
+    }
+    match fm_user::address_book::delete_contacts(pool, user_id, &[id]).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "deleted": true }))),
+        )
+            .into_response(),
+        Ok(false) => v1_error(
+            StatusCode::NOT_FOUND,
+            "contact_not_found",
+            "Contact not found",
+        ),
+        Err(err) => {
+            tracing::warn!("v1 contact delete failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail contacts request failed",
             )
         }
     }
@@ -8742,6 +8970,185 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn contacts_write_test_state() -> (Router, String, String) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 2001, "v1ctmgr", "correct-horse", None).await;
+        fm_user::address_book::ensure_address_book_schema(&pool)
+            .await
+            .unwrap();
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1ctmgr", "correct-horse").await;
+        // Like the switch-account tests, the bootstrap connection token
+        // stays valid after login.
+        (app, cookie, token)
+    }
+
+    fn contacts_post(
+        cookie: &str,
+        token: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("cookie", cookie)
+            .header("x-sm-token", token)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn contact_ids(app: &Router, cookie: &str) -> Vec<i64> {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/contacts?limit=100")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        body["data"]["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|contact| contact["id"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn v1_contacts_writes_reject_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        // Writes hit the connection-token gate first, exactly like v1 send.
+        for request in [
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/contacts")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/contacts/deduplicate")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/frickmail/v1/contacts/1")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_contacts_add_validates_email() {
+        let (app, cookie, token) = contacts_write_test_state().await;
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"name": "No address"}),
+            serde_json::json!({"email": "not-an-address"}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(contacts_post(
+                    &cookie,
+                    &token,
+                    "/api/frickmail/v1/contacts",
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_contacts_add_delete_and_deduplicate_round_trip() {
+        let (app, cookie, token) = contacts_write_test_state().await;
+
+        let response = app
+            .clone()
+            .oneshot(contacts_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/contacts",
+                serde_json::json!({"name": "Ada", "email": "ada@example.com"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+        assert_eq!(body["data"]["email"], "ada@example.com");
+
+        // Nothing to deduplicate yet.
+        let response = app
+            .clone()
+            .oneshot(contacts_post(
+                &cookie,
+                &token,
+                "/api/frickmail/v1/contacts/deduplicate",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["removed"], 0);
+
+        let ids = contact_ids(&app, &cookie).await;
+        assert_eq!(ids.len(), 1);
+
+        // Unknown ids 404.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/frickmail/v1/contacts/999999")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "contact_not_found");
+
+        // Deleting removes the contact from the listing.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/frickmail/v1/contacts/{}", ids[0]))
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(contact_ids(&app, &cookie).await.is_empty());
     }
 
     fn admin_test_config(token: Option<&str>) -> FrickmailConfig {

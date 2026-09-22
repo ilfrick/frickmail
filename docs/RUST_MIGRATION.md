@@ -36,6 +36,34 @@ and `gitea` (all 4 tips identical, verified via `ls-remote`).
 This slice is published as described above. The major
 remaining gates toward the final Rust-only goal are unchanged.
 
+## Progress Snapshot — 2026-09-22 09:27:00 UTC
+
+The v1-contacts-write-API slice is verified (commit pending): `POST
+/api/frickmail/v1/contacts` (add, reusing the exact jCard pipeline as
+legacy `JsonAddContact`), `POST /contacts/deduplicate`, and `DELETE
+/contacts/{id}` — alongside the existing list endpoint. Reads need
+only the session; writes require the `X-SM-Token` connection token.
+Invalid addresses 400; unknown ids 404 via a new user-scoped
+`contact_exists` ownership check in the address book (bulk deletion
+binds the user id without confirming rows matched); everything else
+500 with generic messages.
+
+Verification so far (Docker-only): `cargo fmt --all -- --check` clean;
+`cargo check -p fm-http --all-targets` clean; `cargo test -p fm-http
+--lib -- v1_contacts` 5 passed / 0 failed (3 new: anonymous gating,
+email validation, add/delete/dedupe round trip); `cargo test -p
+fm-http --lib` 550 passed / 0 failed; `cargo test -p fm-user --lib` 64
+passed / 0 failed; `cargo clippy --workspace --all-targets -- -D
+warnings` clean; naming gate passes locally.
+
+Independent senior review APPROVED (user scoping on every path
+verified by test, email validation mirrored from native, generic
+error messages, additive-only address-book change, no schema or config
+change, API-shape coverage over HTTP).
+
+This slice is verified but NOT yet committed or pushed. The major
+remaining gates toward the final Rust-only goal are unchanged.
+
 ## Progress Snapshot — 2026-09-22 09:05:00 UTC
 
 The v1-password-UI slice is published (`9faf7c3ae`): the v1 settings
