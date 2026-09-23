@@ -9,7 +9,7 @@ use std::{
 
 use async_imap::{
     types::{Capabilities, Capability, Flag, NameAttribute},
-    Client, Session,
+    Authenticator, Client, Session,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
@@ -8760,6 +8760,87 @@ async fn login_client(client: BoxedClient, login: &str, password: &str) -> Resul
     }
 }
 
+/// Maximum accepted OAuth access-token bytes for SASL XOAUTH2. Provider
+/// tokens are ~1–2 KiB; the bound only stops absurd inputs from reaching
+/// the wire.
+pub const OAUTH_ACCESS_TOKEN_LIMIT_BYTES: usize = 8 * 1024;
+
+/// Builds the SASL XOAUTH2 initial client response (RFC 7628 §3.2):
+/// `user=<login>\x01auth=Bearer <token>\x01\x01`.
+///
+/// Both halves must be ASCII without carriage returns, line feeds, or NUL
+/// bytes so the response can never smuggle an extra IMAP command into the
+/// base64 payload or the `AUTHENTICATE` line.
+pub fn xoauth2_initial_response(login: &str, access_token: &str) -> Result<Vec<u8>> {
+    if login.is_empty()
+        || !login.is_ascii()
+        || login
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+    {
+        return Err(FrickmailError::BadRequest(
+            "OAuth IMAP login is invalid".to_string(),
+        ));
+    }
+    if access_token.is_empty()
+        || access_token.len() > OAUTH_ACCESS_TOKEN_LIMIT_BYTES
+        || !access_token.is_ascii()
+        || access_token
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+    {
+        return Err(FrickmailError::BadRequest(
+            "OAuth access token is invalid".to_string(),
+        ));
+    }
+    Ok(format!("user={login}\x01auth=Bearer {access_token}\x01\x01").into_bytes())
+}
+
+struct Xoauth2Authenticator {
+    response: Vec<u8>,
+}
+
+impl fmt::Debug for Xoauth2Authenticator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Xoauth2Authenticator { response: [redacted] }")
+    }
+}
+
+impl Authenticator for Xoauth2Authenticator {
+    type Response = Vec<u8>;
+
+    /// The server challenge (usually empty for XOAUTH2) carries no data the
+    /// client needs; the initial response is replayed verbatim.
+    fn process(&mut self, _challenge: &[u8]) -> Vec<u8> {
+        self.response.clone()
+    }
+}
+
+async fn login_client_oauth(client: BoxedClient, response: Vec<u8>) -> Result<BoxedSession> {
+    match timeout_result(
+        "IMAP XOAUTH2",
+        timeout(
+            COMMAND_TIMEOUT,
+            client.authenticate("XOAUTH2", Xoauth2Authenticator { response }),
+        ),
+    )
+    .await?
+    {
+        Ok(session) => Ok(session),
+        Err((err, _client)) => Err(imap_error("IMAP XOAUTH2", err)),
+    }
+}
+
+/// Logs in with a provider OAuth access token via SASL XOAUTH2 instead of
+/// the `LOGIN` password command. The login name still comes from the stored
+/// account config; only the credential differs. No behavior of the existing
+/// password `login` changes.
+pub async fn login_oauth(config: ImapConnectionConfig, access_token: &str) -> Result<BoxedSession> {
+    let response = xoauth2_initial_response(&config.login, access_token)?;
+    let client = connect_client(&config).await?;
+    login_client_oauth(client, response).await
+}
+
 async fn connect_client(config: &ImapConnectionConfig) -> Result<BoxedClient> {
     connect_client_with_read_guard(config, None).await
 }
@@ -12569,6 +12650,93 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         server.await.unwrap();
 
         assert!(error.to_string().contains("too many UIDs"));
+    }
+
+    #[test]
+    fn xoauth2_initial_response_builds_rfc7628_bytes() {
+        assert_eq!(
+            super::xoauth2_initial_response("alice@example.com", "ya29.abc").unwrap(),
+            b"user=alice@example.com\x01auth=Bearer ya29.abc\x01\x01".to_vec()
+        );
+        assert!(super::xoauth2_initial_response("", "ya29.abc").is_err());
+        assert!(super::xoauth2_initial_response("alice@example.com", "").is_err());
+        assert!(super::xoauth2_initial_response("alice\r\n@example.com", "ya29.abc").is_err());
+        assert!(super::xoauth2_initial_response("alice@example.com", "tok\0en").is_err());
+        assert!(super::xoauth2_initial_response("alice@example.com", "tök").is_err());
+        assert!(
+            super::xoauth2_initial_response("alice@example.com", &"a".repeat(8 * 1024 + 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn xoauth2_authenticator_replays_response_without_leaking_it_in_debug() {
+        let mut authenticator = super::Xoauth2Authenticator {
+            response: b"user=a\x01auth=Bearer secret\x01\x01".to_vec(),
+        };
+        assert_eq!(
+            authenticator.process(b""),
+            b"user=a\x01auth=Bearer secret\x01\x01".to_vec()
+        );
+        let rendered = format!("{authenticator:?}");
+        assert!(rendered.contains("[redacted]"));
+        assert!(!rendered.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn xoauth2_authenticate_handshake_against_scripted_server() {
+        use tokio::io::AsyncWriteExt as _;
+
+        use base64::Engine as _;
+
+        let expected = super::xoauth2_initial_response("alice@example.com", "ya29.test-token")
+            .expect("valid credentials");
+        let (client_stream, mut server_stream) = tokio::io::duplex(2048);
+        let server = tokio::spawn(async move {
+            let authenticate = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(authenticate, "A0001 AUTHENTICATE XOAUTH2\r\n");
+            server_stream.write_all(b"+ \r\n").await.unwrap();
+            let encoded = read_scripted_imap_command(&mut server_stream).await;
+            let decoded = super::STANDARD
+                .decode(encoded.trim())
+                .expect("client response is base64");
+            assert_eq!(decoded, expected);
+            server_stream
+                .write_all(b"A0001 OK authenticated\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: super::BoxedImapIo = super::BoxedImapIo::new(client_stream);
+        let client: super::BoxedClient = super::Client::new(stream);
+        let response =
+            super::xoauth2_initial_response("alice@example.com", "ya29.test-token").unwrap();
+        let result = super::login_client_oauth(client, response).await;
+        server.await.unwrap();
+        assert!(result.is_ok(), "handshake failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn xoauth2_authenticate_failure_maps_to_clear_error() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client_stream, mut server_stream) = tokio::io::duplex(512);
+        let server = tokio::spawn(async move {
+            let authenticate = read_scripted_imap_command(&mut server_stream).await;
+            assert_eq!(authenticate, "A0001 AUTHENTICATE XOAUTH2\r\n");
+            server_stream
+                .write_all(b"A0001 NO [AUTHENTICATIONFAILED] bad token\r\n")
+                .await
+                .unwrap();
+        });
+        let stream: super::BoxedImapIo = super::BoxedImapIo::new(client_stream);
+        let client: super::BoxedClient = super::Client::new(stream);
+        let response =
+            super::xoauth2_initial_response("alice@example.com", "ya29.expired").unwrap();
+        let error = super::login_client_oauth(client, response)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.to_string().contains("IMAP XOAUTH2"), "{error}");
     }
 
     async fn read_scripted_imap_command(stream: &mut tokio::io::DuplexStream) -> String {

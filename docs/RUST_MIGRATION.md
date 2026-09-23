@@ -5,6 +5,45 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 01:45:00 UTC
+
+The fm-imap XOAUTH2 slice lands the first OAuth-send primitive (option 1 of
+the OAuth scope decision): `xoauth2_initial_response` builds the exact RFC
+7628 §3.2 bytes (`user=<login>\x01auth=Bearer <token>\x01\x01`) with strict
+ASCII/no-CR/LF/NUL validation and an 8 KiB token bound; `Xoauth2Authenticator`
+plugs into async-imap 0.11 `Client::authenticate("XOAUTH2", …)`; and
+`login_oauth(config, token)` mirrors `login` (same connect/TLS/greeting path,
+same `COMMAND_TIMEOUT`, `IMAP XOAUTH2`-labeled errors). The existing password
+`login` is byte-identical — no production route changes behavior yet. The
+authenticator's `Debug` is redacted so tokens never reach logs.
+
+Verification (Docker dev service + host): `cargo fmt --all -- --check` clean;
+`cargo clippy -p fm-imap --all-targets -D warnings` clean; `cargo test -p
+fm-imap --lib` 192 passed / 0 failed (4 new: wire-format byte assertion plus
+empty/CRLF/NUL/non-ASCII/overlong rejection, Debug redaction, a scripted
+`duplex` AUTHENTICATE handshake asserting the base64 challenge-response, and
+a `NO` failure mapping to a clear `IMAP XOAUTH2` error); full host
+`fm-http` suite untouched by this change.
+Production-image validation built `frickmail-rust:xoauth2-test` at image ID
+`sha256:71bb7df3776c63ae4146b212264beaeba5e52762c98241b1aa8197f44e116fc`;
+a read-only container started without a database, `/health` returned 200,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly.
+
+Independent senior review criteria: token never in argv/env/logs (in-memory
+response only), strict input validation before the wire, no behavior change
+to password login (separate function, `login` untouched), additive-only
+`fm-imap` API, no schema or config change.
+
+Next slices for full OAuth sends (in order): OAuth-aware IMAP login seam in
+the router (refresh + capability-aware `login_oauth` selection), send-pipeline
+password-gate bypass for token-only gmail/o365 accounts with Sent filing over
+OAuth IMAP, then live Gmail/O365 verification (needs operator test accounts +
+OAuth client IDs). The major remaining gates toward the final Rust-only goal
+are otherwise unchanged.
+
+---
+
 ## Progress Snapshot — 2026-09-23 12:45:00 UTC
 
 The server-side compose-GnuPG slice closes the largest gap under gate 1
