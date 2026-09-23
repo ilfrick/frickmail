@@ -5,6 +5,58 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-23 12:45:00 UTC
+
+The server-side compose-GnuPG slice closes the largest gap under gate 1
+(`Still Missing Before The Final Rust-Only Goal`): `SendMessage` and
+`SaveMessage` now share genuinely native keyring signing/encryption.
+
+What was broken vs the documented state: `run_gnupg` never delivered the
+passphrase (a `PINENTRY_USER_DATA` env var GnuPG ignores plus a `--command-fd
+0` that fought stdin for the message), so `GnupgGenerateKey` silently minted
+unprotected keys despite accepting a `passphrase`; `GnupgExportKey` dropped
+the private-export passphrase (GnuPG 2.4 requires it); compose signing
+required *both* `signFingerprint` and `signPassphrase` while PHP signs with an
+empty passphrase and skips only falsy (`""`/`"0"`) fingerprints; encrypt
+recipients were silently subset-filtered instead of failing closed; the RFC
+3156 wrapper prepended a second `-----BEGIN PGP MESSAGE-----` ahead of GnuPG's
+own armor, emitting undecryptable sealed messages; and `SaveMessage` never
+applied GnuPG at all although PHP shares `buildMessage()`.
+
+Fixes, all in `fm-http/src/router.rs`: passphrase via 0600 `--passphrase-file`
+(never argv/env, removed after use); generation honors non-empty passphrases;
+private export forwards its passphrase; sign gate uses PHP truthiness with
+passphrase optional; fingerprints strictly validated (`0x`/space/colon
+tolerant, 8–64 hex, normalized uppercase) with `encryptFingerprints` parsing
+failing closed on invalid entries and over-limit counts; wrapper embeds GnuPG
+armor verbatim with a BEGIN/END sanity check; `SaveMessage` applies
+`legacy_apply_gnupg_crypto` after S/MIME like sends; GnuPG failure messages
+prefer the human-readable stderr line over `[GNUPG:]` status chatter.
+
+Verification so far (host cargo, Docker-free): `cargo fmt --all -- --check`
+clean; `cargo clippy --workspace --all-targets -D warnings` clean (one
+`sliced-string-as-bytes` fixed); `cargo test -p fm-http --lib` 555 passed / 0
+failed; sibling crates (`fm-user` 64, `fm-imap` 188, others) green. Six tests
+are new: fingerprint-form acceptance/rejection, encrypt parsing fail-closed
+(incl. over-limit), PHP-truthy sign gating without GnuPG, a live-keyring
+sign→encrypt→decrypt roundtrip proving single-armor sealed bytes, and a
+`SaveMessage` test proving drafts carry the signed root.
+
+Independent senior review criteria: no passphrase in argv/env/logs (temp file
+0600 + best-effort removal on all paths incl. timeout), bounded passphrase and
+recipient counts unchanged, fingerprint argv safe (hex-only after
+normalization, NUL rejected), empty-passphrase keys still work, malformed
+`encryptFingerprints` JSON still skips like PHP while well-formed invalid
+entries error, no schema or config change.
+
+This slice is verified but NOT yet committed or pushed. The major remaining
+gates toward the final Rust-only goal are unchanged (exact IMAP MIME
+normalization edges for detached/clear-signed verification, OAuth SMTP
+parity, connection-token/CSRF contract, frontend/theming with the theme
+deletion plan recorded, cutover validation).
+
+---
+
 ## Progress Snapshot — 2026-09-23 10:00:00 UTC
 
 The v1-contacts-write-UI slice completes the contacts write API

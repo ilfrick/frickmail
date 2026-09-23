@@ -5495,41 +5495,45 @@ async fn legacy_apply_gnupg_crypto(
     mut stored_bytes: Option<Vec<u8>>,
     request: &LegacySendMessageRequest,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
-    if let (Some(fingerprint), Some(passphrase)) = (
-        request.gnupg_sign_fingerprint.as_ref(),
-        request.gnupg_sign_passphrase.as_ref(),
-    ) {
-        if fingerprint.len() > 64 {
-            return Err("OpenPGP signing fingerprint is invalid".to_string());
-        }
-        if passphrase.len() > GNUPG_PASSPHRASE_LIMIT_BYTES {
-            return Err("OpenPGP signing passphrase exceeds the safety limit".to_string());
-        }
-        let root = legacy_rfc822_root(&transport_bytes)?;
-        let signed = run_gnupg(
-            state,
-            user_id,
-            &[
-                "--detach-sign",
-                "--armor",
-                "--textmode",
-                "--local-user",
-                fingerprint,
-            ],
-            Some(root),
-            Some((fingerprint.clone(), passphrase.clone())),
-        )
-        .await?;
-        let signature = String::from_utf8(signed.output)
-            .map_err(|_| "GnuPG returned invalid UTF-8".to_string())?;
-        transport_bytes = legacy_wrap_pgp_signed_root(
-            &transport_bytes,
-            &signature,
-            request.pgp_boundary.as_deref(),
-        )?;
-        if let Some(stored) = stored_bytes.as_mut() {
-            *stored =
-                legacy_wrap_pgp_signed_root(stored, &signature, request.pgp_boundary.as_deref())?;
+    // PHP `if ($sFingerprint)` uses empty("0") semantics: "" and "0" skip
+    // signing, everything else (including " 0") attempts it. A missing or
+    // empty passphrase is allowed and means an unprotected key.
+    if let Some(fingerprint_raw) = request.gnupg_sign_fingerprint.as_deref() {
+        if legacy_compose_string_is_php_truthy(fingerprint_raw) {
+            let fingerprint = validate_gnupg_compose_fingerprint(fingerprint_raw)?;
+            let passphrase = request.gnupg_sign_passphrase.clone().unwrap_or_default();
+            if passphrase.len() > GNUPG_PASSPHRASE_LIMIT_BYTES {
+                return Err("OpenPGP signing passphrase exceeds the safety limit".to_string());
+            }
+            let root = legacy_rfc822_root(&transport_bytes)?;
+            let signed = run_gnupg(
+                state,
+                user_id,
+                &[
+                    "--detach-sign",
+                    "--armor",
+                    "--textmode",
+                    "--local-user",
+                    &fingerprint,
+                ],
+                Some(root),
+                Some((fingerprint.clone(), passphrase)),
+            )
+            .await?;
+            let signature = String::from_utf8(signed.output)
+                .map_err(|_| "GnuPG returned invalid UTF-8".to_string())?;
+            transport_bytes = legacy_wrap_pgp_signed_root(
+                &transport_bytes,
+                &signature,
+                request.pgp_boundary.as_deref(),
+            )?;
+            if let Some(stored) = stored_bytes.as_mut() {
+                *stored = legacy_wrap_pgp_signed_root(
+                    stored,
+                    &signature,
+                    request.pgp_boundary.as_deref(),
+                )?;
+            }
         }
     }
 
@@ -5537,17 +5541,34 @@ async fn legacy_apply_gnupg_crypto(
         if request.gnupg_encrypt_fingerprints.len() > GNUPG_ENCRYPT_RECIPIENT_LIMIT {
             return Err("OpenPGP encryption recipient limit exceeded".to_string());
         }
+        for fingerprint in &request.gnupg_encrypt_fingerprints {
+            validate_gnupg_compose_fingerprint(fingerprint)?;
+        }
         let root = legacy_rfc822_root(&transport_bytes)?;
         let mut args = vec!["--encrypt", "--armor"];
-        for fingerprint in &request.gnupg_encrypt_fingerprints {
+        // Validate before borrowing for the argv slice so an invalid
+        // recipient fails closed instead of subset-encrypting.
+        let validated: Vec<String> = request.gnupg_encrypt_fingerprints.clone();
+        for fingerprint in &validated {
             args.push("--recipient");
             args.push(fingerprint);
         }
         let encrypted = run_gnupg(state, user_id, &args, Some(root), None).await?;
         let armored = String::from_utf8(encrypted.output)
             .map_err(|_| "GnuPG returned invalid UTF-8".to_string())?;
+        // GnuPG's `--armor` output already carries its own
+        // `-----BEGIN/END PGP MESSAGE-----` framing; prepending another
+        // BEGIN line (as the previous wrapper did) produces a doubled,
+        // undecryptable block. PHP `addPgpEncrypted` likewise embeds the
+        // GnuPG output verbatim as the second MIME subpart.
+        if !armored.contains("-----BEGIN PGP MESSAGE-----")
+            || !armored.contains("-----END PGP MESSAGE-----")
+        {
+            return Err("GnuPG returned invalid encrypted data".to_string());
+        }
         let wrapper = format!(
-            "Content-Type: application/pgp-encrypted\r\nContent-Transfer-Encoding: 7Bit\r\n\r\nVersion: 1\r\n-----BEGIN PGP MESSAGE-----\r\n{armored}"
+            "Content-Type: application/pgp-encrypted\r\nContent-Transfer-Encoding: 7Bit\r\n\r\nVersion: 1\r\n{}",
+            armored.trim()
         );
         transport_bytes = legacy_replace_rfc822_root(&transport_bytes, wrapper.as_bytes())?;
         if let Some(stored) = stored_bytes.as_mut() {
@@ -5556,6 +5577,28 @@ async fn legacy_apply_gnupg_crypto(
     }
 
     Ok((transport_bytes, stored_bytes))
+}
+
+/// Validates a compose-time GnuPG fingerprint/key id. Accepts the `0x`
+/// prefix plus spaces/colons for parity with GnuPG output, then requires
+/// 8–64 hex digits. Returns the normalized uppercase hex form for argv use.
+fn validate_gnupg_compose_fingerprint(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 80 {
+        return Err("OpenPGP signing fingerprint is invalid".to_string());
+    }
+    let stripped = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let normalized: String = stripped
+        .chars()
+        .filter(|c| *c != ' ' && *c != ':' && *c != '\t')
+        .collect();
+    if !(8..=64).contains(&normalized.len()) || !normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("OpenPGP signing fingerprint is invalid".to_string());
+    }
+    Ok(normalized.to_ascii_uppercase())
 }
 
 fn legacy_wrap_pgp_signed_root(
@@ -5808,9 +5851,45 @@ async fn run_gnupg(
     if args.iter().any(|arg| arg.contains('\0')) {
         return Err("Invalid GnuPG argument".to_string());
     }
+    // The key id is already expressed in `args` (`--local-user` /
+    // `--recipient`); only the passphrase matters here. An empty passphrase
+    // means no `--passphrase-file` is needed. A non-empty passphrase is
+    // supplied via a 0600 file so it never appears in argv or the
+    // environment (the previous `PINENTRY_USER_DATA` + `--command-fd 0`
+    // combination never delivered the passphrase to GnuPG).
+    let passphrase = passphrase_for_key
+        .map(|(_, passphrase)| passphrase)
+        .filter(|passphrase| !passphrase.is_empty());
+    if let Some(ref passphrase) = passphrase {
+        if passphrase.len() > GNUPG_PASSPHRASE_LIMIT_BYTES || passphrase.contains('\0') {
+            return Err("OpenPGP passphrase exceeds the safety limit".to_string());
+        }
+    }
     let home = gnupg_homedir(state, user_id)?;
+    let passphrase_file: Option<PathBuf> = if let Some(ref passphrase) = passphrase {
+        let dir = Path::new(&state.config().tmp_dir).join("gnupg");
+        std::fs::create_dir_all(&dir).map_err(|err| format!("GnuPG home unavailable: {err}"))?;
+        let mut random = [0_u8; 16];
+        OsRng.fill_bytes(&mut random);
+        let path = dir.join(format!("pp-{user_id:x}-{}", hex::encode(random)));
+        std::fs::write(&path, passphrase.as_bytes())
+            .map_err(|err| format!("GnuPG home unavailable: {err}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| format!("GnuPG home permissions failed: {err}"))?;
+        }
+        Some(path)
+    } else {
+        None
+    };
     let mut command = tokio::process::Command::new("gpg");
     let mut full_args = gnupg_base_args(&home);
+    if let Some(ref path) = passphrase_file {
+        full_args.push("--passphrase-file".to_string());
+        full_args.push(path.display().to_string());
+    }
     full_args.extend(args.iter().map(|arg| (*arg).to_string()));
     command.args(&full_args);
     command.env_clear();
@@ -5820,14 +5899,7 @@ async fn run_gnupg(
     );
     command.env("LC_ALL", "C");
     command.env("GNUPGHOME", &home);
-    if let Some((key_id, passphrase)) = passphrase_for_key.as_ref() {
-        command.env(
-            "PINENTRY_USER_DATA",
-            serde_json::json!({ key_id: passphrase }).to_string(),
-        );
-        command.arg("--command-fd").arg("0");
-    }
-    command.stdin(if input.is_some() || passphrase_for_key.is_some() {
+    command.stdin(if input.is_some() {
         std::process::Stdio::piped()
     } else {
         std::process::Stdio::null()
@@ -5856,8 +5928,16 @@ async fn run_gnupg(
     let operation = tokio::time::timeout(deadline, child.wait_with_output());
     let output = match operation.await {
         Ok(output) => output,
-        Err(_) => return Err("GnuPG operation timed out".to_string()),
+        Err(_) => {
+            if let Some(ref path) = passphrase_file {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err("GnuPG operation timed out".to_string());
+        }
     };
+    if let Some(ref path) = passphrase_file {
+        let _ = std::fs::remove_file(path);
+    }
     let output = output.map_err(|err| format!("GnuPG operation failed: {err}"))?;
     if !output.status.success()
         && !matches!(
@@ -5865,11 +5945,16 @@ async fn run_gnupg(
             Some(&"--list-keys") | Some(&"--list-secret-keys") | Some(&"--verify")
         )
     {
-        let error = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "GnuPG operation failed: {}",
-            error.lines().next().unwrap_or_default()
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Status lines (`[GNUPG:] ...`) are protocol chatter, not the error.
+        // Prefer the first human-readable line so failures name the cause
+        // (e.g. a missing passphrase) instead of `KEY_CONSIDERED`.
+        let error = stderr
+            .lines()
+            .find(|line| !line.starts_with("[GNUPG:]") && !line.trim().is_empty())
+            .or_else(|| stderr.lines().next())
+            .unwrap_or_default();
+        return Err(format!("GnuPG operation failed: {error}"));
     }
     let mut result = parse_gnupg_output(&output.stderr);
     result.output = output.stdout;
@@ -6855,9 +6940,8 @@ async fn native_gnupg_generate_key(
     if name.len() > 128 || name.chars().any(char::is_control) {
         return json_result_error(action, "OpenPGP identity name is invalid");
     }
-    if payload_optional_string(payload, "passphrase")
-        .is_some_and(|value| value.len() > GNUPG_PASSPHRASE_LIMIT_BYTES)
-    {
+    let passphrase = payload_optional_string(payload, "passphrase").unwrap_or_default();
+    if passphrase.len() > GNUPG_PASSPHRASE_LIMIT_BYTES {
         return json_result_error(action, "OpenPGP passphrase exceeds the safety limit");
     }
     let uid = if name.is_empty() {
@@ -6865,23 +6949,37 @@ async fn native_gnupg_generate_key(
     } else {
         format!("{name} <{email}>")
     };
-    match run_gnupg(
-        state,
-        user.user_id,
-        &[
-            "--yes",
-            "--passphrase",
-            "",
-            "--quick-generate-key",
-            &uid,
-            "default",
-            "default",
-        ],
-        None,
-        None,
-    )
-    .await
-    {
+    // An empty passphrase keeps the historical `--passphrase ""` form so the
+    // key is generated unprotected. A non-empty passphrase is delivered via
+    // `--passphrase-file` inside `run_gnupg` so it never appears in argv.
+    let generate_result = if passphrase.is_empty() {
+        run_gnupg(
+            state,
+            user.user_id,
+            &[
+                "--yes",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                &uid,
+                "default",
+                "default",
+            ],
+            None,
+            None,
+        )
+        .await
+    } else {
+        run_gnupg(
+            state,
+            user.user_id,
+            &["--yes", "--quick-generate-key", &uid, "default", "default"],
+            None,
+            Some((String::new(), passphrase)),
+        )
+        .await
+    };
+    match generate_result {
         Ok(result) => json_value_envelope(
             StatusCode::OK,
             action,
@@ -6972,18 +7070,24 @@ async fn native_gnupg_export_key(
         return json_result_error(action, "keyId required");
     };
     let mut args = vec!["--armor"];
+    // GnuPG requires the passphrase to export a protected secret key, like
+    // PHP `DoGnupgExportKey` forwarding its `passphrase` param. Public
+    // exports never need it.
+    let mut export_passphrase: Option<(String, String)> = None;
     if payload_bool(payload, "isPrivate") {
-        if payload_optional_string(payload, "passphrase")
-            .is_some_and(|value| value.len() > GNUPG_PASSPHRASE_LIMIT_BYTES)
-        {
+        let passphrase = payload_optional_string(payload, "passphrase").unwrap_or_default();
+        if passphrase.len() > GNUPG_PASSPHRASE_LIMIT_BYTES {
             return json_result_error(action, "OpenPGP passphrase exceeds the safety limit");
+        }
+        if !passphrase.is_empty() {
+            export_passphrase = Some((key_id.clone(), passphrase));
         }
         args.push("--export-secret-keys");
     } else {
         args.push("--export");
     }
     args.push(key_id.as_str());
-    match run_gnupg(state, user.user_id, &args, None, None).await {
+    match run_gnupg(state, user.user_id, &args, None, export_passphrase).await {
         Ok(result) => json_value_envelope(
             StatusCode::OK,
             action,
@@ -8025,6 +8129,7 @@ async fn native_save_message_with_appender(
 
     // PHP's SaveMessage and SendMessage share buildMessage(), which applies
     // S/MIME transformations before either action serializes the message.
+    // GnuPG signing/encryption applies on top of the same root, like PHP.
     let draft_bytes = match legacy_apply_smime_crypto(
         state,
         pool,
@@ -8040,6 +8145,11 @@ async fn native_save_message_with_appender(
         Ok((draft, _)) => draft,
         Err(message) => return json_result_error(original_action, &message),
     };
+    let draft_bytes =
+        match legacy_apply_gnupg_crypto(state, user.user_id, draft_bytes, None, &request).await {
+            Ok((draft, _)) => draft,
+            Err(message) => return json_result_error(original_action, &message),
+        };
 
     let new_uid = match appender
         .append(
@@ -8188,27 +8298,49 @@ fn legacy_save_message_request_from_payload_with_html(
         pgp_boundary: legacy_pgp_boundary_from_payload(payload),
         gnupg_sign_fingerprint: payload_optional_string(payload, "signFingerprint"),
         gnupg_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
-        gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload),
+        gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload)?,
     })
 }
 
-fn legacy_parse_gnupg_fingerprints(payload: &Value) -> Vec<String> {
-    let Some(raw) = payload_string(payload, "encryptFingerprints") else {
-        return Vec::new();
+fn legacy_parse_gnupg_fingerprints(payload: &Value) -> Result<Vec<String>, String> {
+    let Some(field) = payload.get("encryptFingerprints") else {
+        return Ok(Vec::new());
     };
-    let Ok(values) = serde_json::from_str::<Vec<Value>>(&raw) else {
-        return Vec::new();
+    // PHP `json_decode(GetActionParam('encryptFingerprints',''), true)`:
+    // absent/empty/malformed JSON decodes to null/falsy and skips encryption.
+    // A well-formed array with invalid entries must fail closed rather than
+    // subset-encrypting, so entries are strictly validated here.
+    let values: Vec<Value> = match field {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(values) => values.clone(),
+        Value::String(raw) if raw.trim().is_empty() => return Ok(Vec::new()),
+        Value::String(raw) => {
+            let Ok(values) = serde_json::from_str::<Vec<Value>>(raw) else {
+                return Ok(Vec::new());
+            };
+            values
+        }
+        // PHP would json_decode a number/bool to a scalar (falsy for 0/false,
+        // truthy otherwise but not an array, so no iteration). Mirror by
+        // skipping non-array scalars.
+        _ => return Ok(Vec::new()),
     };
-    values
-        .into_iter()
-        .filter_map(|value| match value {
-            Value::String(value) => Some(value.trim().to_ascii_uppercase()),
-            Value::Number(value) => Some(value.to_string()),
-            _ => None,
-        })
-        .filter(|value| !value.is_empty() && value.len() <= 64)
-        .take(GNUPG_ENCRYPT_RECIPIENT_LIMIT)
-        .collect()
+    if values.len() > GNUPG_ENCRYPT_RECIPIENT_LIMIT {
+        return Err("OpenPGP encryption recipient limit exceeded".to_string());
+    }
+    let mut fingerprints = Vec::with_capacity(values.len());
+    for value in values {
+        let raw = match value {
+            Value::String(value) => value,
+            Value::Number(value) => value.to_string(),
+            _ => return Err("OpenPGP encryption fingerprint is invalid".to_string()),
+        };
+        fingerprints.push(
+            validate_gnupg_compose_fingerprint(&raw)
+                .map_err(|_| "OpenPGP encryption fingerprint is invalid".to_string())?,
+        );
+    }
+    Ok(fingerprints)
 }
 
 fn legacy_unsupported_compose_feature(payload: &Value, _sending: bool) -> Option<&'static str> {
@@ -10257,7 +10389,7 @@ fn legacy_send_message_request_from_payload_with_html(
         pgp_boundary: legacy_pgp_boundary_from_payload(payload),
         gnupg_sign_fingerprint: payload_optional_string(payload, "signFingerprint"),
         gnupg_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
-        gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload),
+        gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload)?,
     })
 }
 
@@ -39975,6 +40107,286 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["Result"]["signatures"][0]["summary"], 0);
         assert_eq!(body["Result"]["signatures"][0]["valid"], 0);
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn validate_gnupg_compose_fingerprint_accepts_gnupg_forms() {
+        assert_eq!(
+            super::validate_gnupg_compose_fingerprint("ABCDEF0123456789ABCDEF0123456789ABCDEF01")
+                .unwrap(),
+            "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+        );
+        // Lowercase, `0x` prefix, and GnuPG spacing/colon grouping normalize.
+        assert_eq!(
+            super::validate_gnupg_compose_fingerprint("0xabcdef0123456789").unwrap(),
+            "ABCDEF0123456789"
+        );
+        assert_eq!(
+            super::validate_gnupg_compose_fingerprint("AB:CD:EF:01 2345 6789").unwrap(),
+            "ABCDEF0123456789"
+        );
+        assert!(super::validate_gnupg_compose_fingerprint("").is_err());
+        assert!(super::validate_gnupg_compose_fingerprint("0").is_err());
+        assert!(super::validate_gnupg_compose_fingerprint("ZZZ").is_err());
+        assert!(super::validate_gnupg_compose_fingerprint("ABCDEF0123456789!").is_err());
+        assert!(super::validate_gnupg_compose_fingerprint(&"A".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn legacy_parse_gnupg_fingerprints_fails_closed() {
+        // Absent or PHP-falsy raw values skip encryption like PHP's
+        // `if ($aFingerprints)` on a failed `json_decode`.
+        assert!(super::legacy_parse_gnupg_fingerprints(&json!({}))
+            .unwrap()
+            .is_empty());
+        assert!(
+            super::legacy_parse_gnupg_fingerprints(&json!({"encryptFingerprints": ""}))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(super::legacy_parse_gnupg_fingerprints(
+            &json!({"encryptFingerprints": "not-json"})
+        )
+        .unwrap()
+        .is_empty());
+        // A well-formed array normalizes entries ...
+        assert_eq!(
+            super::legacy_parse_gnupg_fingerprints(
+                &json!({"encryptFingerprints": "[\"abcdef0123456789\"]"})
+            )
+            .unwrap(),
+            vec!["ABCDEF0123456789".to_string()]
+        );
+        // ... but invalid entries fail instead of subset-encrypting.
+        assert!(super::legacy_parse_gnupg_fingerprints(
+            &json!({"encryptFingerprints": "[\"ABCDEF0123456789\", \"ZZZ\"]"})
+        )
+        .is_err());
+        assert!(super::legacy_parse_gnupg_fingerprints(
+            &json!({"encryptFingerprints": "[\"ABCDEF0123456789\", 0]"})
+        )
+        .is_err());
+        let too_many: Vec<String> = (0..super::GNUPG_ENCRYPT_RECIPIENT_LIMIT + 1)
+            .map(|_| "\"ABCDEF0123456789\"".to_string())
+            .collect();
+        assert!(super::legacy_parse_gnupg_fingerprints(
+            &json!({"encryptFingerprints": format!("[{}]", too_many.join(","))})
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_gnupg_sign_gate_matches_php_truthiness() {
+        let state = super::AppState::with_db_pool(test_config(None), None);
+        let build = |payload: serde_json::Value| {
+            let request =
+                super::legacy_send_message_request_from_payload(&payload, "sender@example.com")
+                    .expect("compose request");
+            let raw = super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted();
+            (request, raw)
+        };
+        // PHP `if ($sFingerprint)`: "" and "0" skip signing without error.
+        for skipped in ["", "0"] {
+            let payload = json!({
+                "from": "sender@example.com",
+                "to": "recipient@example.com",
+                "plain": "unsigned",
+                "signFingerprint": skipped,
+            });
+            let (request, raw) = build(payload);
+            let (out, stored) =
+                super::legacy_apply_gnupg_crypto(&state, 1, raw.clone(), None, &request)
+                    .await
+                    .expect("falsy fingerprint skips signing");
+            assert_eq!(out, raw);
+            assert!(stored.is_none());
+        }
+        // A PHP-truthy but malformed fingerprint fails closed before GnuPG.
+        let (request, raw) = build(json!({
+            "from": "sender@example.com",
+            "to": "recipient@example.com",
+            "plain": "unsigned",
+            "signFingerprint": "ZZZ",
+        }));
+        assert!(
+            super::legacy_apply_gnupg_crypto(&state, 1, raw, None, &request)
+                .await
+                .unwrap_err()
+                .contains("fingerprint is invalid")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_gnupg_compose_sign_then_encrypt_roundtrip() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("frickmail-gnupg-compose-{unique}"));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let state = super::AppState::with_db_pool(config, None);
+        let generated = super::run_gnupg(
+            &state,
+            99_991,
+            &[
+                "--yes",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                "Compose Tester <compose-tester@example.com>",
+                "default",
+                "default",
+            ],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fingerprint = generated
+            .status
+            .iter()
+            .find_map(|line| line.strip_prefix("KEY_CREATED "))
+            .and_then(|value| value.split(' ').next_back())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(fingerprint.len(), 40);
+
+        // Sign without a passphrase (unprotected key): previously skipped
+        // because signing required both fields; PHP signs with an empty
+        // passphrase, so Rust must too.
+        let request = super::legacy_send_message_request_from_payload(
+            &json!({
+                "from": "sender@example.com",
+                "to": "recipient@example.com",
+                "plain": "signed body",
+                "signFingerprint": fingerprint,
+            }),
+            "sender@example.com",
+        )
+        .expect("sign request");
+        let raw = super::build_legacy_send_message(&request, false)
+            .expect("build")
+            .formatted();
+        let (signed, _) = super::legacy_apply_gnupg_crypto(&state, 99_991, raw, None, &request)
+            .await
+            .expect("signing applies");
+        let signed_text = String::from_utf8(signed).expect("7-bit signed");
+        assert!(signed_text.contains("multipart/signed"));
+        assert!(signed_text.contains("application/pgp-signature"));
+
+        // Encrypt (to self) on top of the signed bytes, mirroring PHP's
+        // sign-then-encrypt order, then decrypt and expect one valid
+        // embedded signature.
+        let request = super::legacy_send_message_request_from_payload(
+            &json!({
+                "from": "sender@example.com",
+                "to": "recipient@example.com",
+                "plain": "enc body",
+                "signFingerprint": fingerprint,
+                "encryptFingerprints": format!("[\"{fingerprint}\"]"),
+            }),
+            "sender@example.com",
+        )
+        .expect("sign+encrypt request");
+        let raw = super::build_legacy_send_message(&request, false)
+            .expect("build")
+            .formatted();
+        let (sealed, stored) =
+            super::legacy_apply_gnupg_crypto(&state, 99_991, raw.clone(), Some(raw), &request)
+                .await
+                .expect("sign+encrypt applies");
+        let sealed_text = String::from_utf8(sealed.clone()).expect("7-bit sealed");
+        assert!(sealed_text.contains("application/pgp-encrypted"));
+        assert!(String::from_utf8(stored.unwrap())
+            .unwrap()
+            .contains("application/pgp-encrypted"));
+        // Decrypt the armor block itself: the MIME root headers preceding it
+        // are not valid armor input for GnuPG.
+        let begin = sealed_text
+            .find("-----BEGIN PGP MESSAGE-----")
+            .expect("armor block");
+        let end = sealed_text[begin..]
+            .find("-----END PGP MESSAGE-----")
+            .expect("armor end")
+            + begin
+            + "-----END PGP MESSAGE-----".len();
+        let root = sealed_text.as_bytes()[begin..end].to_vec();
+        let decrypted = super::run_gnupg(
+            &state,
+            99_991,
+            &["--decrypt"],
+            Some(root),
+            Some((fingerprint, String::new())),
+        )
+        .await
+        .expect("decrypt sealed");
+        // Decrypting unwraps only the encryption layer (sign and encrypt are
+        // separate GnuPG invocations, like PHP's signStream + encryptStream);
+        // the inner detached signature stays inside the recovered MIME root
+        // for the verifier path. The roundtrip proves the sealed bytes are
+        // well-formed: plaintext and the signed structure survive.
+        let decrypted_text = String::from_utf8_lossy(&decrypted.output);
+        assert!(decrypted_text.contains("enc body"), "{decrypted_text}");
+        assert!(
+            decrypted_text.contains("multipart/signed"),
+            "{decrypted_text}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[tokio::test]
+    async fn save_message_applies_gnupg_signing_to_drafts() {
+        let key = [71_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let temp_root = std::env::temp_dir().join(format!(
+            "frickmail-save-gnupg-{}",
+            super::legacy_random_compose_attachment_token()
+        ));
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let (state, session) =
+            message_body_test_state_with_config(9_942, 9_943, &key, config).await;
+        // Unprotected key keeps generation fast; the point is the
+        // SaveMessage path applying GnuPG at all (PHP shares buildMessage).
+        let generated = super::native_gnupg_generate_key(
+            &state,
+            "GnupgGenerateKey",
+            &json!({"email": "draft-signer@example.com"}),
+            &session,
+        )
+        .await;
+        let fingerprint = read_json(generated).await["Result"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(fingerprint.len(), 40);
+        let captured = Arc::new(Mutex::new(None));
+        let appender = RecordingDraftAppender {
+            message: Arc::clone(&captured),
+        };
+        let response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &json!({
+                "account_id": 9_943,
+                "from": "work@example.com",
+                "plain": "Draft to sign",
+                "saveFolder": "Drafts",
+                "signFingerprint": fingerprint,
+            }),
+            &session,
+            &appender,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["folder"], "Drafts");
+        let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(wire.contains("multipart/signed"), "{wire}");
+        assert!(wire.contains("application/pgp-signature"), "{wire}");
+        let _ = tokio::fs::remove_dir_all(&temp_root).await;
     }
 
     #[test]
