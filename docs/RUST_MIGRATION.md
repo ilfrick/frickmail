@@ -49,7 +49,10 @@ normalization, NUL rejected), empty-passphrase keys still work, malformed
 `encryptFingerprints` JSON still skips like PHP while well-formed invalid
 entries error, no schema or config change.
 
-This slice is verified but NOT yet committed or pushed. The major remaining
+Published `01917d8f4` to `master` + `rust-full-migration` on `origin`
+and `gitea` (all 4 tips identical, verified via `ls-remote`).
+
+This slice is published as described above. The major remaining
 gates toward the final Rust-only goal are unchanged (exact IMAP MIME
 normalization edges for detached/clear-signed verification, OAuth SMTP
 parity, connection-token/CSRF contract, frontend/theming with the theme
