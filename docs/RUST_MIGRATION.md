@@ -37,6 +37,9 @@ bundled-plugin hooks (`KolabFolder`, `NextcloudSaveMsg`/`NextcloudAttachFile`),
 connection-token/CSRF contract, frontend/theming with the theme deletion plan
 recorded, cutover validation.
 
+Published `46bbb03b6` to `master` + `rust-full-migration` on `origin` and
+`gitea` (all 4 tips identical, verified via `ls-remote`).
+
 ---
 
 ## Progress Snapshot — 2026-09-24 16:30:00 UTC
