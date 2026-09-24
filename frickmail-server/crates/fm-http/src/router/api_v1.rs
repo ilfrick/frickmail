@@ -79,7 +79,9 @@ pub fn routes() -> Router<AppState> {
         .route("/send", post(send))
         .route("/preferences", get(get_preferences).put(set_preferences))
         .route("/rules", get(rules))
-        .route("/tasks", get(tasks))
+        .route("/tasks", get(tasks).post(add_task_v1))
+        .route("/tasks/{id}", put(update_task_v1).delete(delete_task_v1))
+        .route("/tasks/{id}/completed", post(set_task_completed_v1))
         .route("/folders", get(folders))
         .route("/search", get(search))
         .route("/unified-inbox", get(unified_inbox))
@@ -1669,6 +1671,253 @@ async fn tasks(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "Frickmail tasks listing failed",
+            )
+        }
+    }
+}
+
+/// Body shape for `POST /tasks` and `PUT /tasks/{id}`. All fields optional
+/// so clients send patches; `title` is validated server-side (empty is a 400
+/// at write time, mirroring the repository's `title is required`).
+#[derive(Debug, Default, Deserialize)]
+struct TaskWriteRequest {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    due_date: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TaskCompletedRequest {
+    #[serde(default)]
+    completed: bool,
+}
+
+fn task_title_error() -> Response {
+    v1_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "Task title is required",
+    )
+}
+
+/// `POST /api/frickmail/v1/tasks` — creates a task, reusing the exact
+/// repository call as legacy `FrickmailAddTask`. Returns `{id}`.
+async fn add_task_v1(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<TaskWriteRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid task request",
+        );
+    };
+    if request.title.trim().is_empty() {
+        return task_title_error();
+    }
+    let input = fm_user::NewMailTask {
+        title: request.title.trim().to_string(),
+        notes: request.notes,
+        due_date: request.due_date,
+    };
+    match fm_user::SqlxUserRepository::add_task(pool, user_id, input).await {
+        Ok(id) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true, "id": id }))),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("v1 task create failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail task create failed",
+            )
+        }
+    }
+}
+
+/// `PUT /api/frickmail/v1/tasks/{id}` — updates title/notes/due_date,
+/// mirroring legacy `FrickmailUpdateTask`. Unknown ids 404.
+async fn update_task_v1(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+    body: Result<Json<TaskWriteRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid task id",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid task request",
+        );
+    };
+    if request.title.trim().is_empty() {
+        return task_title_error();
+    }
+    let input = fm_user::UpdateMailTask {
+        id,
+        title: request.title.trim().to_string(),
+        notes: request.notes,
+        due_date: request.due_date,
+    };
+    match fm_user::SqlxUserRepository::update_task(pool, user_id, input).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Ok(false) => v1_error(StatusCode::NOT_FOUND, "task_not_found", "Task not found"),
+        Err(err) => {
+            tracing::warn!("v1 task update failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail task update failed",
+            )
+        }
+    }
+}
+
+/// `POST /api/frickmail/v1/tasks/{id}/completed` — marks a task
+/// complete/incomplete, mirroring legacy `FrickmailCompleteTask`.
+async fn set_task_completed_v1(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+    body: Result<Json<TaskCompletedRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid task id",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid task request",
+        );
+    };
+    match fm_user::SqlxUserRepository::complete_task(pool, user_id, id, request.completed).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Ok(false) => v1_error(StatusCode::NOT_FOUND, "task_not_found", "Task not found"),
+        Err(err) => {
+            tracing::warn!("v1 task completion failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail task completion failed",
+            )
+        }
+    }
+}
+
+/// `DELETE /api/frickmail/v1/tasks/{id}` — deletes a task, mirroring legacy
+/// `FrickmailDeleteTask`. Unknown ids 404.
+async fn delete_task_v1(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid task id",
+        );
+    };
+    match fm_user::SqlxUserRepository::delete_task(pool, user_id, id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Ok(false) => v1_error(StatusCode::NOT_FOUND, "task_not_found", "Task not found"),
+        Err(err) => {
+            tracing::warn!("v1 task delete failed: {}", err.public_message());
+            v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail task delete failed",
             )
         }
     }
@@ -6379,6 +6628,213 @@ mod tests {
         let completed = body["data"]["tasks"].as_array().unwrap();
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0]["title"], "Done thing");
+    }
+
+    fn task_json_request(
+        method: Method,
+        cookie: &str,
+        token: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", cookie)
+            .header("x-sm-token", token)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v1_task_writes_crud_mirror_legacy_hooks() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 902, "v1taskw", "correct-horse", None).await;
+        // `seed_task` also creates the table; drop its marker row so the
+        // later empty-list assertion stays clean.
+        let marker = seed_task(&pool, 902, "table-marker").await;
+        fm_user::SqlxUserRepository::delete_task(&pool, 902, marker)
+            .await
+            .unwrap();
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1taskw", "correct-horse").await;
+
+        // Create (title required).
+        let response = app
+            .clone()
+            .oneshot(task_json_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/tasks",
+                serde_json::json!({"title": "Buy milk", "notes": "skim", "due_date": "2026-10-01"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+        let id = body["data"]["id"].as_i64().unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(task_json_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/tasks",
+                serde_json::json!({"title": "   "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+
+        // Update.
+        let response = app
+            .clone()
+            .oneshot(task_json_request(
+                Method::PUT,
+                &cookie,
+                &token,
+                &format!("/api/frickmail/v1/tasks/{id}"),
+                serde_json::json!({"title": "Buy 2% milk", "notes": null}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+
+        // Complete.
+        let response = app
+            .clone()
+            .oneshot(task_json_request(
+                Method::POST,
+                &cookie,
+                &token,
+                &format!("/api/frickmail/v1/tasks/{id}/completed"),
+                serde_json::json!({"completed": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+
+        // The completed task shows in the completed filter.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/tasks?filter=completed")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        let completed = body["data"]["tasks"].as_array().unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["title"], "Buy 2% milk");
+
+        // Unknown ids 404 on every write path.
+        for (method, uri, body) in [
+            (
+                Method::PUT,
+                "/api/frickmail/v1/tasks/999999".to_string(),
+                serde_json::json!({"title": "nope"}),
+            ),
+            (
+                Method::POST,
+                "/api/frickmail/v1/tasks/999999/completed".to_string(),
+                serde_json::json!({"completed": true}),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(task_json_request(method, &cookie, &token, &uri, body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "task_not_found");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/frickmail/v1/tasks/999999")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Delete removes it.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/frickmail/v1/tasks/{id}"))
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/tasks")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        assert!(body["data"]["tasks"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn v1_task_writes_require_connection_token() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 903, "v1tasktok", "correct-horse", None).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1tasktok", "correct-horse").await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/tasks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{\"title\":\"x\"}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
     }
 
     #[tokio::test]

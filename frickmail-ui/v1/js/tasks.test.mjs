@@ -4,7 +4,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadTasks, renderTasks, renderTasksFilter, renderTaskRow } from './tasks.js';
+import {
+	addTask,
+	collectTaskPayload,
+	deleteTask,
+	loadTasks,
+	renderTaskForm,
+	renderTasks,
+	renderTasksFilter,
+	renderTaskRow,
+	setTaskCompleted
+} from './tasks.js';
 
 describe('renderTaskRow', () => {
 	it('escapes titles and marks completion', () => {
@@ -20,6 +30,15 @@ describe('renderTaskRow', () => {
 		const html = renderTaskRow({});
 		assert.ok(html.includes('(untitled task)'));
 		assert.ok(html.includes('○'));
+	});
+
+	it('renders toggle and delete buttons', () => {
+		const html = renderTaskRow({ id: 7, title: 'Write', completed: false });
+		assert.ok(html.includes('data-fm="toggle"'));
+		assert.ok(html.includes('>Done</button>'));
+		assert.ok(html.includes('data-fm="delete"'));
+		const done = renderTaskRow({ id: 8, title: 'Done', completed: true });
+		assert.ok(done.includes('>Undo</button>'));
 	});
 });
 
@@ -37,6 +56,29 @@ describe('renderTasks', () => {
 			]
 		});
 		assert.equal((html.match(/data-fm="task"/g) || []).length, 2);
+	});
+});
+
+describe('renderTaskForm', () => {
+	it('renders the add form with a title field', () => {
+		const html = renderTaskForm();
+		assert.ok(html.includes('data-fm="add"'));
+		assert.ok(html.includes('data-fm="title"'));
+		assert.ok(html.includes('type="submit"'));
+	});
+});
+
+describe('collectTaskPayload', () => {
+	it('reads the title from the form', () => {
+		const root = {
+			querySelector: () => ({ value: 'Buy milk' })
+		};
+		assert.deepEqual(collectTaskPayload(root), { title: 'Buy milk' });
+	});
+
+	it('returns an empty title when the field is missing', () => {
+		assert.deepEqual(collectTaskPayload({ querySelector: () => null }), { title: '' });
+		assert.deepEqual(collectTaskPayload(null), { title: '' });
 	});
 });
 
@@ -78,5 +120,49 @@ describe('loadTasks', () => {
 		};
 		await loadTasks(api);
 		assert.deepEqual(seen.options.query, {});
+	});
+});
+
+describe('task writes', () => {
+	it('addTask posts the payload', async () => {
+		let seen = null;
+		const api = {
+			request: async (method, path, options) => {
+				seen = { method, path, options };
+				return { id: 3 };
+			}
+		};
+		const result = await addTask(api, { title: 'Buy milk' });
+		assert.equal(seen.method, 'POST');
+		assert.equal(seen.path, '/tasks');
+		assert.deepEqual(seen.options.body, { title: 'Buy milk' });
+		assert.deepEqual(result, { id: 3 });
+	});
+
+	it('setTaskCompleted posts the state to /tasks/{id}/completed', async () => {
+		let seen = null;
+		const api = {
+			request: async (method, path, options) => {
+				seen = { method, path, options };
+				return { ok: true };
+			}
+		};
+		await setTaskCompleted(api, 9, true);
+		assert.equal(seen.method, 'POST');
+		assert.equal(seen.path, '/tasks/9/completed');
+		assert.deepEqual(seen.options.body, { completed: true });
+	});
+
+	it('deleteTask DELETEs /tasks/{id}', async () => {
+		let seen = null;
+		const api = {
+			request: async (method, path, options) => {
+				seen = { method, path, options };
+				return { ok: true };
+			}
+		};
+		await deleteTask(api, 12);
+		assert.equal(seen.method, 'DELETE');
+		assert.equal(seen.path, '/tasks/12');
 	});
 });

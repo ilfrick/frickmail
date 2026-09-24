@@ -27,7 +27,16 @@ import {
 } from './js/contacts.js';
 import { collectComposePayload, loadIdentities, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
-import { loadTasks, renderTasks, renderTasksFilter } from './js/tasks.js';
+import {
+	addTask,
+	collectTaskPayload,
+	deleteTask,
+	loadTasks,
+	renderTaskForm,
+	renderTasks,
+	renderTasksFilter,
+	setTaskCompleted
+} from './js/tasks.js';
 import {
 	collectTotpCode,
 	confirmTotp,
@@ -187,14 +196,72 @@ async function showTasks(filter) {
 		root.innerHTML = nav('tasks')
 			+ '<h1 data-fm="title">Tasks</h1>'
 			+ renderTasksFilter(filter)
-			+ '<div data-fm="tasks-wrap">' + renderTasks(data) + '</div>';
+			+ renderTaskForm()
+			+ '<div data-fm="tasks-wrap">' + renderTasks(data) + '</div>'
+			+ '<p data-fm="status"></p>';
 		wireNav();
 		const select = root.querySelector('[data-fm="filter"]');
 		if (select) {
 			select.addEventListener('change', () => showTasks(select.value));
 		}
+		const form = root.querySelector('[data-fm="add"]');
+		if (form) {
+			form.addEventListener('submit', onTaskAdd);
+		}
+		for (const button of root.querySelectorAll('[data-fm="toggle"]')) {
+			button.addEventListener('click', () => onTaskToggle(button.getAttribute('data-id')));
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onTaskDelete(button.getAttribute('data-id')));
+		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load tasks.</p>';
+	}
+}
+
+function tasksStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onTaskAdd(event) {
+	event.preventDefault();
+	try {
+		const payload = collectTaskPayload(root);
+		if (!payload.title.trim()) {
+			tasksStatus('A task title is required.');
+			return;
+		}
+		await addTask(api, payload);
+		const select = root.querySelector('[data-fm="filter"]');
+		await showTasks(select ? select.value : 'all');
+	} catch (error) {
+		tasksStatus(error && error.message ? error.message : 'Add failed.');
+	}
+}
+
+async function onTaskToggle(id) {
+	const numeric = Number(id) || 0;
+	const row = root.querySelector('[data-fm="task"][data-id="' + numeric + '"]');
+	const done = !!(row && row.getAttribute('data-done'));
+	try {
+		await setTaskCompleted(api, numeric, !done);
+		const select = root.querySelector('[data-fm="filter"]');
+		await showTasks(select ? select.value : 'all');
+	} catch (error) {
+		tasksStatus(error && error.message ? error.message : 'Update failed.');
+	}
+}
+
+async function onTaskDelete(id) {
+	try {
+		await deleteTask(api, Number(id) || 0);
+		const select = root.querySelector('[data-fm="filter"]');
+		await showTasks(select ? select.value : 'all');
+	} catch (error) {
+		tasksStatus(error && error.message ? error.message : 'Delete failed.');
 	}
 }
 

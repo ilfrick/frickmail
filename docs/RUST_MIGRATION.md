@@ -5,6 +5,42 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 19:00:00 UTC
+
+The v1 task-writes slice closes the last read-only v1 carryover: tasks.
+
+- API (`api_v1.rs`): `POST /tasks` (create, `{id}`), `PUT /tasks/{id}`
+  (update title/notes/due_date), `POST /tasks/{id}/completed` (toggle),
+  `DELETE /tasks/{id}` — all reusing the exact repository calls as legacy
+  `FrickmailAddTask`/`UpdateTask`/`CompleteTask`/`DeleteTask`. Writes require
+  the `X-SM-Token` connection token; empty titles 400, unknown ids 404,
+  everything else generic 500.
+- UI (`tasks.js` + `index.html`): add-task form with a stub-able payload
+  collector, per-row Done/Undo toggle and Delete buttons wired to the new
+  endpoints, and status text on failure. Pure helpers + I/O wrappers are
+  unit-tested.
+
+Verification: host `node --test frickmail-ui/v1/js/*.test.mjs` 193 passed /
+0 failed (5 new task-write tests); `npx eslint` on touched JS clean;
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets
+-D warnings` clean; full `cargo test -p fm-http --lib` 575 passed / 0 failed
+(2 new Rust tests: CRUD round-trip with filter visibility, token gate over
+HTTP).
+Production-image validation: `frickmail-rust:v1-task-writes-test` built at
+image ID `sha256:7f25e78a61ea53af578c7a4d64456e88aa90b14a008054fe824133c9faa64ba0`;
+read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: OAuth sends live verification (deferred —
+needs operator test accounts + OAuth client IDs), remaining compat-known
+bundled-plugin hooks (`KolabFolder`, `NextcloudSaveMsg`/`NextcloudAttachFile`
+— operator decisions), connection-token/CSRF contract, frontend/theming with
+the theme deletion plan recorded, cutover validation.
+
+---
+
 ## Progress Snapshot — 2026-09-24 18:00:00 UTC
 
 The Example-plugin port slice closes the remaining trivial gate-2 hook
