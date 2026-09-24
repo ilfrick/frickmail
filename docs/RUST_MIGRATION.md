@@ -52,6 +52,9 @@ needs operator test accounts + OAuth client IDs), OAuth SMTP parity for
 pure-OAuth sends is otherwise complete, connection-token/CSRF contract,
 frontend/theming with the theme deletion plan recorded, cutover validation.
 
+Published `a698d83cc` to `master` + `rust-full-migration` on `origin` and
+`gitea` (all 4 tips identical, verified via `ls-remote`).
+
 ---
 
 ## Progress Snapshot — 2026-09-24 14:00:00 UTC
