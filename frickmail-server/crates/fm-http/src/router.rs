@@ -192,6 +192,11 @@ const COMPOSE_OPERATION_CONCURRENCY: usize = 8;
 const COMPOSE_SANITIZE_CONCURRENCY: usize = 2;
 const COMPOSE_SANITIZE_DEADLINE: Duration = Duration::from_secs(10);
 const TOTP_PENDING_SESSION_KEY: &str = "frickmail_totp_pending_secret";
+/// Set when a live TOTP code was verified in-session. The legacy
+/// two-factor-auth plugin commits a pending secret only after this marker
+/// exists, preserving Frickmail's "a valid code must be proven before the
+/// secret activates" invariant without asking the legacy UI for another code.
+const TOTP_TESTED_SESSION_KEY: &str = "frickmail_totp_tested";
 const MESSAGE_BODY_FETCH_DEADLINE: Duration = Duration::from_secs(20);
 const CHECK_NEW_MAIL_ACCOUNT_DEADLINE: Duration = Duration::from_secs(10);
 const LONG_POLL_NEW_MAIL_DEADLINE: Duration = Duration::from_secs(25);
@@ -1825,6 +1830,24 @@ async fn native_compat_response(
         }
         "FrickmailDisableTotp" => {
             Some(native_frickmail_disable_totp(state, original_action, payload, session).await)
+        }
+        "GetTwoFactorInfo" => {
+            Some(native_legacy_two_factor_info(state, original_action, session).await)
+        }
+        "CreateTwoFactorSecret" => {
+            Some(native_legacy_two_factor_create_secret(state, original_action, session).await)
+        }
+        "ShowTwoFactorSecret" => {
+            Some(native_legacy_two_factor_show_secret(state, original_action, session).await)
+        }
+        "EnableTwoFactor" => {
+            Some(native_legacy_two_factor_enable(state, original_action, payload, session).await)
+        }
+        "VerifyTwoFactorCode" => Some(
+            native_legacy_two_factor_verify_code(state, original_action, payload, session).await,
+        ),
+        "ClearTwoFactorInfo" => {
+            Some(native_legacy_two_factor_clear(state, original_action, session).await)
         }
         "FrickmailRequestPasswordReset" => {
             Some(native_frickmail_request_password_reset(state, original_action, payload).await)
@@ -11609,6 +11632,291 @@ async fn native_frickmail_disable_totp(
         ),
         Err(err) => json_result_error(original_action, &err.public_message()),
     }
+}
+
+// The legacy `two-factor-auth` plugin's JSON hooks, ported natively onto the
+// Frickmail TOTP store (one committed secret per user; presence = enabled).
+//
+// PHP parity where safe, Frickmail security posture preserved otherwise:
+// - `CreateTwoFactorSecret` leaves the secret session-pending until a live
+//   code is verified in-session (`TOTP_TESTED_SESSION_KEY`), so a secret can
+//   never activate unproven — PHP stored it inactively, the modern Frickmail
+//   flow and this port gate activation on a verified code.
+// - Disable/clear without a valid code is refused (fail-safe): the legacy UI
+//   sends no code on those requests, and silently removing 2FA would weaken
+//   the native invariant. The modern `FrickmailDisableTotp` remains the
+//   code-gated path.
+// - Backup codes are not stored (PHP stored eight `rand()` codes as a
+//   boundary; Frickmail has none), so `BackupCodes` is always empty.
+//
+// `{User, IsSet, Enable, Tested}` mirror the PHP shapes; `QRCode` is the
+// Unicode text QR the legacy template renders in a monospace `<pre>`.
+
+fn legacy_two_factor_user_label(session_user: &fm_core::UserSession) -> String {
+    session_user
+        .email
+        .as_deref()
+        .filter(|email| !email.trim().is_empty())
+        .unwrap_or(&session_user.username)
+        .to_string()
+}
+
+/// The active secret for the legacy flow: session-pending first (setup in
+/// progress), else the committed store secret.
+async fn legacy_two_factor_active_secret(
+    state: &AppState,
+    session: &fm_session::Session,
+    user_id: i64,
+) -> Option<String> {
+    if let Ok(Some(secret)) = session.get::<String>(TOTP_PENDING_SESSION_KEY).await {
+        if !secret.trim().is_empty() {
+            return Some(secret);
+        }
+    }
+    let pool = state.db_pool()?;
+    SqlxUserRepository::totp_secret(pool, user_id)
+        .await
+        .ok()
+        .flatten()
+}
+
+fn legacy_two_factor_qr(user: &str, secret: &str) -> String {
+    fm_user::totp_qr_text(&fm_user::totp_otpauth_uri(user, secret)).unwrap_or_default()
+}
+
+async fn native_legacy_two_factor_info(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(action, "Frickmail database is not configured");
+    };
+    let enabled = match SqlxUserRepository::totp_enabled(pool, user.user_id).await {
+        Ok(enabled) => enabled,
+        Err(err) => return json_result_error(action, &err.public_message()),
+    };
+    let label = legacy_two_factor_user_label(&user);
+    let mut result = json!({
+        "User": label,
+        "IsSet": enabled,
+        "Enable": enabled,
+        "Tested": false,
+    });
+    if enabled {
+        // PHP's `getTwoFactorInfo(..., true)` includes `QRCode` when set and
+        // omits Secret/BackupCodes.
+        let secret = SqlxUserRepository::totp_secret(pool, user.user_id)
+            .await
+            .ok()
+            .flatten();
+        result["QRCode"] = json!(secret
+            .as_deref()
+            .map(|secret| legacy_two_factor_qr(&label, secret))
+            .unwrap_or_default());
+    } else {
+        result["Secret"] = json!("");
+        result["BackupCodes"] = json!("");
+    }
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": result }))
+}
+
+async fn native_legacy_two_factor_create_secret(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(action, "Frickmail database is not configured");
+    };
+    // `begin_totp_setup` rejects when 2FA is already enabled (PHP overwrote;
+    // silently replacing an active secret would be a security regression).
+    let setup = match SqlxUserRepository::begin_totp_setup(pool, user.user_id).await {
+        Ok(setup) => setup,
+        Err(err) => return json_result_error(action, &err.public_message()),
+    };
+    if let Err(err) = session
+        .insert(TOTP_PENDING_SESSION_KEY, setup.secret.clone())
+        .await
+    {
+        return json_result_error(action, &format!("Frickmail session write failed: {err}"));
+    }
+    let label = legacy_two_factor_user_label(&user);
+    // PHP returns `getTwoFactorInfo()` after storage: `IsSet` true (secret
+    // exists) with `Enable` false until `EnableTwoFactor` activates it.
+    let result = json!({
+        "User": label,
+        "IsSet": true,
+        "Enable": false,
+        "Secret": setup.secret,
+        "BackupCodes": "",
+        "Tested": false,
+        "QRCode": legacy_two_factor_qr(&label, &setup.secret),
+    });
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": result }))
+}
+
+async fn native_legacy_two_factor_show_secret(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let label = legacy_two_factor_user_label(&user);
+    let Some(secret) = legacy_two_factor_active_secret(state, session, user.user_id).await else {
+        let result = json!({
+            "User": label,
+            "IsSet": false,
+            "Enable": false,
+            "Secret": "",
+            "Tested": false,
+        });
+        return json_value_envelope(StatusCode::OK, action, json!({ "Result": result }));
+    };
+    let pool = state.db_pool();
+    let enabled = match pool {
+        Some(pool) => SqlxUserRepository::totp_enabled(pool, user.user_id)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
+    // PHP `ShowTwoFactorSecret` returns Secret + regenerated QRCode and
+    // unsets BackupCodes.
+    let result = json!({
+        "User": label,
+        "IsSet": true,
+        "Enable": enabled,
+        "Secret": secret,
+        "Tested": false,
+        "QRCode": legacy_two_factor_qr(&label, &secret),
+    });
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": result }))
+}
+
+async fn native_legacy_two_factor_verify_code(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let Some(secret) = legacy_two_factor_active_secret(state, session, user.user_id).await else {
+        return json_value_envelope(StatusCode::OK, action, json!({ "Result": false }));
+    };
+    let code = payload_string(payload, "Code").unwrap_or_default();
+    let verified = SqlxUserRepository::verify_totp_code_now(&secret, &code).unwrap_or(false);
+    if verified {
+        let _ = session.insert(TOTP_TESTED_SESSION_KEY, true).await;
+    }
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": verified }))
+}
+
+async fn native_legacy_two_factor_enable(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(action, "Frickmail database is not configured");
+    };
+    if !payload_bool(payload, "Enable") {
+        // The legacy UI toggling off sends no code; never silently disable.
+        return json_result_error(
+            action,
+            "A valid TOTP code is required to disable two-factor authentication",
+        );
+    }
+    let pending = match session.get::<String>(TOTP_PENDING_SESSION_KEY).await {
+        Ok(Some(secret)) if !secret.trim().is_empty() => secret,
+        _ => {
+            return json_result_error(
+                action,
+                "No pending two-factor setup. Create a secret first.",
+            )
+        }
+    };
+    let tested = session
+        .get::<bool>(TOTP_TESTED_SESSION_KEY)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    if !tested {
+        return json_result_error(action, "Verify a two-factor code before enabling");
+    }
+    if let Err(err) = SqlxUserRepository::set_totp_secret(pool, user.user_id, &pending).await {
+        return json_result_error(action, &err.public_message());
+    }
+    let _ = session.remove::<String>(TOTP_PENDING_SESSION_KEY).await;
+    let _ = session.remove::<bool>(TOTP_TESTED_SESSION_KEY).await;
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": true }))
+}
+
+async fn native_legacy_two_factor_clear(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(action, "Frickmail database is not configured");
+    };
+    // Clearing an ACTIVE secret without a live code would silently weaken
+    // 2FA; refuse and keep the native code-gated `FrickmailDisableTotp` as
+    // the removal path. A pending (not-yet-enabled) setup is cancellable.
+    if SqlxUserRepository::totp_enabled(pool, user.user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return json_result_error(
+            action,
+            "A valid TOTP code is required to clear two-factor authentication",
+        );
+    }
+    let _ = session.remove::<String>(TOTP_PENDING_SESSION_KEY).await;
+    let _ = session.remove::<bool>(TOTP_TESTED_SESSION_KEY).await;
+    let result = json!({
+        "User": legacy_two_factor_user_label(&user),
+        "IsSet": false,
+        "Enable": false,
+        "Secret": "",
+        "BackupCodes": "",
+    });
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": result }))
 }
 
 async fn native_frickmail_request_password_reset(
@@ -25310,6 +25618,260 @@ mod tests {
             body["Result"]["error"],
             "A valid TOTP code is required to disable two-factor authentication."
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_two_factor_full_flow_create_test_enable() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 18_431, "legacy2fa", Some("[EMAIL]")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool.clone()));
+        let session = authenticated_session(18_431, "legacy2fa", Some("[EMAIL]")).await;
+
+        // Disabled state: PHP parity {User, IsSet:false, Enable:false,
+        // Secret:'', BackupCodes:''}.
+        let body = read_json(
+            super::native_legacy_two_factor_info(&state, "GetTwoFactorInfo", &session).await,
+        )
+        .await;
+        assert_eq!(body["Result"]["User"], "[EMAIL]");
+        assert_eq!(body["Result"]["IsSet"], false);
+        assert_eq!(body["Result"]["Enable"], false);
+        assert_eq!(body["Result"]["Secret"], "");
+        assert_eq!(body["Result"]["BackupCodes"], "");
+
+        // Create leaves a session-pending secret: IsSet true, Enable false,
+        // Secret + text QRCode returned, no backup codes.
+        let body = read_json(
+            super::native_legacy_two_factor_create_secret(
+                &state,
+                "CreateTwoFactorSecret",
+                &session,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"]["User"], "[EMAIL]");
+        assert_eq!(body["Result"]["IsSet"], true);
+        assert_eq!(body["Result"]["Enable"], false);
+        let secret = body["Result"]["Secret"].as_str().unwrap().to_string();
+        assert!(secret.len() >= 16);
+        assert!(!body["Result"]["QRCode"].as_str().unwrap().is_empty());
+        assert_eq!(body["Result"]["BackupCodes"], "");
+        assert_eq!(
+            session
+                .get::<String>(super::TOTP_PENDING_SESSION_KEY)
+                .await
+                .unwrap()
+                .unwrap(),
+            secret
+        );
+
+        // A wrong code does not verify and does not set the tested marker.
+        let body = read_json(
+            super::native_legacy_two_factor_verify_code(
+                &state,
+                "VerifyTwoFactorCode",
+                &json!({"Code": "000000"}),
+                &session,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], false);
+        assert_eq!(
+            session
+                .get::<bool>(super::TOTP_TESTED_SESSION_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+
+        // A live code verifies and sets the tested marker.
+        let code = test_totp_code(&secret, current_test_totp_counter());
+        let body = read_json(
+            super::native_legacy_two_factor_verify_code(
+                &state,
+                "VerifyTwoFactorCode",
+                &json!({"Code": code}),
+                &session,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], true);
+
+        // Disabling without a code is refused (fail-safe).
+        let body = read_json(
+            super::native_legacy_two_factor_enable(
+                &state,
+                "EnableTwoFactor",
+                &json!({"Enable": 0}),
+                &session,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            body["Result"]["error"],
+            "A valid TOTP code is required to disable two-factor authentication"
+        );
+
+        // Enable after the verified marker commits the pending secret.
+        let body = read_json(
+            super::native_legacy_two_factor_enable(
+                &state,
+                "EnableTwoFactor",
+                &json!({"Enable": 1}),
+                &session,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], true);
+        assert!(SqlxUserRepository::totp_enabled(&pool, 18_431)
+            .await
+            .unwrap());
+        assert_eq!(
+            session
+                .get::<String>(super::TOTP_PENDING_SESSION_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Enabled state: IsSet + Enable true with QRCode, secret hidden.
+        let body = read_json(
+            super::native_legacy_two_factor_info(&state, "GetTwoFactorInfo", &session).await,
+        )
+        .await;
+        assert_eq!(body["Result"]["IsSet"], true);
+        assert_eq!(body["Result"]["Enable"], true);
+        assert!(!body["Result"]["QRCode"].as_str().unwrap().is_empty());
+
+        // Clearing an enabled secret without a code is refused.
+        let body = read_json(
+            super::native_legacy_two_factor_clear(&state, "ClearTwoFactorInfo", &session).await,
+        )
+        .await;
+        assert_eq!(
+            body["Result"]["error"],
+            "A valid TOTP code is required to clear two-factor authentication"
+        );
+        assert!(SqlxUserRepository::totp_enabled(&pool, 18_431)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_two_factor_pending_setup_cancels_without_enabling() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 18_432, "legacy2fa-cancel", Some("[EMAIL]")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(18_432, "legacy2fa-cancel", Some("[EMAIL]")).await;
+
+        // Create a pending secret, then clear it without ever verifying a code.
+        let _ = super::native_legacy_two_factor_create_secret(
+            &state,
+            "CreateTwoFactorSecret",
+            &session,
+        )
+        .await;
+        assert!(session
+            .get::<String>(super::TOTP_PENDING_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_some());
+        let body = read_json(
+            super::native_legacy_two_factor_clear(&state, "ClearTwoFactorInfo", &session).await,
+        )
+        .await;
+        assert_eq!(body["Result"]["IsSet"], false);
+        assert_eq!(body["Result"]["Enable"], false);
+        assert_eq!(body["Result"]["Secret"], "");
+        assert!(session
+            .get::<String>(super::TOTP_PENDING_SESSION_KEY)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_two_factor_hooks_dispatch_over_json_route() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 18_433, "legacy2fa-route", Some("[EMAIL]")).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(18_433, "legacy2fa-route", Some("[EMAIL]")).await;
+        let token = super::ensure_connection_token(&state, &session, None)
+            .await
+            .unwrap();
+
+        // CreateTwoFactorSecret over the legacy JSON route (Plugin prefix).
+        let request = |action: &str, extra: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/?/Json/")
+                .header("x-sm-token", &token)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "Action=Plugin{action}&XToken={token}{extra}"
+                )))
+                .unwrap()
+        };
+        let body = read_json(
+            super::json_api_request(
+                state.clone(),
+                "/?/Json/".parse().unwrap(),
+                request("CreateTwoFactorSecret", ""),
+                session.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Action"], "PluginCreateTwoFactorSecret");
+        assert_eq!(body["Result"]["IsSet"], true);
+        let secret = body["Result"]["Secret"].as_str().unwrap().to_string();
+
+        // Verify the code over the route.
+        let code = test_totp_code(&secret, current_test_totp_counter());
+        let body = read_json(
+            super::json_api_request(
+                state.clone(),
+                "/?/Json/".parse().unwrap(),
+                request("VerifyTwoFactorCode", &format!("&Code={code}")),
+                session.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], true);
+
+        // Enable it over the route.
+        let body = read_json(
+            super::json_api_request(
+                state.clone(),
+                "/?/Json/".parse().unwrap(),
+                request("EnableTwoFactor", "&Enable=1"),
+                session.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], true);
+        let body = read_json(
+            super::json_api_request(
+                state,
+                "/?/Json/".parse().unwrap(),
+                request("GetTwoFactorInfo", ""),
+                session,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"]["IsSet"], true);
+        assert_eq!(body["Result"]["Enable"], true);
     }
 
     #[tokio::test]

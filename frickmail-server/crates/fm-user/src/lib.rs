@@ -486,6 +486,32 @@ impl SqlxUserRepository {
             .is_some_and(|secret| !secret.is_empty() && secret != "0"))
     }
 
+    /// The user's stored TOTP secret, when enabled. Exposed so the legacy
+    /// two-factor-auth plugin can re-render a secret/QR for an already
+    /// configured account (PHP returns the stored secret too).
+    pub async fn totp_secret(pool: &AnyPool, user_id: i64) -> Result<Option<String>> {
+        Ok(Self::find_by_id(pool, user_id)
+            .await?
+            .and_then(|user| user.totp_secret)
+            .filter(|secret| !secret.is_empty() && secret != "0"))
+    }
+
+    /// Persists a TOTP secret without requiring a live code. Used only by the
+    /// legacy two-factor-auth plugin's `EnableTwoFactor`, which commits a
+    /// session-pending secret after the same session already verified a live
+    /// code (the modern `confirm_totp` path keeps its code requirement).
+    pub async fn set_totp_secret(pool: &AnyPool, user_id: i64, secret: &str) -> Result<()> {
+        update_totp_secret(pool, user_id, Some(secret)).await
+    }
+
+    /// Verifies a TOTP code against an arbitrary secret at the current time
+    /// without recording usage. Used for the legacy plugin's self-test popup;
+    /// every authentication path still uses [`verify_totp_login_code`]'s
+    /// replay-protected verifier.
+    pub fn verify_totp_code_now(secret: &str, code: &str) -> Result<bool> {
+        verify_totp_code_at_current_time(secret, &normalize_totp_code(code))
+    }
+
     pub async fn begin_totp_setup(pool: &AnyPool, user_id: i64) -> Result<TotpSetupResult> {
         begin_totp_setup(pool, user_id).await
     }
@@ -1562,6 +1588,21 @@ fn qr_data_url(input: &str) -> Result<String> {
         "data:image/svg+xml;base64,{}",
         STANDARD.encode(svg.as_bytes())
     ))
+}
+
+/// Builds PHP's `getQRCode` otpauth URI exactly:
+/// `otpauth://totp/{rawurlencode($email)}?secret={$secret}`.
+pub fn totp_otpauth_uri(user: &str, secret: &str) -> String {
+    format!("otpauth://totp/{}?secret={secret}", url_encode(user.trim()))
+}
+
+/// Renders a Unicode half-block text QR (like the legacy two-factor-auth
+/// plugin's `QRCode->__toString()`), which the legacy settings template
+/// displays in a monospace `<pre>`.
+pub fn totp_qr_text(uri: &str) -> Result<String> {
+    let code = QrCode::new(uri.as_bytes())
+        .map_err(|err| FrickmailError::Upstream(format!("TOTP QR generation failed: {err}")))?;
+    Ok(code.render::<qrcode::render::unicode::Dense1x2>().build())
 }
 
 pub fn derive_credential_key(password: &str, salt: &[u8]) -> Result<[u8; CREDENTIAL_KEY_BYTES]> {

@@ -5,6 +5,55 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 16:30:00 UTC
+
+The legacy two-factor-auth plugin port slice is the next gate-2 hook closure:
+all six formerly-501 JSON hooks (`GetTwoFactorInfo`, `CreateTwoFactorSecret`,
+`ShowTwoFactorSecret`, `EnableTwoFactor`, `VerifyTwoFactorCode`,
+`ClearTwoFactorInfo`) are now native, backed by the Frickmail TOTP store
+(one committed secret per user; presence = enabled).
+
+- `fm-user` (additive): `totp_secret`, `set_totp_secret` (commit without a
+  code, used only after an in-session code verification), `verify_totp_code_now`
+  (non-recording self-test), `totp_otpauth_uri` (PHP's exact
+  `otpauth://totp/<user>?secret=` form), `totp_qr_text` (Unicode text QR the
+  legacy `<pre>` renders).
+- Router: six handlers mirror PHP response shapes (`{User, IsSet, Enable,
+  Tested}`, enum-state `Secret`/`BackupCodes` presence, `QRCode` text) while
+  preserving the native security posture — a secret activates only after a
+  live code is verified in-session (`TOTP_TESTED_SESSION_KEY`), and
+  disable/clear without a valid code is refused (fail-safe; the modern
+  `FrickmailDisableTotp` remains the code-gated removal path). The legacy UI
+  (create → show → test popup → enable) works end to end over the `/Json/`
+  route with the `Plugin` prefix.
+
+Documented boundaries (consistent with the migration's native-replacement
+strategy): legacy PHP storage files are not read or written (secrets live in
+the Frickmail users table), `BackupCodes` is always empty (Frickmail has no
+backup codes), and `force_two_factor_auth` is not mapped.
+
+Verification: `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets -D warnings` clean; `cargo test -p fm-user --lib` 64 passed;
+3 new fm-http tests green (full create→test→enable→refuse-disable flow
+asserting the session markers and persisted secret, pending-setup cancel via
+ClearTwoFactorInfo, and a route-level `Plugin…` JSON dispatch proving the
+hooks no longer 501). Full `cargo test -p fm-http --lib` 572 passed / 0
+failed.
+Production-image validation: `frickmail-rust:legacy-2fa-test` built at image
+ID `sha256:bb40ba53e1bd026bdff9ab607e0ee2abed6841cc1f85206b83552798f15ce849`;
+read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: OAuth sends live verification (deferred —
+needs operator test accounts + OAuth client IDs), remaining compat-known
+bundled-plugin hooks (`KolabFolder`, `NextcloudSaveMsg`/`NextcloudAttachFile`,
+Example-plugin trio), connection-token/CSRF contract, frontend/theming with
+the theme deletion plan recorded, cutover validation.
+
+---
+
 ## Progress Snapshot — 2026-09-24 15:20:00 UTC
 
 The PGP detached/clear-signed verification parity slice completes gate 1's
