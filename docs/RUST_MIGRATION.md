@@ -47,6 +47,9 @@ OAuth sends: live Gmail/O365 verification (needs operator test accounts +
 OAuth client IDs). The major remaining gates toward the final Rust-only goal
 are otherwise unchanged.
 
+Published `2f49c0347` to `master` + `rust-full-migration` on `origin` and
+`gitea` (all 4 tips identical, verified via `ls-remote`).
+
 ---
 
 ## Progress Snapshot — 2026-09-24 12:30:00 UTC
