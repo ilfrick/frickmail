@@ -923,6 +923,13 @@ impl SqlxUserRepository {
         add_mail_rule(pool, user_id, input).await
     }
 
+    /// Scoped rule existence check so v1 mutating handlers can 404 unknown
+    /// ids before the (row-count-agnostic) delete/toggle calls, matching the
+    /// identity/contact v1 pattern.
+    pub async fn mail_rule_exists(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<bool> {
+        mail_rule_exists(pool, user_id, rule_id).await
+    }
+
     pub async fn delete_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<()> {
         delete_mail_rule(pool, user_id, rule_id).await
     }
@@ -2941,6 +2948,28 @@ async fn add_mail_rule(pool: &AnyPool, user_id: i64, input: NewMailRule) -> Resu
         &input.actions,
     )
     .await
+}
+
+/// Scoped rule existence check for v1 mutating handlers (the delete/toggle
+/// queries bind the user id without confirming a row matched, mirroring
+/// legacy `ok` semantics).
+async fn mail_rule_exists(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<bool> {
+    if rule_id <= 0 {
+        return Ok(false);
+    }
+    let mut conn = pool.acquire().await.map_err(db_error)?;
+    let backend = conn.backend_name().to_string();
+    let query = match backend.as_str() {
+        "PostgreSQL" => "SELECT id FROM frickmail_rules WHERE user_id = $1 AND id = $2",
+        _ => "SELECT id FROM frickmail_rules WHERE user_id = ? AND id = ?",
+    };
+    sqlx::query(query)
+        .bind(user_id)
+        .bind(rule_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map(|row| row.is_some())
+        .map_err(db_error)
 }
 
 async fn delete_mail_rule(pool: &AnyPool, user_id: i64, rule_id: i64) -> Result<()> {

@@ -15,7 +15,15 @@ import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
 import { loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadFolders, renderFolderList } from './js/folders.js';
-import { loadRules, renderRules } from './js/rules.js';
+import {
+	addRule,
+	collectRulePayload,
+	deleteRule,
+	loadRules,
+	renderRuleForm,
+	renderRules,
+	toggleRule
+} from './js/rules.js';
 import {
 	addContact,
 	collectContactPayload,
@@ -597,21 +605,79 @@ async function onEventDelete() {
 	}
 }
 
+let rulesAccountId = 0;
+
 async function showRules() {
 	try {
 		const session = await api.bootstrap();
+		rulesAccountId = session && session.selected_account_id
+			? session.selected_account_id
+			: 0;
 		const data = await loadRules(
 			api,
-			session && session.selected_account_id
-				? { accountId: session.selected_account_id }
-				: undefined
+			rulesAccountId ? { accountId: rulesAccountId } : undefined
 		);
 		root.innerHTML = nav('rules')
 			+ '<h1 data-fm="title">Rules</h1>'
-			+ renderRules(data);
+			+ renderRuleForm()
+			+ renderRules(data)
+			+ '<p data-fm="status"></p>';
 		wireNav();
+		const form = root.querySelector('[data-fm="add"]');
+		if (form) {
+			form.addEventListener('submit', onRuleAdd);
+		}
+		for (const button of root.querySelectorAll('[data-fm="toggle"]')) {
+			button.addEventListener('click', () => onRuleToggle(button.getAttribute('data-id')));
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onRuleDelete(button.getAttribute('data-id')));
+		}
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load rules.</p>';
+	}
+}
+
+function rulesStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onRuleAdd(event) {
+	event.preventDefault();
+	try {
+		const payload = collectRulePayload(root, rulesAccountId);
+		if (!payload.name.trim()) {
+			rulesStatus('A rule name is required.');
+			return;
+		}
+		await addRule(api, payload);
+		await showRules();
+	} catch (error) {
+		rulesStatus(error && error.message ? error.message : 'Add failed.');
+	}
+}
+
+async function onRuleToggle(id) {
+	const numeric = Number(id) || 0;
+	const row = root.querySelector('[data-fm="rule"][data-id="' + numeric + '"]');
+	const enabled = row && row.getAttribute('data-enabled') === '1';
+	try {
+		await toggleRule(api, numeric, !enabled);
+		await showRules();
+	} catch (error) {
+		rulesStatus(error && error.message ? error.message : 'Toggle failed.');
+	}
+}
+
+async function onRuleDelete(id) {
+	try {
+		await deleteRule(api, Number(id) || 0);
+		await showRules();
+	} catch (error) {
+		rulesStatus(error && error.message ? error.message : 'Delete failed.');
 	}
 }
 

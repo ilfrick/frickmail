@@ -5,6 +5,47 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 20:30:00 UTC
+
+The v1 rules-writes slice completes the tasks-write pattern for filter rules.
+
+- API (`api_v1.rs`): `POST /rules` (create with `account_id`, `name`,
+  `conditions`, `conditions_logic`, `actions`; reuses the exact repository
+  call as legacy `FrickmailAddRule`), `POST /rules/{id}/toggle`
+  (`enabled`), `DELETE /rules/{id}`. New `fm-user::mail_rule_exists`
+  (scoped, mirrors `mail_identity_exists`) so unknown ids 404 instead of the
+  legacy silent-OK. Writes require the `X-SM-Token` token; blank name/missing
+  account 400, foreign account 404, invalid condition/action shapes fail
+  closed.
+- UI (`rules.js` + `index.html`): add-rule form (name for now; the API
+  accepts full payloads — full condition/action editing is a follow-up),
+  per-row Enable/Disable + Delete buttons, status text, account id held from
+  the shell session.
+
+Verification: host `node --test frickmail-ui/v1/js/*.test.mjs` 200 passed /
+0 failed (8 new rule-write tests); `npx eslint` clean; `cargo fmt --all
+-- --check` clean; `cargo clippy --workspace --all-targets -D warnings`
+clean; `cargo test -p fm-user --lib` 64 passed; full `cargo test -p fm-http
+--lib` 577 passed / 0 failed on rerun (the first full-suite run showed one
+non-reproducing failure that was not present on the immediate rerun — treated
+as a flake per the documented policy, with the focused suites green
+throughout); 2 new Rust tests green (CRUD round-trip incl. toggle-enable
+state, validation + token gate over HTTP).
+Production-image validation: `frickmail-rust:v1-rule-writes-test` built at
+image ID `sha256:a01d58a17c685e4fdc2fee45a6250e8f8387bd309a890529f706599589d46c64`;
+read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: OAuth sends live verification (deferred —
+needs operator test accounts + OAuth client IDs), remaining compat-known
+bundled-plugin hooks (`KolabFolder`, `NextcloudSaveMsg`/`NextcloudAttachFile`
+— operator decisions), connection-token/CSRF contract, frontend/theming with
+the theme deletion plan recorded, cutover validation.
+
+---
+
 ## Progress Snapshot — 2026-09-24 19:00:00 UTC
 
 The v1 task-writes slice closes the last read-only v1 carryover: tasks.

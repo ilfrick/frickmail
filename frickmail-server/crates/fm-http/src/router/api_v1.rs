@@ -78,7 +78,9 @@ pub fn routes() -> Router<AppState> {
         .route("/messages/{uid}", get(message))
         .route("/send", post(send))
         .route("/preferences", get(get_preferences).put(set_preferences))
-        .route("/rules", get(rules))
+        .route("/rules", get(rules).post(add_rule_v1))
+        .route("/rules/{id}", delete(delete_rule_v1))
+        .route("/rules/{id}/toggle", post(toggle_rule_v1))
         .route("/tasks", get(tasks).post(add_task_v1))
         .route("/tasks/{id}", put(update_task_v1).delete(delete_task_v1))
         .route("/tasks/{id}/completed", post(set_task_completed_v1))
@@ -3558,6 +3560,206 @@ async fn rules(
     }
 }
 
+/// Body for rules writes. `conditions`/`actions` are JSON arrays matching
+/// the legacy `NewMailRule`; `conditions_logic` normalizes to `all`/`any`.
+#[derive(Debug, Default, Deserialize)]
+struct RuleWriteRequest {
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    conditions: Vec<serde_json::Value>,
+    #[serde(default)]
+    conditions_logic: Option<String>,
+    #[serde(default)]
+    actions: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuleToggleRequest {
+    #[serde(default)]
+    enabled: bool,
+}
+
+fn rule_error(err: fm_core::FrickmailError, context: &str) -> Response {
+    // The repository raises `Account not found` for unknown/foreign accounts;
+    // surface as 404 like the listing path.
+    if let fm_core::FrickmailError::BadRequest(message) = &err {
+        if message == "Account not found" {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            );
+        }
+    }
+    tracing::warn!("v1 {context} failed: {}", err.public_message());
+    v1_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "Frickmail rules request failed",
+    )
+}
+
+/// `POST /api/frickmail/v1/rules` — creates a rule for one of the caller's
+/// accounts, mirroring legacy `FrickmailAddRule`. Returns `{id}`.
+async fn add_rule_v1(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<RuleWriteRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid rule request",
+        );
+    };
+    let Ok(account_id) = request.account_id.filter(|id| *id > 0).ok_or(()) else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "A positive account_id is required",
+        );
+    };
+    if request.name.trim().is_empty() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Rule name is required",
+        );
+    }
+    let input = fm_user::NewMailRule {
+        account_id,
+        name: request.name.trim().to_string(),
+        conditions: request.conditions,
+        conditions_logic: request
+            .conditions_logic
+            .unwrap_or_else(|| "all".to_string()),
+        actions: request.actions,
+    };
+    match fm_user::SqlxUserRepository::add_mail_rule(pool, user_id, input).await {
+        Ok(id) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true, "id": id }))),
+        )
+            .into_response(),
+        Err(err) => rule_error(err, "rule create"),
+    }
+}
+
+/// `POST /api/frickmail/v1/rules/{id}/toggle` — enables/disables a rule,
+/// mirroring legacy `FrickmailToggleRule`. Unknown ids 404.
+async fn toggle_rule_v1(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+    body: Result<Json<RuleToggleRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid rule id",
+        );
+    };
+    let Ok(Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid rule request",
+        );
+    };
+    match fm_user::SqlxUserRepository::mail_rule_exists(pool, user_id, id).await {
+        Ok(true) => {}
+        Ok(false) => return v1_error(StatusCode::NOT_FOUND, "rule_not_found", "Rule not found"),
+        Err(err) => return rule_error(err, "rule lookup"),
+    }
+    match fm_user::SqlxUserRepository::toggle_mail_rule(pool, user_id, id, request.enabled).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Err(err) => rule_error(err, "rule toggle"),
+    }
+}
+
+/// `DELETE /api/frickmail/v1/rules/{id}` — deletes a rule, mirroring legacy
+/// `FrickmailDeleteRule`. Unknown ids 404.
+async fn delete_rule_v1(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    path: Result<axum::extract::Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path(id)) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid rule id",
+        );
+    };
+    match fm_user::SqlxUserRepository::mail_rule_exists(pool, user_id, id).await {
+        Ok(true) => {}
+        Ok(false) => return v1_error(StatusCode::NOT_FOUND, "rule_not_found", "Rule not found"),
+        Err(err) => return rule_error(err, "rule lookup"),
+    }
+    match fm_user::SqlxUserRepository::delete_mail_rule(pool, user_id, id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Err(err) => rule_error(err, "rule delete"),
+    }
+}
+
 /// Reads the authenticated user's merged preferences, reusing the exact
 /// repository query as legacy `FrickmailGetPrefs`. GET-only, so no CSRF
 /// check applies.
@@ -6340,6 +6542,245 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn rules_write_test_state() -> (Router, String, String, sqlx::AnyPool) {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 704, "v1rulew", "correct-horse", None).await;
+        seed_mail_account(&pool, 802, 704, "Rulebox").await;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS frickmail_rules (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                conditions TEXT NOT NULL,
+                actions TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                last_run TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let app = login_app(pool.clone());
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1rulew", "correct-horse").await;
+        (app, cookie, token, pool)
+    }
+
+    fn rule_request(
+        method: Method,
+        cookie: &str,
+        token: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", cookie)
+            .header("x-sm-token", token)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v1_rule_writes_crud_mirror_legacy_hooks() {
+        let (app, cookie, token, pool) = rules_write_test_state().await;
+
+        // Create: valid rule returns an id and appears in the listing.
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/rules",
+                serde_json::json!({
+                    "account_id": 802,
+                    "name": "Archive sales",
+                    "conditions": [{"field": "subject", "op": "contains", "value": "sale"}],
+                    "conditions_logic": "any",
+                    "actions": [{"type": "move", "params": {"folder": "Archive"}}],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+        let id = body["data"]["id"].as_i64().unwrap();
+
+        // Toggle off and on.
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                &format!("/api/frickmail/v1/rules/{id}/toggle"),
+                serde_json::json!({"enabled": false}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["ok"], true);
+        let listed = fm_user::SqlxUserRepository::list_mail_rules(&pool, 704, 802)
+            .await
+            .unwrap();
+        assert!(!listed[0].enabled);
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                &format!("/api/frickmail/v1/rules/{id}/toggle"),
+                serde_json::json!({"enabled": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Unknown rule ids 404 on toggle/delete.
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/rules/999999/toggle",
+                serde_json::json!({"enabled": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "rule_not_found");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/frickmail/v1/rules/999999")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Delete removes the rule.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/frickmail/v1/rules/{id}"))
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let listed = fm_user::SqlxUserRepository::list_mail_rules(&pool, 704, 802)
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v1_rule_writes_validate_and_gate() {
+        let (app, cookie, token, _pool) = rules_write_test_state().await;
+
+        // Missing account_id and blank name are 400s.
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/rules",
+                serde_json::json!({"name": "No account"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/rules",
+                serde_json::json!({"account_id": 802, "name": "  "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A foreign/unknown account_id 404s like the listing path.
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/rules",
+                serde_json::json!({"account_id": 999999, "name": "Nope"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "account_not_found");
+
+        // An invalid rule action shape fails closed.
+        let response = app
+            .clone()
+            .oneshot(rule_request(
+                Method::POST,
+                &cookie,
+                &token,
+                "/api/frickmail/v1/rules",
+                serde_json::json!({
+                    "account_id": 802,
+                    "name": "Bad action",
+                    "actions": [{"kind": "bogus"}],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Tokenless writes are rejected.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/rules")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{\"account_id\":802,\"name\":\"x\"}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
     }
 
     fn test_message_parts() -> Vec<fm_imap::BodyPreviewPart> {
