@@ -1204,6 +1204,7 @@ async fn send(
         &headers,
         &super::ProductionLegacySmtpSender,
         &super::ProductionLegacySentAppender,
+        &super::ProductionOAuthTokenRefresher,
     )
     .await
 }
@@ -1241,6 +1242,7 @@ async fn send_with_sender_and_appender(
     headers: &axum::http::HeaderMap,
     smtp_sender: &dyn super::LegacySmtpSender,
     sent_appender: &dyn super::LegacySentAppender,
+    token_refresher: &dyn super::OAuthAccessTokenRefresher,
 ) -> Response {
     if let Err(response) = v1_require_token(state, session, headers).await {
         return response;
@@ -1404,6 +1406,7 @@ async fn send_with_sender_and_appender(
         std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
         smtp_sender,
         sent_appender,
+        token_refresher,
     )
     .await;
     map_send_response(response).await
@@ -6693,7 +6696,7 @@ mod tests {
             _user_id: i64,
             _account_id: i64,
             _config: &fm_imap::ImapConnectionConfig,
-            _password: &str,
+            _credentials: &fm_imap::ImapCredentials,
             _folder: &str,
             raw: &[u8],
         ) -> Result<(), String> {
@@ -6759,6 +6762,7 @@ mod tests {
             &RecordingSentAppender {
                 message: std::sync::Arc::clone(&stored),
             },
+            &super::super::ProductionOAuthTokenRefresher,
         )
         .await;
         let response = response.into_response();
@@ -6804,6 +6808,7 @@ mod tests {
             &RecordingSentAppender {
                 message: std::sync::Arc::clone(&stored),
             },
+            &super::super::ProductionOAuthTokenRefresher,
         )
         .await;
         let response = response.into_response();
@@ -6897,6 +6902,7 @@ mod tests {
             &RecordingSentAppender {
                 message: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
+            &super::super::ProductionOAuthTokenRefresher,
         )
         .await
         .into_response()

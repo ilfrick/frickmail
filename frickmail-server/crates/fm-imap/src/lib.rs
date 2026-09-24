@@ -1926,7 +1926,38 @@ pub async fn append_raw_message_classified(
         .await
         .map_err(|err| AppendRawMessageFailure::Definitive(err.public_message()))?;
 
-    let result = match timeout(
+    let result = append_in_session_classified(&mut session, mailbox, raw).await;
+    logout_quietly(session).await;
+    result
+}
+
+/// OAuth sibling of [`append_raw_message_classified`]: same validation,
+/// same `\Seen` APPEND, same definitive/uncertain classification — only the
+/// session comes from SASL XOAUTH2 instead of `LOGIN`.
+pub async fn append_raw_message_classified_oauth(
+    config: ImapConnectionConfig,
+    access_token: &str,
+    mailbox: &str,
+    raw: &[u8],
+) -> std::result::Result<(), AppendRawMessageFailure> {
+    validate_mailbox(mailbox)
+        .and_then(|_| validate_eml(raw))
+        .map_err(|err| AppendRawMessageFailure::Definitive(err.public_message()))?;
+    let mut session = login_oauth(config, access_token)
+        .await
+        .map_err(|err| AppendRawMessageFailure::Definitive(err.public_message()))?;
+
+    let result = append_in_session_classified(&mut session, mailbox, raw).await;
+    logout_quietly(session).await;
+    result
+}
+
+async fn append_in_session_classified(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    raw: &[u8],
+) -> std::result::Result<(), AppendRawMessageFailure> {
+    match timeout(
         COMMAND_TIMEOUT,
         session.append(mailbox, Some("(\\Seen)"), None, raw),
     )
@@ -1944,9 +1975,7 @@ pub async fn append_raw_message_classified(
         Err(_) => Err(AppendRawMessageFailure::Uncertain(
             "append raw message timed out".to_string(),
         )),
-    };
-    logout_quietly(session).await;
-    result
+    }
 }
 
 pub async fn append_raw_message_without_flags(
@@ -2448,15 +2477,47 @@ pub async fn store_message_keyword(
     }
 
     let mut session = login(config, password).await?;
+    let result = store_keyword_in_session(&mut session, mailbox, uid_set, keyword, set).await;
+    logout_quietly(session).await;
+    result
+}
+
+/// OAuth sibling of [`store_message_keyword`]: same validation and
+/// `PERMANENTFLAGS` capability gate — only the session comes from SASL
+/// XOAUTH2 instead of `LOGIN`.
+pub async fn store_message_keyword_oauth(
+    config: ImapConnectionConfig,
+    access_token: &str,
+    mailbox: &str,
+    uid_set: &str,
+    keyword: &str,
+    set: bool,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    validate_uid_set(uid_set)?;
+    if !keyword_can_be_stored(keyword) {
+        return Ok(());
+    }
+
+    let mut session = login_oauth(config, access_token).await?;
+    let result = store_keyword_in_session(&mut session, mailbox, uid_set, keyword, set).await;
+    logout_quietly(session).await;
+    result
+}
+
+async fn store_keyword_in_session(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    uid_set: &str,
+    keyword: &str,
+    set: bool,
+) -> Result<()> {
     let selected = timeout_imap("select mailbox", session.select(mailbox)).await?;
     if !keyword_supported(&selected, keyword) {
-        logout_quietly(session).await;
         return Ok(());
     }
     let query = store_keyword_query(keyword, set);
-    let result = drain_uid_store(&mut session, uid_set, &query, "store message keyword").await;
-    logout_quietly(session).await;
-    result
+    drain_uid_store(session, uid_set, &query, "store message keyword").await
 }
 
 pub async fn store_seen_to_all(
@@ -2541,11 +2602,32 @@ pub async fn delete_messages(
     validate_uid_set(uid_set)?;
 
     let mut session = login(config, password).await?;
-    let capabilities = imap_rule_capabilities(&mut session).await?;
-    timeout_imap("select mailbox", session.select(mailbox)).await?;
-    let result = delete_rule_messages(&mut session, capabilities, uid_set).await;
+    let result = delete_in_session(&mut session, mailbox, uid_set).await;
     logout_quietly(session).await;
     result
+}
+
+/// OAuth sibling of [`delete_messages`]: same validation and MOVE-fallback
+/// semantics — only the session comes from SASL XOAUTH2 instead of `LOGIN`.
+pub async fn delete_messages_oauth(
+    config: ImapConnectionConfig,
+    access_token: &str,
+    mailbox: &str,
+    uid_set: &str,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    validate_uid_set(uid_set)?;
+
+    let mut session = login_oauth(config, access_token).await?;
+    let result = delete_in_session(&mut session, mailbox, uid_set).await;
+    logout_quietly(session).await;
+    result
+}
+
+async fn delete_in_session(session: &mut BoxedSession, mailbox: &str, uid_set: &str) -> Result<()> {
+    let capabilities = imap_rule_capabilities(session).await?;
+    timeout_imap("select mailbox", session.select(mailbox)).await?;
+    delete_rule_messages(session, capabilities, uid_set).await
 }
 
 pub async fn apply_imap_rules(
@@ -8841,6 +8923,35 @@ pub async fn login_oauth(config: ImapConnectionConfig, access_token: &str) -> Re
     login_client_oauth(client, response).await
 }
 
+/// IMAP credential material: either a stored password (`LOGIN`) or a freshly
+/// refreshed provider OAuth access token (SASL XOAUTH2). The token never
+/// touches logs (`Debug` redacted); it lives only long enough to
+/// authenticate one session.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ImapCredentials {
+    Password(String),
+    OAuthToken(String),
+}
+
+impl fmt::Debug for ImapCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ImapCredentials { material: [redacted] }")
+    }
+}
+
+/// Logs in with either credential kind. Post-login sessions are identical,
+/// so every `*_in_session` core works unchanged regardless of how the
+/// session was established.
+pub async fn login_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+) -> Result<BoxedSession> {
+    match credentials {
+        ImapCredentials::Password(password) => login(config, password).await,
+        ImapCredentials::OAuthToken(token) => login_oauth(config, token).await,
+    }
+}
+
 async fn connect_client(config: &ImapConnectionConfig) -> Result<BoxedClient> {
     connect_client_with_read_guard(config, None).await
 }
@@ -12713,6 +12824,128 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         let result = super::login_client_oauth(client, response).await;
         server.await.unwrap();
         assert!(result.is_ok(), "handshake failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn imap_credentials_debug_redacts_both_kinds() {
+        for credentials in [
+            super::ImapCredentials::Password("s3cret".to_string()),
+            super::ImapCredentials::OAuthToken("ya29.secret".to_string()),
+        ] {
+            let rendered = format!("{credentials:?}");
+            assert!(rendered.contains("[redacted]"));
+            assert!(!rendered.contains("s3cret"));
+            assert!(!rendered.contains("ya29.secret"));
+        }
+    }
+
+    /// Runs `login_with_credentials` against a scripted loopback IMAP server
+    /// so the full connect+greet+auth path (not just an injected client) is
+    /// exercised for each credential kind.
+    async fn with_loopback_imap_server<F, Fut>(serve: F, credentials: super::ImapCredentials)
+    where
+        F: FnOnce(tokio::net::TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            serve(socket).await;
+        });
+        let config =
+            super::ImapConnectionConfig::new("127.0.0.1", Some(port), Some("NONE"), "alice")
+                .unwrap();
+        let session = super::login_with_credentials(config, &credentials).await;
+        server.await.unwrap();
+        assert!(session.is_ok(), "login failed: {:?}", session.err());
+    }
+
+    async fn read_server_line(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut line = Vec::new();
+        let mut byte = [0_u8; 1];
+        loop {
+            socket.read_exact(&mut byte).await.unwrap();
+            line.push(byte[0]);
+            if line.ends_with(b"\r\n") {
+                break;
+            }
+        }
+        let _ = socket.flush().await;
+        String::from_utf8(line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn login_with_credentials_dispatches_password_login() {
+        use tokio::io::AsyncWriteExt as _;
+
+        with_loopback_imap_server(
+            |mut socket| async move {
+                socket.write_all(b"* OK loopback ready\r\n").await.unwrap();
+                let request = read_server_line(&mut socket).await;
+                assert!(request.starts_with("A0001 LOGIN "), "{request}");
+                socket.write_all(b"A0001 OK logged in\r\n").await.unwrap();
+            },
+            super::ImapCredentials::Password("pw".to_string()),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn login_with_credentials_dispatches_oauth_login() {
+        use tokio::io::AsyncWriteExt as _;
+
+        use base64::Engine as _;
+
+        with_loopback_imap_server(
+            |mut socket| async move {
+                socket.write_all(b"* OK loopback ready\r\n").await.unwrap();
+                let request = read_server_line(&mut socket).await;
+                assert_eq!(request, "A0001 AUTHENTICATE XOAUTH2\r\n");
+                socket.write_all(b"+ \r\n").await.unwrap();
+                let encoded = read_server_line(&mut socket).await;
+                let decoded = super::STANDARD.decode(encoded.trim()).unwrap();
+                assert_eq!(
+                    decoded,
+                    b"user=alice\x01auth=Bearer ya29.dispatch\x01\x01".to_vec()
+                );
+                socket
+                    .write_all(b"A0001 OK authenticated\r\n")
+                    .await
+                    .unwrap();
+            },
+            super::ImapCredentials::OAuthToken("ya29.dispatch".to_string()),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn oauth_login_siblings_validate_without_network() {
+        let config =
+            super::ImapConnectionConfig::new("127.0.0.1", Some(9_993), Some("SSL"), "alice")
+                .unwrap();
+        // Validation runs before any socket connects, so these fail fast
+        // with the same errors as the password variants.
+        assert!(
+            super::append_raw_message_classified_oauth(config.clone(), "t", "", b"raw")
+                .await
+                .is_err()
+        );
+        assert!(super::store_message_keyword_oauth(
+            config.clone(),
+            "t",
+            "INBOX",
+            "not-a-uid",
+            "kw",
+            true
+        )
+        .await
+        .is_err());
+        assert!(super::delete_messages_oauth(config, "t", "INBOX", "")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

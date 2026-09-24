@@ -4479,6 +4479,32 @@ impl LegacySmtpSender for ProductionLegacySmtpSender {
     }
 }
 
+/// Refreshes a provider OAuth access token for the send flow. Injected (like
+/// the SMTP sender/appender seams) so OAuth send tests run without network.
+#[async_trait::async_trait]
+trait OAuthAccessTokenRefresher: Sync {
+    async fn refresh(
+        &self,
+        account_type: &str,
+        refresh_token: &str,
+        tenant: Option<&str>,
+    ) -> fm_core::Result<String>;
+}
+
+struct ProductionOAuthTokenRefresher;
+
+#[async_trait::async_trait]
+impl OAuthAccessTokenRefresher for ProductionOAuthTokenRefresher {
+    async fn refresh(
+        &self,
+        account_type: &str,
+        refresh_token: &str,
+        tenant: Option<&str>,
+    ) -> fm_core::Result<String> {
+        refresh_oauth_access_token(account_type, refresh_token, tenant).await
+    }
+}
+
 #[async_trait::async_trait]
 trait LegacyReadReceiptImap: Sync {
     async fn preflight(&self, config: ImapConnectionConfig, password: &str) -> fm_core::Result<()>;
@@ -4529,7 +4555,7 @@ trait LegacySentAppender: Sync {
         user_id: i64,
         account_id: i64,
         config: &ImapConnectionConfig,
-        password: &str,
+        credentials: &fm_imap::ImapCredentials,
         folder: &str,
         raw: &[u8],
     ) -> Result<(), String>;
@@ -4546,12 +4572,19 @@ impl LegacySentAppender for ProductionLegacySentAppender {
         user_id: i64,
         account_id: i64,
         config: &ImapConnectionConfig,
-        password: &str,
+        credentials: &fm_imap::ImapCredentials,
         folder: &str,
         raw: &[u8],
     ) -> Result<(), String> {
         legacy_send_message_append_to_sent(
-            state, pool, user_id, account_id, config, password, folder, raw,
+            state,
+            pool,
+            user_id,
+            account_id,
+            config,
+            credentials,
+            folder,
+            raw,
         )
         .await
     }
@@ -4728,6 +4761,7 @@ async fn native_send_read_receipt_message_inner_with_clients(
         &account,
         &password,
         &credential_key,
+        None,
     )
     .await
     {
@@ -5040,10 +5074,14 @@ async fn native_send_message_inner_with_sender(
         delivery_phase,
         smtp_sender,
         &ProductionLegacySentAppender,
+        &ProductionOAuthTokenRefresher,
     )
     .await
 }
 
+/// The send flow threads its test seams (SMTP sender, Sent appender, OAuth
+/// refresher) explicitly, hence the argument count.
+#[allow(clippy::too_many_arguments)]
 async fn native_send_message_inner_with_sender_and_sent_appender(
     state: &AppState,
     original_action: &str,
@@ -5052,6 +5090,7 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
     delivery_phase: Arc<AtomicU8>,
     smtp_sender: &dyn LegacySmtpSender,
     sent_appender: &dyn LegacySentAppender,
+    token_refresher: &dyn OAuthAccessTokenRefresher,
 ) -> Response {
     if let Some(feature) = legacy_unsupported_compose_feature(payload, true) {
         return json_result_error(
@@ -5090,9 +5129,32 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
 
-    let password = match account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(_) => return json_result_error(original_action, "Missing account password"),
+    // IMAP credential resolution for the send flow (fail fast like the
+    // legacy password gate). Password accounts keep the exact legacy gate;
+    // provider OAuth accounts are resolved by the shared helper below.
+    let send_credentials = match resolve_send_imap_credentials(
+        &account,
+        &credential_key,
+        original_action,
+        token_refresher,
+    )
+    .await
+    {
+        Ok(credentials) => credentials,
+        Err(response) => return response,
+    };
+    // SMTP still takes a password string for the password-auth fallback; on
+    // the OAuth path it is unused because the preset access token selects
+    // XOAUTH2. Pure-OAuth accounts simply have none stored.
+    let smtp_password = match &send_credentials {
+        fm_imap::ImapCredentials::Password(password) => password.clone(),
+        fm_imap::ImapCredentials::OAuthToken(_) => {
+            account_password(&account, &credential_key).unwrap_or_default()
+        }
+    };
+    let preset_access_token = match &send_credentials {
+        fm_imap::ImapCredentials::OAuthToken(token) => Some(token.as_str()),
+        fm_imap::ImapCredentials::Password(_) => None,
     };
 
     let _compose_permit = match tokio::time::timeout(
@@ -5154,8 +5216,9 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
         user.user_id,
         account_id,
         &account,
-        &password,
+        &smtp_password,
         &credential_key,
+        preset_access_token,
     )
     .await
     {
@@ -5298,24 +5361,50 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
     let post_send_imap_requested = stored_bytes.is_some()
         || request.draft_info.is_some()
         || (!request.draft_folder.is_empty() && request.draft_uid > 0);
-    let imap_config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) if post_send_imap_requested => {
-            return legacy_action_error(
-                original_action,
-                CANT_SAVE_MESSAGE,
-                format!(
-                    "Message was sent, but post-send IMAP processing is unavailable: {}",
+    // Post-send IMAP follows the same credentials as the send itself:
+    // password accounts keep the exact legacy config lookup, OAuth accounts
+    // use the provider-default config resolved in slice 2. Either failure
+    // keeps the legacy mandatory-or-skip contract below.
+    let imap_config = match &send_credentials {
+        fm_imap::ImapCredentials::Password(_) => match imap_config_from_account_secret(&account) {
+            Ok(config) => config,
+            Err(err) if post_send_imap_requested => {
+                return legacy_action_error(
+                    original_action,
+                    CANT_SAVE_MESSAGE,
+                    format!(
+                        "Message was sent, but post-send IMAP processing is unavailable: {}",
+                        err.public_message()
+                    ),
+                )
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "SendMessage: skipping post-send IMAP work, no usable IMAP config: {}",
                     err.public_message()
-                ),
-            )
-        }
-        Err(err) => {
-            tracing::warn!(
-                "SendMessage: skipping post-send IMAP work, no usable IMAP config: {}",
-                err.public_message()
-            );
-            return legacy_send_message_success(original_action);
+                );
+                return legacy_send_message_success(original_action);
+            }
+        },
+        fm_imap::ImapCredentials::OAuthToken(_) => {
+            match oauth_imap_connection_config(pool, &account).await {
+                Ok(config) => config,
+                Err(message) if post_send_imap_requested => {
+                    return legacy_action_error(
+                        original_action,
+                        CANT_SAVE_MESSAGE,
+                        format!(
+                        "Message was sent, but post-send IMAP processing is unavailable: {message}"
+                    ),
+                    )
+                }
+                Err(message) => {
+                    tracing::warn!(
+                        "SendMessage: skipping post-send IMAP work, no usable IMAP config: {message}"
+                    );
+                    return legacy_send_message_success(original_action);
+                }
+            }
         }
     };
 
@@ -5327,7 +5416,7 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
                 user.user_id,
                 account_id,
                 &imap_config,
-                &password,
+                &send_credentials,
                 &request.save_folder,
                 &stored_bytes,
             )
@@ -5338,16 +5427,16 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
     }
 
     if let Some(draft_info) = &request.draft_info {
-        legacy_send_message_flag_draft_source(&imap_config, &password, draft_info).await;
+        legacy_send_message_flag_draft_source(&imap_config, &send_credentials, draft_info).await;
     }
 
     if !request.draft_folder.is_empty() && request.draft_uid > 0 {
         let uid_set = request.draft_uid.to_string();
         let cleanup = tokio::time::timeout(
             SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
-            fm_imap::delete_messages(
+            send_imap_delete_messages(
                 imap_config.clone(),
-                &password,
+                &send_credentials,
                 &request.draft_folder,
                 &uid_set,
             ),
@@ -7475,19 +7564,30 @@ async fn legacy_send_message_append_to_sent(
     user_id: i64,
     account_id: i64,
     imap_config: &ImapConnectionConfig,
-    password: &str,
+    credentials: &fm_imap::ImapCredentials,
     save_folder: &str,
     raw: &[u8],
 ) -> Result<(), String> {
     let _ = state;
-    let first_error = match fm_imap::append_raw_message_classified(
-        imap_config.clone(),
-        password,
-        save_folder,
-        raw,
-    )
-    .await
-    {
+    // The classified APPEND (validation, `\Seen` flags, definitive/uncertain
+    // outcome mapping, SentFolder fallback below) is identical for both
+    // credential kinds; only the session establishment differs.
+    let first_error = match credentials {
+        fm_imap::ImapCredentials::Password(password) => {
+            fm_imap::append_raw_message_classified(imap_config.clone(), password, save_folder, raw)
+                .await
+        }
+        fm_imap::ImapCredentials::OAuthToken(token) => {
+            fm_imap::append_raw_message_classified_oauth(
+                imap_config.clone(),
+                token,
+                save_folder,
+                raw,
+            )
+            .await
+        }
+    };
+    let first_error = match first_error {
         Ok(()) => return Ok(()),
         Err(fm_imap::AppendRawMessageFailure::Definitive(message)) => message,
         Err(fm_imap::AppendRawMessageFailure::Uncertain(message)) => {
@@ -7521,13 +7621,26 @@ async fn legacy_send_message_append_to_sent(
         ));
     };
 
-    match fm_imap::append_raw_message_classified(
-        imap_config.clone(),
-        password,
-        &fallback_folder,
-        raw,
-    )
-    .await
+    match match credentials {
+        fm_imap::ImapCredentials::Password(password) => {
+            fm_imap::append_raw_message_classified(
+                imap_config.clone(),
+                password,
+                &fallback_folder,
+                raw,
+            )
+            .await
+        }
+        fm_imap::ImapCredentials::OAuthToken(token) => {
+            fm_imap::append_raw_message_classified_oauth(
+                imap_config.clone(),
+                token,
+                &fallback_folder,
+                raw,
+            )
+            .await
+        }
+    }
     {
         Ok(()) => Ok(()),
         Err(err) => Err(format!(
@@ -7540,7 +7653,7 @@ async fn legacy_send_message_append_to_sent(
 /// Marks the source message answered/forwarded after a reply or forward is sent.
 async fn legacy_send_message_flag_draft_source(
     imap_config: &ImapConnectionConfig,
-    password: &str,
+    credentials: &fm_imap::ImapCredentials,
     draft_info: &LegacyDraftInfoRequest,
 ) {
     if draft_info.folder.trim().is_empty() || draft_info.uid == 0 {
@@ -7549,37 +7662,40 @@ async fn legacy_send_message_flag_draft_source(
 
     let uid_set = draft_info.uid.to_string();
     let info_type = draft_info.info_type.to_ascii_lowercase();
-    let result = match info_type.as_str() {
-        "reply" | "reply-all" => {
-            tokio::time::timeout(
-                SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
-                fm_imap::store_message_keyword(
-                    imap_config.clone(),
-                    password,
-                    &draft_info.folder,
-                    &uid_set,
-                    "\\Answered",
-                    true,
-                ),
-            )
-            .await
-        }
-        "forward" => {
-            tokio::time::timeout(
-                SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
-                fm_imap::store_message_keyword(
-                    imap_config.clone(),
-                    password,
-                    &draft_info.folder,
-                    &uid_set,
-                    "$Forwarded",
-                    true,
-                ),
-            )
-            .await
-        }
+    // Same keyword flagging for both credential kinds; only the session
+    // establishment differs.
+    let keyword = match info_type.as_str() {
+        "reply" | "reply-all" => "\\Answered",
+        "forward" => "$Forwarded",
         _ => return,
     };
+    let result = tokio::time::timeout(SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE, async {
+        match credentials {
+            fm_imap::ImapCredentials::Password(password) => {
+                fm_imap::store_message_keyword(
+                    imap_config.clone(),
+                    password,
+                    &draft_info.folder,
+                    &uid_set,
+                    keyword,
+                    true,
+                )
+                .await
+            }
+            fm_imap::ImapCredentials::OAuthToken(token) => {
+                fm_imap::store_message_keyword_oauth(
+                    imap_config.clone(),
+                    token,
+                    &draft_info.folder,
+                    &uid_set,
+                    keyword,
+                    true,
+                )
+                .await
+            }
+        }
+    })
+    .await;
 
     match result {
         Ok(Ok(())) => {}
@@ -7594,6 +7710,68 @@ async fn legacy_send_message_flag_draft_source(
             draft_info.folder,
             draft_info.uid
         ),
+    }
+}
+
+/// Resolves how the send flow authenticates to IMAP. Password accounts keep
+/// the exact legacy gate. Provider OAuth (gmail/o365) accounts try OAuth
+/// first: a fresh token unlocks OAuth SMTP and OAuth IMAP. Any OAuth failure
+/// falls back to the exact legacy password behavior, so hybrid accounts keep
+/// working; pure-OAuth failures stay errors, only the message improves
+/// (re-authorize instead of a misleading missing-password error).
+async fn resolve_send_imap_credentials(
+    account: &MailAccountConnectionSecret,
+    credential_key: &[u8],
+    original_action: &str,
+    token_refresher: &dyn OAuthAccessTokenRefresher,
+) -> Result<fm_imap::ImapCredentials, Response> {
+    match account.account_type.as_str() {
+        "gmail" | "o365" => {
+            let oauth = match oauth_refresh_token_for_imap(account, credential_key) {
+                Ok((account_type, refresh_token, tenant)) => token_refresher
+                    .refresh(&account_type, &refresh_token, tenant.as_deref())
+                    .await
+                    .ok()
+                    .filter(|token| !token.trim().is_empty()),
+                Err(_) => None,
+            };
+            match oauth {
+                Some(access_token) => Ok(fm_imap::ImapCredentials::OAuthToken(access_token)),
+                None => match account_password(account, credential_key) {
+                    Ok(password) => Ok(fm_imap::ImapCredentials::Password(password)),
+                    Err(_) => Err(json_result_error(
+                        original_action,
+                        "Missing OAuth refresh token — re-authorize this account.",
+                    )),
+                },
+            }
+        }
+        _ => match account_password(account, credential_key) {
+            Ok(password) => Ok(fm_imap::ImapCredentials::Password(password)),
+            Err(_) => Err(json_result_error(
+                original_action,
+                "Missing account password",
+            )),
+        },
+    }
+}
+
+/// Deletes messages with either credential kind for post-send draft cleanup.
+/// Same UID-set validation and MOVE-fallback semantics; only the session
+/// establishment differs.
+async fn send_imap_delete_messages(
+    config: ImapConnectionConfig,
+    credentials: &fm_imap::ImapCredentials,
+    mailbox: &str,
+    uid_set: &str,
+) -> fm_core::Result<()> {
+    match credentials {
+        fm_imap::ImapCredentials::Password(password) => {
+            fm_imap::delete_messages(config, password, mailbox, uid_set).await
+        }
+        fm_imap::ImapCredentials::OAuthToken(token) => {
+            fm_imap::delete_messages_oauth(config, token, mailbox, uid_set).await
+        }
     }
 }
 
@@ -7820,6 +7998,10 @@ async fn admin_setting_effective(
 /// Resolves the SMTP endpoint, preferring the per-account record, then the
 /// enabled domain template matching the account email, and finally the
 /// server-wide mail defaults.
+/// Resolves SMTP endpoint, TLS mode, and credentials for one send. The
+/// preset token (send flow only) skips a second refresh per send; other
+/// callers pass `None` for the legacy decrypt-plus-refresh behavior.
+#[allow(clippy::too_many_arguments)]
 async fn legacy_smtp_send_settings(
     state: &AppState,
     pool: &sqlx::AnyPool,
@@ -7828,6 +8010,7 @@ async fn legacy_smtp_send_settings(
     account: &MailAccountConnectionSecret,
     password: &str,
     credential_key: &[u8],
+    preset_access_token: Option<&str>,
 ) -> Result<fm_smtp::SmtpSendSettings, String> {
     let stored = SqlxUserRepository::get_mail_account(pool, user_id, account_id)
         .await
@@ -7912,31 +8095,34 @@ async fn legacy_smtp_send_settings(
         .map(|address| address.ip().to_string())
         .ok_or_else(|| "SMTP host has no validated public address".to_string())?;
 
-    // Determine if this is an OAuth account and get access token. The
-    // refresh-token decrypt step is shared with the OAuth IMAP login seam;
-    // a missing/undecryptable token (or a failed refresh) still falls back
-    // to password auth here, exactly like the PHP plugin hook returning
-    // without an access token.
+    // Determine if this is an OAuth account and get access token. A preset
+    // token from the caller's own resolution wins so one send performs one
+    // refresh; otherwise the shared decrypt-plus-refresh runs here with the
+    // same password fallback as the PHP plugin hook returning without one.
     let access_token = match account.account_type.as_str() {
         "gmail" | "o365" => {
-            match oauth_refresh_token_for_imap(account, credential_key) {
-                Ok((account_type, refresh_token, tenant)) => {
-                    // Exchange refresh token for access token
-                    match refresh_oauth_access_token(
-                        &account_type,
-                        &refresh_token,
-                        tenant.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(token) => Some(token),
-                        Err(e) => {
-                            tracing::warn!("Failed to get OAuth access token for SMTP, falling back to password: {}", e);
-                            None
+            if let Some(preset) = preset_access_token.filter(|token| !token.trim().is_empty()) {
+                Some(preset.to_string())
+            } else {
+                match oauth_refresh_token_for_imap(account, credential_key) {
+                    Ok((account_type, refresh_token, tenant)) => {
+                        // Exchange refresh token for access token
+                        match refresh_oauth_access_token(
+                            &account_type,
+                            &refresh_token,
+                            tenant.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(token) => Some(token),
+                            Err(e) => {
+                                tracing::warn!("Failed to get OAuth access token for SMTP, falling back to password: {}", e);
+                                None
+                            }
                         }
                     }
+                    Err(_) => None,
                 }
-                Err(_) => None,
             }
         }
         _ => None,
@@ -23015,10 +23201,6 @@ fn imap_port(port: Option<i64>) -> fm_core::Result<Option<u16>> {
 /// Well-known IMAP endpoints for provider OAuth accounts, used only when
 /// neither the account nor its domain template pins an IMAP host — mirroring
 /// how `legacy_smtp_send_settings` falls back to configured defaults.
-///
-/// Staged for the OAuth IMAP login slice (the first caller); allowed dead
-/// until then so the `-D warnings` gate stays green.
-#[allow(dead_code)]
 fn oauth_imap_provider_defaults(account_type: &str) -> Option<(&'static str, u16, &'static str)> {
     match account_type {
         "gmail" => Some(("imap.gmail.com", 993, "SSL")),
@@ -23035,10 +23217,6 @@ fn oauth_imap_provider_defaults(account_type: &str) -> Option<(&'static str, u16
 /// authentication goes through `login_account_imap` (XOAUTH2, never LOGIN).
 /// Host trust matches every other IMAP path: stored/template hosts were
 /// validated at write time and provider defaults are constants.
-///
-/// Staged for the OAuth IMAP login slice (the first caller); allowed dead
-/// until then so the `-D warnings` gate stays green.
-#[allow(dead_code)]
 async fn oauth_imap_connection_config(
     pool: &sqlx::AnyPool,
     account: &MailAccountConnectionSecret,
@@ -38300,6 +38478,164 @@ Subject: Empty body metadata\r\n\r\n"
         .is_err());
     }
 
+    #[tokio::test]
+    async fn send_message_oauth_account_without_token_fails_closed() {
+        let key = [73_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(9_951, 9_952, &key, test_config(None)).await;
+        // Pure-OAuth account: no stored password and no refresh token.
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+              SET email = ?, type = 'gmail', login = ?,
+                  encrypted_password = NULL, encrypted_oauth_refresh_token = NULL
+              WHERE id = ?",
+        )
+        .bind("oauth-sender@example.com")
+        .bind("oauth-sender@example.com")
+        .bind(9_952_i64)
+        .execute(state.db_pool().unwrap())
+        .await
+        .unwrap();
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::new(Mutex::new(None)),
+        };
+        let appender = RecordingSentAppender::with_message(Arc::new(Mutex::new(None)));
+        let response = super::native_send_message_inner_with_sender_and_sent_appender(
+            &state,
+            "SendMessage",
+            &json!({
+                "account_id": 9_952,
+                "from": "oauth-sender@example.com",
+                "to": "recipient@example.net",
+                "plain": "unreachable",
+            }),
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+            &appender,
+            &StubOAuthTokenRefresher { token: None },
+        )
+        .await;
+        // Fails before any network: no token to refresh, no password to fall
+        // back to — with the re-authorize wording, not a password error.
+        let body = read_json(response).await;
+        assert_eq!(
+            body["Result"]["error"],
+            "Missing OAuth refresh token — re-authorize this account."
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_oauth_account_sends_and_files_sent_over_oauth() {
+        let key = [74_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(9_961, 9_962, &key, test_config(None)).await;
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+              SET email = ?, type = 'gmail', login = ?,
+                  encrypted_password = NULL,
+                  encrypted_oauth_refresh_token = ?,
+                  oauth_tenant = NULL,
+                  smtp_host = ?, smtp_port = ?, smtp_secure = ?
+              WHERE id = ?",
+        )
+        .bind("oauth-sender@example.com")
+        .bind("oauth-sender@example.com")
+        .bind(fm_user::encrypt_account_secret("stub-refresh", &key).unwrap())
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(9_962_i64)
+        .execute(state.db_pool().unwrap())
+        .await
+        .unwrap();
+        let smtp = Arc::new(Mutex::new(None));
+        let sent = Arc::new(Mutex::new(None));
+        let kinds = Arc::new(Mutex::new(Vec::new()));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&smtp),
+        };
+        let appender = RecordingSentAppender {
+            message: Arc::clone(&sent),
+            credentials: Arc::clone(&kinds),
+        };
+        let response = super::native_send_message_inner_with_sender_and_sent_appender(
+            &state,
+            "SendMessage",
+            &json!({
+                "account_id": 9_962,
+                "from": "oauth-sender@example.com",
+                "to": "recipient@example.net",
+                "plain": "OAuth body",
+                "saveFolder": "Sent",
+            }),
+            &session,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &sender,
+            &appender,
+            &StubOAuthTokenRefresher {
+                token: Some("stub-access-token".to_string()),
+            },
+        )
+        .await;
+        // No real network anywhere: SMTP and Sent are recorded, the stub
+        // stands in for the token endpoint, and the payload skips draft ops.
+        assert_eq!(read_json(response).await["Result"], true);
+        let smtp_wire = String::from_utf8(smtp.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(smtp_wire.contains("OAuth body"), "{smtp_wire}");
+        assert!(sent.lock().unwrap().is_some());
+        assert_eq!(*kinds.lock().unwrap(), vec!["oauth".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_send_imap_credentials_falls_back_to_password() {
+        let key = [75_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        // Hybrid account (password plus token) whose refresh fails keeps the
+        // exact legacy password path: no behavior change on failure.
+        let account = fm_user::MailAccountConnectionSecret {
+            id: 9_971,
+            email: "hybrid@example.com".to_string(),
+            account_type: "gmail".to_string(),
+            imap_host: None,
+            imap_port: None,
+            imap_secure: None,
+            login: None,
+            encrypted_password: Some(
+                fm_user::encrypt_account_secret("hybrid-password", &key).unwrap(),
+            ),
+            encrypted_oauth_refresh_token: Some(
+                fm_user::encrypt_account_secret("stale-refresh", &key).unwrap(),
+            ),
+            oauth_tenant: None,
+        };
+        let credentials = super::resolve_send_imap_credentials(
+            &account,
+            &key,
+            "SendMessage",
+            &StubOAuthTokenRefresher { token: None },
+        )
+        .await
+        .expect("hybrid falls back to password");
+        assert!(matches!(credentials, fm_imap::ImapCredentials::Password(_)));
+        // A fresh token wins over the stored password on the OAuth path.
+        let credentials = super::resolve_send_imap_credentials(
+            &account,
+            &key,
+            "SendMessage",
+            &StubOAuthTokenRefresher {
+                token: Some("fresh-token".to_string()),
+            },
+        )
+        .await
+        .expect("fresh token resolves OAuth");
+        assert!(matches!(
+            credentials,
+            fm_imap::ImapCredentials::OAuthToken(_)
+        ));
+    }
+
     #[test]
     fn oauth_refresh_token_for_imap_fails_closed() {
         let key = [19_u8; fm_user::CREDENTIAL_KEY_BYTES];
@@ -42324,9 +42660,8 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
-            &RecordingSentAppender {
-                message: Arc::new(Mutex::new(None)),
-            },
+            &RecordingSentAppender::with_message(Arc::new(Mutex::new(None))),
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         let body = read_json(response).await;
@@ -42368,6 +42703,16 @@ Subject: Empty body metadata\r\n\r\n"
 
     struct RecordingSentAppender {
         message: Arc<Mutex<Option<Vec<u8>>>>,
+        credentials: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingSentAppender {
+        fn with_message(message: Arc<Mutex<Option<Vec<u8>>>>) -> Self {
+            Self {
+                message,
+                credentials: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -42379,10 +42724,14 @@ Subject: Empty body metadata\r\n\r\n"
             _user_id: i64,
             _account_id: i64,
             _config: &ImapConnectionConfig,
-            _password: &str,
+            credentials: &fm_imap::ImapCredentials,
             _folder: &str,
             raw: &[u8],
         ) -> Result<(), String> {
+            self.credentials.lock().unwrap().push(match credentials {
+                fm_imap::ImapCredentials::Password(_) => "password".to_string(),
+                fm_imap::ImapCredentials::OAuthToken(_) => "oauth".to_string(),
+            });
             *self.message.lock().unwrap() = Some(raw.to_vec());
             Ok(())
         }
@@ -42390,6 +42739,24 @@ Subject: Empty body metadata\r\n\r\n"
 
     struct RecordingDraftAppender {
         message: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    struct StubOAuthTokenRefresher {
+        token: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::OAuthAccessTokenRefresher for StubOAuthTokenRefresher {
+        async fn refresh(
+            &self,
+            _account_type: &str,
+            _refresh_token: &str,
+            _tenant: Option<&str>,
+        ) -> fm_core::Result<String> {
+            self.token.clone().ok_or_else(|| {
+                fm_core::FrickmailError::Upstream("stub OAuth refresh failed".to_string())
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -42718,9 +43085,7 @@ Subject: Empty body metadata\r\n\r\n"
             succeed: true,
             message: Arc::clone(&smtp),
         };
-        let appender = RecordingSentAppender {
-            message: Arc::clone(&sent),
-        };
+        let appender = RecordingSentAppender::with_message(Arc::clone(&sent));
         let response = super::native_send_message_inner_with_sender_and_sent_appender(
             &state,
             "SendMessage",
@@ -42740,6 +43105,7 @@ Subject: Empty body metadata\r\n\r\n"
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
             &appender,
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         assert_eq!(read_json(response).await["Result"], true);
@@ -42827,9 +43193,7 @@ Subject: Empty body metadata\r\n\r\n"
             succeed: true,
             message: Arc::clone(&smtp),
         };
-        let sent_appender = RecordingSentAppender {
-            message: Arc::clone(&sent),
-        };
+        let sent_appender = RecordingSentAppender::with_message(Arc::clone(&sent));
         let response = super::native_send_message_inner_with_sender_and_sent_appender(
             &state,
             "SendMessage",
@@ -42838,6 +43202,7 @@ Subject: Empty body metadata\r\n\r\n"
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
             &sent_appender,
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         assert_eq!(read_json(response).await["Result"], true);

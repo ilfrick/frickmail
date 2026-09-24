@@ -5,6 +5,58 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 12:30:00 UTC
+
+The OAuth-aware send pipeline slice makes pure-OAuth (gmail/o365, no stored
+password) sends work end to end through `SendMessage` and v1 `POST /send`,
+which previously died at `Missing account password`:
+
+- `fm-imap`: `ImapCredentials::{Password,OAuthToken}` (redacted `Debug`)
+  plus `login_with_credentials` dispatch, and OAuth siblings sharing the
+  extracted in-session cores — `append_raw_message_classified_oauth`,
+  `store_message_keyword_oauth`, `delete_messages_oauth`. Password entry
+  points are byte-identical (proven by the untouched suites below).
+- Router: `OAuthAccessTokenRefresher` seam (production impl delegates to the
+  shared refresh; stub in tests), `resolve_send_imap_credentials`
+  (OAuth-first for gmail/o365 with exact legacy-password fallback, so hybrid
+  accounts keep working; pure-OAuth failures get the re-authorize wording),
+  one refresh per send (the resolved token is preset into SMTP settings),
+  credentials-aware post-send (provider-default config, Sent append with
+  SentFolder fallback, draft flagging/cleanup — all dispatching on the same
+  enum), and `LegacySentAppender` now takes credentials (recorders capture
+  the kind).
+
+Behavior on failure is unchanged by construction: hybrids fall back to the
+legacy password path, and config failures keep the mandatory-or-skip
+post-send contract. Draft saves and read receipts still gate on passwords;
+they follow the same pattern in the next slice.
+
+Verification: `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets -D warnings` clean (two precedent-backed `too_many_arguments`
+allows for the seam-threaded functions); `cargo test -p fm-imap --lib` 196
+passed / 0 failed (4 new: redaction, loopback dispatch for both kinds,
+sibling validation parity); `cargo test -p fm-http --lib` 561 passed / 0
+failed (5 new: fail-closed no-token send, full OAuth send with recorded
+SMTP+Sent asserting the `oauth` kind and zero network, hybrid
+fallback-to-password resolution); targeted suites green throughout.
+Production-image validation built `frickmail-rust:oauth-send-test` at image
+ID `sha256:52ae6de3613e7673137089fbb7dc453d8c93df5184a4eebeb7baad837e8d34ab`;
+a read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+Independent senior review criteria: tokens never in argv/env/logs (memory
+only, redacted Debugs), OAuth-first with legacy fallback (no regression
+possible on failure paths), single refresh per send, no schema or config
+change, staged `allow(dead_code)`s from slice 2 removed (all wired).
+
+This slice is verified but NOT yet committed or pushed. Remaining for full
+OAuth sends: draft-save + read-receipt OAuth paths, then live Gmail/O365
+verification (needs operator test accounts + OAuth client IDs). The major
+remaining gates toward the final Rust-only goal are otherwise unchanged.
+
+---
+
 ## Progress Snapshot — 2026-09-24 10:45:00 UTC
 
 The OAuth IMAP login seam slice continues option 1 (full OAuth sends) in the
