@@ -5,6 +5,40 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 18:00:00 UTC
+
+The Example-plugin port slice closes the remaining trivial gate-2 hook
+trio: `JsonGetExampleUserData`, `JsonSaveExampleUserData`, and
+`JsonAdminGetData` are now native (previously 501).
+
+- `JsonGetExampleUserData` / `JsonSaveExampleUserData` read/write the user
+  settings `Plugins["example"]` object, mirroring the Search Filters plugin's
+  `Plugins["Search Filters"]` namespace. Reads default to `''`; writes merge
+  only the `example` sub-object, so other plugin namespaces (Search Filters,
+  etc.) survive — verified by test against a pre-seeded Search Filters entry.
+- `JsonAdminGetData` requires the operator session flag
+  (`fm_session::ADMIN_SESSION_KEY`) exactly like PHP's `IsAdminLoggined()`
+  and returns `{"PHP": <server version>}`.
+
+Verification: `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets -D warnings` clean; full `cargo test -p fm-http --lib` 573
+passed / 0 failed; 1 new test green (round-trip, defaults,
+Search-Filters-preserving merge, admin gating with the operator flag).
+Production-image validation: `frickmail-rust:example-plugin-test` built at
+image ID `sha256:1aa0cfcaf6a45a5a6bf43b8991111388cefd5187a1c449b9a59dc307204a2a4b`;
+read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: OAuth sends live verification (deferred —
+needs operator test accounts + OAuth client IDs), remaining compat-known
+bundled-plugin hooks (`KolabFolder`, `NextcloudSaveMsg`/`NextcloudAttachFile`),
+connection-token/CSRF contract, frontend/theming with the theme deletion plan
+recorded, cutover validation.
+
+---
+
 ## Progress Snapshot — 2026-09-24 16:30:00 UTC
 
 The legacy two-factor-auth plugin port slice is the next gate-2 hook closure:

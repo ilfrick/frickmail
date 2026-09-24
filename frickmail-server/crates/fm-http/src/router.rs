@@ -1849,6 +1849,15 @@ async fn native_compat_response(
         "ClearTwoFactorInfo" => {
             Some(native_legacy_two_factor_clear(state, original_action, session).await)
         }
+        "JsonGetExampleUserData" => {
+            Some(native_json_get_example_user_data(state, original_action, session).await)
+        }
+        "JsonSaveExampleUserData" => {
+            Some(native_json_save_example_user_data(state, original_action, payload, session).await)
+        }
+        "JsonAdminGetData" => {
+            Some(native_json_admin_get_data(state, original_action, session).await)
+        }
         "FrickmailRequestPasswordReset" => {
             Some(native_frickmail_request_password_reset(state, original_action, payload).await)
         }
@@ -11917,6 +11926,131 @@ async fn native_legacy_two_factor_clear(
         "BackupCodes": "",
     });
     json_value_envelope(StatusCode::OK, action, json!({ "Result": result }))
+}
+
+// The bundled Example plugin's JSON hooks (`example.js` settings tab),
+// ported to the user settings `Plugins["example"]` object the same way the
+// Search Filters plugin uses `Plugins["Search Filters"]`. Reads default to
+// `''`; writes merge only the `example` sub-object so other plugin
+// namespaces are preserved. `JsonAdminGetData` requires the operator
+// session flag like PHP's `IsAdminLoggined()`.
+
+const EXAMPLE_PLUGIN_NAME: &str = "example";
+
+async fn native_example_load_plugins(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let user = SqlxUserRepository::find_by_id(pool, user_id)
+        .await
+        .map_err(|err| err.public_message())?
+        .ok_or_else(|| "Not authenticated".to_string())?;
+    Ok(user
+        .settings
+        .get("Plugins")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default())
+}
+
+async fn native_json_get_example_user_data(
+    state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(action, "Frickmail database is not configured");
+    };
+    let plugins = match native_example_load_plugins(pool, user.user_id).await {
+        Ok(plugins) => plugins,
+        Err(message) => return json_result_error(action, &message),
+    };
+    let example = plugins.get(EXAMPLE_PLUGIN_NAME).and_then(Value::as_object);
+    let string_field = |field: &str| {
+        example
+            .and_then(|example| example.get(field).and_then(Value::as_str))
+            .unwrap_or("")
+    };
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({
+            "Result": {
+                "UserFacebook": string_field("UserFacebook"),
+                "UserSkype": string_field("UserSkype"),
+            }
+        }),
+    )
+}
+
+async fn native_json_save_example_user_data(
+    state: &AppState,
+    action: &str,
+    payload: &Value,
+    session: &fm_session::Session,
+) -> Response {
+    let Some(user) = (match load_session_user(state, action, session).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    }) else {
+        return json_result_error(action, "Not authenticated");
+    };
+    let Some(pool) = state.db_pool() else {
+        return json_result_error(action, "Frickmail database is not configured");
+    };
+    let mut plugins = match native_example_load_plugins(pool, user.user_id).await {
+        Ok(plugins) => plugins,
+        Err(message) => return json_result_error(action, &message),
+    };
+    let example = json!({
+        "UserFacebook": payload_string(payload, "UserFacebook").unwrap_or_default(),
+        "UserSkype": payload_string(payload, "UserSkype").unwrap_or_default(),
+    });
+    plugins.insert(EXAMPLE_PLUGIN_NAME.to_string(), example);
+    if let Err(err) = SqlxUserRepository::replace_user_settings_key(
+        pool,
+        user.user_id,
+        "Plugins",
+        &Value::Object(plugins),
+    )
+    .await
+    {
+        return json_result_error(action, &err.public_message());
+    }
+    json_value_envelope(StatusCode::OK, action, json!({ "Result": true }))
+}
+
+async fn native_json_admin_get_data(
+    _state: &AppState,
+    action: &str,
+    session: &fm_session::Session,
+) -> Response {
+    // PHP gates on `IsAdminLoggined()`; the session carries the operator
+    // flag established by the native admin login.
+    let is_admin = session
+        .get::<bool>(fm_session::ADMIN_SESSION_KEY)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    if !is_admin {
+        return json_value_envelope(StatusCode::OK, action, json!({ "Result": false }));
+    }
+    json_value_envelope(
+        StatusCode::OK,
+        action,
+        json!({
+            "Result": {
+                "PHP": env!("CARGO_PKG_VERSION"),
+            }
+        }),
+    )
 }
 
 async fn native_frickmail_request_password_reset(
@@ -25872,6 +26006,86 @@ mod tests {
         .await;
         assert_eq!(body["Result"]["IsSet"], true);
         assert_eq!(body["Result"]["Enable"], true);
+    }
+
+    #[tokio::test]
+    async fn example_plugin_hooks_roundtrip_and_preserve_other_plugins() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        // Pre-seed a Search Filters namespace to prove the merge does not
+        // clobber other plugin settings (the shared `Plugins` object).
+        seed_user_with_settings(
+            &pool,
+            18_441,
+            "example-user",
+            Some("[EMAIL]"),
+            json!({
+                "Plugins": {
+                    "Search Filters": { "SFilters": [{"searchQ": "keep-me"}] }
+                }
+            }),
+        )
+        .await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session = authenticated_session(18_441, "example-user", Some("[EMAIL]")).await;
+
+        // Defaults are empty strings.
+        let body = read_json(
+            super::native_json_get_example_user_data(&state, "JsonGetExampleUserData", &session)
+                .await,
+        )
+        .await;
+        assert_eq!(body["Result"]["UserFacebook"], "");
+        assert_eq!(body["Result"]["UserSkype"], "");
+
+        // Save round-trips.
+        let body = read_json(
+            super::native_json_save_example_user_data(
+                &state,
+                "JsonSaveExampleUserData",
+                &json!({"UserFacebook": "fbook", "UserSkype": "skypeid"}),
+                &session,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["Result"], true);
+        let body = read_json(
+            super::native_json_get_example_user_data(&state, "JsonGetExampleUserData", &session)
+                .await,
+        )
+        .await;
+        assert_eq!(body["Result"]["UserFacebook"], "fbook");
+        assert_eq!(body["Result"]["UserSkype"], "skypeid");
+
+        // The Search Filters namespace survives the example write.
+        let user = SqlxUserRepository::find_by_id(state.db_pool().unwrap(), 18_441)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            user.settings["Plugins"]["Search Filters"]["SFilters"][0]["searchQ"],
+            "keep-me"
+        );
+
+        // Admin gating: a plain user session gets Result false like PHP's
+        // `IsAdminLoggined()` failure; the operator flag returns the version.
+        let body = read_json(
+            super::native_json_admin_get_data(&state, "JsonAdminGetData", &session).await,
+        )
+        .await;
+        assert_eq!(body["Result"], false);
+        let session = authenticated_session(18_441, "example-user", Some("[EMAIL]")).await;
+        session
+            .insert(fm_session::ADMIN_SESSION_KEY, true)
+            .await
+            .unwrap();
+        let body = read_json(
+            super::native_json_admin_get_data(&state, "JsonAdminGetData", &session).await,
+        )
+        .await;
+        let php = body["Result"]["PHP"].as_str().unwrap();
+        assert!(!php.is_empty());
     }
 
     #[tokio::test]

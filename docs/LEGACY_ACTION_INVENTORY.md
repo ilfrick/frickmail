@@ -197,12 +197,12 @@ features unless noted elsewhere.
 |---|---|
 | Avatars | `Avatar` (native: file cache, bundled service icons on caller-asserted DKIM, opt-in SSRF-safe Gravatar/favicon; third-party favicon aggregators and BIMI DNS are follow-ups) |
 | Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` (native settings CRUD under the legacy `Plugins["Search Filters"]` namespace; invalid add/edit and empty renamed queries are rejected as an intentional safety boundary, while login-time IMAP application remains pending) |
-| Kolab | `KolabFolder` |
+| Kolab | `KolabFolder` — compat-known, deferred to an operator decision. The legacy handler depends on the Kolab PHP/library stack; no standalone Rust mapping exists on the mailbox path. Reassess at cutover (retire vs. live-integration port). |
 | Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` (native, operator-gated bounded legacy private-data archive/restore; requires `FRICKMAIL__ADMIN__TOKEN_HASH` and `FRICKMAIL__PRIVATE_DATA_DIR`, excludes cache and symlinks, and enforces entry/size/path/symlink limits) |
 | Contacts sync | `JsonContactsSync`, `JsonAddContact`, `JsonDeduplicateContacts` — all native. The new `fm-user` address-book module shares the legacy PHP `rainloop_ab_contacts` / `rainloop_ab_properties` schema (jCard blob under `prop_type = 251` plus flattened typed properties and lowercased search values), so the PHP compatibility runtime reads the same rows. `JsonContactsSync` proxies Gmail People API (pageSize 200, fixed personFields, page tokens) and Microsoft Graph contacts ($top=100 following `@odata.nextLink`, restricted to the Graph root for SSRF safety) with the selected Frickmail account's encrypted OAuth refresh token (`account_type` selects the provider instead of PHP's domain-list detection), refreshing with the Graph contacts scope, and upserting by `gmail:` / `o365:` provider UIDs with the PHP save-count semantics; provider error strings, jCard shapes (BDAY as `date`), and Result envelopes match the PHP plugin. `JsonAddContact` uses `manual:` plus 32 random hex characters; the "address book is not active" errors are intentionally absent because the native PAB storage is always available. |
-| Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` |
+| Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` — all native. Read/write the user settings `Plugins["example"]` object (defaults `''`, writes merge only the `example` sub-object so the Search Filters namespace survives); `JsonAdminGetData` requires the operator session flag like PHP's `IsAdminLoggined()` and returns the server version string. |
 | Change password | `ChangePassword` (partial-native) |
-| Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` |
+| Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` — compat-known, deferred to an operator decision. The legacy handlers operate on Nextcloud's embedded `\OCP\Files` runtime and the plugin has no standalone endpoint/token configuration, so there is no native Rust mapping on a plain deployment. Reassess at cutover (retire vs. a standalone WebDAV-backed port). |
 | Calendar | `JsonCalendarEvents`, `JsonCalendarList`, `JsonCalendarSave`, `JsonCalendarDelete` — native. Proxies Google Calendar / Microsoft Graph with the selected Frickmail account's encrypted OAuth refresh token (`account_type` selects the provider instead of PHP's domain-list detection; explicit `account_id` or the selected-account session replaces the PHP main-account lookup). Gmail refresh sends no scope; Graph refresh sends the `Calendars.ReadWrite offline_access` scope. Response envelopes, event shapes, composite-id rules, and provider error strings match the PHP plugin; the O365 event *update* intentionally addresses the raw Graph event id instead of the legacy composite `calendar:id` URL (which could never match), and client credentials come from `FRICKMAIL__OAUTH2__*` with the legacy `FRICKMAIL_GMAIL_*` / `FRICKMAIL_O365_*` fallback. |
 | Have I Been Pwned | `HibpCheck` (native) |
 | Two-factor-auth legacy plugin | `GetTwoFactorInfo`, `CreateTwoFactorSecret`, `ShowTwoFactorSecret`, `EnableTwoFactor`, `VerifyTwoFactorCode`, `ClearTwoFactorInfo` — all native. Ported onto the Frickmail TOTP store with PHP response shapes (`{User, IsSet, Enable, Tested}`, text `QRCode` for the monospace `<pre>`, empty `BackupCodes`); a secret only activates after a live code is verified in-session, and disable/clear without a valid code is refused (the modern `FrickmailDisableTotp` remains the code-gated removal path). Legacy PHP storage files are not read or written; the plugin's `force_two_factor_auth` setting and backup codes are boundaries. |
@@ -307,20 +307,14 @@ surface.
 
 The next Rust implementation targets from this inventory are:
 
-1. Complete native parity for exact IMAP MIME normalization edge cases for
-   detached/clear-signed verification — now native. Server-side compose GnuPG
-   is native: passphrase-protected keyring generation/sign/encrypt/decrypt/
-   export with loopback passphrase files, PHP-truthy sign gating, strict
-   fail-closed fingerprint/recipient validation, PHP sign-then-encrypt order,
-   single-armor RFC 3156 wrapping, and SaveMessage draft parity. Verification
-   parity: `PgpVerifyMessage` fetches `{part}.MIME` headers, the part body,
-   and the optional signature part under the shared bounds; detached text is
-   `headers + CRLF + body`, clearsigned text is the header-derived
-   transfer-decoded body with an empty signature, CRLF-canonicalized and
-   ASCII-filtered like PHP, staged for `gpg --verify` through 0600 temp files
-   (roundtrips regression-tested against the local GnuPG binary). Key
-   listing/import/generation/export, direct or IMAP part decryption, and
-   legacy multi-signature verification metadata are native.
+1. Operator decisions pending (no standalone local mapping exists, or live
+   integration endpoints are required to verify):
+   - `KolabFolder` and `NextcloudSaveMsg`/`NextcloudAttachFile` — the legacy
+     handlers depend on the embedded Kolab/Nextcloud PHP runtimes, which the
+     Rust-only deployment does not run; retire or provide a standalone
+     endpoint at cutover.
+   - OAuth (Gmail/O365) send/IMAP/SMTP live verification needs operator test
+     accounts plus OAuth client IDs; the native pipeline itself is complete.
 2. Complete `Message` parity: remaining message/header details and detailed
    message payloads. Opaque (non-detached) S/MIME `smimeSigned` auto-verification
    is native and best-effort in the `Message` handler (verified inner `body`
