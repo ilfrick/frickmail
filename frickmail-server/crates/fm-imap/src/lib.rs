@@ -2023,10 +2023,47 @@ pub async fn append_draft_message(
     raw: &[u8],
     message_id: Option<&str>,
 ) -> Result<Option<u32>> {
+    append_draft_message_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_owned()),
+        mailbox,
+        raw,
+        message_id,
+    )
+    .await
+}
+
+/// OAuth sibling of [`append_draft_message`]: same validation, `\Seen`
+/// APPEND, `Message-ID` UID lookup, and uncertain-outcome recovery — only
+/// the sessions come from SASL XOAUTH2 instead of `LOGIN`.
+pub async fn append_draft_message_oauth(
+    config: ImapConnectionConfig,
+    access_token: &str,
+    mailbox: &str,
+    raw: &[u8],
+    message_id: Option<&str>,
+) -> Result<Option<u32>> {
+    append_draft_message_with_credentials(
+        config,
+        &ImapCredentials::OAuthToken(access_token.to_owned()),
+        mailbox,
+        raw,
+        message_id,
+    )
+    .await
+}
+
+async fn append_draft_message_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    raw: &[u8],
+    message_id: Option<&str>,
+) -> Result<Option<u32>> {
     validate_mailbox(mailbox)?;
     validate_eml(raw)?;
 
-    let mut session = login(config.clone(), password).await?;
+    let mut session = login_with_credentials(config.clone(), credentials).await?;
     let result = append_draft_message_in_session(&mut session, mailbox, raw, message_id).await;
     logout_quietly(session).await;
     match result? {
@@ -2038,7 +2075,7 @@ pub async fn append_draft_message(
             };
             // Reconnect because the original stream may be desynchronized or
             // closed. Locating the unique Message-ID proves that APPEND committed.
-            let Ok(mut recovery) = login(config, password).await else {
+            let Ok(mut recovery) = login_with_credentials(config, credentials).await else {
                 return Ok(None);
             };
             let recovered =
@@ -2455,11 +2492,40 @@ pub async fn store_message_flag(
     validate_uid_set(uid_set)?;
 
     let mut session = login(config, password).await?;
-    timeout_imap("select mailbox", session.select(mailbox)).await?;
-    let query = store_flag_query(flag, set);
-    let result = drain_uid_store(&mut session, uid_set, query, "store message flag").await;
+    let result = store_flag_in_session(&mut session, mailbox, uid_set, flag, set).await;
     logout_quietly(session).await;
     result
+}
+
+/// OAuth sibling of [`store_message_flag`]: same validation and UID STORE
+/// semantics — only the session comes from SASL XOAUTH2 instead of `LOGIN`.
+pub async fn store_message_flag_oauth(
+    config: ImapConnectionConfig,
+    access_token: &str,
+    mailbox: &str,
+    uid_set: &str,
+    flag: ImapMessageFlag,
+    set: bool,
+) -> Result<()> {
+    validate_mailbox(mailbox)?;
+    validate_uid_set(uid_set)?;
+
+    let mut session = login_oauth(config, access_token).await?;
+    let result = store_flag_in_session(&mut session, mailbox, uid_set, flag, set).await;
+    logout_quietly(session).await;
+    result
+}
+
+async fn store_flag_in_session(
+    session: &mut BoxedSession,
+    mailbox: &str,
+    uid_set: &str,
+    flag: ImapMessageFlag,
+    set: bool,
+) -> Result<()> {
+    timeout_imap("select mailbox", session.select(mailbox)).await?;
+    let query = store_flag_query(flag, set);
+    drain_uid_store(session, uid_set, query, "store message flag").await
 }
 
 pub async fn store_message_keyword(
@@ -12943,9 +13009,26 @@ wQoDASNFZ4mrze8B\n-----END PGP MESSAGE-----"
         )
         .await
         .is_err());
-        assert!(super::delete_messages_oauth(config, "t", "INBOX", "")
-            .await
-            .is_err());
+        assert!(
+            super::delete_messages_oauth(config.clone(), "t", "INBOX", "")
+                .await
+                .is_err()
+        );
+        assert!(super::store_message_flag_oauth(
+            config.clone(),
+            "t",
+            "INBOX",
+            "not-a-uid",
+            super::ImapMessageFlag::Seen,
+            true
+        )
+        .await
+        .is_err());
+        assert!(
+            super::append_draft_message_oauth(config, "t", "", b"raw", None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

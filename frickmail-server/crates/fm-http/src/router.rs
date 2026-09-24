@@ -4507,11 +4507,15 @@ impl OAuthAccessTokenRefresher for ProductionOAuthTokenRefresher {
 
 #[async_trait::async_trait]
 trait LegacyReadReceiptImap: Sync {
-    async fn preflight(&self, config: ImapConnectionConfig, password: &str) -> fm_core::Result<()>;
+    async fn preflight(
+        &self,
+        config: ImapConnectionConfig,
+        credentials: &fm_imap::ImapCredentials,
+    ) -> fm_core::Result<()>;
     async fn mark_mdn_sent(
         &self,
         config: ImapConnectionConfig,
-        password: &str,
+        credentials: &fm_imap::ImapCredentials,
         folder: &str,
         uid: u32,
     ) -> fm_core::Result<()>;
@@ -4521,27 +4525,46 @@ struct ProductionLegacyReadReceiptImap;
 
 #[async_trait::async_trait]
 impl LegacyReadReceiptImap for ProductionLegacyReadReceiptImap {
-    async fn preflight(&self, config: ImapConnectionConfig, password: &str) -> fm_core::Result<()> {
-        let _session = login(config, password).await?;
+    async fn preflight(
+        &self,
+        config: ImapConnectionConfig,
+        credentials: &fm_imap::ImapCredentials,
+    ) -> fm_core::Result<()> {
+        let _session = fm_imap::login_with_credentials(config, credentials).await?;
         Ok(())
     }
 
     async fn mark_mdn_sent(
         &self,
         config: ImapConnectionConfig,
-        password: &str,
+        credentials: &fm_imap::ImapCredentials,
         folder: &str,
         uid: u32,
     ) -> fm_core::Result<()> {
-        store_message_flag(
-            config,
-            password,
-            folder,
-            &uid.to_string(),
-            ImapMessageFlag::MdnSentKeyword,
-            true,
-        )
-        .await
+        match credentials {
+            fm_imap::ImapCredentials::Password(password) => {
+                store_message_flag(
+                    config,
+                    password,
+                    folder,
+                    &uid.to_string(),
+                    ImapMessageFlag::MdnSentKeyword,
+                    true,
+                )
+                .await
+            }
+            fm_imap::ImapCredentials::OAuthToken(token) => {
+                fm_imap::store_message_flag_oauth(
+                    config,
+                    token,
+                    folder,
+                    &uid.to_string(),
+                    ImapMessageFlag::MdnSentKeyword,
+                    true,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -4655,6 +4678,7 @@ async fn native_send_read_receipt_message_inner(
         session,
         &ProductionLegacySmtpSender,
         &ProductionLegacyReadReceiptImap,
+        &ProductionOAuthTokenRefresher,
     )
     .await
 }
@@ -4666,6 +4690,7 @@ async fn native_send_read_receipt_message_inner_with_clients(
     session: &fm_session::Session,
     smtp_sender: &dyn LegacySmtpSender,
     imap_client: &dyn LegacyReadReceiptImap,
+    token_refresher: &dyn OAuthAccessTokenRefresher,
 ) -> Response {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
         Ok(auth) => auth,
@@ -4690,9 +4715,29 @@ async fn native_send_read_receipt_message_inner_with_clients(
         Ok(None) => return json_result_error(original_action, "Account not found"),
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
-    let password = match account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(_) => return json_result_error(original_action, "Missing account password"),
+    let receipt_credentials = match resolve_compose_imap_credentials(
+        &account,
+        &credential_key,
+        original_action,
+        token_refresher,
+    )
+    .await
+    {
+        Ok(credentials) => credentials,
+        Err(response) => return response,
+    };
+    // SMTP still takes a password string for the password-auth fallback; on
+    // the OAuth path it is unused because the preset access token selects
+    // XOAUTH2.
+    let receipt_smtp_password = match &receipt_credentials {
+        fm_imap::ImapCredentials::Password(password) => password.clone(),
+        fm_imap::ImapCredentials::OAuthToken(_) => {
+            account_password(&account, &credential_key).unwrap_or_default()
+        }
+    };
+    let receipt_preset_token = match &receipt_credentials {
+        fm_imap::ImapCredentials::OAuthToken(token) => Some(token.as_str()),
+        fm_imap::ImapCredentials::Password(_) => None,
     };
     let mut public_account =
         match SqlxUserRepository::get_mail_account(pool, user.user_id, account_id).await {
@@ -4759,9 +4804,9 @@ async fn native_send_read_receipt_message_inner_with_clients(
         user.user_id,
         account_id,
         &account,
-        &password,
+        &receipt_smtp_password,
         &credential_key,
-        None,
+        receipt_preset_token,
     )
     .await
     {
@@ -4771,13 +4816,21 @@ async fn native_send_read_receipt_message_inner_with_clients(
     // PHP initializes the selected IMAP account before it sends the receipt.
     // Keep that ordering: a disconnected source mailbox must not result in an
     // SMTP receipt that cannot be marked or cached afterwards.
-    let imap_config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
+    let imap_config = match &receipt_credentials {
+        fm_imap::ImapCredentials::Password(_) => match imap_config_from_account_secret(&account) {
+            Ok(config) => config,
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        },
+        fm_imap::ImapCredentials::OAuthToken(_) => {
+            match oauth_imap_connection_config(pool, &account).await {
+                Ok(config) => config,
+                Err(message) => return json_result_error(original_action, &message),
+            }
+        }
     };
     match tokio::time::timeout(
         MESSAGE_MUTATION_DEADLINE,
-        imap_client.preflight(imap_config.clone(), &password),
+        imap_client.preflight(imap_config.clone(), &receipt_credentials),
     )
     .await
     {
@@ -4818,7 +4871,7 @@ async fn native_send_read_receipt_message_inner_with_clients(
         {
             let result = tokio::time::timeout(
                 MESSAGE_MUTATION_DEADLINE,
-                imap_client.mark_mdn_sent(imap_config, &password, &folder, uid),
+                imap_client.mark_mdn_sent(imap_config, &receipt_credentials, &folder, uid),
             )
             .await;
             if let Err(message) = result {
@@ -5132,7 +5185,7 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
     // IMAP credential resolution for the send flow (fail fast like the
     // legacy password gate). Password accounts keep the exact legacy gate;
     // provider OAuth accounts are resolved by the shared helper below.
-    let send_credentials = match resolve_send_imap_credentials(
+    let send_credentials = match resolve_compose_imap_credentials(
         &account,
         &credential_key,
         original_action,
@@ -7713,13 +7766,14 @@ async fn legacy_send_message_flag_draft_source(
     }
 }
 
-/// Resolves how the send flow authenticates to IMAP. Password accounts keep
-/// the exact legacy gate. Provider OAuth (gmail/o365) accounts try OAuth
-/// first: a fresh token unlocks OAuth SMTP and OAuth IMAP. Any OAuth failure
-/// falls back to the exact legacy password behavior, so hybrid accounts keep
-/// working; pure-OAuth failures stay errors, only the message improves
-/// (re-authorize instead of a misleading missing-password error).
-async fn resolve_send_imap_credentials(
+/// Resolves how compose flows (send, save, read receipts) authenticate to
+/// IMAP. Password accounts keep the exact legacy gate. Provider OAuth
+/// (gmail/o365) accounts try OAuth first: a fresh token unlocks OAuth SMTP
+/// and OAuth IMAP. Any OAuth failure falls back to the exact legacy password
+/// behavior, so hybrid accounts keep working; pure-OAuth failures stay
+/// errors, only the message improves (re-authorize instead of a misleading
+/// missing-password error).
+async fn resolve_compose_imap_credentials(
     account: &MailAccountConnectionSecret,
     credential_key: &[u8],
     original_action: &str,
@@ -8144,7 +8198,7 @@ trait LegacyDraftAppender: Sync {
     async fn append(
         &self,
         config: ImapConnectionConfig,
-        password: &str,
+        credentials: &fm_imap::ImapCredentials,
         folder: &str,
         raw: &[u8],
         message_id: &str,
@@ -8158,12 +8212,20 @@ impl LegacyDraftAppender for ProductionLegacyDraftAppender {
     async fn append(
         &self,
         config: ImapConnectionConfig,
-        password: &str,
+        credentials: &fm_imap::ImapCredentials,
         folder: &str,
         raw: &[u8],
         message_id: &str,
     ) -> fm_core::Result<Option<u32>> {
-        fm_imap::append_draft_message(config, password, folder, raw, Some(message_id)).await
+        match credentials {
+            fm_imap::ImapCredentials::Password(password) => {
+                fm_imap::append_draft_message(config, password, folder, raw, Some(message_id)).await
+            }
+            fm_imap::ImapCredentials::OAuthToken(token) => {
+                fm_imap::append_draft_message_oauth(config, token, folder, raw, Some(message_id))
+                    .await
+            }
+        }
     }
 }
 
@@ -8179,6 +8241,7 @@ async fn native_save_message(
         payload,
         session,
         &ProductionLegacyDraftAppender,
+        &ProductionOAuthTokenRefresher,
     )
     .await
 }
@@ -8189,6 +8252,7 @@ async fn native_save_message_with_appender(
     payload: &Value,
     session: &fm_session::Session,
     appender: &dyn LegacyDraftAppender,
+    token_refresher: &dyn OAuthAccessTokenRefresher,
 ) -> Response {
     if let Some(feature) = legacy_unsupported_compose_feature(payload, false) {
         return json_result_error(
@@ -8233,14 +8297,32 @@ async fn native_save_message_with_appender(
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
 
-    let password = match account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(_) => return json_result_error(original_action, "Missing account password"),
+    let save_credentials = match resolve_compose_imap_credentials(
+        &account,
+        &credential_key,
+        original_action,
+        token_refresher,
+    )
+    .await
+    {
+        Ok(credentials) => credentials,
+        Err(response) => return response,
     };
 
-    let imap_config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
+    // Draft filing follows the same credentials as the send flow: password
+    // accounts keep the exact legacy config lookup, OAuth accounts use the
+    // provider-default config.
+    let imap_config = match &save_credentials {
+        fm_imap::ImapCredentials::Password(_) => match imap_config_from_account_secret(&account) {
+            Ok(config) => config,
+            Err(err) => return json_result_error(original_action, &err.public_message()),
+        },
+        fm_imap::ImapCredentials::OAuthToken(_) => {
+            match oauth_imap_connection_config(pool, &account).await {
+                Ok(config) => config,
+                Err(message) => return json_result_error(original_action, &message),
+            }
+        }
     };
 
     let _compose_permit = match tokio::time::timeout(
@@ -8339,7 +8421,7 @@ async fn native_save_message_with_appender(
     let new_uid = match appender
         .append(
             imap_config.clone(),
-            &password,
+            &save_credentials,
             &save_folder,
             &draft_bytes,
             &message_id,
@@ -8358,7 +8440,7 @@ async fn native_save_message_with_appender(
         let uid_set = previous_uid.to_string();
         let cleanup = tokio::time::timeout(
             SEND_MESSAGE_DRAFT_CLEANUP_DEADLINE,
-            fm_imap::delete_messages(imap_config, &password, &previous_folder, &uid_set),
+            send_imap_delete_messages(imap_config, &save_credentials, &previous_folder, &uid_set),
         )
         .await;
         match cleanup {
@@ -38590,7 +38672,7 @@ Subject: Empty body metadata\r\n\r\n"
     }
 
     #[tokio::test]
-    async fn resolve_send_imap_credentials_falls_back_to_password() {
+    async fn resolve_compose_imap_credentials_falls_back_to_password() {
         let key = [75_u8; fm_user::CREDENTIAL_KEY_BYTES];
         // Hybrid account (password plus token) whose refresh fails keeps the
         // exact legacy password path: no behavior change on failure.
@@ -38610,7 +38692,7 @@ Subject: Empty body metadata\r\n\r\n"
             ),
             oauth_tenant: None,
         };
-        let credentials = super::resolve_send_imap_credentials(
+        let credentials = super::resolve_compose_imap_credentials(
             &account,
             &key,
             "SendMessage",
@@ -38620,7 +38702,7 @@ Subject: Empty body metadata\r\n\r\n"
         .expect("hybrid falls back to password");
         assert!(matches!(credentials, fm_imap::ImapCredentials::Password(_)));
         // A fresh token wins over the stored password on the OAuth path.
-        let credentials = super::resolve_send_imap_credentials(
+        let credentials = super::resolve_compose_imap_credentials(
             &account,
             &key,
             "SendMessage",
@@ -40934,9 +41016,7 @@ Subject: Empty body metadata\r\n\r\n"
             .to_string();
         assert_eq!(fingerprint.len(), 40);
         let captured = Arc::new(Mutex::new(None));
-        let appender = RecordingDraftAppender {
-            message: Arc::clone(&captured),
-        };
+        let appender = RecordingDraftAppender::with_message(Arc::clone(&captured));
         let response = super::native_save_message_with_appender(
             &state,
             "SaveMessage",
@@ -40949,6 +41029,7 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             &appender,
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         let body = read_json(response).await;
@@ -40957,6 +41038,121 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(wire.contains("multipart/signed"), "{wire}");
         assert!(wire.contains("application/pgp-signature"), "{wire}");
         let _ = tokio::fs::remove_dir_all(&temp_root).await;
+    }
+
+    async fn oauth_compose_test_account(
+        pool: &AnyPool,
+        account_id: i64,
+        email: &str,
+        account_type: &str,
+        password: Option<Vec<u8>>,
+        refresh_token: Option<Vec<u8>>,
+    ) {
+        sqlx::query(
+            "UPDATE frickmail_mail_accounts
+              SET email = ?, type = ?, login = ?,
+                  encrypted_password = ?,
+                  encrypted_oauth_refresh_token = ?,
+                  oauth_tenant = ?,
+                  smtp_host = ?, smtp_port = ?, smtp_secure = ?
+              WHERE id = ?",
+        )
+        .bind(email)
+        .bind(account_type)
+        .bind(email)
+        .bind(password)
+        .bind(refresh_token)
+        .bind((account_type == "o365").then(|| "common".to_string()))
+        .bind("8.8.8.8")
+        .bind(25_i64)
+        .bind("none")
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn save_message_oauth_account_without_token_fails_closed() {
+        let key = [76_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(9_971, 9_972, &key, test_config(None)).await;
+        oauth_compose_test_account(
+            state.db_pool().unwrap(),
+            9_972,
+            "oauth-sender@example.com",
+            "gmail",
+            None,
+            None,
+        )
+        .await;
+        let appender = RecordingDraftAppender::with_message(Arc::new(Mutex::new(None)));
+        let response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &json!({
+                "account_id": 9_972,
+                "from": "oauth-sender@example.com",
+                "plain": "unreachable",
+                "saveFolder": "Drafts",
+            }),
+            &session,
+            &appender,
+            &StubOAuthTokenRefresher { token: None },
+        )
+        .await;
+        // Fails before any network with the re-authorize wording.
+        let body = read_json(response).await;
+        assert_eq!(
+            body["Result"]["error"],
+            "Missing OAuth refresh token — re-authorize this account."
+        );
+    }
+
+    #[tokio::test]
+    async fn save_message_oauth_account_appends_draft_over_oauth() {
+        let key = [77_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) =
+            message_body_test_state_with_config(9_981, 9_982, &key, test_config(None)).await;
+        oauth_compose_test_account(
+            state.db_pool().unwrap(),
+            9_982,
+            "oauth-sender@example.com",
+            "gmail",
+            None,
+            Some(fm_user::encrypt_account_secret("stub-refresh", &key).unwrap()),
+        )
+        .await;
+        let captured = Arc::new(Mutex::new(None));
+        let kinds = Arc::new(Mutex::new(Vec::new()));
+        let appender = RecordingDraftAppender {
+            message: Arc::clone(&captured),
+            credentials: Arc::clone(&kinds),
+        };
+        let response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &json!({
+                "account_id": 9_982,
+                "from": "oauth-sender@example.com",
+                "plain": "OAuth draft",
+                "saveFolder": "Drafts",
+            }),
+            &session,
+            &appender,
+            &StubOAuthTokenRefresher {
+                token: Some("stub-access-token".to_string()),
+            },
+        )
+        .await;
+        // No real network: the draft is recorded and the appender saw OAuth
+        // credentials (no previous-draft ops in the payload, so no cleanup).
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["folder"], "Drafts");
+        assert_eq!(body["Result"]["uid"], 77);
+        let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(wire.contains("OAuth draft"), "{wire}");
+        assert_eq!(*kinds.lock().unwrap(), vec!["oauth".to_string()]);
     }
 
     #[test]
@@ -42389,6 +42585,16 @@ Subject: Empty body metadata\r\n\r\n"
         preflight_succeeds: bool,
         mark_succeeds: bool,
         marked: Arc<Mutex<Vec<(String, u32)>>>,
+        kinds: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingReadReceiptImap {
+        fn record_kind(&self, credentials: &fm_imap::ImapCredentials) {
+            self.kinds.lock().unwrap().push(match credentials {
+                fm_imap::ImapCredentials::Password(_) => "password".to_string(),
+                fm_imap::ImapCredentials::OAuthToken(_) => "oauth".to_string(),
+            });
+        }
     }
 
     #[async_trait::async_trait]
@@ -42396,8 +42602,9 @@ Subject: Empty body metadata\r\n\r\n"
         async fn preflight(
             &self,
             _config: ImapConnectionConfig,
-            _password: &str,
+            credentials: &fm_imap::ImapCredentials,
         ) -> fm_core::Result<()> {
+            self.record_kind(credentials);
             if self.preflight_succeeds {
                 Ok(())
             } else {
@@ -42410,10 +42617,11 @@ Subject: Empty body metadata\r\n\r\n"
         async fn mark_mdn_sent(
             &self,
             _config: ImapConnectionConfig,
-            _password: &str,
+            credentials: &fm_imap::ImapCredentials,
             folder: &str,
             uid: u32,
         ) -> fm_core::Result<()> {
+            self.record_kind(credentials);
             self.marked.lock().unwrap().push((folder.to_string(), uid));
             if self.mark_succeeds {
                 Ok(())
@@ -42423,6 +42631,124 @@ Subject: Empty body metadata\r\n\r\n"
                 ))
             }
         }
+    }
+
+    #[tokio::test]
+    async fn send_read_receipt_oauth_account_without_token_fails_closed() {
+        let key = [94_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(15_042, 15_043, &key).await;
+        oauth_compose_test_account(
+            state.db_pool().unwrap(),
+            15_043,
+            "oauth-sender@example.com",
+            "gmail",
+            None,
+            None,
+        )
+        .await;
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::new(Mutex::new(None)),
+        };
+        let imap = RecordingReadReceiptImap {
+            preflight_succeeds: true,
+            mark_succeeds: true,
+            marked: Arc::new(Mutex::new(Vec::new())),
+            kinds: Arc::new(Mutex::new(Vec::new())),
+        };
+        let body = read_json(
+            super::native_send_read_receipt_message_inner_with_clients(
+                &state,
+                "SendReadReceiptMessage",
+                &json!({"account_id": 15_043}),
+                &session,
+                &sender,
+                &imap,
+                &StubOAuthTokenRefresher { token: None },
+            )
+            .await,
+        )
+        .await;
+        // Fails before any network with the re-authorize wording.
+        assert_eq!(
+            body["Result"]["error"],
+            "Missing OAuth refresh token — re-authorize this account."
+        );
+    }
+
+    #[tokio::test]
+    async fn send_read_receipt_oauth_account_sends_and_marks_over_oauth() {
+        let key = [95_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let (state, session) = message_body_test_state(15_052, 15_053, &key).await;
+        let pool = state.db_pool().unwrap();
+        oauth_compose_test_account(
+            pool,
+            15_053,
+            "oauth-sender@example.com",
+            "gmail",
+            None,
+            Some(fm_user::encrypt_account_secret("stub-refresh", &key).unwrap()),
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO frickmail_identities (id, account_id, user_id, name, email, reply_to, is_default)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(15_054_i64)
+        .bind(15_053_i64)
+        .bind(15_052_i64)
+        .bind("OAuth Sender")
+        .bind("oauth-sender@example.com")
+        .bind(None::<String>)
+        .bind(true)
+        .execute(pool)
+        .await
+        .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let sender = RecordingSmtpSender {
+            succeed: true,
+            message: Arc::clone(&captured),
+        };
+        let marked = Arc::new(Mutex::new(Vec::new()));
+        let kinds = Arc::new(Mutex::new(Vec::new()));
+        let imap = RecordingReadReceiptImap {
+            preflight_succeeds: true,
+            mark_succeeds: true,
+            marked: Arc::clone(&marked),
+            kinds: Arc::clone(&kinds),
+        };
+        let body = read_json(
+            super::native_send_read_receipt_message_inner_with_clients(
+                &state,
+                "SendReadReceiptMessage",
+                &json!({
+                    "account_id": 15_053,
+                    "readReceipt": "recipient@example.net",
+                    "subject": "Receipt",
+                    "plain": "received",
+                    "messageFolder": "INBOX",
+                    "messageUid": 42
+                }),
+                &session,
+                &sender,
+                &imap,
+                &StubOAuthTokenRefresher {
+                    token: Some("stub-access-token".to_string()),
+                },
+            )
+            .await,
+        )
+        .await;
+        // No real network: SMTP and IMAP are recorded, the stub stands in
+        // for the token endpoint, and both IMAP calls saw OAuth credentials.
+        assert_eq!(body["Result"], true);
+        let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(wire.contains("Message-ID: "), "{wire}");
+        assert_eq!(*marked.lock().unwrap(), vec![("INBOX".to_string(), 42)]);
+        assert_eq!(
+            *kinds.lock().unwrap(),
+            vec!["oauth".to_string(), "oauth".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -42464,6 +42790,7 @@ Subject: Empty body metadata\r\n\r\n"
             preflight_succeeds: true,
             mark_succeeds: true,
             marked: Arc::clone(&marked),
+            kinds: Arc::new(Mutex::new(Vec::new())),
         };
         let payload = json!({
             "account_id": 14_943,
@@ -42481,6 +42808,7 @@ Subject: Empty body metadata\r\n\r\n"
                 &session,
                 &sender,
                 &imap,
+                &super::ProductionOAuthTokenRefresher,
             )
             .await,
         )
@@ -42502,6 +42830,7 @@ Subject: Empty body metadata\r\n\r\n"
             preflight_succeeds: false,
             mark_succeeds: true,
             marked: Arc::new(Mutex::new(Vec::new())),
+            kinds: Arc::new(Mutex::new(Vec::new())),
         };
         let body = read_json(
             super::native_send_read_receipt_message_inner_with_clients(
@@ -42511,6 +42840,7 @@ Subject: Empty body metadata\r\n\r\n"
                 &session,
                 &blocked_sender,
                 &blocked_imap,
+                &super::ProductionOAuthTokenRefresher,
             )
             .await,
         )
@@ -42535,6 +42865,7 @@ Subject: Empty body metadata\r\n\r\n"
             preflight_succeeds: true,
             mark_succeeds: true,
             marked: Arc::clone(&failed_smtp_marks),
+            kinds: Arc::new(Mutex::new(Vec::new())),
         };
         let failed_smtp_sender = RecordingSmtpSender {
             succeed: false,
@@ -42548,6 +42879,7 @@ Subject: Empty body metadata\r\n\r\n"
                 &session,
                 &failed_smtp_sender,
                 &failed_smtp_imap,
+                &super::ProductionOAuthTokenRefresher,
             )
             .await,
         )
@@ -42577,6 +42909,7 @@ Subject: Empty body metadata\r\n\r\n"
             preflight_succeeds: true,
             mark_succeeds: true,
             marked: Arc::clone(&rejected_marks),
+            kinds: Arc::new(Mutex::new(Vec::new())),
         };
         let rejected_sender = RecordingSmtpSender {
             succeed: true,
@@ -42590,6 +42923,7 @@ Subject: Empty body metadata\r\n\r\n"
                 &session,
                 &rejected_sender,
                 &rejected_imap,
+                &super::ProductionOAuthTokenRefresher,
             )
             .await,
         )
@@ -42600,6 +42934,7 @@ Subject: Empty body metadata\r\n\r\n"
             preflight_succeeds: true,
             mark_succeeds: false,
             marked: Arc::new(Mutex::new(Vec::new())),
+            kinds: Arc::new(Mutex::new(Vec::new())),
         };
         let mut failed_store_payload = payload.clone();
         failed_store_payload["messageUid"] = json!(43);
@@ -42611,6 +42946,7 @@ Subject: Empty body metadata\r\n\r\n"
                 &session,
                 &sender,
                 &failed_store_imap,
+                &super::ProductionOAuthTokenRefresher,
             )
             .await,
         )
@@ -42691,7 +43027,9 @@ Subject: Empty body metadata\r\n\r\n"
                 preflight_succeeds: true,
                 mark_succeeds: true,
                 marked: Arc::clone(&marked),
+                kinds: Arc::new(Mutex::new(Vec::new())),
             },
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         let body = read_json(response).await;
@@ -42739,6 +43077,16 @@ Subject: Empty body metadata\r\n\r\n"
 
     struct RecordingDraftAppender {
         message: Arc<Mutex<Option<Vec<u8>>>>,
+        credentials: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingDraftAppender {
+        fn with_message(message: Arc<Mutex<Option<Vec<u8>>>>) -> Self {
+            Self {
+                message,
+                credentials: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     struct StubOAuthTokenRefresher {
@@ -42764,11 +43112,15 @@ Subject: Empty body metadata\r\n\r\n"
         async fn append(
             &self,
             _config: ImapConnectionConfig,
-            _password: &str,
+            credentials: &fm_imap::ImapCredentials,
             _folder: &str,
             raw: &[u8],
             _message_id: &str,
         ) -> fm_core::Result<Option<u32>> {
+            self.credentials.lock().unwrap().push(match credentials {
+                fm_imap::ImapCredentials::Password(_) => "password".to_string(),
+                fm_imap::ImapCredentials::OAuthToken(_) => "oauth".to_string(),
+            });
             *self.message.lock().unwrap() = Some(raw.to_vec());
             Ok(Some(77))
         }
@@ -42936,9 +43288,7 @@ Subject: Empty body metadata\r\n\r\n"
             .await
             .unwrap();
         let captured = Arc::new(Mutex::new(None));
-        let appender = RecordingDraftAppender {
-            message: Arc::clone(&captured),
-        };
+        let appender = RecordingDraftAppender::with_message(Arc::clone(&captured));
         let response = super::native_save_message_with_appender(
             &state,
             "SaveMessage",
@@ -42958,6 +43308,7 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             &appender,
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
 
@@ -43234,9 +43585,7 @@ Subject: Empty body metadata\r\n\r\n"
         );
 
         let appended = Arc::new(Mutex::new(None));
-        let appender = RecordingDraftAppender {
-            message: Arc::clone(&appended),
-        };
+        let appender = RecordingDraftAppender::with_message(Arc::clone(&appended));
         let save_response = super::native_save_message_with_appender(
             &state,
             "SaveMessage",
@@ -43252,6 +43601,7 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             &appender,
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         assert_eq!(read_json(save_response).await["Result"]["uid"], 77);
@@ -43384,9 +43734,7 @@ Subject: Empty body metadata\r\n\r\n"
             .await
             .unwrap();
         let appended = Arc::new(Mutex::new(None));
-        let appender = RecordingDraftAppender {
-            message: Arc::clone(&appended),
-        };
+        let appender = RecordingDraftAppender::with_message(Arc::clone(&appended));
         let save_response = super::native_save_message_with_appender(
             &state,
             "SaveMessage",
@@ -43402,6 +43750,7 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             &appender,
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         let save_body = read_json(save_response).await;
@@ -43474,9 +43823,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert!(!sent_wire.contains("data:image"));
 
         let saved = Arc::new(Mutex::new(None));
-        let appender = RecordingDraftAppender {
-            message: Arc::clone(&saved),
-        };
+        let appender = RecordingDraftAppender::with_message(Arc::clone(&saved));
         let response = super::native_save_message_with_appender(
             &state,
             "SaveMessage",
@@ -43489,6 +43836,7 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             &appender,
+            &super::ProductionOAuthTokenRefresher,
         )
         .await;
         assert_eq!(read_json(response).await["Result"]["uid"], 77);

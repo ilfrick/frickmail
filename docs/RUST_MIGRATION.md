@@ -5,6 +5,50 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 14:00:00 UTC
+
+The compose-OAuth completion slice extends the slice-3 send pipeline to draft
+saves (`SaveMessage`) and read receipts (`SendReadReceiptMessage`), so every
+compose flow authenticates to IMAP the same way:
+
+- `fm-imap`: `append_draft_message_oauth` (same validation, `\Seen` APPEND,
+  `Message-ID` UID lookup, and uncertain-outcome recovery as the password
+  variant, via a shared credentials-taking core) and `store_message_flag_oauth`
+  (same validation and UID STORE semantics via a shared core). Password entry
+  points are byte-identical.
+- Router: `native_save_message_with_appender` and the read-receipt flow
+  resolve credentials through the shared `resolve_compose_imap_credentials`
+  (renamed from `resolve_send_imap_credentials` while young); the draft
+  appender and read-receipt IMAP traits now take `fm_imap::ImapCredentials`
+  (production dispatches, recorders capture the kind — including the first
+  production use of `login_with_credentials` in the receipt preflight);
+  read-receipt SMTP reuses the resolved token via the settings preset; save
+  cleanup reuses the slice-3 delete dispatch. Draft saves and receipts for
+  password accounts behave exactly as before.
+
+Verification: `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets -D warnings` clean; `cargo test -p fm-imap --lib` 196 passed /
+0 failed; `cargo test -p fm-http --lib` 565 passed / 0 failed (4 new:
+save fail-closed, save success asserting the `oauth` kind with zero network,
+receipt fail-closed, receipt success asserting `oauth` kinds on preflight+
+mark with zero network).
+Production-image validation built `frickmail-rust:compose-oauth-test` at
+image ID `sha256:64ca43b3eecbdf327576d9b87afca2b7d99a09736fb9fda36a74a252195ef5e7`;
+a read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+Independent senior review criteria: tokens never in argv/env/logs, OAuth-first
+with legacy fallback (no regression possible on failure paths), one refresh
+per flow, no schema or config change.
+
+This slice is verified but NOT yet committed or pushed. Remaining for full
+OAuth sends: live Gmail/O365 verification (needs operator test accounts +
+OAuth client IDs). The major remaining gates toward the final Rust-only goal
+are otherwise unchanged.
+
+---
+
 ## Progress Snapshot — 2026-09-24 12:30:00 UTC
 
 The OAuth-aware send pipeline slice makes pure-OAuth (gmail/o365, no stored
