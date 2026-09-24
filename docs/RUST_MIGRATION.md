@@ -5,6 +5,55 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 15:20:00 UTC
+
+The PGP detached/clear-signed verification parity slice completes gate 1's
+remaining "exact IMAP MIME normalization edge cases for detached/clear-signed
+verification" in `fm-http/src/router.rs`:
+
+- `legacy_pgp_verify_input_pair` assembles the `(text, signature)` pair
+  byte-exact with PHP `DoPgpVerifyMessage`: detached `text` = the part's
+  `{part}.MIME` headers `+ CRLF +` body; clearsigned `text` = the
+  header-derived transfer-decoded body with an empty signature. The previous
+  Rust code dropped the body entirely and swapped the pair (shipping the raw
+  body in the signature slot and the signature part as `text`), so no real
+  detached/clearsigned verification could ever succeed.
+- `legacy_pgp_verify_normalize` applies PHP's guarantees to every path: text
+  CRLF-canonicalized (`preg_replace('/\r?\n/su', "\r\n", ...)`) and
+  signature ASCII-filtered — replacing the old CRLF→LF rewrite that broke
+  RFC 3156 canonical content.
+- `run_gnupg_with_message` stages `--verify` inputs as 0600 temp files
+  (`gpg --verify sig msg`, or `gpg --verify msg` for clearsigned) instead of
+  the `--enable-special-filenames - "-&5"` stdin pipe, which never delivered
+  two distinct streams to GnuPG (no command received).
+
+Verification (host): `cargo fmt --all -- --check` clean; `cargo clippy
+--workspace --all-targets -D warnings` clean; 4 new tests green —
+`legacy_pgp_verify_input_pair_matches_php_assembly` (exact header+body+CRLF
+bytes, empty clearsigned signature, base64 decode), `..._normalize_matches_php
+_preg_replace` (CRLF canonicalization + ASCII filter incl. control bytes),
+and two live-GnuPG roundtrips proving a detached-signed MIME part verifies
+via the fetch-contract inputs and a `--clearsign` payload verifies with an
+empty signature. Full `cargo test -p fm-http --lib` 569 passed / 0 failed.
+Production-image validation: `frickmail-rust:pgp-verify-test` built at image
+ID `sha256:9ac34f0e898a282c7e0adff17dcb6e0fc2641f16cb70f22fd56dbffcdff5c3b8`;
+read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+Independent senior review criteria: PHP byte-parity on the fetch-contract
+inputs (proven by the live-GnuPG roundtrips), temp-file staging never leaks
+content to argv/logs (0600, removed on all paths), no schema or config
+change, additive-only.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: OAuth sends live verification (deferred —
+needs operator test accounts + OAuth client IDs), OAuth SMTP parity for
+pure-OAuth sends is otherwise complete, connection-token/CSRF contract,
+frontend/theming with the theme deletion plan recorded, cutover validation.
+
+---
+
 ## Progress Snapshot — 2026-09-24 14:00:00 UTC
 
 The compose-OAuth completion slice extends the slice-3 send pipeline to draft

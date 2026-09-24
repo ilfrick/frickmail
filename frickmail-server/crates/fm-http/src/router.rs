@@ -6118,12 +6118,50 @@ async fn run_gnupg_with_message(
     if args.iter().any(|arg| arg.contains('\0')) {
         return Err("Invalid GnuPG argument".to_string());
     }
+    let signature = signature.unwrap_or_default();
     let home = gnupg_homedir(state, user_id)?;
+
+    // `--verify` takes two file operands (signature, message) — or one
+    // (message) for clearsigned input. Both streams arrive in memory here,
+    // so stage them as 0600 files exactly like the passphrase path; gpg's
+    // `--enable-special-filenames` fd juggling cannot deliver two distinct
+    // streams through the single stdin pipe. Cleanup happens on every path
+    // including the timeout.
+    let dir = Path::new(&state.config().tmp_dir).join("gnupg");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("GnuPG home unavailable: {err}"))?;
+    let mut random = [0_u8; 16];
+    OsRng.fill_bytes(&mut random);
+    let unique = hex::encode(random);
+    let message_path = dir.join(format!("vmsg-{user_id:x}-{unique}"));
+    let message_file = |path: &Path, bytes: &[u8]| -> Result<(), String> {
+        std::fs::write(path, bytes).map_err(|err| format!("GnuPG home unavailable: {err}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| format!("GnuPG home permissions failed: {err}"))?;
+        }
+        Ok(())
+    };
+    message_file(&message_path, &message)?;
+    let signature_path = if signature.is_empty() {
+        // Clearsigned input: gpg reads the inline signature from the message.
+        None
+    } else {
+        let path = dir.join(format!("vsig-{user_id:x}-{unique}"));
+        message_file(&path, &signature)?;
+        Some(path)
+    };
+
     let mut command = tokio::process::Command::new("gpg");
     let mut full_args = gnupg_base_args(&home);
     full_args.extend(args.iter().map(|arg| (*arg).to_string()));
-    full_args.push("--enable-special-filenames".to_string());
-    full_args.push("- \"-&5\"".to_string());
+    if let Some(ref path) = signature_path {
+        full_args.push(path.display().to_string());
+        full_args.push(message_path.display().to_string());
+    } else {
+        full_args.push(message_path.display().to_string());
+    }
     command.args(&full_args);
     command.env_clear();
     command.env(
@@ -6132,30 +6170,21 @@ async fn run_gnupg_with_message(
     );
     command.env("LC_ALL", "C");
     command.env("GNUPGHOME", &home);
-    command.stdin(std::process::Stdio::piped());
+    command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("GnuPG unavailable: {err}"))?;
-    let mut stdin = child.stdin.take().ok_or("GnuPG input unavailable")?;
-    stdin
-        .write_all(&signature.unwrap_or_default())
-        .await
-        .map_err(|_| "Broken GnuPG pipe")?;
-    stdin
-        .write_all(&message)
-        .await
-        .map_err(|_| "Broken GnuPG pipe")?;
-    stdin.shutdown().await.map_err(|_| "Broken GnuPG pipe")?;
-
-    let operation = tokio::time::timeout(GNUPG_DEADLINE, child.wait_with_output());
-    match operation.await {
+    let operation = tokio::time::timeout(GNUPG_DEADLINE, command.output());
+    let result = match operation.await {
         Ok(Ok(output)) => Ok(parse_gnupg_output(&output.stderr)),
         Ok(Err(err)) => Err(format!("GnuPG operation failed: {err}")),
         Err(_) => Err("GnuPG operation timed out".to_string()),
+    };
+    let _ = std::fs::remove_file(&message_path);
+    if let Some(ref path) = signature_path {
+        let _ = std::fs::remove_file(path);
     }
+    result
 }
 
 #[derive(Debug, Serialize)]
@@ -7334,15 +7363,58 @@ async fn native_gnupg_decrypt(
     }
 }
 
-/// Fetches and normalizes the GnuPG `--verify` inputs for a signed MIME part,
-/// shared by the `PgpVerifyMessage` action and `Message` auto-verification.
+/// Assembles the `(text, signature)` GnuPG `--verify` inputs from fetched
+/// MIME data, byte-exact with PHP `DoPgpVerifyMessage`:
 ///
-/// Returns `(signature, body)`: the detached signature bytes (or the
-/// transfer-decoded clearsigned payload when `sig_part_id` is empty)
-/// followed by the signed body bytes. Call sites bind these as
-/// `(text, signature)` for the pre-existing normalize+invoke sequence
-/// shared with `run_gnupg_with_message`. All bounds match the
-/// `PgpVerifyMessage` contract.
+/// - **Detached** (`signature_part` is `Some`): `text` = the part's MIME
+///   headers plus CRLF plus the part body; `signature` = the signature part.
+///   The previous Rust code swapped the pair and dropped the body entirely
+///   (`{partId}.MIME` + CRLF was the "text", the raw body the "signature").
+/// - **Clearsigned** (`signature_part` is `None`): `text` = the
+///   header-derived transfer-decoded body (base64 / quoted-printable)
+///   exactly like PHP's `HeaderCollection` decode; `signature` = empty.
+///
+/// Line-ending canonicalization and the ASCII signature filter are applied
+/// later by [`legacy_pgp_verify_normalize`], mirroring PHP's `preg_replace`
+/// calls, so every call site shares one contract.
+fn legacy_pgp_verify_input_pair(
+    mime: &[u8],
+    body: &[u8],
+    signature_part: Option<&[u8]>,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    match signature_part {
+        Some(signature) => {
+            let mut text = Vec::with_capacity(mime.len() + 2 + body.len());
+            text.extend_from_slice(mime);
+            text.extend_from_slice(b"\r\n");
+            text.extend_from_slice(body);
+            Ok((text, signature.to_vec()))
+        }
+        None => Ok((decode_legacy_verified_body(mime, body)?, Vec::new())),
+    }
+}
+
+/// Mirrors PHP's post-fetch guarantees for both PGP verify paths: the text
+/// is canonicalized to CRLF (`preg_replace('/\r?\n/su', "\r\n", ...)`) and
+/// the signature is stripped to ASCII (`preg_replace('/[^\x00-\x7F]/', '')`).
+fn legacy_pgp_verify_normalize(text: Vec<u8>, signature: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+    let text = String::from_utf8_lossy(&text)
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n")
+        .into_bytes();
+    let signature = String::from_utf8_lossy(&signature)
+        .chars()
+        .filter(char::is_ascii)
+        .collect::<String>()
+        .into_bytes();
+    (text, signature)
+}
+
+/// Fetches the PGP `--verify` inputs for a message part: `{part}.MIME`
+/// headers, the part body, and (when present) the sibling signature part.
+///
+/// Returns `(text, signature)` per [`legacy_pgp_verify_input_pair`]. All
+/// bounds match the `PgpVerifyMessage` contract.
 async fn fetch_pgp_verify_inputs(
     config: ImapConnectionConfig,
     password: &str,
@@ -7351,7 +7423,7 @@ async fn fetch_pgp_verify_inputs(
     part_id: &str,
     sig_part_id: &str,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let mut mime = match fm_imap::fetch_mime_part_bounded(
+    let mime = match fm_imap::fetch_mime_part_bounded(
         config.clone(),
         password,
         folder,
@@ -7379,10 +7451,9 @@ async fn fetch_pgp_verify_inputs(
         Ok(None) => return Err("Message part not found".to_string()),
         Err(err) => return Err(err.public_message()),
     };
-    let signature = if sig_part_id.is_empty() {
-        decode_legacy_verified_body(&mime, &body)?
+    let signature_part = if sig_part_id.is_empty() {
+        None
     } else {
-        mime.extend_from_slice(b"\r\n");
         match fm_imap::fetch_mime_part_bounded(
             config,
             password,
@@ -7393,12 +7464,12 @@ async fn fetch_pgp_verify_inputs(
         )
         .await
         {
-            Ok(Some(value)) => value,
+            Ok(Some(value)) => Some(value),
             Ok(None) => return Err("Signature part not found".to_string()),
             Err(err) => return Err(err.public_message()),
         }
     };
-    Ok((signature, body))
+    legacy_pgp_verify_input_pair(&mime, &body, signature_part.as_deref())
 }
 
 async fn native_pgp_verify_message(
@@ -7432,14 +7503,7 @@ async fn native_pgp_verify_message(
             Err(message) => return json_result_error(action, &message),
         }
     };
-    let text = String::from_utf8_lossy(&text)
-        .replace("\r\n", "\n")
-        .into_bytes();
-    let signature = String::from_utf8_lossy(&signature)
-        .chars()
-        .filter(char::is_ascii)
-        .collect::<String>()
-        .into_bytes();
+    let (text, signature) = legacy_pgp_verify_normalize(text, signature);
     let user_id = load_session_user(state, action, session)
         .await
         .ok()
@@ -20128,14 +20192,7 @@ async fn legacy_message_pgp_auto_verify(
         message
     })
     .ok()?;
-    let text = String::from_utf8_lossy(&text)
-        .replace("\r\n", "\n")
-        .into_bytes();
-    let signature = String::from_utf8_lossy(&signature)
-        .chars()
-        .filter(char::is_ascii)
-        .collect::<String>()
-        .into_bytes();
+    let (text, signature) = legacy_pgp_verify_normalize(text, signature);
     let result = run_gnupg_with_message(
         state,
         Some(user_id),
@@ -40987,6 +41044,212 @@ Subject: Empty body metadata\r\n\r\n"
             decrypted_text.contains("multipart/signed"),
             "{decrypted_text}"
         );
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn legacy_pgp_verify_input_pair_matches_php_assembly() {
+        let mime = b"Content-Type: text/plain\r\nContent-Transfer-Encoding: 7Bit\r\n";
+        let body = b"signed line one\r\nsigned line two\r\n";
+        // Detached: PHP concatenates `{part}.MIME` + BODY[{part}] as the
+        // text and uses BODY[{sigPart}] as the signature. The previous Rust
+        // code returned only `{part}.MIME` + CRLF as "text" and shipped the
+        // raw body in the signature slot — this pins the fixed pair.
+        let (text, signature) =
+            super::legacy_pgp_verify_input_pair(mime, body, Some(b"SIG")).expect("detached inputs");
+        assert_eq!(text, b"Content-Type: text/plain\r\nContent-Transfer-Encoding: 7Bit\r\n\r\nsigned line one\r\nsigned line two\r\n");
+        assert_eq!(signature, b"SIG");
+        // Clearsigned: text is the transfer-decoded body, signature is empty.
+        let (text, signature) =
+            super::legacy_pgp_verify_input_pair(mime, body, None).expect("clearsigned inputs");
+        assert_eq!(text, body);
+        assert!(signature.is_empty());
+        // Base64 clearsigned body decodes via the header-derived CTE.
+        let base64_mime = b"Content-Transfer-Encoding: Base64\r\n";
+        let (text, _) = super::legacy_pgp_verify_input_pair(base64_mime, b"aGVsbG8=", None)
+            .expect("base64 clearsigned decode");
+        assert_eq!(text, b"hello");
+    }
+
+    #[test]
+    fn legacy_pgp_verify_normalize_matches_php_preg_replace() {
+        // PHP `preg_replace('/\r?\n/su', "\r\n", ...)`: any LF becomes CRLF.
+        let (text, signature) = super::legacy_pgp_verify_normalize(
+            b"a\nb\r\nc".to_vec(),
+            b"sig\xff\x01\x7fok".to_vec(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&text),
+            "a\r\nb\r\nc",
+            "all LFs canonicalize to CRLF"
+        );
+        // Signature is ASCII-filtered exactly like
+        // `preg_replace('/[^\x00-\x7F]/', '', ...)`: the \xff (non-ASCII)
+        // is stripped while controls like \x01 and \x7f (KEYSIGH) stay.
+        assert_eq!(signature, b"sig\x01\x7fok");
+        // Already-CRLF content is unchanged.
+        let (text, _) = super::legacy_pgp_verify_normalize(b"x\r\ny\r\n".to_vec(), Vec::new());
+        assert_eq!(text, b"x\r\ny\r\n");
+    }
+
+    #[tokio::test]
+    async fn pgp_detached_verify_roundtrip_with_gpg() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("frickmail-pgp-detach-{unique}"));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let state = super::AppState::with_db_pool(config, None);
+        let generated = super::run_gnupg(
+            &state,
+            99_992,
+            &[
+                "--yes",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                "Verify Tester <[EMAIL]>",
+                "default",
+                "default",
+            ],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fingerprint = generated
+            .status
+            .iter()
+            .find_map(|line| line.strip_prefix("KEY_CREATED "))
+            .and_then(|value| value.split(' ').next_back())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(fingerprint.len(), 40);
+
+        // The MIME part is signed with `--textmode --detach-sign` over the
+        // canonical `headers + CRLF + body` bytes, exactly like an RFC 3156
+        // multipart/signed producer.
+        let mime = b"Content-Type: text/plain\r\nContent-Transfer-Encoding: 7Bit\r\n";
+        let body = b"signed line one\r\nsigned line two\r\n";
+        let mut signed_bytes = Vec::new();
+        signed_bytes.extend_from_slice(mime);
+        signed_bytes.extend_from_slice(b"\r\n");
+        signed_bytes.extend_from_slice(body);
+        let signed = super::run_gnupg(
+            &state,
+            99_992,
+            &[
+                "--textmode",
+                "--armor",
+                "--detach-sign",
+                "--local-user",
+                &fingerprint,
+            ],
+            Some(signed_bytes),
+            None,
+        )
+        .await
+        .expect("detached signing");
+
+        // The verifier runs on the fetch-contract inputs: `{part}.MIME`,
+        // the part body, and the signature part.
+        let (text, signature) =
+            super::legacy_pgp_verify_input_pair(mime, body, Some(&signed.output))
+                .expect("verify inputs");
+        let (text, signature) = super::legacy_pgp_verify_normalize(text, signature);
+        let result = super::run_gnupg_with_message(
+            &state,
+            Some(99_992),
+            &["--verify"],
+            Some(signature),
+            text,
+            None,
+        )
+        .await
+        .expect("detached verify");
+        let signatures = super::parse_verification_signature(&result.status);
+        assert_eq!(signatures.len(), 1, "{:?}", result.status);
+        assert_eq!(signatures[0]["status"], 0);
+        assert_eq!(signatures[0]["summary"], 0);
+        assert_eq!(
+            signatures[0]["fingerprint"], fingerprint,
+            "{:?}",
+            result.status
+        );
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[tokio::test]
+    async fn pgp_clearsigned_verify_roundtrip_with_gpg() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("frickmail-pgp-clear-{unique}"));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let mut config = test_config(None);
+        config.tmp_dir = temp_root.to_string_lossy().to_string();
+        let state = super::AppState::with_db_pool(config, None);
+        let uid = 99_993;
+        let generated = super::run_gnupg(
+            &state,
+            uid,
+            &[
+                "--yes",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                "Clear Tester <[EMAIL]>",
+                "default",
+                "default",
+            ],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fingerprint = generated
+            .status
+            .iter()
+            .find_map(|line| line.strip_prefix("KEY_CREATED "))
+            .and_then(|value| value.split(' ').next_back())
+            .unwrap_or_default()
+            .to_string();
+        let clearsigned = super::run_gnupg(
+            &state,
+            uid,
+            &["--clearsign", "--local-user", &fingerprint],
+            Some(b"clearsigned line one\r\nclearsigned line two\r\n".to_vec()),
+            None,
+        )
+        .await
+        .expect("clearsign");
+        let payload = String::from_utf8(clearsigned.output).expect("ascii clearsigned output");
+        assert!(payload.contains("-----BEGIN PGP SIGNED MESSAGE-----"));
+
+        // Clearsigned parts arrive with an empty signature; the CTE lookup
+        // finds none and returns the text as-is.
+        let mime = b"Content-Type: text/plain\r\n";
+        let (text, signature) = super::legacy_pgp_verify_input_pair(mime, payload.as_bytes(), None)
+            .expect("clearsigned inputs");
+        assert!(signature.is_empty());
+        let (text, signature) = super::legacy_pgp_verify_normalize(text, signature);
+        let result = super::run_gnupg_with_message(
+            &state,
+            Some(uid),
+            &["--verify"],
+            Some(signature),
+            text,
+            None,
+        )
+        .await
+        .expect("clearsigned verify");
+        let signatures = super::parse_verification_signature(&result.status);
+        assert_eq!(signatures.len(), 1, "{:?}", result.status);
+        assert_eq!(signatures[0]["status"], 0);
         let _ = std::fs::remove_dir_all(&temp_root);
     }
 

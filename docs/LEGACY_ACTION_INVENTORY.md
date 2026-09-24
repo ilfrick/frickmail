@@ -146,10 +146,16 @@ model instead of collapsing verification to one early `VALIDSIG` result.
 Success and failure signatures retain legacy status/summary values, decoded
 UIDs, fingerprints, timestamps, expiry/version fields, valid markers, and
 PHP-compatible summary messages; no recognized signature still returns false.
-IMAP verification also reproduces PHP MIME normalization: bounded part headers
-are fetched before the body, Base64 and quoted-printable clear-signed parts are
-decoded, detached signatures receive the same header-plus-CRLF prefix ahead of
-the body, and signatures remain ASCII-filtered.
+IMAP verification reproduces PHP MIME normalization byte-exactly: bounded
+part headers are fetched before the body, Base64 and quoted-printable
+clear-signed parts are decoded with an empty signature, detached signatures
+receive the full `{part}.MIME` headers `+ CRLF +` body as the text (the
+previous Rust code shipped only the headers and swapped the signature/body
+slots), the text is CRLF-canonicalized (`\r?\n → \r\n` like PHP's
+`preg_replace`), signatures remain ASCII-filtered, and the GnuPG `--verify`
+inputs are staged as 0600 temp files (the earlier `--enable-special-filenames
+- "-&5"` pipe attempt never reached GnuPG). Detached and clearsigned
+roundtrips against the local GnuPG binary are regression-tested.
 
 Native `GnupgDecrypt` no longer skips embedded signature verification: direct
 and IMAP part decryption return real legacy-compatible signature metadata for
@@ -302,13 +308,19 @@ surface.
 The next Rust implementation targets from this inventory are:
 
 1. Complete native parity for exact IMAP MIME normalization edge cases for
-   detached/clear-signed verification. Server-side compose GnuPG is native:
-   passphrase-protected keyring generation/sign/encrypt/decrypt/export with
-   loopback passphrase files, PHP-truthy sign gating, strict fail-closed
-   fingerprint/recipient validation, PHP sign-then-encrypt order, single-armor
-   RFC 3156 wrapping, and SaveMessage draft parity. Key listing/import/
-   generation/export, direct or IMAP part decryption, and legacy
-   multi-signature verification metadata are now native.
+   detached/clear-signed verification — now native. Server-side compose GnuPG
+   is native: passphrase-protected keyring generation/sign/encrypt/decrypt/
+   export with loopback passphrase files, PHP-truthy sign gating, strict
+   fail-closed fingerprint/recipient validation, PHP sign-then-encrypt order,
+   single-armor RFC 3156 wrapping, and SaveMessage draft parity. Verification
+   parity: `PgpVerifyMessage` fetches `{part}.MIME` headers, the part body,
+   and the optional signature part under the shared bounds; detached text is
+   `headers + CRLF + body`, clearsigned text is the header-derived
+   transfer-decoded body with an empty signature, CRLF-canonicalized and
+   ASCII-filtered like PHP, staged for `gpg --verify` through 0600 temp files
+   (roundtrips regression-tested against the local GnuPG binary). Key
+   listing/import/generation/export, direct or IMAP part decryption, and
+   legacy multi-signature verification metadata are native.
 2. Complete `Message` parity: remaining message/header details and detailed
    message payloads. Opaque (non-detached) S/MIME `smimeSigned` auto-verification
    is native and best-effort in the `Message` handler (verified inner `body`
