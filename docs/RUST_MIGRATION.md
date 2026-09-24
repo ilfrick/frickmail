@@ -5,6 +5,53 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-24 10:45:00 UTC
+
+The OAuth IMAP login seam slice continues option 1 (full OAuth sends) in the
+router: `oauth_imap_connection_config` builds IMAP configs for gmail/o365
+accounts (stored host → domain template → well-known provider defaults
+`imap.gmail.com` / `outlook.office365.com` on 993/TLS, login falls back to the
+full email), `oauth_refresh_token_for_imap` decrypts the stored refresh token
+failing closed with the bridge's re-authorize wording, and the SMTP-only
+`get_oauth_access_token_for_smtp` is renamed to the shared
+`refresh_oauth_access_token` used by SMTP XOAUTH2, future IMAP login, and
+account validation alike.
+
+Behavior is intentionally unchanged: the resolver is wired into
+`legacy_smtp_send_settings` with byte-identical fallback semantics (missing/
+bad token or failed refresh still falls back to password auth like the PHP
+plugin hook returning without a token), and the config builder is staged
+behind `#[allow(dead_code)]` (precedent-backed) until the login slice gives
+it its first caller — the router never calls `fm_imap::login` directly, so
+no honest one-line migration exists yet. Password login, SMTP transport, and
+all IMAP paths behave exactly as before.
+
+Verification (host + Docker dev service): `cargo fmt --all -- --check` clean;
+`cargo clippy --workspace --all-targets -D warnings` clean; new tests
+(provider defaults incl. non-OAuth rejection, config defaults/override via an
+in-memory pool, refresh-token missing/undecryptable/empty fail-closed plus a
+roundtrip with type+tenant) green alongside the adjacent suites
+(`send_message`/`save_message`/`read_receipt`/`smtp` 28 passed, `v1_send` 5
+passed).
+Production-image validation built `frickmail-rust:oauth-seam-test` at image
+ID `sha256:796c23d4032e51cfa137d3ae9f2014cf416f492a14875ed8d0266a61f07e8659`;
+a read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+Independent senior review criteria: no behavior change (SMTP fallback matrix
+preserved exactly, provider constants never touch the network at config
+time), host trust unchanged (write-time-validated stored/template hosts plus
+constants, same as every IMAP path), refresh-token errors generic
+client-side with details server-side, no schema or config change.
+
+Next: the credential dispatch + first OAuth IMAP login caller (send-pipeline
+password-gate bypass with Sent filing over OAuth IMAP), then live Gmail/O365
+verification (needs operator test accounts + OAuth client IDs). The major
+remaining gates toward the final Rust-only goal are otherwise unchanged.
+
+---
+
 ## Progress Snapshot — 2026-09-24 01:45:00 UTC
 
 The fm-imap XOAUTH2 slice lands the first OAuth-send primitive (option 1 of

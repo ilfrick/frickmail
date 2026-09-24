@@ -7912,32 +7912,31 @@ async fn legacy_smtp_send_settings(
         .map(|address| address.ip().to_string())
         .ok_or_else(|| "SMTP host has no validated public address".to_string())?;
 
-    // Determine if this is an OAuth account and get access token
+    // Determine if this is an OAuth account and get access token. The
+    // refresh-token decrypt step is shared with the OAuth IMAP login seam;
+    // a missing/undecryptable token (or a failed refresh) still falls back
+    // to password auth here, exactly like the PHP plugin hook returning
+    // without an access token.
     let access_token = match account.account_type.as_str() {
         "gmail" | "o365" => {
-            // Check if account has an encrypted OAuth refresh token
-            if let Some(blob) = account.encrypted_oauth_refresh_token.as_deref() {
-                match decrypt_account_secret(blob, credential_key) {
-                    Ok(Some(refresh_token)) if !refresh_token.trim().is_empty() => {
-                        // Exchange refresh token for access token
-                        match get_oauth_access_token_for_smtp(
-                            &account.account_type,
-                            &refresh_token,
-                            account.oauth_tenant.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(token) => Some(token),
-                            Err(e) => {
-                                tracing::warn!("Failed to get OAuth access token for SMTP, falling back to password: {}", e);
-                                None
-                            }
+            match oauth_refresh_token_for_imap(account, credential_key) {
+                Ok((account_type, refresh_token, tenant)) => {
+                    // Exchange refresh token for access token
+                    match refresh_oauth_access_token(
+                        &account_type,
+                        &refresh_token,
+                        tenant.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            tracing::warn!("Failed to get OAuth access token for SMTP, falling back to password: {}", e);
+                            None
                         }
                     }
-                    _ => None,
                 }
-            } else {
-                None
+                Err(_) => None,
             }
         }
         _ => None,
@@ -22347,7 +22346,11 @@ async fn graph_access_token_for(
         })
 }
 
-async fn get_oauth_access_token_for_smtp(
+/// Refreshes a provider OAuth access token from a stored refresh token.
+/// Shared by SMTP XOAUTH2, the future OAuth IMAP login seam, and account
+/// validation: the token endpoint, client credentials, and scope are identical
+/// in all three paths.
+async fn refresh_oauth_access_token(
     account_type: &str,
     refresh_token: &str,
     tenant: Option<&str>,
@@ -23007,6 +23010,126 @@ fn imap_port(port: Option<i64>) -> fm_core::Result<Option<u16>> {
     u16::try_from(port)
         .map(Some)
         .map_err(|_| FrickmailError::BadRequest("invalid IMAP port".to_string()))
+}
+
+/// Well-known IMAP endpoints for provider OAuth accounts, used only when
+/// neither the account nor its domain template pins an IMAP host — mirroring
+/// how `legacy_smtp_send_settings` falls back to configured defaults.
+///
+/// Staged for the OAuth IMAP login slice (the first caller); allowed dead
+/// until then so the `-D warnings` gate stays green.
+#[allow(dead_code)]
+fn oauth_imap_provider_defaults(account_type: &str) -> Option<(&'static str, u16, &'static str)> {
+    match account_type {
+        "gmail" => Some(("imap.gmail.com", 993, "SSL")),
+        "o365" => Some(("outlook.office365.com", 993, "SSL")),
+        _ => None,
+    }
+}
+
+/// Builds an IMAP connection config for a provider OAuth (gmail/o365)
+/// account: stored host → domain template → well-known provider default.
+/// Unlike `imap_config_from_account_secret` this accepts OAuth account types;
+/// the credential itself is resolved separately via
+/// `oauth_refresh_token_for_imap` plus the shared refresh flow, and
+/// authentication goes through `login_account_imap` (XOAUTH2, never LOGIN).
+/// Host trust matches every other IMAP path: stored/template hosts were
+/// validated at write time and provider defaults are constants.
+///
+/// Staged for the OAuth IMAP login slice (the first caller); allowed dead
+/// until then so the `-D warnings` gate stays green.
+#[allow(dead_code)]
+async fn oauth_imap_connection_config(
+    pool: &sqlx::AnyPool,
+    account: &MailAccountConnectionSecret,
+) -> Result<ImapConnectionConfig, String> {
+    let (default_host, default_port, default_secure) =
+        oauth_imap_provider_defaults(&account.account_type)
+            .ok_or_else(|| "Not an OAuth IMAP account".to_string())?;
+
+    // A resolution failure degrades to provider defaults rather than failing
+    // the login, matching the SMTP domain-template behavior.
+    let template = SqlxUserRepository::resolve_domain_for_email(pool, &account.email)
+        .await
+        .ok()
+        .flatten();
+    let template_imap_host = template.as_ref().and_then(|domain| {
+        domain
+            .imap_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+    });
+
+    let host = account
+        .imap_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .or(template_imap_host)
+        .unwrap_or(default_host)
+        .to_string();
+    let port = imap_port(account.imap_port)
+        .map_err(|err| err.public_message())?
+        .or_else(|| {
+            template
+                .as_ref()
+                .and_then(|domain| domain.imap_port)
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port > 0)
+        })
+        .unwrap_or(default_port);
+    let secure = account
+        .imap_secure
+        .as_deref()
+        .map(str::trim)
+        .filter(|secure| !secure.is_empty())
+        .or_else(|| {
+            template.as_ref().and_then(|domain| {
+                domain
+                    .imap_secure
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|secure| !secure.is_empty())
+            })
+        })
+        .unwrap_or(default_secure);
+    let login = account
+        .login
+        .as_deref()
+        .map(str::trim)
+        .filter(|login| !login.is_empty())
+        .unwrap_or(account.email.as_str())
+        .to_string();
+
+    ImapConnectionConfig::new(host, Some(port), Some(secure), login)
+        .map_err(|err| err.public_message())
+}
+
+/// Decrypts an OAuth account's stored refresh token without touching the
+/// network, failing closed with the bridge's re-authorize wording when the
+/// account is not OAuth-typed or the token is missing, empty, or
+/// undecryptable. Returns `(account_type, refresh_token, tenant)` for the
+/// shared refresh flow.
+fn oauth_refresh_token_for_imap(
+    account: &MailAccountConnectionSecret,
+    credential_key: &[u8],
+) -> Result<(String, String, Option<String>), String> {
+    if account.account_type != "gmail" && account.account_type != "o365" {
+        return Err("Not an OAuth IMAP account".to_string());
+    }
+    let Some(blob) = account.encrypted_oauth_refresh_token.as_deref() else {
+        return Err("Missing OAuth refresh token — re-authorize this account.".to_string());
+    };
+    let token = decrypt_account_secret(blob, credential_key)
+        .map_err(|err| err.public_message())?
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| "Missing OAuth refresh token — re-authorize this account.".to_string())?;
+    Ok((
+        account.account_type.clone(),
+        token,
+        account.oauth_tenant.clone(),
+    ))
 }
 
 fn account_password(
@@ -38105,6 +38228,117 @@ Subject: Empty body metadata\r\n\r\n"
         let mut config = test_config(None);
         config.frickmail_user.allow_message_append = allow_message_append;
         config
+    }
+
+    #[test]
+    fn oauth_imap_provider_defaults_cover_oauth_types_only() {
+        assert_eq!(
+            super::oauth_imap_provider_defaults("gmail"),
+            Some(("imap.gmail.com", 993, "SSL"))
+        );
+        assert_eq!(
+            super::oauth_imap_provider_defaults("o365"),
+            Some(("outlook.office365.com", 993, "SSL"))
+        );
+        assert_eq!(super::oauth_imap_provider_defaults("imap"), None);
+        assert_eq!(super::oauth_imap_provider_defaults(""), None);
+    }
+
+    fn oauth_imap_test_account(
+        account_type: &str,
+        imap_host: Option<String>,
+        refresh_token: Option<Vec<u8>>,
+    ) -> fm_user::MailAccountConnectionSecret {
+        fm_user::MailAccountConnectionSecret {
+            id: 7_731,
+            email: "oauth-user@example.com".to_string(),
+            account_type: account_type.to_string(),
+            imap_host,
+            imap_port: None,
+            imap_secure: None,
+            login: None,
+            encrypted_password: None,
+            encrypted_oauth_refresh_token: refresh_token,
+            oauth_tenant: Some("common".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_imap_connection_config_uses_provider_defaults() {
+        // No domains table in this pool: template resolution degrades to the
+        // provider defaults, exactly like the SMTP template behavior.
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        for (account_type, host) in [
+            ("gmail", "imap.gmail.com"),
+            ("o365", "outlook.office365.com"),
+        ] {
+            let config = super::oauth_imap_connection_config(
+                &pool,
+                &oauth_imap_test_account(account_type, None, None),
+            )
+            .await
+            .expect("provider defaults apply");
+            assert_eq!(config.host, host);
+            assert_eq!(config.port, 993);
+            assert_eq!(config.login, "oauth-user@example.com");
+        }
+        // A stored host wins over the provider default.
+        let config = super::oauth_imap_connection_config(
+            &pool,
+            &oauth_imap_test_account("gmail", Some("imap.example.com".to_string()), None),
+        )
+        .await
+        .expect("stored host applies");
+        assert_eq!(config.host, "imap.example.com");
+        // Non-OAuth types are rejected.
+        assert!(super::oauth_imap_connection_config(
+            &pool,
+            &oauth_imap_test_account("imap", None, None)
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn oauth_refresh_token_for_imap_fails_closed() {
+        let key = [19_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        // Non-OAuth types are rejected before any secret is touched.
+        assert!(super::oauth_refresh_token_for_imap(
+            &oauth_imap_test_account("imap", None, None),
+            &key
+        )
+        .is_err());
+        // Missing, undecryptable, and empty tokens all fail with the
+        // bridge's re-authorize wording instead of falling back to passwords.
+        for account in [
+            oauth_imap_test_account("gmail", None, None),
+            oauth_imap_test_account("gmail", None, Some(vec![9_u8; 32])),
+            oauth_imap_test_account(
+                "o365",
+                None,
+                Some(fm_user::encrypt_account_secret("", &key).unwrap()),
+            ),
+        ] {
+            assert_eq!(
+                super::oauth_refresh_token_for_imap(&account, &key).unwrap_err(),
+                "Missing OAuth refresh token — re-authorize this account."
+            );
+        }
+        // A stored token round-trips with its type and tenant.
+        let stored = fm_user::encrypt_account_secret("refresh-token-value", &key).unwrap();
+        assert_eq!(
+            super::oauth_refresh_token_for_imap(
+                &oauth_imap_test_account("o365", None, Some(stored)),
+                &key
+            )
+            .unwrap(),
+            (
+                "o365".to_string(),
+                "refresh-token-value".to_string(),
+                Some("common".to_string())
+            )
+        );
     }
 
     fn admin_backup_config(
