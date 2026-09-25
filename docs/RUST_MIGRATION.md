@@ -5,6 +5,56 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-25 07:50:00 UTC
+
+The v1 identities-management UI slice wires the already-native identities
+endpoints into the standalone v1 screen, closing the last unwired v1
+read surface.
+
+- UI (`identities.js` + `index.html`): list/add/set-default/delete over the
+  exact v1 endpoints (`GET`/`POST /identities`, `POST
+  /identities/{id}/default`, `DELETE /identities/{id}`), with pure renderers
+  (`renderIdentities`, `renderIdentityForm`), a stub-able payload collector,
+  and thin I/O wrappers — all unit-tested. `index.html` gains an Identities
+  nav entry plus `showIdentities` and its add/default/delete handlers with
+  name/email-required validation, account-scoped through the bootstrap
+  session like the rules screen.
+- Breakage fixed on arrival: the in-progress import collided with
+  `compose.js`'s `loadIdentities` (duplicate binding = page-wide
+  SyntaxError). The compose import is now aliased to
+  `loadComposeIdentities`; the management screen owns the canonical
+  `loadIdentities`. No Rust changes in this slice — the API surface
+  (`api_v1.rs` identities handlers reusing the exact repository calls) was
+  already native.
+
+Verification: host `node --test frickmail-ui/v1/js/*.test.mjs` 213 passed /
+0 failed (13 identities tests); `npx eslint` on touched JS clean; inline
+module in `index.html` parses (`node --check` OK); `cargo fmt --all
+-- --check` clean; `cargo clippy --workspace --all-targets -D warnings`
+clean; `cargo test -p fm-user --lib` 64 passed; `cargo test -p fm-http
+--lib` 577 passed / 0 failed.
+Production-image validation: `frickmail-rust:v1-identities-test` built at
+image ID `sha256:cacffee2022501a9501276e216458f40baa930122e5f5d132c73d0b985db4038`;
+read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and the
+shipped v1 bundle was confirmed to contain the Identities nav wiring; the
+container stopped/removed cleanly with the image removed afterwards.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: OAuth sends live verification (deferred —
+needs operator test accounts + OAuth client IDs), remaining compat-known
+bundled-plugin hooks (`KolabFolder`, `NextcloudSaveMsg`/`NextcloudAttachFile`
+— operator decisions), connection-token/CSRF contract, frontend/theming with
+the theme deletion plan recorded, cutover validation.
+
+Prior pending slice now confirmed published: `master` + `rust-full-migration`
+on `origin` and `gitea` all resolve to `598b77c2c` (the rule-writes
+publication record), verified via live `ls-remote`; local
+`rust-full-migration` tracking ref still points at `8d2ea81a9` and needs a
+fetch on next publish.
+
+---
+
 ## Progress Snapshot — 2026-09-24 20:30:00 UTC
 
 The v1 rules-writes slice completes the tasks-write pattern for filter rules.

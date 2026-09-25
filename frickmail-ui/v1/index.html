@@ -33,7 +33,7 @@ import {
 	renderContactForm,
 	renderContacts
 } from './js/contacts.js';
-import { collectComposePayload, loadIdentities, renderComposeForm, sendMessage } from './js/compose.js';
+import { collectComposePayload, loadIdentities as loadComposeIdentities, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
 import {
 	addTask,
@@ -98,6 +98,15 @@ import {
 	saveEvent
 } from './js/calendar.js';
 import { collectPreferencesPatch, loadPreferences, renderPreferencesForm, savePreferences } from './js/settings.js';
+import {
+	addIdentity,
+	collectIdentityPayload,
+	deleteIdentity,
+	loadIdentities,
+	renderIdentities,
+	renderIdentityForm,
+	setDefaultIdentity
+} from './js/identities.js';
 
 const api = new ApiClient('');
 const root = document.getElementById('app');
@@ -113,6 +122,7 @@ function nav(active) {
 	const rules = active === 'rules' ? ' aria-current="page"' : '';
 	const calendar = active === 'calendar' ? ' aria-current="page"' : '';
 	const contacts = active === 'contacts' ? ' aria-current="page"' : '';
+	const identities = active === 'identities' ? ' aria-current="page"' : '';
 	const compose = active === 'compose' ? ' aria-current="page"' : '';
 	return '<nav data-fm="nav">'
 		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
@@ -123,6 +133,7 @@ function nav(active) {
 		+ '<button type="button" data-fm="nav-smime"' + smime + '>S/MIME</button>'
 		+ '<button type="button" data-fm="nav-rules"' + rules + '>Rules</button>'
 		+ '<button type="button" data-fm="nav-contacts"' + contacts + '>Contacts</button>'
+		+ '<button type="button" data-fm="nav-identities"' + identities + '>Identities</button>'
 		+ '<button type="button" data-fm="nav-calendar"' + calendar + '>Calendar</button>'
 		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
 		+ '<button type="button" data-fm="nav-compose"' + compose + '>Compose</button>'
@@ -139,6 +150,7 @@ function wireNav() {
 	const smimeButton = root.querySelector('[data-fm="nav-smime"]');
 	const rulesButton = root.querySelector('[data-fm="nav-rules"]');
 	const contactsButton = root.querySelector('[data-fm="nav-contacts"]');
+	const identitiesButton = root.querySelector('[data-fm="nav-identities"]');
 	const calendarButton = root.querySelector('[data-fm="nav-calendar"]');
 	const settingsButton = root.querySelector('[data-fm="nav-settings"]');
 	const composeButton = root.querySelector('[data-fm="nav-compose"]');
@@ -166,6 +178,9 @@ function wireNav() {
 	}
 	if (contactsButton) {
 		contactsButton.addEventListener('click', () => showContacts());
+	}
+	if (identitiesButton) {
+		identitiesButton.addEventListener('click', () => showIdentities());
 	}
 	if (calendarButton) {
 		calendarButton.addEventListener('click', () => showCalendar());
@@ -681,6 +696,80 @@ async function onRuleDelete(id) {
 	}
 }
 
+let identitiesAccountId = 0;
+
+async function showIdentities() {
+	try {
+		const session = await api.bootstrap();
+		identitiesAccountId = session && session.selected_account_id
+			? session.selected_account_id
+			: 0;
+		const data = await loadIdentities(api, identitiesAccountId);
+		root.innerHTML = nav('identities')
+			+ '<h1 data-fm="title">Sender identities</h1>'
+			+ renderIdentityForm()
+			+ renderIdentities(data)
+			+ '<p data-fm="status"></p>';
+		wireNav();
+		const form = root.querySelector('[data-fm="add"]');
+		if (form) {
+			form.addEventListener('submit', onIdentityAdd);
+		}
+		for (const button of root.querySelectorAll('[data-fm="default"]')) {
+			button.addEventListener('click', () => onIdentityDefault(button.getAttribute('data-id')));
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onIdentityDelete(button.getAttribute('data-id')));
+		}
+	} catch (error) {
+		root.innerHTML = '<p>Cannot load sender identities.</p>';
+	}
+}
+
+function identitiesStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onIdentityAdd(event) {
+	event.preventDefault();
+	try {
+		const payload = collectIdentityPayload(root, identitiesAccountId);
+		if (!payload.name.trim()) {
+			identitiesStatus('A name is required.');
+			return;
+		}
+		if (!payload.email.trim()) {
+			identitiesStatus('An email address is required.');
+			return;
+		}
+		await addIdentity(api, payload);
+		await showIdentities();
+	} catch (error) {
+		identitiesStatus(error && error.message ? error.message : 'Add failed.');
+	}
+}
+
+async function onIdentityDefault(id) {
+	try {
+		await setDefaultIdentity(api, Number(id) || 0);
+		await showIdentities();
+	} catch (error) {
+		identitiesStatus(error && error.message ? error.message : 'Set default failed.');
+	}
+}
+
+async function onIdentityDelete(id) {
+	try {
+		await deleteIdentity(api, Number(id) || 0);
+		await showIdentities();
+	} catch (error) {
+		identitiesStatus(error && error.message ? error.message : 'Delete failed.');
+	}
+}
+
 async function showSettings() {
 	try {
 		const data = await loadPreferences(api);
@@ -815,7 +904,7 @@ async function showCompose(seed) {
 		const accountId = session && session.selected_account_id
 			? session.selected_account_id
 			: undefined;
-		const data = await loadIdentities(api, accountId);
+		const data = await loadComposeIdentities(api, accountId);
 		identities = data && Array.isArray(data.identities) ? data.identities : [];
 	} catch (error) {
 		void error;
