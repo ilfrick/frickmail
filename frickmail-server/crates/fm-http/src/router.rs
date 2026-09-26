@@ -20582,9 +20582,13 @@ fn legacy_message_json(
         "dmarc": auth_statuses.dmarc,
         "flags": flags,
         "inReplyTo": in_reply_to,
-        "id": legacy_optional_scalar_string(email_id),
+        // PHP `Message::jsonSerialize()` always emits `id` and `preview`
+        // as strings (possibly empty) and `headers` as a collection
+        // object, so absent values become `""`/empty-`@Collection`
+        // rather than null.
+        "id": json!(email_id.unwrap_or("")),
         "size": size,
-        "preview": legacy_nullable_string(preview),
+        "preview": json!(preview.unwrap_or("")),
         "headers": legacy_parsed_headers_json(headers),
     });
 
@@ -20700,10 +20704,12 @@ fn legacy_parsed_attachments_json(
     )
 }
 
+/// Serializes parsed message headers as the legacy
+/// `Collection/MimeHeaderCollection` shape. PHP `Message::jsonSerialize()`
+/// always emits the collection object, so an absent list becomes an empty
+/// `@Collection` rather than null.
 fn legacy_parsed_headers_json(headers: Option<&[ParsedMessageHeader]>) -> Value {
-    let Some(headers) = headers else {
-        return Value::Null;
-    };
+    let headers = headers.unwrap_or(&[]);
 
     json!({
         "@Object": "Collection/MimeHeaderCollection",
@@ -30423,7 +30429,7 @@ mod tests {
         assert_eq!(body["Result"]["@Object"], "Object/Message");
         assert_eq!(body["Result"]["folder"], "INBOX");
         assert_eq!(body["Result"]["uid"], 51);
-        assert_eq!(body["Result"]["id"], Value::Null);
+        assert_eq!(body["Result"]["id"], "");
         assert_eq!(body["Result"]["subject"], "Legacy body");
         assert_eq!(body["Result"]["messageId"], "<message@example.com>");
         assert_eq!(body["Result"]["inReplyTo"], "<parent@example.com>");
@@ -30432,7 +30438,7 @@ mod tests {
             "<root@example.com> <parent@example.com>"
         );
         assert_eq!(body["Result"]["readReceipt"], "receipt@example.com");
-        assert_eq!(body["Result"]["preview"], Value::Null);
+        assert_eq!(body["Result"]["preview"], "");
         assert_eq!(body["Result"]["from"][0]["name"], "Sender, Example");
         assert_eq!(body["Result"]["from"][0]["email"], "sender@example.com");
         assert_eq!(body["Result"]["replyTo"][0]["email"], "reply@example.com");
@@ -30956,7 +30962,13 @@ UERGREFUQQ==
         assert_eq!(body["Result"]["subject"], "Attachment preview");
         assert_eq!(body["Result"]["plain"], "Body from capped preview.");
         assert_eq!(body["Result"]["attachments"], Value::Null);
-        assert_eq!(body["Result"]["headers"], Value::Null);
+        assert_eq!(
+            body["Result"]["headers"],
+            json!({
+                "@Object": "Collection/MimeHeaderCollection",
+                "@Collection": [],
+            })
+        );
     }
 
     #[tokio::test]
@@ -31100,7 +31112,13 @@ Subject: Preview metadata\r\n\r\n"
         assert_eq!(result["to"][0]["email"], "recipient@example.com");
         assert_eq!(result["cc"][0]["email"], "cc@example.com");
         assert_eq!(result["bcc"][0]["email"], "hidden@example.com");
-        assert_eq!(result["headers"], Value::Null);
+        assert_eq!(
+            result["headers"],
+            json!({
+                "@Object": "Collection/MimeHeaderCollection",
+                "@Collection": [],
+            })
+        );
         assert!(result.get("html").is_none());
         assert!(result.get("plain").is_none());
     }
@@ -31568,9 +31586,9 @@ Subject: Empty body metadata\r\n\r\n"
 
         assert_eq!(body["Action"], "Message");
         assert_eq!(body["Result"]["@Object"], "Object/Message");
-        assert_eq!(body["Result"]["id"], Value::Null);
+        assert_eq!(body["Result"]["id"], "");
         assert_eq!(body["Result"]["subject"], "Metadata only");
-        assert_eq!(body["Result"]["preview"], Value::Null);
+        assert_eq!(body["Result"]["preview"], "");
         assert!(body["Result"].get("date").is_none());
         assert!(body["Result"].get("html").is_none());
         assert!(body["Result"].get("plain").is_none());
@@ -33817,7 +33835,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(message["readReceipt"], "receipt@example.com");
         assert_eq!(message["html"], "<p>Hello</p>");
         assert_eq!(message["plain"], "");
-        assert_eq!(message["preview"], Value::Null);
+        assert_eq!(message["preview"], "");
         assert_eq!(message["id"], "gmail-message-id");
         assert_eq!(message["from"][0]["name"], "Sender");
         assert_eq!(message["from"][0]["email"], "sender@example.com");
@@ -33830,12 +33848,77 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(message["sender"][0]["email"], "actual@example.com");
         assert_eq!(message["deliveredTo"][0]["email"], "delivered@example.com");
         assert_eq!(message["attachments"], Value::Null);
-        assert_eq!(message["headers"], Value::Null);
+        assert_eq!(
+            message["headers"],
+            json!({
+                "@Object": "Collection/MimeHeaderCollection",
+                "@Collection": [],
+            })
+        );
         assert_eq!(message["dateTimestamp"], 0);
         assert_eq!(message["dateTimestampSource"], "internal");
         assert!(message.get("date").is_none());
         assert!(message.get("threads").is_none());
         assert!(message.get("threadUnseen").is_none());
+    }
+
+    #[test]
+    fn legacy_message_json_matches_php_absent_scalar_shapes() {
+        let headers = [super::ParsedMessageHeader {
+            name: "X-Custom".to_string(),
+            value: "yes".to_string(),
+            parameters: Vec::new(),
+        }];
+        let message = super::legacy_message_json(
+            "INBOX",
+            55,
+            "hash",
+            "Absent shapes",
+            false,
+            0,
+            "",
+            false,
+            &Default::default(),
+            None,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            0,
+            "internal",
+            Value::Null,
+            Some(headers.as_slice()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            0,
+            &[],
+            None,
+            Some("Hello"),
+            &[],
+            &[],
+            &super::LegacyMessageAutoVerify::default(),
+        );
+
+        // PHP `Message::jsonSerialize()` emits `id`/`preview` as strings
+        // even when empty, and `headers` as a collection object.
+        assert_eq!(message["id"], "");
+        assert_eq!(message["preview"], "Hello");
+        assert_eq!(
+            message["headers"]["@Object"],
+            "Collection/MimeHeaderCollection"
+        );
+        assert_eq!(message["headers"]["@Collection"][0]["name"], "X-Custom");
+        assert_eq!(message["headers"]["@Collection"][0]["value"], "yes");
+        assert!(message.get("html").is_none());
+        assert!(message.get("plain").is_none());
     }
 
     #[test]

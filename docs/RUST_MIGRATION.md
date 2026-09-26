@@ -5,6 +5,53 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-26 16:25:00 UTC
+
+The Message-view shape slice closes the last concrete field-level gaps from
+the PHP `DoMessage()`/`Message::jsonSerialize()` diff: absent `id`/`preview`
+now serialize as PHP-exact `""` (no longer null) and absent `headers` as an
+empty `MimeHeaderCollection` collection object. Flags needed no change —
+`fm-imap` normalization already matches PHP (lowercase, unique,
+`$readreceipt`→`$mdnsent`, `$replied`→`\answered`, covered by existing
+tests). The `filter.result-message`/`filter.message-html`/`filter.message-plain`
+render hooks stay retired by architecture (no bundled consumers), consistent
+with the filter-pipeline slice. The inventory `Message` row, the remaining-targets
+`Message` item, and the bare `ChangePassword (partial-native)` marker are
+updated to record the exact residue: external LDAP/arbitrary-SQL/hosting-panel
+password drivers need operator infrastructure and are an operator
+retire-vs-port decision (the Frickmail login flow with policy, HIBP,
+credential reseal, and session rotation is native).
+
+Verification: `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets -D warnings` clean; naming gate passes locally (56 hits, 11
+entries, none stale); `cargo test -p fm-core` 13 passed; `cargo test -p
+fm-http --lib` 585 passed / 0 failed on the final full run (1 new
+view-shape test; 5 existing pins updated from null to the PHP-exact
+shapes, all failures during the slice were old pins of the changed
+behavior — no flakes).
+Production-image validation: `frickmail-rust:v1-msgshapes-test` built at
+image ID `sha256:5d957cff32f0bf74aecd1487ef94d5414b433f49861f9c676d019efb8f594719`;
+read-only container returned 200 for `/health` and the v1 session endpoint,
+logs showed only the expected Redis-fallback WARN without a sidecar, and it
+stopped/removed cleanly with the image removed afterwards.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: connection-token/CSRF contract, theme
+deletion plan (freeze already effective in the Rust service — hardcoded
+`Default` theme, `Themes: false`; serving/source/UI deletion blocked on
+legacy-app removal), schema-compat integration tests, OAuth sends live
+verification (deferred — needs operator test accounts + OAuth client IDs),
+remaining compat-known bundled-plugin hooks (`KolabFolder`,
+`NextcloudSaveMsg`/`NextcloudAttachFile`, external password drivers —
+operator decisions), frontend/theming, cutover validation.
+
+Prior pending slices now confirmed published: `master` +
+`rust-full-migration` on `origin` and `gitea` all resolve to `c2557bd33`
+(the filter-pipeline feature plus the naming-allowlist fix-forward),
+verified via live `ls-remote`.
+
+---
+
 ## Progress Snapshot — 2026-09-26 14:10:00 UTC
 
 The message filter-hook slice closes the shared `partial-native` boundary on
