@@ -21,14 +21,15 @@
 //! on first use).
 
 use axum::{
-    extract::rejection::JsonRejection,
-    http::StatusCode,
+    extract::{rejection::JsonRejection, ConnectInfo, FromRequestParts},
+    http::{request::Parts, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::net::{IpAddr, SocketAddr};
 
 use super::NativeLoginOutcome;
 use super::{
@@ -1189,7 +1190,29 @@ async fn map_send_response(response: Response) -> Response {
     )
 }
 
-/// Sends a plain text/HTML message through the selected or explicit account,
+/// Best-effort peer address for the `filter.build-message`
+/// (`X-Originating-IP`) port. Infallible by design: transports without
+/// connect info (Unix sockets, in-process tests) yield `None` and skip the
+/// header instead of rejecting the request — `Option<ConnectInfo>` cannot
+/// express this in axum 0.8, hence the manual extraction mirroring the
+/// proxy-auth extractor.
+struct OptionalPeerAddr(Option<IpAddr>);
+
+impl<S> FromRequestParts<S> for OptionalPeerAddr
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
+                .await
+                .ok()
+                .map(|info| info.0.ip()),
+        ))
+    }
+}
 /// reusing the exact compose/delivery pipeline as legacy `SendMessage`
 /// (validation, MIME build, SMTP delivery, Sent filing). Attachments,
 /// client PGP/SMIME payloads, and signing options stay on the legacy
@@ -1199,6 +1222,7 @@ async fn send(
     state: axum::extract::State<AppState>,
     session: fm_session::Session,
     headers: axum::http::HeaderMap,
+    peer: OptionalPeerAddr,
     body: Result<Json<SendRequest>, JsonRejection>,
 ) -> Response {
     send_with_sender_and_appender(
@@ -1206,6 +1230,7 @@ async fn send(
         &session,
         body,
         &headers,
+        peer.0,
         &super::ProductionLegacySmtpSender,
         &super::ProductionLegacySentAppender,
         &super::ProductionOAuthTokenRefresher,
@@ -1239,11 +1264,13 @@ fn default_send_save_to_sent() -> bool {
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_with_sender_and_appender(
     state: &AppState,
     session: &fm_session::Session,
     body: Result<Json<SendRequest>, JsonRejection>,
     headers: &axum::http::HeaderMap,
+    peer_ip: Option<IpAddr>,
     smtp_sender: &dyn super::LegacySmtpSender,
     sent_appender: &dyn super::LegacySentAppender,
     token_refresher: &dyn super::OAuthAccessTokenRefresher,
@@ -1407,6 +1434,7 @@ async fn send_with_sender_and_appender(
         "SendMessage",
         &payload,
         session,
+        peer_ip,
         std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
         smtp_sender,
         sent_appender,
@@ -7653,6 +7681,7 @@ mod tests {
                 save_to_sent: true,
             })),
             &headers,
+            None,
             &RecordingSmtpSender {
                 message: std::sync::Arc::clone(&sent),
             },
@@ -7699,6 +7728,7 @@ mod tests {
                 save_to_sent: false,
             })),
             &headers,
+            None,
             &RecordingSmtpSender {
                 message: std::sync::Arc::clone(&sent),
             },
@@ -7793,6 +7823,7 @@ mod tests {
                 save_to_sent: false,
             })),
             &headers,
+            None,
             &RecordingSmtpSender {
                 message: std::sync::Arc::clone(sent),
             },

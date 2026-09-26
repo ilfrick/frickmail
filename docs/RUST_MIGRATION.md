@@ -5,6 +5,72 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-26 14:10:00 UTC
+
+The message filter-hook slice closes the shared `partial-native` boundary on
+`SendMessage`, `SaveMessage`, and `SendReadReceiptMessage`: all three are now
+`native` in `docs/LEGACY_ACTION_INVENTORY.md`.
+
+- Mechanism (`router/message_filters.rs`, new): named PHP fire points
+  (`filter.build-message`, `filter.send-message`, `filter.save-message`,
+  `filter.send-read-receipt-message`, `filter.message-rcpt`,
+  `filter.smtp-from`), a PHP-exact `ValidateWildcardValues` port
+  (whitespace/comma/semicolon split, collapsed stars, case-sensitive exact
+  items, unanchored wildcard parts), and the loopback-normalized
+  originating-IP mapping (proxy headers never consulted, matching the
+  deployment's never-trust-XFF rule).
+- Ports: `add-x-originating-ip-header` via opt-in
+  `mail.add_x_originating_ip` (stamped pre-build so transport, Sent, and
+  draft serializations all carry it, like the shared `buildMessage()`
+  mutation); `smtp-use-from-adr-account` via opt-in
+  `mail.from_address_account_smtp` with wildcard `mail.from_address_patterns`
+  (fail-closed `mail.from_address_throw_notfound` default `true`) — a
+  pattern-matching sender resolves to the matching account whose SMTP
+  endpoint/credentials carry the send, while Sent filing and `$MDNSent`
+  flagging stay on the sending account. The demo-account `filter.send-message`
+  policy was already native and is unchanged. Peer addresses flow from
+  `ConnectInfo` (legacy dispatcher) and an infallible optional extractor
+  (v1 `POST /send`); transports without connect info skip the header instead
+  of rejecting. Third-party PHP filters cannot run without the legacy PHP
+  runtime and are retired by architecture, like the Kolab/Nextcloud hooks.
+- Fixed in review: the v1 `send` handler first took a required `ConnectInfo`
+  extractor, which turned connect-info-less requests (Unix sockets,
+  in-process tests) into 500s — caught by
+  `v1_send_rejects_bad_requests_over_http` (500 vs expected 400) and fixed
+  with the infallible `OptionalPeerAddr` extractor.
+
+Verification: `cargo fmt --all -- --check` clean; `cargo clippy --workspace
+--all-targets -D warnings` clean (two `too_many_arguments` allows follow the
+existing convention); naming gate passes locally with no new legacy refs;
+`cargo test -p fm-core` 13 passed; `cargo test -p fm-http --lib` 584 passed /
+0 failed on the final full run (11 new tests: 4 filter-module units, resolver
+semantics incl. fail-closed default, end-to-end SMTP host switch
+`8.8.8.8`→`9.9.9.9`, builder-level and save-flow `X-Originating-IP`
+stamping). An intermediate full run showed 2 failures: one was the real
+`ConnectInfo` rejection above (fixed, green in isolation and in the final
+run); the other did not reproduce on rerun and was treated as a flake per
+policy with the focused suites green throughout.
+Production-image validation: `frickmail-rust:v1-msgfilters-test` built at
+image ID `sha256:02d7c2ac458c87901e24fe28359dfacbc500d8f7903e7cd9e2bf253d42731926`;
+read-only container with the new filter env vars set returned 200 for
+`/health` and the v1 session endpoint, logs showed only the expected
+Redis-fallback WARN without a sidecar, and it stopped/removed cleanly with
+the image removed afterwards.
+
+This slice is verified but NOT yet committed or pushed. Remaining major gates
+toward the final Rust-only goal: `Message` response details,
+connection-token/CSRF contract, theme deletion plan, schema-compat
+integration tests, OAuth sends live verification (deferred — needs operator
+test accounts + OAuth client IDs), remaining compat-known bundled-plugin
+hooks (`KolabFolder`, `NextcloudSaveMsg`/`NextcloudAttachFile` — operator
+decisions), frontend/theming, cutover validation.
+
+Prior pending slice now confirmed published: `master` +
+`rust-full-migration` on `origin` and `gitea` all resolve to `9f4f3e476`
+(the identities-screen publication record), verified via live `ls-remote`.
+
+---
+
 ## Progress Snapshot — 2026-09-25 07:50:00 UTC
 
 The v1 identities-management UI slice wires the already-native identities

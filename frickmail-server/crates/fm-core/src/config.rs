@@ -159,6 +159,42 @@ pub struct MailDefaults {
         deserialize_with = "deserialize_message_list_domain_overrides"
     )]
     pub message_list_domain_overrides: HashMap<String, MessageListDomainOverride>,
+    /// Native port of the `add-x-originating-ip-header` plugin's
+    /// `filter.build-message` hook: stamps `X-Originating-IP` on outgoing
+    /// MIME built by the send and draft-save pipelines. Off by default,
+    /// matching the plugin-disabled state.
+    #[serde(default)]
+    pub add_x_originating_ip: bool,
+    /// Native port of the `smtp-use-from-adr-account` plugin's
+    /// `filter.smtp-from` hook: when the envelope sender differs from the
+    /// sending account and matches `from_address_patterns`, delivery uses
+    /// the matching account's SMTP settings and credentials. Off by
+    /// default, matching the plugin-disabled state.
+    #[serde(default)]
+    pub from_address_account_smtp: bool,
+    /// Space/comma/semicolon-delimited `*`-wildcard patterns gating
+    /// `from_address_account_smtp`, mirroring the plugin's
+    /// `from_adress_pattern` option. Empty disables the switch, exactly
+    /// like the plugin's empty-whitelist early return.
+    #[serde(default)]
+    pub from_address_patterns: String,
+    /// Mirrors the plugin's `throw_notfound_exception` option (default
+    /// `true`): a pattern match with no account fails the send instead of
+    /// falling back to the sending account's SMTP settings.
+    #[serde(default = "default_from_address_throw_notfound")]
+    pub from_address_throw_notfound: bool,
+}
+
+impl MailDefaults {
+    /// Mirrors the plugin's `strlen($sWhiteList)` gate: the from-address
+    /// switch only runs when enabled with a non-empty pattern list.
+    pub fn from_address_filter_active(&self) -> bool {
+        self.from_address_account_smtp && !self.from_address_patterns.trim().is_empty()
+    }
+}
+
+fn default_from_address_throw_notfound() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -458,6 +494,10 @@ impl Default for MailDefaults {
             message_list_permanent_filter: String::new(),
             message_list_limit: default_message_list_limit(),
             message_list_domain_overrides: HashMap::new(),
+            add_x_originating_ip: false,
+            from_address_account_smtp: false,
+            from_address_patterns: String::new(),
+            from_address_throw_notfound: default_from_address_throw_notfound(),
         }
     }
 }
@@ -997,6 +1037,33 @@ mod tests {
             recipient_delimiter: String::new(),
         };
         assert_eq!(unsafe_config.recipient_pattern(), None);
+    }
+
+    #[test]
+    fn message_filter_ports_default_off_with_plugin_parity() {
+        let default = serde_json::from_value::<MailDefaults>(serde_json::json!({})).unwrap();
+        assert!(!default.add_x_originating_ip);
+        assert!(!default.from_address_account_smtp);
+        assert!(default.from_address_patterns.is_empty());
+        assert!(default.from_address_throw_notfound);
+        assert!(!default.from_address_filter_active());
+
+        let enabled = serde_json::from_value::<MailDefaults>(serde_json::json!({
+            "add_x_originating_ip": true,
+            "from_address_account_smtp": true,
+            "from_address_patterns": "user@example.com *@example2.com"
+        }))
+        .unwrap();
+        assert!(enabled.add_x_originating_ip);
+        assert!(enabled.from_address_filter_active());
+
+        // Enabled without patterns mirrors the plugin's empty-whitelist
+        // early return: the switch never runs.
+        let patternless = serde_json::from_value::<MailDefaults>(serde_json::json!({
+            "from_address_account_smtp": true
+        }))
+        .unwrap();
+        assert!(!patternless.from_address_filter_active());
     }
 
     #[test]

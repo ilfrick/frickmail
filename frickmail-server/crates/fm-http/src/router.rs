@@ -2,6 +2,7 @@ pub mod api_v1;
 mod avatar;
 pub mod calendar;
 pub mod contacts;
+pub mod message_filters;
 
 use std::{
     borrow::Cow,
@@ -1437,6 +1438,12 @@ async fn json_api_request(
 ) -> Response {
     let (parts, body) = request.into_parts();
     let method = parts.method;
+    // Directly connected peer for the `filter.build-message`
+    // (`X-Originating-IP`) port. Proxy headers are never consulted.
+    let peer_ip = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
     let headers = parts.headers;
     let query = query_map(&uri);
     let route_action = legacy_route_action(&uri);
@@ -1600,6 +1607,7 @@ async fn json_api_request(
             &session,
             &headers,
             &body,
+            peer_ip,
         )
         .await
         {
@@ -1808,6 +1816,7 @@ async fn bridge_json_request(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn native_compat_response(
     state: &AppState,
     action: &str,
@@ -1816,6 +1825,7 @@ async fn native_compat_response(
     session: &fm_session::Session,
     headers: &HeaderMap,
     body_bytes: &[u8],
+    peer_ip: Option<IpAddr>,
 ) -> Option<Response> {
     match action {
         "FrickmailMe" => Some(native_frickmail_me(state, original_action, session).await),
@@ -2236,8 +2246,12 @@ async fn native_compat_response(
         "ChangePassword" => {
             Some(native_change_password(state, original_action, payload, session).await)
         }
-        "SendMessage" => Some(native_send_message(state, original_action, payload, session).await),
-        "SaveMessage" => Some(native_save_message(state, original_action, payload, session).await),
+        "SendMessage" => {
+            Some(native_send_message(state, original_action, payload, session, peer_ip).await)
+        }
+        "SaveMessage" => {
+            Some(native_save_message(state, original_action, payload, session, peer_ip).await)
+        }
         "GetPGPKeys" => Some(native_get_pgp_keys(state, original_action, session).await),
         "PgpStoreKeyPair" => {
             Some(native_pgp_store_key_pair(state, original_action, payload, session).await)
@@ -4408,6 +4422,9 @@ struct LegacySendMessageRequest {
     gnupg_sign_passphrase: Option<String>,
     /// Server-side GnuPG recipient fingerprints.
     gnupg_encrypt_fingerprints: Vec<String>,
+    /// `filter.build-message` (`add-x-originating-ip-header` port) value,
+    /// applied by the MIME builder when set.
+    x_originating_ip: Option<String>,
 }
 
 impl std::fmt::Debug for LegacySendMessageRequest {
@@ -4650,6 +4667,7 @@ async fn native_send_message(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    peer_ip: Option<IpAddr>,
 ) -> Response {
     let delivery_phase = Arc::new(AtomicU8::new(SEND_PHASE_PRE_SMTP));
     match tokio::time::timeout(
@@ -4659,6 +4677,7 @@ async fn native_send_message(
             original_action,
             payload,
             session,
+            peer_ip,
             Arc::clone(&delivery_phase),
         ),
     )
@@ -4830,15 +4849,67 @@ async fn native_send_read_receipt_message_inner_with_clients(
         Ok(envelope) => envelope,
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
+    // `filter.smtp-from` + `filter.message-rcpt`
+    // (`smtp-use-from-adr-account` port): the receipt path fires the same
+    // SMTP hooks in PHP, so a receipt From that belongs to another of the
+    // caller's accounts delivers through that account's SMTP settings.
+    // The `$MDNSent` flagging below stays on the sending account.
+    let receipt_from_override = if state.config().mail.from_address_filter_active() {
+        match message_filter_from_account(
+            pool,
+            user.user_id,
+            &account.email,
+            &message.from,
+            &state.config().mail.from_address_patterns,
+            state.config().mail.from_address_throw_notfound,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(message) => return json_result_error(original_action, &message),
+        }
+    } else {
+        None
+    };
+    let mut receipt_smtp_account_id = account_id;
+    let mut receipt_smtp_password = receipt_smtp_password;
+    let mut receipt_smtp_preset: Option<String> = receipt_preset_token.map(str::to_string);
+    let mut receipt_from_secret_storage: Option<MailAccountConnectionSecret> = None;
+    if let Some((from_id, from_secret)) = receipt_from_override {
+        let from_credentials = match resolve_compose_imap_credentials(
+            &from_secret,
+            &credential_key,
+            original_action,
+            token_refresher,
+        )
+        .await
+        {
+            Ok(credentials) => credentials,
+            Err(response) => return response,
+        };
+        receipt_smtp_account_id = from_id;
+        receipt_smtp_password = match &from_credentials {
+            fm_imap::ImapCredentials::Password(password) => password.clone(),
+            fm_imap::ImapCredentials::OAuthToken(_) => {
+                account_password(&from_secret, &credential_key).unwrap_or_default()
+            }
+        };
+        receipt_smtp_preset = match &from_credentials {
+            fm_imap::ImapCredentials::OAuthToken(token) => Some(token.clone()),
+            fm_imap::ImapCredentials::Password(_) => None,
+        };
+        receipt_from_secret_storage = Some(from_secret);
+    }
+    let receipt_smtp_account = receipt_from_secret_storage.as_ref().unwrap_or(&account);
     let settings = match legacy_smtp_send_settings(
         state,
         pool,
         user.user_id,
-        account_id,
-        &account,
+        receipt_smtp_account_id,
+        receipt_smtp_account,
         &receipt_smtp_password,
         &credential_key,
-        receipt_preset_token,
+        receipt_smtp_preset.as_deref(),
     )
     .await
     {
@@ -5130,6 +5201,7 @@ async fn native_send_message_inner(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    peer_ip: Option<IpAddr>,
     delivery_phase: Arc<AtomicU8>,
 ) -> Response {
     native_send_message_inner_with_sender(
@@ -5137,6 +5209,7 @@ async fn native_send_message_inner(
         original_action,
         payload,
         session,
+        peer_ip,
         delivery_phase,
         &ProductionLegacySmtpSender,
     )
@@ -5148,6 +5221,7 @@ async fn native_send_message_inner_with_sender(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    peer_ip: Option<IpAddr>,
     delivery_phase: Arc<AtomicU8>,
     smtp_sender: &dyn LegacySmtpSender,
 ) -> Response {
@@ -5156,6 +5230,7 @@ async fn native_send_message_inner_with_sender(
         original_action,
         payload,
         session,
+        peer_ip,
         delivery_phase,
         smtp_sender,
         &ProductionLegacySentAppender,
@@ -5172,6 +5247,7 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    peer_ip: Option<IpAddr>,
     delivery_phase: Arc<AtomicU8>,
     smtp_sender: &dyn LegacySmtpSender,
     sent_appender: &dyn LegacySentAppender,
@@ -5295,15 +5371,78 @@ async fn native_send_message_inner_with_sender_and_sent_appender(
     request.attachments = attachments;
     request._attachment_memory_permit = memory_permit;
 
+    // `filter.build-message` (`add-x-originating-ip-header` port): stamp
+    // the header field before the MIME build so both the transport and
+    // Sent serializations carry it, exactly like the plugin's in-place
+    // message mutation inside the shared `buildMessage()`.
+    if state.config().mail.add_x_originating_ip {
+        request.x_originating_ip = message_filters::originating_ip_header_value(peer_ip);
+    }
+
+    // `filter.smtp-from` + `filter.message-rcpt`
+    // (`smtp-use-from-adr-account` port): when the envelope sender belongs
+    // to another of the caller's accounts, delivery uses that account's
+    // SMTP endpoint and credentials. The Sent copy still files through the
+    // sending account, matching the plugin (which only rewrites SMTP).
+    // The demo-account `filter.send-message` checks below keep running
+    // against the sending account either way.
+    let from_override = if state.config().mail.from_address_filter_active() {
+        match message_filter_from_account(
+            pool,
+            user.user_id,
+            &account.email,
+            &request.envelope_from,
+            &state.config().mail.from_address_patterns,
+            state.config().mail.from_address_throw_notfound,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(message) => return json_result_error(original_action, &message),
+        }
+    } else {
+        None
+    };
+    let mut smtp_account_id = account_id;
+    let mut smtp_password = smtp_password;
+    let mut smtp_preset: Option<String> = preset_access_token.map(str::to_string);
+    let mut from_secret_storage: Option<MailAccountConnectionSecret> = None;
+    if let Some((from_id, from_secret)) = from_override {
+        let from_credentials = match resolve_compose_imap_credentials(
+            &from_secret,
+            &credential_key,
+            original_action,
+            token_refresher,
+        )
+        .await
+        {
+            Ok(credentials) => credentials,
+            Err(response) => return response,
+        };
+        smtp_account_id = from_id;
+        smtp_password = match &from_credentials {
+            fm_imap::ImapCredentials::Password(password) => password.clone(),
+            fm_imap::ImapCredentials::OAuthToken(_) => {
+                account_password(&from_secret, &credential_key).unwrap_or_default()
+            }
+        };
+        smtp_preset = match &from_credentials {
+            fm_imap::ImapCredentials::OAuthToken(token) => Some(token.clone()),
+            fm_imap::ImapCredentials::Password(_) => None,
+        };
+        from_secret_storage = Some(from_secret);
+    }
+    let smtp_account = from_secret_storage.as_ref().unwrap_or(&account);
+
     let smtp_settings = match legacy_smtp_send_settings(
         state,
         pool,
         user.user_id,
-        account_id,
-        &account,
+        smtp_account_id,
+        smtp_account,
         &smtp_password,
         &credential_key,
-        preset_access_token,
+        smtp_preset.as_deref(),
     )
     .await
     {
@@ -8289,6 +8428,57 @@ async fn legacy_smtp_send_settings(
     })
 }
 
+/// Native port of the `smtp-use-from-adr-account` plugin's
+/// `filter.smtp-from` hook (`FilterDetectFrom`).
+///
+/// When the from-address switch is active (see
+/// `MailDefaults::from_address_filter_active`) and the envelope sender
+/// differs from the sending account and matches a pattern, this resolves
+/// the caller's other mail account carrying that address — mirroring the
+/// plugin's main/additional account lookup. The caller then rebuilds the
+/// SMTP settings from the returned secret, which is the native equivalent
+/// of the plugin's `FilterSmtpConnect`/`FilterSmtpCredentials` rewrite.
+///
+/// Returns `Ok(None)` when the filter is inactive or does not apply (the
+/// plugin returning without touching its from-account map). A pattern
+/// match with no account fails with the legacy unknown-account shape when
+/// `throw_notfound` is set (the plugin's `AccountDoesNotExist` default);
+/// otherwise delivery keeps the sending account's settings.
+async fn message_filter_from_account(
+    pool: &sqlx::AnyPool,
+    user_id: i64,
+    account_email: &str,
+    envelope_from: &str,
+    patterns: &str,
+    throw_notfound: bool,
+) -> Result<Option<(i64, MailAccountConnectionSecret)>, String> {
+    let sender = envelope_from.trim();
+    if sender.is_empty() || sender == account_email.trim() {
+        return Ok(None);
+    }
+    if !message_filters::wildcard_list_matches(patterns, sender) {
+        return Ok(None);
+    }
+    let accounts = SqlxUserRepository::list_mail_accounts(pool, user_id)
+        .await
+        .map_err(|err| err.public_message())?;
+    let Some(from_id) = accounts
+        .iter()
+        .find(|candidate| candidate.email.trim() == sender)
+        .map(|candidate| candidate.id)
+    else {
+        if throw_notfound {
+            return Err("Account not found".to_string());
+        }
+        return Ok(None);
+    };
+    let secret = SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, from_id)
+        .await
+        .map_err(|err| err.public_message())?
+        .ok_or_else(|| "Account not found".to_string())?;
+    Ok(Some((from_id, secret)))
+}
+
 #[async_trait::async_trait]
 trait LegacyDraftAppender: Sync {
     async fn append(
@@ -8330,12 +8520,14 @@ async fn native_save_message(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    peer_ip: Option<IpAddr>,
 ) -> Response {
     native_save_message_with_appender(
         state,
         original_action,
         payload,
         session,
+        peer_ip,
         &ProductionLegacyDraftAppender,
         &ProductionOAuthTokenRefresher,
     )
@@ -8347,6 +8539,7 @@ async fn native_save_message_with_appender(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
+    peer_ip: Option<IpAddr>,
     appender: &dyn LegacyDraftAppender,
     token_refresher: &dyn OAuthAccessTokenRefresher,
 ) -> Response {
@@ -8476,6 +8669,13 @@ async fn native_save_message_with_appender(
     };
     request.attachments = attachments;
     request._attachment_memory_permit = memory_permit;
+
+    // `filter.build-message` (`add-x-originating-ip-header` port): the
+    // shared `buildMessage()` stamp applies to saved drafts exactly like
+    // the send flow above.
+    if state.config().mail.add_x_originating_ip {
+        request.x_originating_ip = message_filters::originating_ip_header_value(peer_ip);
+    }
 
     // The Message-ID is pinned so the appended draft can be located afterwards.
     let message_id = legacy_generate_draft_message_id(&request.envelope_from);
@@ -8662,6 +8862,7 @@ fn legacy_save_message_request_from_payload_with_html(
         gnupg_sign_fingerprint: payload_optional_string(payload, "signFingerprint"),
         gnupg_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
         gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload)?,
+        x_originating_ip: None,
     })
 }
 
@@ -10753,6 +10954,7 @@ fn legacy_send_message_request_from_payload_with_html(
         gnupg_sign_fingerprint: payload_optional_string(payload, "signFingerprint"),
         gnupg_sign_passphrase: payload_optional_string(payload, "signPassphrase"),
         gnupg_encrypt_fingerprints: legacy_parse_gnupg_fingerprints(payload)?,
+        x_originating_ip: None,
     })
 }
 
@@ -11099,6 +11301,13 @@ fn build_legacy_send_message_with_metadata(
     }
     if !request.require_tls {
         builder = builder.raw_header(legacy_raw_header("TLS-Required", "No")?);
+    }
+    // `filter.build-message` (`add-x-originating-ip-header` port): the value
+    // is stamped by the send/save pipelines before the build, so both the
+    // transport and Sent/draft serializations carry it exactly like the PHP
+    // plugin's in-place message mutation.
+    if let Some(originating_ip) = request.x_originating_ip.as_deref() {
+        builder = builder.raw_header(legacy_raw_header("X-Originating-IP", originating_ip)?);
     }
 
     // OpenPGP: if the client pre-built a signed MIME structure (e.g. via
@@ -39426,6 +39635,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "plain": "unreachable",
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
             &appender,
@@ -39487,6 +39697,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "saveFolder": "Sent",
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
             &appender,
@@ -42067,6 +42278,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "signFingerprint": fingerprint,
             }),
             &session,
+            None,
             &appender,
             &super::ProductionOAuthTokenRefresher,
         )
@@ -42136,6 +42348,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "saveFolder": "Drafts",
             }),
             &session,
+            None,
             &appender,
             &StubOAuthTokenRefresher { token: None },
         )
@@ -42178,6 +42391,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "saveFolder": "Drafts",
             }),
             &session,
+            None,
             &appender,
             &StubOAuthTokenRefresher {
                 token: Some("stub-access-token".to_string()),
@@ -44033,6 +44247,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "plain": "Blocked"
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
             &RecordingSentAppender::with_message(Arc::new(Mutex::new(None))),
@@ -44076,6 +44291,221 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["code"], super::DEMO_SEND_MESSAGE_ERROR);
         assert!(receipt_message.lock().unwrap().is_none());
         assert!(marked.lock().unwrap().is_empty());
+    }
+
+    struct RecordingSmtpSettings {
+        host: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::LegacySmtpSender for RecordingSmtpSettings {
+        async fn send(
+            &self,
+            settings: &fm_smtp::SmtpSendSettings,
+            _envelope: &lettre::address::Envelope,
+            _message: &[u8],
+            _options: fm_smtp::SmtpDeliveryOptions,
+        ) -> fm_core::Result<bool> {
+            *self.host.lock().unwrap() = Some(settings.host.clone());
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn message_filter_from_account_mirrors_legacy_plugin() {
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 16_001, "filteruser", Some("filteruser@example.com")).await;
+        seed_mail_account(&pool, 16_011, 16_001, "Work", true).await;
+        seed_mail_account(&pool, 16_012, 16_001, "Alias", false).await;
+
+        // The sending account's own address never switches, exactly like
+        // the plugin's `$sFrom != $oAccount->Email()` guard.
+        assert!(super::message_filter_from_account(
+            &pool,
+            16_001,
+            "work@example.com",
+            "work@example.com",
+            "*@example.com",
+            true,
+        )
+        .await
+        .unwrap()
+        .is_none());
+        // Non-matching patterns never switch.
+        assert!(super::message_filter_from_account(
+            &pool,
+            16_001,
+            "work@example.com",
+            "alias@example.com",
+            "boss@example.com",
+            true,
+        )
+        .await
+        .unwrap()
+        .is_none());
+        // A matching address resolves to the other account with its secret.
+        let (id, secret) = super::message_filter_from_account(
+            &pool,
+            16_001,
+            "work@example.com",
+            "alias@example.com",
+            "*@example.com",
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("alias must resolve");
+        assert_eq!(id, 16_012);
+        assert_eq!(secret.email, "alias@example.com");
+        // A match with no account fails closed by default, mirroring the
+        // plugin's `AccountDoesNotExist` throw...
+        assert_eq!(
+            super::message_filter_from_account(
+                &pool,
+                16_001,
+                "work@example.com",
+                "ghost@example.com",
+                "*",
+                true,
+            )
+            .await
+            .unwrap_err(),
+            "Account not found"
+        );
+        // ...and keeps the sending account when throwing is disabled.
+        assert!(super::message_filter_from_account(
+            &pool,
+            16_001,
+            "work@example.com",
+            "ghost@example.com",
+            "*",
+            false,
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn message_filter_from_address_switches_smtp_settings() {
+        let key = [95_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let mut config = test_config(None);
+        config.mail.from_address_account_smtp = true;
+        config.mail.from_address_patterns = "*@example.com".to_string();
+        let (state, session) =
+            message_body_test_state_with_config(16_002, 16_021, &key, config).await;
+        let pool = state.db_pool().unwrap();
+        seed_mail_account(pool, 16_022, 16_002, "Alias", false).await;
+        assert!(SqlxUserRepository::set_mail_account_password(
+            pool,
+            16_002,
+            16_022,
+            "alias-secret".to_string(),
+            &key,
+        )
+        .await
+        .unwrap());
+        // IP literals keep the settings build offline, mirroring the demo
+        // policy test's offline SMTP shape.
+        for (id, host) in [(16_021_i64, "8.8.8.8"), (16_022_i64, "9.9.9.9")] {
+            sqlx::query(
+                "UPDATE frickmail_mail_accounts SET smtp_host = ?, smtp_port = ?, smtp_secure = ? WHERE id = ?",
+            )
+            .bind(host)
+            .bind(25_i64)
+            .bind("none")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        let host = Arc::new(Mutex::new(None));
+        let response = super::native_send_message_inner_with_sender_and_sent_appender(
+            &state,
+            "SendMessage",
+            &json!({
+                "account_id": 16_021,
+                "from": "Alias <alias@example.com>",
+                "to": "recipient@example.net",
+                "subject": "Switched",
+                "plain": "Body"
+            }),
+            &session,
+            None,
+            Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
+            &RecordingSmtpSettings {
+                host: Arc::clone(&host),
+            },
+            &RecordingSentAppender::with_message(Arc::new(Mutex::new(None))),
+            &StubOAuthTokenRefresher { token: None },
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"], true);
+        assert_eq!(host.lock().unwrap().as_deref(), Some("9.9.9.9"));
+    }
+
+    #[test]
+    fn legacy_build_message_filter_stamps_originating_ip() {
+        let payload = json!({
+            "from": "sender@example.com",
+            "to": "to@example.com",
+            "plain": "body",
+        });
+        let mut request =
+            super::legacy_send_message_request_from_payload(&payload, "acct@example.com")
+                .expect("payload should parse");
+        // The `filter.build-message` port leaves the field unset unless the
+        // pipeline stamps it, so default builds carry no header.
+        let unstamped = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(!unstamped.contains("X-Originating-IP:"));
+        request.x_originating_ip = super::message_filters::originating_ip_header_value(Some(
+            "203.0.113.7".parse().unwrap(),
+        ));
+        let stamped = String::from_utf8(
+            super::build_legacy_send_message(&request, false)
+                .expect("build")
+                .formatted(),
+        )
+        .expect("utf8");
+        assert!(stamped.contains("X-Originating-IP: 203.0.113.7"));
+    }
+
+    #[tokio::test]
+    async fn save_message_filter_stamps_originating_ip_for_peer() {
+        let key = [96_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let mut config = test_config(None);
+        config.mail.add_x_originating_ip = true;
+        let (state, session) =
+            message_body_test_state_with_config(16_003, 16_031, &key, config).await;
+        let captured = Arc::new(Mutex::new(None));
+        let appender = RecordingDraftAppender::with_message(Arc::clone(&captured));
+        let response = super::native_save_message_with_appender(
+            &state,
+            "SaveMessage",
+            &json!({
+                "account_id": 16_031,
+                "from": "work@example.com",
+                "to": "to@example.com",
+                "plain": "Draft",
+                "saveFolder": "Drafts"
+            }),
+            &session,
+            Some("203.0.113.7".parse().unwrap()),
+            &appender,
+            &super::ProductionOAuthTokenRefresher,
+        )
+        .await;
+        let body = read_json(response).await;
+        assert_eq!(body["Result"]["folder"], "Drafts");
+        let wire = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(wire.contains("X-Originating-IP: 203.0.113.7"));
     }
 
     struct RecordingSentAppender {
@@ -44220,6 +44650,7 @@ Subject: Empty body metadata\r\n\r\n"
                     }
                 }),
                 &session,
+                None,
                 Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
                 &sender,
             )
@@ -44280,6 +44711,7 @@ Subject: Empty body metadata\r\n\r\n"
                 }
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
         )
@@ -44346,6 +44778,7 @@ Subject: Empty body metadata\r\n\r\n"
                 }
             }),
             &session,
+            None,
             &appender,
             &super::ProductionOAuthTokenRefresher,
         )
@@ -44411,6 +44844,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "encryptCertificates": [7002]
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
         )
@@ -44492,6 +44926,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "saveFolder": "Sent"
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
             &appender,
@@ -44589,6 +45024,7 @@ Subject: Empty body metadata\r\n\r\n"
             "SendMessage",
             &payload,
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
             &sent_appender,
@@ -44639,6 +45075,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "saveFolder": "Drafts"
             }),
             &session,
+            None,
             &appender,
             &super::ProductionOAuthTokenRefresher,
         )
@@ -44693,6 +45130,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "identityID": "missing"
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
         )
@@ -44756,6 +45194,7 @@ Subject: Empty body metadata\r\n\r\n"
             "SendMessage",
             &send_payload,
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
         )
@@ -44788,6 +45227,7 @@ Subject: Empty body metadata\r\n\r\n"
                 }
             }),
             &session,
+            None,
             &appender,
             &super::ProductionOAuthTokenRefresher,
         )
@@ -44849,6 +45289,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "plain": "Logo"
             }),
             &session,
+            None,
             Arc::new(std::sync::atomic::AtomicU8::new(super::SEND_PHASE_PRE_SMTP)),
             &sender,
         )
@@ -44874,6 +45315,7 @@ Subject: Empty body metadata\r\n\r\n"
                 "saveFolder": "Drafts"
             }),
             &session,
+            None,
             &appender,
             &super::ProductionOAuthTokenRefresher,
         )
