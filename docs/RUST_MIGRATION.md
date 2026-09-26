@@ -5,6 +5,44 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-26 19:35:00 UTC
+
+Production cutover executed on operator instruction: the legacy runtime was
+already absent from this host (no PHP container running; traffic served by
+the month-old `frickmail-rust:ui-test` canary), so the cutover replaced it
+with the current-tree build.
+
+- Backup first: `frickmail-rust:rollback` tagged to the previously serving
+  image (`sha256:5acddacf...`), Postgres custom-format dump
+  (`frickmail-pre-cutover-20260926T192937Z.dump`, 460800 bytes, archive
+  listing verified) plus Redis RDB snapshot, all under
+  `/home/nicola/frickmail-backups/` (outside the repo). `pg_dump` is
+  snapshot-consistent; the app stayed up during backup (documented deviation
+  from the stop-writes runbook step).
+- Revision-tagged image `frickmail-rust:1804e9971ca4` built `--pull`
+  (digest `sha256:5d957cff...`, runs as `frickmail:frickmail`), also tagged
+  `latest`. Canary `frickmail-rust-canary` on 127.0.0.1:18090 with the exact
+  live env: `/health` + `/version` (rust 0.1.0) + v1 session 200, logs show
+  a *verified* database connection, read-only, no restarts/OOM; auth proven
+  against the live DB (403 without connection token by design, then 401
+  `invalid_credentials` for bad credentials with token).
+- Cutover: old container stopped/removed, new `frickmail-rust` on
+  127.0.0.1:8888 with identical env, restart/reload/cap-drop posture
+  (`unless-stopped`, read-only, `CapDrop: ALL`); Docker health `healthy`,
+  DB verified. Canary removed, secret env files shredded, stale `ui-test`
+  tag dropped (image retained via `rollback` tag).
+- External check: `https://webmail.housefz.com/health` 200,
+  `/version` rust 0.1.0 — production traffic is on the new build.
+- PHP repo code intentionally retained as the rollback path; no repo-code
+  deletion in this operation.
+
+Not verified (need operator): real-credential login/inbox/send end-to-end,
+OAuth/OIDC live flows, `FRICKMAIL__BASE_URL` still `localhost:18088`
+(preserved as-was; revisit for OIDC redirects). Deferred decisions
+(Kolab/Nextcloud/password drivers) are unaffected by the cutover.
+
+---
+
 ## Progress Snapshot — 2026-09-26 16:25:00 UTC
 
 The Message-view shape slice closes the last concrete field-level gaps from
