@@ -23,3 +23,4 @@ frickmail-server/crates/fm-http/src/router.rs|rainloop_ab_|db-compat|PHP-bridge-
 .docker/release/rust/Dockerfile|snappymail/v/0\.0\.0/|packaging|legacy-UI-removal|Strangler-phase UI bundle build inputs (static, templates, themes, localization)
 frickmail-ui/build.mjs|snappymail/v/0\.0\.0/|packaging|legacy-UI-removal|Strangler-phase static-bundle source paths
 frickmail-server/crates/fm-http/assets/avatars/ATTRIBUTION.md|RainLoop Team|legal|legacy-tree-removal|Required MIT copyright notice for the baked-in brand icons
+frickmail-server/crates/fm-http/src/router/message_filters.rs|RainLoop|http|PHP-runtime-removal|Legacy RainLoop action/helper parity references in filter-port documentation
