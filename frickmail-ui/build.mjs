@@ -105,7 +105,7 @@ themeCss += await readFile(
 await writeFile(path.join(outputRoot, 'frickmail-theme.css'), themeCss);
 // The bundled theme CSS references the Default theme background relative
 // to the static root (`images/background.jpg`); ship it alongside the
-// SnappyMail static images.
+// legacy static images.
 await copyFile(
   path.join(root, 'snappymail/v/0.0.0/themes/Default/images/background.jpg'),
   path.join(outputRoot, 'images/background.jpg'),
