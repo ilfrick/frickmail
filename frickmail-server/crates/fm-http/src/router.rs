@@ -12995,7 +12995,12 @@ async fn native_app_data(state: &AppState, admin: bool, session: &fm_session::Se
             "token": token,
             "languages": [],
             "webPath": "/static/",
-            "webVersionPath": "/static/"
+            // Version-path PARENT: legacy `staticLink()` appends
+            // `'static/' + path` itself (PHP emits the versioned app root
+            // here, without `static/`), so `/` yields `/static/...`.
+            // (Non-custom theme previews resolve to `/themes/...` and 404,
+            // but theme switching is frozen to Default.)
+            "webVersionPath": "/",
         },
         "allowLanguagesOnLogin": true,
         "Theme": "Default",
@@ -13060,8 +13065,17 @@ async fn native_app_data(state: &AppState, admin: bool, session: &fm_session::Se
                     .finalize()
             )
         );
-        if let Err(err) = ensure_connection_token(state, session, Some(account_id)).await {
-            return err;
+        // The response must carry the account-bound token the server now
+        // expects: the base payload above was built with the unbound token,
+        // and sending that stale value back fails every subsequent POST
+        // with a 403 connection-token error (legacy PHP returns the
+        // per-account token in AppData).
+        let bound_token = match ensure_connection_token(state, session, Some(account_id)).await {
+            Ok(bound_token) => bound_token,
+            Err(err) => return err,
+        };
+        if let Some(system) = result.get_mut("System") {
+            system["token"] = Value::String(bound_token);
         }
         result["Auth"] = Value::Bool(true);
         result["Email"] = Value::String(account.email.clone());
@@ -39224,6 +39238,37 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["System"]["allowAppendMessage"], false);
         assert_eq!(body["System"]["attachmentsActions"], json!(["zip"]));
         assert!(!body["accountHash"].as_str().unwrap().is_empty());
+        // Version-path parent: legacy `staticLink()` appends `static/`
+        // itself, so `/` yields `/static/...` (not `/static/static/...`).
+        assert_eq!(body["System"]["webVersionPath"], "/");
+    }
+
+    #[tokio::test]
+    async fn app_data_token_matches_enforced_connection_token() {
+        let key = [62_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        seed_user(&pool, 1710, "app-token", Some("app-token@example.com")).await;
+        seed_mail_account(&pool, 1711, 1710, "Primary", true).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+        let session =
+            credential_session(1710, "app-token", Some("app-token@example.com"), &key).await;
+
+        // Regression: AppData once returned the unbound token while storing
+        // the account-bound expectation, so the very next POST (Folders
+        // first) failed with a 403 connection-token error.
+        let body = read_json(super::native_app_data(&state, false, &session).await).await;
+        let token = body["System"]["token"]
+            .as_str()
+            .expect("AppData carries a token");
+        assert!(token.starts_with("1711-"), "unexpected token {token}");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-sm-token", token.parse().expect("token is header-safe"));
+        let payload = json!({"Action": "Folders"});
+        super::enforce_connection_token(&state, &session, &headers, &payload)
+            .await
+            .expect("AppData token must pass enforcement");
     }
 
     #[tokio::test]

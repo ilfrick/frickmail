@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = process.cwd();
@@ -101,6 +101,14 @@ for (const file of themeFiles) {
 themeCss += await readFile(
   path.join(root, 'snappymail/v/0.0.0/themes/Default/styles.css'),
   'utf8',
+);
+await writeFile(path.join(outputRoot, 'frickmail-theme.css'), themeCss);
+// The bundled theme CSS references the Default theme background relative
+// to the static root (`images/background.jpg`); ship it alongside the
+// SnappyMail static images.
+await copyFile(
+  path.join(root, 'snappymail/v/0.0.0/themes/Default/images/background.jpg'),
+  path.join(outputRoot, 'images/background.jpg'),
 );
 if (!templates.includes('<template id="Login">')) throw new Error('Core Login template missing');
 
