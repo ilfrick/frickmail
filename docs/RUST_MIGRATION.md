@@ -5,6 +5,32 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-27 17:30:00 UTC
+
+Cache-hardening follow-up (`b5aa494e4923`, image
+`sha256:c92ee7d4d350...`) after the double-load fix: the live shell already
+served the single-script document, but users could still execute a previously
+cached `index.html` (the old page carried the duplicate `<script src>` tags),
+and the stable-named `libs`/`app` bundles could be served stale after a
+deploy. Changes:
+
+- `root_get` now returns the shell with `Cache-Control: no-store`, so the
+  boot document is never stale.
+- AppData `StaticLibsJs` carries a build-version query
+  (`/static/js/min/libs.min.js?v=<build id>`); `boot.min.js` rewrites only the
+  `/libs.`→`/app.` segment, so `app.min.js?v=<build id>` is versioned too.
+  Build id comes from the new `FRICKMAIL_BUILD_ID` Docker build arg (falls
+  back to the crate version).
+
+Verification: `fm-http` 586 passed / 0 failed, clippy/fmt clean, naming gate
+green; canary and live both show `cache-control: no-store` on `/`, AppData
+`StaticLibsJs=/static/js/min/libs.min.js?v=b5aa494e4923`, and both versioned
+URLs 200; container healthy, zero restarts; external checks green. Image
+includes every prior hotfix. Operator in-browser re-test after one hard
+refresh is the remaining confirmation (browser automation unavailable here).
+
+---
+
 ## Progress Snapshot — 2026-09-27 17:00:00 UTC
 
 Root cause of the persistent post-login failures found from the user's browser
