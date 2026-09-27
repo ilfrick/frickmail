@@ -13,6 +13,11 @@ WORKDIR /build
 COPY package.json ./
 COPY frickmail-server/ ./frickmail-server/
 
+# Build identity for cache-busting static script URLs (see AppData
+# `StaticLibsJs`); falls back to the crate version when unset.
+ARG FRICKMAIL_BUILD_ID=dev
+ENV FRICKMAIL_BUILD_ID=$FRICKMAIL_BUILD_ID
+
 WORKDIR /build/frickmail-server
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/frickmail-server/target,sharing=locked \

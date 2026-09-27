@@ -233,6 +233,15 @@ const SMIME_SIGNING_MAX_BYTES: usize = SMIME_VERIFY_MAX_BYTES;
 const SMIME_SIGNING_OUTPUT_MAX_BYTES: usize = SMIME_SIGNING_MAX_BYTES.div_ceil(3) * 4 + 16 * 1024;
 const SMIME_DIRECT_SIGN_PASSPHRASE_MAX_BYTES: usize = 4096;
 const LEGACY_SNAPPYMAIL_APP_VERSION: &str = env!("FRICKMAIL_WEBMAIL_VERSION");
+/// Cache-busting token appended to the static script URLs that `boot.min.js`
+/// loads (`libs.min.js` and, via its `/libs.`→`/app.` rewrite, `app.min.js`).
+/// The bundle files have stable names, so without this a browser could keep
+/// executing a previous build's JS against a new shell. Falls back to the
+/// crate version when the build id is not supplied.
+const STATIC_BUNDLE_BUILD_ID: &str = match option_env!("FRICKMAIL_BUILD_ID") {
+    Some(id) => id,
+    None => env!("CARGO_PKG_VERSION"),
+};
 const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com";
 const MICROSOFT_GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send offline_access";
 const MICROSOFT_ACCOUNT_SWITCH_SCOPES: &str = "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read";
@@ -537,7 +546,12 @@ async fn root_get(
     match tokio::fs::read(index_root.join("index.html")).await {
         Ok(body) => (
             StatusCode::OK,
-            [("content-type", "text/html; charset=utf-8")],
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                // The shell must never be served stale: an old shell can
+                // reference a different script set than the current build.
+                ("cache-control", "no-store"),
+            ],
             body,
         )
             .into_response(),
@@ -13007,7 +13021,7 @@ async fn native_app_data(state: &AppState, admin: bool, session: &fm_session::Se
         "language": "en",
         "clientLanguage": "en",
         "PluginsLink": "",
-        "StaticLibsJs": "/static/js/min/libs.min.js"
+        "StaticLibsJs": format!("/static/js/min/libs.min.js?v={STATIC_BUNDLE_BUILD_ID}")
     });
 
     let Some(user) = user else {
