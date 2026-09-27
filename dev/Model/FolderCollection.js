@@ -99,15 +99,18 @@ export const
 			.post('Folders', FolderUserStore.foldersLoading)
 			.then(data => {
 				clearCache();
-				// A falsy Result is a server-side failure envelope, not a
-				// collection: reviving it would build an empty collection
-				// without `capabilities` and crash in `storeIt()`,
-				// masking the real error. Surface the payload instead.
-				if (data?.Result) {
-					FolderCollectionModel.reviveFromJson(data.Result)?.storeIt();
+				// Only a real collection may be revived: a server error
+				// envelope (`{ok:false,error}`) or any non-collection value
+				// would otherwise build an empty collection without
+				// `capabilities` and crash in `storeIt()`, hiding the cause.
+				const result = data?.Result;
+				if (result && ('Collection/FolderCollection' === result['@Object'] || isArray(result))) {
+					FolderCollectionModel.reviveFromJson(result)?.storeIt();
 					fCallback?.(true);
 				} else {
-					fCallback?.(false, data);
+					fCallback?.(false, {
+						message: result?.error || result?.message || data?.message || 'Folders request failed'
+					});
 				}
 				// Repeat every 15 minutes?
 //				this.foldersTimeout = setTimeout(loadFolders, 900000);

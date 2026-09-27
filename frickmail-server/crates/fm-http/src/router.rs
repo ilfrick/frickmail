@@ -18920,7 +18920,14 @@ where
                 "Result": legacy_folder_collection_json(&collection, &checkable)
             }),
         ),
-        Err(error) => json_result_error(original_action, &error.public_message()),
+        Err(error) => {
+            tracing::warn!(
+                "legacy Folders failed for account {}: {}",
+                account_id,
+                error.public_message()
+            );
+            json_result_error(original_action, &error.public_message())
+        }
     }
 }
 
