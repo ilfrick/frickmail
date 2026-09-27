@@ -5,6 +5,28 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-27 08:45:00 UTC
+
+Production hotfix for a total legacy-UI outage: every boot of the legacy
+Knockout app crashed with `TypeError: Cannot read properties of null
+(reading 'dataset')`, surfacing the `rl-loading-error` ("An error
+occurred") page. Root cause: `frickmail-ui/build.mjs` generates the
+production `index.html` without the `<style id="app-theme-style">` element
+the PHP template always emits, so `ThemeStore.changeTheme()` dereferenced
+null at `initThemes`. One-line fix emitting
+`<style id="app-theme-style" data-name="Default"></style>` in `<head>`;
+`data-name="Default"` matches the hardcoded Rust AppData theme, so no CSS
+fetch is attempted. Verified in a local bundle build, then deployed as
+`frickmail-rust:daacedb106b8` via canary (element present in served page,
+health 200, verified DB connection) and cut over to 127.0.0.1:8888;
+external `https://webmail.housefz.com/` serves the fixed page, container
+healthy with zero restarts. Previous image retained under
+`frickmail-rust:rollback`; no DB writes involved, no backup needed beyond
+yesterday's pre-cutover set. Users with the broken page cached must
+hard-refresh (service-worker app-shell cache).
+
+---
+
 ## Progress Snapshot — 2026-09-26 19:35:00 UTC
 
 Production cutover executed on operator instruction: the legacy runtime was
