@@ -153,10 +153,20 @@ const indexHtml = `<!doctype html>
 <div id="rl-popups"></div>
 ${templates}
 <script>${bootScript}${bootLanguage}</script>
-<script src="/static/js/min/libs.min.js"></script>
-<script src="/static/js/min/app.min.js"></script>
-<script src="/static/js/min/openpgp.min.js"></script>
-<script src="/static/frickmail-plugins.js"></script>
 </body></html>`;
+
+// `boot.min.js` is the only script the page must reference: it dynamically
+// loads `libs.min.js` then `app.min.js` (mirroring the legacy template).
+// Referencing those files directly as well double-executes them, which
+// re-declares `libs`'s top-level `const TurndownService` and breaks the app.
+// Fold the standalone OpenPGP library into `libs` and the assembled plugin
+// bundle into `app` so that single boot chain loads everything in order.
+const libsPath = path.join(outputRoot, 'js/min/libs.min.js');
+const appPath = path.join(outputRoot, 'js/min/app.min.js');
+await writeFile(
+  libsPath,
+  `${await readFile(libsPath, 'utf8')}\n${await readFile(path.join(outputRoot, 'js/min/openpgp.min.js'), 'utf8')}`,
+);
+await writeFile(appPath, `${await readFile(appPath, 'utf8')}\n${plugins}`);
 
 await writeFile(path.join(outputRoot, 'index.html'), indexHtml);
