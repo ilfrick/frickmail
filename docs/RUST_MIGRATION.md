@@ -5,6 +5,36 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-27 17:00:00 UTC
+
+Root cause of the persistent post-login failures found from the user's browser
+console: the generated `index.html` loaded `libs.min.js` and `app.min.js`
+twice — once as hardcoded `<script src>` tags and again because the inlined
+`boot.min.js` dynamically loads them (mirroring the legacy template, which has
+only the inline boot). The second parse of `libs.min.js` re-declares its
+top-level `const TurndownService`, throwing "Identifier 'TurndownService' has
+already been declared"; that cascades into `app.min.js` failing
+(`Cannot read properties of undefined (reading 'RequestError')` →
+`start`/`logout` → the `Folders error` popup). Every browser hit it; the
+pure-incognito reproduction confirmed it was server-side, not cache.
+
+Fix (`frickmail-ui/build.mjs`, commit `b53d9d861`): the generated page emits
+only the inline boot script, and the build folds `openpgp.min.js` into
+`libs.min.js` and the assembled plugin bundle into `app.min.js`, so boot's
+single `libs → app` chain loads everything in legacy order. Deployed as
+`frickmail-rust:b53d9d861b46` (`sha256:7ca166f381a2...`).
+
+Verification: local bundle build and the served canary both show exactly one
+`<script>` (inline boot), `libs` contains one top-level `const TurndownService`
+and the OpenPGP library, `app` contains the plugin bundle; verified DB
+connection; cutover clean, external index serves the single-script document,
+container healthy, zero restarts; naming gate green. In-browser re-test by the
+operator pending (browser automation unavailable to the agent). All prior
+hotfixes (`13c7bab4c` token, `3503eb030` folders guard, theme assets) are
+included in this image.
+
+---
+
 ## Progress Snapshot — 2026-09-27 15:00:00 UTC
 
 Follow-up hotfix deploy (`frickmail-rust:3503eb030a4a`, commits `13c7bab4c`
