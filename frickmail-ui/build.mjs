@@ -134,7 +134,8 @@ const indexHtml = `<!doctype html>
 <html lang="en" class="rl-started-trigger">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Frickmail</title>
 <link rel="manifest" href="/static/manifest.json"><link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/css/app.min.css"><link rel="stylesheet" href="/static/frickmail-theme.css"></head>
+<link rel="stylesheet" href="/static/css/app.min.css"><link rel="stylesheet" href="/static/frickmail-theme.css">
+<style id="app-theme-style" data-name="Default"></style></head>
 <body id="rl-app" data-admin="0" spellcheck="false">
 <div id="rl-loading"><div id="rl-loading-desc">Frickmail</div><i class="icon-spinner"></i></div>
 <div id="rl-loading-error" hidden="">An error occurred.</div>
