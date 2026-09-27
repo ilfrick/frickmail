@@ -5,6 +5,38 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-27 14:35:00 UTC
+
+User-reported production breakage, two root causes, one deploy
+(`frickmail-rust:13c7bab4cc34`, commit `13c7bab4c`).
+
+1. `Folders error: Network response error: 403` after login — backend bug:
+   `native_app_data` built the response with the unbound (`None`)
+   connection token, then stored the account-bound expectation without
+   updating the response. Every subsequent POST failed CSRF enforcement
+   (legacy PHP returns the per-account token in AppData). Fixed by writing
+   the bound token into `result["System"]["token"]`; regression test
+   `app_data_token_matches_enforced_connection_token` proves the returned
+   token passes `enforce_connection_token`.
+2. Missing theme graphics/logo — the static bundle never shipped
+   `frickmail-theme.css` (`themeCss` assembled in `build.mjs` but the
+   `writeFile` call was missing; URL 404'd), the Default theme
+   `background.jpg` was never copied (new `copyFile` into
+   `images/background.jpg`), and AppData `webVersionPath` was `/static/`,
+   doubling every `staticLink()` asset URL to `/static/static/...` (login
+   logo, notification sounds/icons, service-worker registration). Now `/`
+   with a code comment (non-custom theme previews 404, but theme switching
+   is frozen to Default).
+
+Verification: fmt/clippy clean; `fm-core` 13 passed; `fm-http` 586 passed /
+0 failed; local bundle build contains the 50KB theme CSS, the JPEG
+(byte-identical copy), and the style element; canary proved theme CSS 200
+(was 404), background/logo 200, verified DB connection; cutover clean,
+external health + theme CSS 200, container healthy, zero restarts.
+Rollback image and pre-cutover backups unchanged from yesterday.
+
+---
+
 ## Progress Snapshot — 2026-09-27 08:45:00 UTC
 
 Production hotfix for a total legacy-UI outage: every boot of the legacy
