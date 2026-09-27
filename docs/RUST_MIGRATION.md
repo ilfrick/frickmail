@@ -5,6 +5,36 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-27 15:00:00 UTC
+
+Follow-up hotfix deploy (`frickmail-rust:3503eb030a4a`, commits `13c7bab4c`
++ `3503eb030`) for the user-reported Folders failures and missing graphics.
+
+- Folders 403 root cause (backend): `native_app_data` returned the unbound
+  connection token while storing the account-bound expectation, so every
+  post-login POST failed CSRF. Fixed + regression-tested (token round-trip
+  through `enforce_connection_token`).
+- Folders `.some` TypeError root cause (client): on a falsy `Result`
+  (server-side failure envelope over HTTP 200),
+  `FolderCollectionModel.reviveFromJson(data.Result)?.storeIt()` built an
+  empty collection without `capabilities` and crashed in `storeIt()`,
+  masking the real error. `loadFolders` now surfaces the server payload
+  (which carries `.message`) instead — the next user report will contain
+  the actual failure (e.g. account/IMAP), still to be chased.
+- Theme assets: `frickmail-theme.css` was assembled but never written by
+  `build.mjs` (missing `writeFile` — URL 404'd); Default `background.jpg`
+  copied into the bundle; AppData `webVersionPath` corrected from
+  `/static/` to `/` (was doubling asset URLs to `/static/static/...`,
+  breaking login logo, notification assets, service-worker registration).
+- Verification: 586 Rust tests green, clippy/fmt clean, naming gate green;
+  canary proved theme CSS/background 200, guard present in minified
+  `app.min.js`, verified DB connection; cutover clean, external health +
+  CSS 200, container healthy. All four tips published (record follows in
+  the next snapshot commit per hotfix speed; bundle-affecting commits went
+  out first).
+
+---
+
 ## Progress Snapshot — 2026-09-27 14:35:00 UTC
 
 User-reported production breakage, two root causes, one deploy
