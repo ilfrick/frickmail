@@ -1444,6 +1444,24 @@ async fn send_with_sender_and_appender(
     map_send_response(response).await
 }
 
+/// Resolves an account's IMAP endpoint and credential kind for the v1
+/// handlers. Provider OAuth accounts (gmail/o365) are first class, exactly as
+/// in the legacy dispatcher: they resolve to the provider IMAP host and
+/// authenticate with a freshly refreshed XOAUTH2 token. Without this the v1
+/// mail screens fail for every user whose primary account is provider-hosted
+/// (`/folders` returned `invalid_account` because there is no stored
+/// password).
+async fn v1_imap_connection(
+    state: &AppState,
+    account: &fm_user::MailAccountConnectionSecret,
+    credential_key: &[u8],
+    token_refresher: &dyn super::OAuthAccessTokenRefresher,
+) -> Result<(fm_imap::ImapConnectionConfig, fm_imap::ImapCredentials), Response> {
+    super::imap_action_connection_for_account(state, account, credential_key, token_refresher)
+        .await
+        .map_err(|message| v1_error(StatusCode::BAD_REQUEST, "invalid_account", message))
+}
+
 /// Lists one account's IMAP folders, reusing the exact fetch as legacy
 /// `Folders` (subscription discovery follows the account's stored
 /// `HideUnsubscribed` setting, mirroring legacy). GET-only, so no CSRF
@@ -1461,8 +1479,9 @@ async fn folders(
         &session,
         query,
         super::MESSAGE_LIST_DEADLINE,
-        |config, password, discover| async move {
-            fm_imap::fetch_legacy_folders(config, &password, discover).await
+        &super::ProductionOAuthTokenRefresher,
+        |config, credentials, discover| async move {
+            fm_imap::fetch_legacy_folders_with_credentials(config, &credentials, discover).await
         },
     )
     .await
@@ -1476,10 +1495,11 @@ async fn folders_with_fetcher<F, Fut>(
         axum::extract::rejection::QueryRejection,
     >,
     fetch_deadline: std::time::Duration,
+    token_refresher: &dyn super::OAuthAccessTokenRefresher,
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(fm_imap::ImapConnectionConfig, String, bool) -> Fut,
+    F: FnOnce(fm_imap::ImapConnectionConfig, fm_imap::ImapCredentials, bool) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<fm_imap::LegacyFolderCollection>>,
 {
     let user_id = match v1_session_user_id(session).await {
@@ -1584,30 +1604,15 @@ where
             );
         }
     };
-    let password = match super::account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(_) => {
-            return v1_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_account",
-                "Mail account credentials are unavailable",
-            )
-        }
-    };
-    let imap_config = match super::imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => {
-            return v1_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_account",
-                err.public_message(),
-            )
-        }
-    };
+    let (imap_config, credentials) =
+        match v1_imap_connection(state, &account, &credential_key, token_refresher).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
 
     let result = tokio::time::timeout(
         fetch_deadline,
-        fetcher(imap_config, password, discover_subscriptions),
+        fetcher(imap_config, credentials, discover_subscriptions),
     )
     .await
     .map_err(|_| fm_core::FrickmailError::Upstream("Folder list fetch timed out".to_string()));
@@ -3283,8 +3288,10 @@ async fn message(
         path,
         query,
         super::MESSAGE_BODY_FETCH_DEADLINE,
-        |config, password, folder, uid| async move {
-            fm_imap::fetch_message_body_preview(config, &password, &folder, uid).await
+        &super::ProductionOAuthTokenRefresher,
+        |config, credentials, folder, uid| async move {
+            fm_imap::fetch_message_body_preview_with_credentials(config, &credentials, &folder, uid)
+                .await
         },
     )
     .await
@@ -3296,10 +3303,11 @@ async fn message_with_fetcher<F, Fut>(
     path: Result<axum::extract::Path<u32>, axum::extract::rejection::PathRejection>,
     query: Result<axum::extract::Query<MessageQuery>, axum::extract::rejection::QueryRejection>,
     fetch_deadline: std::time::Duration,
+    token_refresher: &dyn super::OAuthAccessTokenRefresher,
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(fm_imap::ImapConnectionConfig, String, String, u32) -> Fut,
+    F: FnOnce(fm_imap::ImapConnectionConfig, fm_imap::ImapCredentials, String, u32) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<fm_imap::BodyPreviewPart>>>>,
 {
     let stored = match session
@@ -3401,31 +3409,16 @@ where
             );
         }
     };
-    let password = match super::account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(_) => {
-            return v1_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_account",
-                "Mail account credentials are unavailable",
-            )
-        }
-    };
-    let imap_config = match super::imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => {
-            return v1_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_account",
-                err.public_message(),
-            )
-        }
-    };
+    let (imap_config, credentials) =
+        match v1_imap_connection(state, &account, &credential_key, token_refresher).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
     let auto_verify = super::effective_auto_verify_signatures(state).await;
     let pgp_verify_connection = auto_verify.then(|| {
         (
             imap_config.clone(),
-            password.clone(),
+            credentials.clone(),
             params.folder.clone(),
             uid,
         )
@@ -3433,7 +3426,7 @@ where
 
     let result = tokio::time::timeout(
         fetch_deadline,
-        fetcher(imap_config, password, params.folder.clone(), uid),
+        fetcher(imap_config, credentials, params.folder.clone(), uid),
     )
     .await
     .map_err(|_| fm_core::FrickmailError::Upstream("Message fetch timed out".to_string()));
@@ -3467,8 +3460,8 @@ where
                 super::legacy_message_smime_auto_verify(&parts, auto_verify),
                 async {
                     let (signed, connection) = match (pgp_signed, pgp_verify_connection) {
-                        (Some(signed), Some((vconfig, vpassword, vfolder, vuid))) => {
-                            (signed, (vconfig, vpassword, vfolder, vuid))
+                        (Some(signed), Some((vconfig, vcredentials, vfolder, vuid))) => {
+                            (signed, (vconfig, vcredentials, vfolder, vuid))
                         }
                         _ => return None,
                     };
@@ -3476,9 +3469,7 @@ where
                         state,
                         user.user_id,
                         connection.0,
-                        // The v1 message path still resolves a stored password;
-                        // legacy core is credential-agnostic, so wrap it here.
-                        &super::ImapCredentials::Password(connection.1.clone()),
+                        &connection.1,
                         &connection.2,
                         connection.3,
                         &signed,
@@ -4117,8 +4108,21 @@ async fn messages(
         &session,
         query,
         super::MESSAGE_LIST_DEADLINE,
-        |config, password, request| async move {
-            fm_imap::fetch_legacy_message_list(config, &password, request).await
+        &super::ProductionOAuthTokenRefresher,
+        |config, credentials, request| async move {
+            fm_imap::fetch_legacy_message_list_with_uid_cache_if_changed_with_credentials(
+                config,
+                &credentials,
+                request,
+                None,
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                fm_core::FrickmailError::Upstream(
+                    "message list fetch was unexpectedly skipped".to_string(),
+                )
+            })
         },
     )
     .await
@@ -4129,10 +4133,15 @@ async fn messages_with_fetcher<F, Fut>(
     session: &fm_session::Session,
     query: Result<axum::extract::Query<MessagesQuery>, axum::extract::rejection::QueryRejection>,
     fetch_deadline: std::time::Duration,
+    token_refresher: &dyn super::OAuthAccessTokenRefresher,
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(fm_imap::ImapConnectionConfig, String, fm_imap::LegacyMessageListRequest) -> Fut,
+    F: FnOnce(
+        fm_imap::ImapConnectionConfig,
+        fm_imap::ImapCredentials,
+        fm_imap::LegacyMessageListRequest,
+    ) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<fm_imap::LegacyMessageList>>,
 {
     let stored = match session
@@ -4230,26 +4239,11 @@ where
             );
         }
     };
-    let password = match super::account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(_) => {
-            return v1_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_account",
-                "Mail account credentials are unavailable",
-            )
-        }
-    };
-    let imap_config = match super::imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => {
-            return v1_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_account",
-                err.public_message(),
-            )
-        }
-    };
+    let (imap_config, credentials) =
+        match v1_imap_connection(state, &account, &credential_key, token_refresher).await {
+            Ok(connection) => connection,
+            Err(response) => return response,
+        };
     // Synthesize the legacy payload shape (omitting absent keys so the
     // shared normalization — limit defaults and clamping, search/sort
     // trimming — applies exactly as on the legacy dispatcher).
@@ -4299,7 +4293,7 @@ where
         .message_list_search_settings(&account.email);
     request.message_list_limit = state.config().mail.message_list_limit(&account.email);
 
-    let result = tokio::time::timeout(fetch_deadline, fetcher(imap_config, password, request))
+    let result = tokio::time::timeout(fetch_deadline, fetcher(imap_config, credentials, request))
         .await
         .map_err(|_| fm_core::FrickmailError::Upstream("Message list fetch timed out".to_string()));
     match result {
@@ -5128,6 +5122,27 @@ fn v1_error(status: StatusCode, code: &'static str, message: impl Into<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test refresher for the v1 IMAP resolver: password accounts never call
+    /// it, and provider-account tests supply a token (or None to simulate a
+    /// failed refresh).
+    struct StubV1OAuthTokenRefresher {
+        token: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::OAuthAccessTokenRefresher for StubV1OAuthTokenRefresher {
+        async fn refresh(
+            &self,
+            _account_type: &str,
+            _refresh_token: &str,
+            _tenant: Option<&str>,
+        ) -> fm_core::Result<String> {
+            self.token
+                .map(|token| token.to_string())
+                .ok_or_else(|| fm_core::FrickmailError::Upstream("refresh failed".to_string()))
+        }
+    }
     use axum::{
         body::Body,
         http::{Method, Request},
@@ -6185,6 +6200,7 @@ mod tests {
                 sort: None,
             })),
             std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher { token: None },
             |config, _password, request| async move {
                 assert_eq!(config.host, "imap.example.com");
                 assert_eq!(request.mailbox, "INBOX");
@@ -6225,6 +6241,7 @@ mod tests {
                 sort: None,
             })),
             std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher { token: None },
             |_config, _password, _request| async move {
                 Err(fm_core::FrickmailError::Upstream(
                     "imap.example.com: connection refused".to_string(),
@@ -6854,6 +6871,7 @@ mod tests {
                 account_id: Some(900),
             })),
             std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher { token: None },
             |config, _password, folder, uid| async move {
                 assert_eq!(config.host, "imap.example.com");
                 assert_eq!(folder, "INBOX");
@@ -6887,6 +6905,7 @@ mod tests {
             Ok(axum::extract::Path(56)),
             query(),
             std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher { token: None },
             |_config, _password, _folder, _uid| async move { Ok(None) },
         )
         .await;
@@ -6901,6 +6920,7 @@ mod tests {
             Ok(axum::extract::Path(57)),
             query(),
             std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher { token: None },
             |_config, _password, _folder, _uid| async move {
                 Ok(Some(vec![fm_imap::BodyPreviewPart {
                     kind: fm_imap::BodyPartKind::RawMessage,
@@ -7468,6 +7488,7 @@ mod tests {
                 "1100".to_string(),
             )]))),
             std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher { token: None },
             |config, _password, discover| async move {
                 assert_eq!(config.host, "imap.example.com");
                 assert!(!discover);
@@ -7481,6 +7502,51 @@ mod tests {
         assert_eq!(body["version"], "v1");
         assert_eq!(body["data"]["folders"][0]["name"], "INBOX");
         assert_eq!(body["data"]["folders"][0]["total_emails"], 2);
+    }
+
+    /// Provider OAuth accounts must resolve in the v1 IMAP path. Without the
+    /// credential-aware resolver this handler answered `invalid_account` for
+    /// every gmail/o365 user (their primary account has no stored password),
+    /// which is what broke the v1 mailbox screen in production.
+    #[tokio::test]
+    async fn v1_folders_serves_provider_oauth_accounts() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1111, "v1gmail", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        seed_gmail_oauth_account(&pool, 1110, 1111, "[EMAIL]", &credential_key).await;
+        let state = AppState::with_db_pool(test_api_config(), Some(pool));
+        let session = authed_v1_session(1111, "v1gmail").await;
+
+        let response = super::folders_with_fetcher(
+            &state,
+            &session,
+            Ok(axum::extract::Query(std::collections::HashMap::from([(
+                "account_id".to_string(),
+                "1110".to_string(),
+            )]))),
+            std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher {
+                token: Some("fresh-token"),
+            },
+            |config, credentials, discover| async move {
+                assert_eq!(config.host, "imap.gmail.com");
+                assert_eq!(config.port, 993);
+                assert_eq!(
+                    credentials,
+                    fm_imap::ImapCredentials::OAuthToken("fresh-token".to_string())
+                );
+                assert!(!discover);
+                Ok(test_folder_collection())
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["data"]["folders"][0]["name"], "INBOX");
     }
 
     #[tokio::test]
@@ -7503,6 +7569,7 @@ mod tests {
                 "1100".to_string(),
             )]))),
             std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher { token: None },
             |_config, _password, discover| async move {
                 assert!(discover);
                 Ok(test_folder_collection())
@@ -8049,6 +8116,7 @@ mod tests {
         sqlx::query(
             "UPDATE frickmail_mail_accounts
              SET email = ?, login = ?, type = 'gmail',
+                 imap_host = NULL, imap_port = NULL, imap_secure = NULL,
                  encrypted_oauth_refresh_token = ?
              WHERE id = ?",
         )
