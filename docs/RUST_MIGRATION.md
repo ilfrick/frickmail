@@ -5,6 +5,55 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-28 21:00:00 UTC
+
+Completed-and-pushed since the 17:20 snapshot:
+
+- The v1 UI cutover (`7067ca9b6`, `effb9ba41`, `643b58b7c`) was pushed to
+  `master` + `rust-full-migration` on `origin` + `gitea`; all four tips
+  resolved to `643b58b7cdaa...` by live `ls-remote`. `naming` **success**;
+  `rust-ci` run `36456908513` **success**.
+
+Current slice — v1 mail handlers now serve provider OAuth accounts (code
+commit `8894df626`; deployed; docs pending in this commit):
+
+- Operator report after the cutover: the v1 app loaded but showed
+  `Cannot load the mailbox.` with `GET /api/frickmail/v1/folders 400`. Root
+  cause: the v1 `/folders`, `/messages` and `/messages/{uid}` handlers
+  resolved a stored password with `account_password` and a password-only IMAP
+  config, so every gmail/o365 account answered 400 `invalid_account` ("Mail
+  account credentials are unavailable") — the same class of bug as the legacy
+  dispatcher, now in the v1 path.
+- Fix: route the three handlers through the shared credential-aware resolver
+  (`v1_imap_connection` -> `imap_action_connection_for_account`), switch the
+  injected fetchers from `String` to `fm_imap::ImapCredentials`, call the
+  `*_with_credentials` fm-imap cores (folders, message body, message list via
+  the uid-cache core with no cache) and pass the credentials straight into the
+  PGP auto-verify path (dropping the v1-only password wrapper). The resolver
+  takes an injectable `OAuthAccessTokenRefresher`; the handlers pass
+  `ProductionOAuthTokenRefresher`, so the provider path is pinned by
+  `v1_folders_serves_provider_oauth_accounts` (gmail account + stub refresher
+  -> `imap.gmail.com` + `OAuthToken`).
+
+Verification: `cargo test --workspace` — fm-http 589 passed / 0 failed, all
+other suites green; `cargo fmt --check` and
+`cargo clippy --workspace --all-targets -D warnings` clean. Production image
+`frickmail-rust:8894df6263c5`
+(`sha256:2f424e84705ce06d1fdb986975e4a4921cc361f9aec2d943fd1dcf9ed9373669`),
+cut over with the same hardened flags/networks/env; `/` still serves the v1
+app, `/health` 200, external site 200, Redis sessions connected, container
+healthy. Rollback: `frickmail-rust:effb9ba412e6` (v1 UI, password-only
+handlers) or earlier.
+
+Remaining confirmation: operator in-browser check that the mailbox, message
+view and compose work on the v1 UI (folders is the first confirmed path).
+Remaining major gates unchanged: OAuth sends live verification, PG
+backup/restore and schema-migration cutover gates, and v1-vs-legacy feature
+gaps (themes/background, some plugin surfaces, Google *sign-in* as opposed to
+account linking).
+
+---
+
 ## Progress Snapshot — 2026-09-28 17:20:00 UTC
 
 Completed-and-pushed since the 15:45 snapshot:
