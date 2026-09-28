@@ -958,12 +958,30 @@ pub async fn fetch_message_body_preview(
     mailbox: &str,
     uid: u32,
 ) -> Result<Option<Vec<BodyPreviewPart>>> {
+    fetch_message_body_preview_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        uid,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_message_body_preview`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_message_body_preview_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    uid: u32,
+) -> Result<Option<Vec<BodyPreviewPart>>> {
     validate_mailbox(mailbox)?;
     if uid == 0 {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
     }
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
     let Some(mut specs) = fetch_body_part_specs(&mut session, mailbox, uid, &capabilities).await?
@@ -1260,9 +1278,25 @@ pub async fn fetch_mailbox_status(
     password: &str,
     mailbox: &str,
 ) -> Result<MailboxStatus> {
+    fetch_mailbox_status_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_mailbox_status`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_mailbox_status_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+) -> Result<MailboxStatus> {
     validate_mailbox(mailbox)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let mailbox = timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     logout_quietly(session).await;
 
@@ -1277,11 +1311,27 @@ pub async fn fetch_legacy_folders(
     password: &str,
     discover_subscriptions: bool,
 ) -> Result<LegacyFolderCollection> {
-    let namespaces = fetch_legacy_namespaces(config.clone(), password)
+    fetch_legacy_folders_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        discover_subscriptions,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_legacy_folders`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_legacy_folders_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    discover_subscriptions: bool,
+) -> Result<LegacyFolderCollection> {
+    let namespaces = fetch_legacy_namespaces(config.clone(), credentials)
         .await
         .unwrap_or(None);
     let client_hash = legacy_imap_client_hash(&config);
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         let capabilities =
             timeout_imap("read folder-list capabilities", session.capabilities()).await?;
@@ -1410,10 +1460,32 @@ pub async fn fetch_legacy_folder_information(
     flag_uids: Option<Vec<u32>>,
     fetch_new_messages: bool,
 ) -> Result<LegacyFolderInformation> {
+    fetch_legacy_folder_information_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        prev_uid_next,
+        flag_uids,
+        fetch_new_messages,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_legacy_folder_information`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_legacy_folder_information_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    prev_uid_next: Option<u32>,
+    flag_uids: Option<Vec<u32>>,
+    fetch_new_messages: bool,
+) -> Result<LegacyFolderInformation> {
     validate_mailbox(mailbox)?;
 
     let client_hash = legacy_imap_client_hash(&config);
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = legacy_folder_information_in_session(
         &mut session,
         mailbox,
@@ -1455,13 +1527,33 @@ pub async fn fetch_legacy_message_list_with_uid_cache_if_changed(
     uid_cache: Option<Arc<dyn LegacyMessageListUidCache>>,
     unchanged_folder_etag: Option<String>,
 ) -> Result<Option<LegacyMessageList>> {
+    fetch_legacy_message_list_with_uid_cache_if_changed_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        request,
+        uid_cache,
+        unchanged_folder_etag,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_legacy_message_list_with_uid_cache_if_changed`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_legacy_message_list_with_uid_cache_if_changed_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    request: LegacyMessageListRequest,
+    uid_cache: Option<Arc<dyn LegacyMessageListUidCache>>,
+    unchanged_folder_etag: Option<String>,
+) -> Result<Option<LegacyMessageList>> {
     validate_mailbox(&request.mailbox)?;
 
     let client_hash = legacy_imap_client_hash(&config);
     let warm_config = config.clone();
-    let warm_password = password.to_string();
+    let warm_credentials = credentials.clone();
     let warm_request = request.clone();
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
     let warm_key = uid_cache
         .as_deref()
@@ -1495,7 +1587,7 @@ pub async fn fetch_legacy_message_list_with_uid_cache_if_changed(
                         MESSAGE_LIST_CACHE_WARM_BUDGET,
                         warm_legacy_message_list_cache(
                             warm_config,
-                            &warm_password,
+                            &warm_credentials,
                             warm_request,
                             folder_hash,
                             uid_cache,
@@ -1515,12 +1607,30 @@ pub async fn fetch_raw_message(
     mailbox: &str,
     uid: u32,
 ) -> Result<Option<Vec<u8>>> {
+    fetch_raw_message_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        uid,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_raw_message`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_raw_message_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    uid: u32,
+) -> Result<Option<Vec<u8>>> {
     validate_mailbox(mailbox)?;
     if uid == 0 {
         return Err(FrickmailError::BadRequest("uid required".to_string()));
     }
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     let raw = fetch_raw_message_in_session(&mut session, uid).await?;
     logout_quietly(session).await;
@@ -1556,7 +1666,28 @@ pub async fn fetch_mime_part_bounded(
     mime_index: &str,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
-    fetch_mime_part_decoded_bounded(config, password, mailbox, uid, mime_index, max_bytes).await
+    fetch_mime_part_bounded_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        uid,
+        mime_index,
+        max_bytes,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_mime_part_bounded`]: PGP signature
+/// verification and attachment export run against provider OAuth accounts too.
+pub async fn fetch_mime_part_bounded_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    uid: u32,
+    mime_index: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
+    fetch_mime_part_decoded_bounded(config, credentials, mailbox, uid, mime_index, max_bytes).await
 }
 
 async fn fetch_mime_part_raw(
@@ -1616,7 +1747,7 @@ async fn fetch_mime_part_raw(
 
 async fn fetch_mime_part_decoded_bounded(
     config: ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
     mailbox: &str,
     uid: u32,
     mime_index: &str,
@@ -1633,7 +1764,7 @@ async fn fetch_mime_part_decoded_bounded(
     let (_, _, read_budget, max_literal_bytes) =
         bounded_mime_part_wire_limits(mime_index, max_bytes)?;
     let mut session =
-        login_with_read_guard(config, password, read_budget, max_literal_bytes).await?;
+        login_with_read_guard(config, credentials, read_budget, max_literal_bytes).await?;
     let result = fetch_mime_part_decoded_bounded_in_session(
         &mut session,
         mailbox,
@@ -1877,9 +2008,27 @@ pub async fn fetch_raw_folder_messages(
     mailbox: &str,
     limits: RawFolderFetchLimits,
 ) -> Result<Vec<Vec<u8>>> {
+    fetch_raw_folder_messages_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        limits,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_raw_folder_messages`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_raw_folder_messages_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    limits: RawFolderFetchLimits,
+) -> Result<Vec<Vec<u8>>> {
     validate_mailbox(mailbox)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let folder = timeout_imap("examine mailbox", session.examine(mailbox)).await?;
     let messages = fetch_raw_messages_by_sequence(&mut session, folder.exists, limits).await?;
     logout_quietly(session).await;
@@ -1892,7 +2041,23 @@ pub async fn append_raw_message(
     mailbox: &str,
     raw: &[u8],
 ) -> Result<()> {
-    append_raw_message_with_flags(config, password, mailbox, raw, Some("(\\Seen)")).await
+    append_raw_message_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        raw,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`append_raw_message`].
+pub async fn append_raw_message_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    raw: &[u8],
+) -> Result<()> {
+    append_raw_message_with_flags(config, credentials, mailbox, raw, Some("(\\Seen)")).await
 }
 
 /// Failure classification for an IMAP APPEND. A definitive failure is known to
@@ -1919,10 +2084,28 @@ pub async fn append_raw_message_classified(
     mailbox: &str,
     raw: &[u8],
 ) -> std::result::Result<(), AppendRawMessageFailure> {
+    append_raw_message_classified_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        raw,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`append_raw_message_classified`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn append_raw_message_classified_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    raw: &[u8],
+) -> std::result::Result<(), AppendRawMessageFailure> {
     validate_mailbox(mailbox)
         .and_then(|_| validate_eml(raw))
         .map_err(|err| AppendRawMessageFailure::Definitive(err.public_message()))?;
-    let mut session = login(config, password)
+    let mut session = login_with_credentials(config, credentials)
         .await
         .map_err(|err| AppendRawMessageFailure::Definitive(err.public_message()))?;
 
@@ -1984,12 +2167,29 @@ pub async fn append_raw_message_without_flags(
     mailbox: &str,
     raw: &[u8],
 ) -> Result<()> {
-    append_raw_message_with_flags(config, password, mailbox, raw, None).await
+    append_raw_message_without_flags_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        raw,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`append_raw_message_without_flags`]: draft and
+/// EML import append to provider OAuth accounts as well.
+pub async fn append_raw_message_without_flags_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    raw: &[u8],
+) -> Result<()> {
+    append_raw_message_with_flags(config, credentials, mailbox, raw, None).await
 }
 
 async fn append_raw_message_with_flags(
     config: ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
     mailbox: &str,
     raw: &[u8],
     flags: Option<&str>,
@@ -1997,7 +2197,7 @@ async fn append_raw_message_with_flags(
     validate_mailbox(mailbox)?;
     validate_eml(raw)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     timeout_imap(
         "append raw message",
         session.append(mailbox, flags, None, raw),
@@ -2170,9 +2370,27 @@ pub async fn set_mailbox_subscription(
     mailbox: &str,
     subscribe: bool,
 ) -> Result<()> {
+    set_mailbox_subscription_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        subscribe,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`set_mailbox_subscription`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn set_mailbox_subscription_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    subscribe: bool,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = if subscribe {
         timeout_imap("subscribe mailbox", session.subscribe(mailbox)).await
     } else {
@@ -2188,7 +2406,25 @@ pub async fn set_mailbox_metadata(
     mailbox: &str,
     metadata: MailboxMetadata,
 ) -> Result<()> {
-    let mut session = login(config, password).await?;
+    set_mailbox_metadata_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        metadata,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`set_mailbox_metadata`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn set_mailbox_metadata_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    metadata: MailboxMetadata,
+) -> Result<()> {
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         if mailbox_metadata_supported(&mut session).await? {
             let command = set_metadata_command(mailbox, &metadata)?;
@@ -2212,7 +2448,27 @@ pub async fn update_mailbox_settings(
     subscribe: bool,
     metadata: Option<MailboxMetadata>,
 ) -> Result<()> {
-    let mut session = login(config, password).await?;
+    update_mailbox_settings_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        subscribe,
+        metadata,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`update_mailbox_settings`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn update_mailbox_settings_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    subscribe: bool,
+    metadata: Option<MailboxMetadata>,
+) -> Result<()> {
+    let mut session = login_with_credentials(config, credentials).await?;
 
     if validate_mailbox(mailbox).is_ok() {
         let subscription_result = if subscribe {
@@ -2247,10 +2503,26 @@ pub async fn fetch_mailbox_acl(
     password: &str,
     mailbox: &str,
 ) -> Result<Vec<MailboxAclEntry>> {
+    fetch_mailbox_acl_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`fetch_mailbox_acl`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn fetch_mailbox_acl_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+) -> Result<Vec<MailboxAclEntry>> {
     validate_mailbox(mailbox)?;
 
     let login_identifier = config.login.clone();
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         require_mailbox_acl_support(&mut session).await?;
 
@@ -2305,10 +2577,30 @@ pub async fn set_mailbox_acl(
     identifier: &str,
     rights: &str,
 ) -> Result<()> {
+    set_mailbox_acl_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        identifier,
+        rights,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`set_mailbox_acl`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn set_mailbox_acl_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    identifier: &str,
+    rights: &str,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
     let command = set_acl_command(mailbox, identifier, rights)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         require_mailbox_acl_support(&mut session).await?;
         timeout_imap(
@@ -2328,10 +2620,28 @@ pub async fn delete_mailbox_acl(
     mailbox: &str,
     identifier: &str,
 ) -> Result<()> {
+    delete_mailbox_acl_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        identifier,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`delete_mailbox_acl`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn delete_mailbox_acl_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    identifier: &str,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
     let command = delete_acl_command(mailbox, identifier)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         require_mailbox_acl_support(&mut session).await?;
         timeout_imap(
@@ -2352,6 +2662,26 @@ pub async fn create_mailbox(
     parent: &str,
     subscribe: bool,
 ) -> Result<Option<LegacyFolder>> {
+    create_mailbox_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        parent,
+        subscribe,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`create_mailbox`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn create_mailbox_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    parent: &str,
+    subscribe: bool,
+) -> Result<Option<LegacyFolder>> {
     let mailbox = mailbox.trim();
     let parent = parent.trim();
     validate_mailbox(mailbox)?;
@@ -2359,7 +2689,7 @@ pub async fn create_mailbox(
         validate_mailbox(parent)?;
     }
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         let delimiter = mailbox_hierarchy_delimiter(&mut session, parent).await?;
         let full_name = create_mailbox_full_name(mailbox, parent, delimiter.as_str());
@@ -2385,10 +2715,32 @@ pub async fn rename_mailbox(
     subscribe: bool,
     metadata: Option<MailboxMetadata>,
 ) -> Result<String> {
+    rename_mailbox_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        old_name,
+        new_name,
+        subscribe,
+        metadata,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`rename_mailbox`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn rename_mailbox_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    old_name: &str,
+    new_name: &str,
+    subscribe: bool,
+    metadata: Option<MailboxMetadata>,
+) -> Result<String> {
     validate_mailbox(old_name)?;
     validate_mailbox(new_name)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         let delimiter = mailbox_hierarchy_delimiter(&mut session, old_name).await?;
         let subscribed =
@@ -2444,9 +2796,25 @@ pub async fn clear_mailbox(
     password: &str,
     mailbox: &str,
 ) -> Result<()> {
+    clear_mailbox_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`clear_mailbox`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn clear_mailbox_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let selected = timeout_imap("select mailbox", session.select(mailbox)).await?;
     let result = clear_mailbox_in_session(&mut session, selected.exists).await;
     logout_quietly(session).await;
@@ -2458,9 +2826,25 @@ pub async fn delete_mailbox(
     password: &str,
     mailbox: &str,
 ) -> Result<()> {
+    delete_mailbox_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`delete_mailbox`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn delete_mailbox_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let status = timeout_imap(
         "check mailbox before delete",
         session.status(mailbox, "(MESSAGES)"),
@@ -2488,10 +2872,32 @@ pub async fn store_message_flag(
     flag: ImapMessageFlag,
     set: bool,
 ) -> Result<()> {
+    store_message_flag_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        uid_set,
+        flag,
+        set,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`store_message_flag`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn store_message_flag_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    uid_set: &str,
+    flag: ImapMessageFlag,
+    set: bool,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
     validate_uid_set(uid_set)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = store_flag_in_session(&mut session, mailbox, uid_set, flag, set).await;
     logout_quietly(session).await;
     result
@@ -2536,13 +2942,35 @@ pub async fn store_message_keyword(
     keyword: &str,
     set: bool,
 ) -> Result<()> {
+    store_message_keyword_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        uid_set,
+        keyword,
+        set,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`store_message_keyword`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn store_message_keyword_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    uid_set: &str,
+    keyword: &str,
+    set: bool,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
     validate_uid_set(uid_set)?;
     if !keyword_can_be_stored(keyword) {
         return Ok(());
     }
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = store_keyword_in_session(&mut session, mailbox, uid_set, keyword, set).await;
     logout_quietly(session).await;
     result
@@ -2593,12 +3021,32 @@ pub async fn store_seen_to_all(
     thread_uid_set: Option<&str>,
     set: bool,
 ) -> Result<()> {
+    store_seen_to_all_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        thread_uid_set,
+        set,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`store_seen_to_all`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn store_seen_to_all_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    thread_uid_set: Option<&str>,
+    set: bool,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
     if let Some(uid_set) = thread_uid_set.filter(|value| !value.trim().is_empty()) {
         validate_uid_set(uid_set)?;
     }
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     timeout_imap("select mailbox", session.select(mailbox)).await?;
     let query = store_flag_query(ImapMessageFlag::Seen, set);
     let result = if let Some(uid_set) = thread_uid_set.filter(|value| !value.trim().is_empty()) {
@@ -2617,11 +3065,31 @@ pub async fn copy_messages(
     to_mailbox: &str,
     uid_set: &str,
 ) -> Result<()> {
+    copy_messages_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        from_mailbox,
+        to_mailbox,
+        uid_set,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`copy_messages`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn copy_messages_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    from_mailbox: &str,
+    to_mailbox: &str,
+    uid_set: &str,
+) -> Result<()> {
     validate_mailbox(from_mailbox)?;
     validate_mailbox(to_mailbox)?;
     validate_uid_set(uid_set)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     timeout_imap("select source mailbox", session.select(from_mailbox)).await?;
     let result = timeout_imap("copy messages", session.uid_copy(uid_set, to_mailbox)).await;
     logout_quietly(session).await;
@@ -2636,11 +3104,33 @@ pub async fn move_messages(
     uid_set: &str,
     options: ImapMoveOptions,
 ) -> Result<()> {
+    move_messages_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        from_mailbox,
+        to_mailbox,
+        uid_set,
+        options,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`move_messages`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn move_messages_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    from_mailbox: &str,
+    to_mailbox: &str,
+    uid_set: &str,
+    options: ImapMoveOptions,
+) -> Result<()> {
     validate_mailbox(from_mailbox)?;
     validate_mailbox(to_mailbox)?;
     validate_uid_set(uid_set)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let capabilities = imap_rule_capabilities(&mut session).await?;
     timeout_imap("select source mailbox", session.select(from_mailbox)).await?;
     apply_legacy_move_pre_flags(&mut session, uid_set, options).await;
@@ -2664,10 +3154,28 @@ pub async fn delete_messages(
     mailbox: &str,
     uid_set: &str,
 ) -> Result<()> {
+    delete_messages_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        mailbox,
+        uid_set,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`delete_messages`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn delete_messages_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    mailbox: &str,
+    uid_set: &str,
+) -> Result<()> {
     validate_mailbox(mailbox)?;
     validate_uid_set(uid_set)?;
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = delete_in_session(&mut session, mailbox, uid_set).await;
     logout_quietly(session).await;
     result
@@ -2701,6 +3209,22 @@ pub async fn apply_imap_rules(
     password: &str,
     rules: &[RuleExecutionPlan],
 ) -> Result<RuleExecutionReport> {
+    apply_imap_rules_with_credentials(
+        config,
+        &ImapCredentials::Password(password.to_string()),
+        rules,
+    )
+    .await
+}
+
+/// Credential-accepting core of [`apply_imap_rules`]: provider OAuth accounts
+/// (gmail/o365) authenticate with XOAUTH2, so the operation must not be
+/// reachable only through a password-based entry point.
+pub async fn apply_imap_rules_with_credentials(
+    config: ImapConnectionConfig,
+    credentials: &ImapCredentials,
+    rules: &[RuleExecutionPlan],
+) -> Result<RuleExecutionReport> {
     if rules.is_empty() {
         return Ok(RuleExecutionReport {
             applied: Vec::new(),
@@ -2708,7 +3232,7 @@ pub async fn apply_imap_rules(
         });
     }
 
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let capabilities = imap_rule_capabilities(&mut session).await?;
     timeout_imap("select mailbox", session.select("INBOX")).await?;
     let result = apply_imap_rules_in_session(&mut session, capabilities, rules).await;
@@ -5460,13 +5984,13 @@ async fn legacy_folder_information_in_session(
 
 async fn warm_legacy_message_list_cache(
     config: ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
     request: LegacyMessageListRequest,
     folder_hash: String,
     uid_cache: Arc<dyn LegacyMessageListUidCache>,
 ) -> Result<()> {
     let client_hash = legacy_imap_client_hash(&config);
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let result = async {
         let mut capabilities = imap_fetch_metadata_capabilities(&mut session).await?;
         let advertised = timeout_imap(
@@ -8887,13 +9411,18 @@ pub async fn login(config: ImapConnectionConfig, password: &str) -> Result<Boxed
 
 async fn login_with_read_guard(
     config: ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
     read_budget: usize,
     max_literal_bytes: usize,
 ) -> Result<BoxedSession> {
     let client =
         connect_client_with_read_guard(&config, Some((read_budget, max_literal_bytes))).await?;
-    login_client(client, &config.login, password).await
+    match credentials {
+        ImapCredentials::Password(password) => login_client(client, &config.login, password).await,
+        ImapCredentials::OAuthToken(token) => {
+            login_client_oauth(client, xoauth2_initial_response(&config.login, token)?).await
+        }
+    }
 }
 
 async fn login_client(client: BoxedClient, login: &str, password: &str) -> Result<BoxedSession> {
@@ -9375,9 +9904,9 @@ impl LegacyNamespaces {
 
 async fn fetch_legacy_namespaces(
     config: ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
 ) -> Result<Option<LegacyNamespaces>> {
-    let mut session = login(config, password).await?;
+    let mut session = login_with_credentials(config, credentials).await?;
     let capabilities =
         timeout_imap("read IMAP namespace capability", session.capabilities()).await?;
     let utf8_mode = enable_legacy_utf8(&mut session, &capabilities).await?;

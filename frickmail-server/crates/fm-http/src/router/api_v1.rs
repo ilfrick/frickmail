@@ -3476,7 +3476,9 @@ where
                         state,
                         user.user_id,
                         connection.0,
-                        &connection.1,
+                        // The v1 message path still resolves a stored password;
+                        // legacy core is credential-agnostic, so wrap it here.
+                        &super::ImapCredentials::Password(connection.1.clone()),
                         &connection.2,
                         connection.3,
                         &signed,

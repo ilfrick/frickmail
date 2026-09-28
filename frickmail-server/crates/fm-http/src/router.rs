@@ -40,21 +40,30 @@ use base64::{
 use chrono::{Duration as ChronoDuration, Local, Utc};
 use fm_core::{plugin::PluginRequest, ApiEnvelope, ErrorBody, FrickmailError, HealthResponse};
 use fm_imap::{
-    append_raw_message, append_raw_message_without_flags, apply_imap_rules, clear_mailbox,
-    copy_messages, create_mailbox, delete_mailbox, delete_mailbox_acl, delete_messages,
-    fetch_legacy_folder_information, fetch_legacy_folders,
-    fetch_legacy_message_list_with_uid_cache_if_changed, fetch_legacy_message_threads_cached,
-    fetch_mailbox_acl, fetch_mailbox_status, fetch_message_body_preview, fetch_mime_part_bounded,
-    fetch_raw_folder_messages, fetch_raw_message, legacy_message_cache_key, legacy_message_hash,
+    append_raw_message_with_credentials, append_raw_message_without_flags_with_credentials,
+    apply_imap_rules_with_credentials, clear_mailbox_with_credentials,
+    copy_messages_with_credentials, create_mailbox_with_credentials,
+    delete_mailbox_acl_with_credentials, delete_mailbox_with_credentials,
+    delete_messages_with_credentials, fetch_legacy_folder_information_with_credentials,
+    fetch_legacy_folders_with_credentials,
+    fetch_legacy_message_list_with_uid_cache_if_changed_with_credentials,
+    fetch_legacy_message_threads_cached, fetch_mailbox_acl_with_credentials,
+    fetch_mailbox_status_with_credentials, fetch_message_body_preview_with_credentials,
+    fetch_mime_part_bounded_with_credentials, fetch_raw_folder_messages_with_credentials,
+    fetch_raw_message_with_credentials, legacy_message_cache_key, legacy_message_hash,
     legacy_message_list_cache_key, legacy_message_list_params_hash,
-    legacy_message_list_visible_uids_cached, login, move_messages, rename_mailbox, set_mailbox_acl,
-    set_mailbox_metadata, set_mailbox_subscription, store_message_flag, store_message_keyword,
-    store_seen_to_all, timeout_imap, update_mailbox_settings, validate_eml, BodyPreviewPart,
-    ImapConnectionConfig, ImapLoginProbe, ImapMessageFlag, ImapMoveLearning, ImapMoveOptions,
-    LegacyFolder, LegacyFolderCollection, LegacyFolderInformation, LegacyMessageList,
-    LegacyMessageListRequest, LegacyNamespaces, MailboxAclEntry, MailboxMetadata, MailboxStatus,
-    RawFolderFetchLimits, RuleAction, RuleCondition, RuleConditionField, RuleConditionOp,
-    RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport,
+    legacy_message_list_visible_uids_cached, login_with_credentials,
+    move_messages_with_credentials, rename_mailbox_with_credentials,
+    set_mailbox_acl_with_credentials, set_mailbox_metadata_with_credentials,
+    set_mailbox_subscription_with_credentials, store_message_flag,
+    store_message_flag_with_credentials, store_message_keyword_with_credentials,
+    store_seen_to_all_with_credentials, timeout_imap, update_mailbox_settings_with_credentials,
+    validate_eml, BodyPreviewPart, ImapConnectionConfig, ImapCredentials, ImapLoginProbe,
+    ImapMessageFlag, ImapMoveLearning, ImapMoveOptions, LegacyFolder, LegacyFolderCollection,
+    LegacyFolderInformation, LegacyMessageList, LegacyMessageListRequest, LegacyNamespaces,
+    MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction,
+    RuleCondition, RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+    RuleExecutionReport,
 };
 use fm_mime::{
     parse_body, parse_body_part_text, ParsedAuthStatuses, ParsedDraftInfo, ParsedMessageAttachment,
@@ -7510,7 +7519,7 @@ async fn native_gnupg_decrypt(
     if folder.is_empty() || uid == 0 {
         return json_result_error(action, "folder and uid are required");
     }
-    match fm_imap::fetch_mime_part_bounded(
+    match fm_imap::fetch_mime_part_bounded_with_credentials(
         config,
         &password,
         &folder,
@@ -7602,15 +7611,15 @@ fn legacy_pgp_verify_normalize(text: Vec<u8>, signature: Vec<u8>) -> (Vec<u8>, V
 /// bounds match the `PgpVerifyMessage` contract.
 async fn fetch_pgp_verify_inputs(
     config: ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
     folder: &str,
     uid: u32,
     part_id: &str,
     sig_part_id: &str,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let mime = match fm_imap::fetch_mime_part_bounded(
+    let mime = match fm_imap::fetch_mime_part_bounded_with_credentials(
         config.clone(),
-        password,
+        credentials,
         folder,
         uid,
         &format!("{part_id}.MIME"),
@@ -7622,9 +7631,9 @@ async fn fetch_pgp_verify_inputs(
         Ok(None) => return Err("Message part not found".to_string()),
         Err(err) => return Err(err.public_message()),
     };
-    let body = match fm_imap::fetch_mime_part_bounded(
+    let body = match fm_imap::fetch_mime_part_bounded_with_credentials(
         config.clone(),
-        password,
+        credentials,
         folder,
         uid,
         part_id,
@@ -7639,9 +7648,9 @@ async fn fetch_pgp_verify_inputs(
     let signature_part = if sig_part_id.is_empty() {
         None
     } else {
-        match fm_imap::fetch_mime_part_bounded(
+        match fm_imap::fetch_mime_part_bounded_with_credentials(
             config,
-            password,
+            credentials,
             folder,
             uid,
             sig_part_id,
@@ -8028,6 +8037,18 @@ async fn resolve_compose_imap_credentials(
     original_action: &str,
     token_refresher: &dyn OAuthAccessTokenRefresher,
 ) -> Result<fm_imap::ImapCredentials, Response> {
+    resolve_account_imap_credentials(account, credential_key, token_refresher)
+        .await
+        .map_err(|message| json_result_error(original_action, &message))
+}
+
+/// Message-returning core of [`resolve_compose_imap_credentials`] so callers
+/// that answer with their own legacy error shape keep using it.
+async fn resolve_account_imap_credentials(
+    account: &MailAccountConnectionSecret,
+    credential_key: &[u8],
+    token_refresher: &dyn OAuthAccessTokenRefresher,
+) -> Result<fm_imap::ImapCredentials, String> {
     match account.account_type.as_str() {
         "gmail" | "o365" => {
             let oauth = match oauth_refresh_token_for_imap(account, credential_key) {
@@ -8042,19 +8063,18 @@ async fn resolve_compose_imap_credentials(
                 Some(access_token) => Ok(fm_imap::ImapCredentials::OAuthToken(access_token)),
                 None => match account_password(account, credential_key) {
                     Ok(password) => Ok(fm_imap::ImapCredentials::Password(password)),
-                    Err(_) => Err(json_result_error(
-                        original_action,
-                        "Missing OAuth refresh token — re-authorize this account.",
-                    )),
+                    Err(_) => {
+                        Err("Missing OAuth refresh token — re-authorize this account.".to_string())
+                    }
                 },
             }
         }
         _ => match account_password(account, credential_key) {
             Ok(password) => Ok(fm_imap::ImapCredentials::Password(password)),
-            Err(_) => Err(json_result_error(
-                original_action,
-                "Missing account password",
-            )),
+            // Keep the credential layer's own wording ("No credentials
+            // stored") so every action reports a missing password the same
+            // way the legacy account checks did.
+            Err(err) => Err(err.public_message()),
         },
     }
 }
@@ -14624,8 +14644,8 @@ async fn native_frickmail_get_message_body(
         payload,
         session,
         MESSAGE_BODY_FETCH_DEADLINE,
-        |config, password, folder, uid| async move {
-            fetch_message_body_preview(config, &password, &folder, uid).await
+        |config, credentials, folder, uid| async move {
+            fetch_message_body_preview_with_credentials(config, &credentials, &folder, uid).await
         },
     )
     .await
@@ -14640,7 +14660,7 @@ async fn native_frickmail_get_message_body_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, u32) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, u32) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<BodyPreviewPart>>>>,
 {
     let Some(user) = (match load_session_user(state, original_action, session).await {
@@ -14681,19 +14701,22 @@ where
         Err(err) => return json_result_error(original_action, &err.public_message()),
     };
 
-    let config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
-    };
-    let password = match account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
+    let (config, credentials) = match imap_action_connection_for_account(
+        state,
+        &account,
+        &credential_key,
+        &ProductionOAuthTokenRefresher,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(message) => return json_result_error(original_action, &message),
     };
     let folder = payload_optional_string(payload, "folder").unwrap_or_else(|| "INBOX".to_string());
 
     let fetch = tokio::time::timeout(
         fetch_deadline,
-        fetcher(config, password, folder, uid as u32),
+        fetcher(config, credentials, folder, uid as u32),
     )
     .await
     .map_err(|_| FrickmailError::Upstream("Message body fetch timed out".to_string()));
@@ -14756,8 +14779,8 @@ async fn native_frickmail_check_new_mail(
         payload,
         session,
         CHECK_NEW_MAIL_ACCOUNT_DEADLINE,
-        |config, password, folder| async move {
-            fetch_mailbox_status(config, &password, &folder).await
+        |config, credentials, folder| async move {
+            fetch_mailbox_status_with_credentials(config, &credentials, &folder).await
         },
     )
     .await
@@ -14772,7 +14795,7 @@ async fn native_frickmail_check_new_mail_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    F: Fn(ImapConnectionConfig, ImapCredentials, String) -> Fut + Clone,
     Fut: std::future::Future<Output = fm_core::Result<MailboxStatus>>,
 {
     let Some(user) = (match load_session_user(state, original_action, session).await {
@@ -14793,6 +14816,7 @@ where
 
     let last_uids = payload_last_uids(payload);
     let accounts = match check_new_mail_accounts_with_fetcher(
+        state,
         pool,
         user.user_id,
         &credential_key,
@@ -14825,8 +14849,8 @@ async fn native_frickmail_long_poll_new_mail(
             poll_deadline: LONG_POLL_NEW_MAIL_DEADLINE,
             poll_interval: LONG_POLL_NEW_MAIL_INTERVAL,
         },
-        |config, password, folder| async move {
-            fetch_mailbox_status(config, &password, &folder).await
+        |config, credentials, folder| async move {
+            fetch_mailbox_status_with_credentials(config, &credentials, &folder).await
         },
     )
     .await
@@ -14841,7 +14865,7 @@ async fn native_frickmail_long_poll_new_mail_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    F: Fn(ImapConnectionConfig, ImapCredentials, String) -> Fut + Clone,
     Fut: std::future::Future<Output = fm_core::Result<MailboxStatus>>,
 {
     let Some(user) = (match load_session_user(state, original_action, session).await {
@@ -14865,6 +14889,7 @@ where
 
     loop {
         let accounts = match check_new_mail_accounts_with_fetcher(
+            state,
             pool,
             user.user_id,
             &credential_key,
@@ -14913,6 +14938,7 @@ where
 }
 
 async fn check_new_mail_accounts_with_fetcher<F, Fut>(
+    state: &AppState,
     pool: &sqlx::AnyPool,
     user_id: i64,
     credential_key: &[u8],
@@ -14921,7 +14947,7 @@ async fn check_new_mail_accounts_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> fm_core::Result<Vec<Value>>
 where
-    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    F: Fn(ImapConnectionConfig, ImapCredentials, String) -> Fut + Clone,
     Fut: std::future::Future<Output = fm_core::Result<MailboxStatus>>,
 {
     let accounts = SqlxUserRepository::list_mail_accounts(pool, user_id).await?;
@@ -14937,19 +14963,22 @@ where
                 Ok(Some(secret)) => secret,
                 _ => continue,
             };
-        let config = match imap_config_from_account_secret(&secret) {
-            Ok(config) => config,
-            Err(_) => continue,
-        };
-        let password = match account_password(&secret, credential_key) {
-            Ok(password) => password,
+        let (config, credentials) = match imap_action_connection_for_account(
+            state,
+            &secret,
+            credential_key,
+            &ProductionOAuthTokenRefresher,
+        )
+        .await
+        {
+            Ok(connection) => connection,
             Err(_) => continue,
         };
 
         let fetcher = fetcher.clone();
         let status = match tokio::time::timeout(
             fetch_deadline,
-            fetcher(config, password, "INBOX".to_string()),
+            fetcher(config, credentials, "INBOX".to_string()),
         )
         .await
         {
@@ -15468,7 +15497,9 @@ async fn native_frickmail_apply_rules(
         payload,
         session,
         APPLY_RULES_DEADLINE,
-        |config, password, rules| async move { apply_imap_rules(config, &password, &rules).await },
+        |config, credentials, rules| async move {
+            apply_imap_rules_with_credentials(config, &credentials, &rules).await
+        },
     )
     .await
 }
@@ -15482,7 +15513,7 @@ async fn native_frickmail_apply_rules_with_executor<F, Fut>(
     executor: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, Vec<RuleExecutionPlan>) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, Vec<RuleExecutionPlan>) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<RuleExecutionReport>>,
 {
     let Some(user) = (match load_session_user(state, original_action, session).await {
@@ -15517,13 +15548,16 @@ where
     if account.account_type != "imap" {
         return json_result_error(original_action, "Rules only supported for IMAP accounts");
     }
-    let config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => return json_result_error(original_action, &err.public_message()),
-    };
-    let password = match account_password(&account, &credential_key) {
-        Ok(password) => password,
-        Err(_) => return json_result_error(original_action, "Missing IMAP password"),
+    let (config, credentials) = match imap_action_connection_for_account(
+        state,
+        &account,
+        &credential_key,
+        &ProductionOAuthTokenRefresher,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(message) => return json_result_error(original_action, &message),
     };
 
     let rules = match SqlxUserRepository::list_mail_rules(pool, user.user_id, account_id).await {
@@ -15543,7 +15577,7 @@ where
         return apply_rules_response(original_action, Vec::new());
     }
 
-    let report = tokio::time::timeout(apply_deadline, executor(config, password, plans))
+    let report = tokio::time::timeout(apply_deadline, executor(config, credentials, plans))
         .await
         .map_err(|_| FrickmailError::Upstream("Rule application timed out".to_string()));
 
@@ -15957,8 +15991,8 @@ async fn native_frickmail_export_message(
         payload,
         session,
         EXPORT_MESSAGE_DEADLINE,
-        |config, password, folder, uid| async move {
-            fetch_raw_message(config, &password, &folder, uid).await
+        |config, credentials, folder, uid| async move {
+            fetch_raw_message_with_credentials(config, &credentials, &folder, uid).await
         },
     )
     .await
@@ -15973,7 +16007,7 @@ async fn native_frickmail_export_message_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, u32) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, u32) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
@@ -16050,8 +16084,8 @@ async fn native_frickmail_export_folder(
         session,
         EXPORT_FOLDER_DEADLINE,
         limits,
-        move |config, password, folder| async move {
-            fetch_raw_folder_messages(config, &password, &folder, limits).await
+        move |config, credentials, folder| async move {
+            fetch_raw_folder_messages_with_credentials(config, &credentials, &folder, limits).await
         },
     )
     .await
@@ -16067,7 +16101,7 @@ async fn native_frickmail_export_folder_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Vec<Vec<u8>>>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
@@ -16133,8 +16167,8 @@ async fn native_frickmail_import_eml(
         payload,
         session,
         IMPORT_EML_DEADLINE,
-        |config, password, folder, raw| async move {
-            append_raw_message(config, &password, &folder, &raw).await
+        |config, credentials, folder, raw| async move {
+            append_raw_message_with_credentials(config, &credentials, &folder, &raw).await
         },
     )
     .await
@@ -16149,7 +16183,7 @@ async fn native_frickmail_import_eml_with_appender<F, Fut>(
     appender: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, Vec<u8>) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
@@ -16216,8 +16250,9 @@ async fn native_legacy_folder_append_multipart(
         body,
         session,
         FOLDER_APPEND_DEADLINE,
-        |config, password, folder, raw| async move {
-            append_raw_message_without_flags(config, &password, &folder, &raw).await
+        |config, credentials, folder, raw| async move {
+            append_raw_message_without_flags_with_credentials(config, &credentials, &folder, &raw)
+                .await
         },
     )
     .await
@@ -16233,7 +16268,7 @@ async fn native_legacy_folder_append_multipart_with_appender<F, Fut>(
     appender: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, Vec<u8>) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (user, credential_key) =
@@ -16340,7 +16375,7 @@ async fn legacy_folder_append_connection_for_selected_or_payload(
     session: &fm_session::Session,
     user_id: i64,
     credential_key: &[u8],
-) -> Result<(ImapConnectionConfig, String), Response> {
+) -> Result<(ImapConnectionConfig, ImapCredentials), Response> {
     let Some(pool) = state.db_pool() else {
         return Err(legacy_folder_append_error(
             original_action,
@@ -16367,26 +16402,19 @@ async fn legacy_folder_append_connection_for_selected_or_payload(
                 ))
             }
         };
-    let config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => {
-            return Err(legacy_folder_append_error(
-                original_action,
-                err.public_message(),
-            ))
-        }
-    };
-    let password = match account_password(&account, credential_key) {
-        Ok(password) => password,
-        Err(_) => {
-            return Err(legacy_folder_append_error(
-                original_action,
-                "Missing IMAP password",
-            ))
-        }
+    let (config, credentials) = match imap_action_connection_for_account(
+        state,
+        &account,
+        credential_key,
+        &ProductionOAuthTokenRefresher,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(message) => return Err(legacy_folder_append_error(original_action, message)),
     };
 
-    Ok((config, password))
+    Ok((config, credentials))
 }
 
 async fn legacy_folder_append_account_id(
@@ -16437,10 +16465,10 @@ async fn native_legacy_attachments_actions(
         payload,
         session,
         MESSAGE_BODY_FETCH_DEADLINE,
-        |config, password, folder, uid, mime_index| async move {
-            fetch_mime_part_bounded(
+        |config, credentials, folder, uid, mime_index| async move {
+            fetch_mime_part_bounded_with_credentials(
                 config,
-                &password,
+                &credentials,
                 &folder,
                 uid,
                 &mime_index,
@@ -16461,10 +16489,10 @@ async fn native_legacy_attachments_actions_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut,
+    F: Fn(ImapConnectionConfig, ImapCredentials, String, u32, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>>,
 {
-    let (scope, config, password) =
+    let (scope, config, credentials) =
         match legacy_attachment_export_imap_context(state, original_action, payload, session).await
         {
             Ok(connection) => connection,
@@ -16601,7 +16629,7 @@ where
                     fetch_deadline,
                     fetcher(
                         config.clone(),
-                        password.clone(),
+                        credentials.clone(),
                         item_folder.to_string(),
                         item_uid,
                         mime_index,
@@ -17178,7 +17206,14 @@ async fn legacy_compose_imap_staging_context(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
-) -> Result<(LegacyComposeStagingScope, ImapConnectionConfig, String), Response> {
+) -> Result<
+    (
+        LegacyComposeStagingScope,
+        ImapConnectionConfig,
+        ImapCredentials,
+    ),
+    Response,
+> {
     let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
     let Some(pool) = state.db_pool() else {
         return Err(json_result_error(
@@ -17202,12 +17237,16 @@ async fn legacy_compose_imap_staging_context(
         Ok(None) => return Err(json_result_error(original_action, "Account not found")),
         Err(err) => return Err(json_result_error(original_action, &err.public_message())),
     };
-    let config = imap_config_from_account_secret(&account)
-        .map_err(|err| json_result_error(original_action, &err.public_message()))?;
-    let password = account_password(&account, &credential_key)
-        .map_err(|_| json_result_error(original_action, "Missing account password"))?;
+    let (config, credentials) = imap_action_connection_for_account(
+        state,
+        &account,
+        &credential_key,
+        &ProductionOAuthTokenRefresher,
+    )
+    .await
+    .map_err(|message| json_result_error(original_action, &message))?;
     let scope = LegacyComposeStagingScope::new(&state.config().tmp_dir, user.user_id, account_id);
-    Ok((scope, config, password))
+    Ok((scope, config, credentials))
 }
 
 async fn legacy_attachment_export_imap_context(
@@ -17215,7 +17254,14 @@ async fn legacy_attachment_export_imap_context(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
-) -> Result<(LegacyComposeStagingScope, ImapConnectionConfig, String), Response> {
+) -> Result<
+    (
+        LegacyComposeStagingScope,
+        ImapConnectionConfig,
+        ImapCredentials,
+    ),
+    Response,
+> {
     let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
     let Some(pool) = state.db_pool() else {
         return Err(json_result_error(
@@ -17235,10 +17281,14 @@ async fn legacy_attachment_export_imap_context(
         Ok(None) => return Err(json_result_error(original_action, "Account not found")),
         Err(err) => return Err(json_result_error(original_action, &err.public_message())),
     };
-    let config = imap_config_from_account_secret(&account)
-        .map_err(|err| json_result_error(original_action, &err.public_message()))?;
-    let password = account_password(&account, &credential_key)
-        .map_err(|_| json_result_error(original_action, "Missing account password"))?;
+    let (config, credentials) = imap_action_connection_for_account(
+        state,
+        &account,
+        &credential_key,
+        &ProductionOAuthTokenRefresher,
+    )
+    .await
+    .map_err(|message| json_result_error(original_action, &message))?;
     Ok((
         LegacyComposeStagingScope::attachment_export(
             &state.config().tmp_dir,
@@ -17246,7 +17296,7 @@ async fn legacy_attachment_export_imap_context(
             account_id,
         ),
         config,
-        password,
+        credentials,
     ))
 }
 
@@ -17654,10 +17704,10 @@ async fn native_legacy_message_upload_attachments(
             payload,
             session,
             MESSAGE_BODY_FETCH_DEADLINE,
-            |config, password, folder, uid, mime_index| async move {
-                fetch_mime_part_bounded(
+            |config, credentials, folder, uid, mime_index| async move {
+                fetch_mime_part_bounded_with_credentials(
                     config,
-                    &password,
+                    &credentials,
                     &folder,
                     uid,
                     &mime_index,
@@ -17683,10 +17733,10 @@ async fn native_legacy_message_upload_attachments_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut + Send + Sync,
+    F: Fn(ImapConnectionConfig, ImapCredentials, String, u32, String) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>> + Send,
 {
-    let (scope, config, password) =
+    let (scope, config, credentials) =
         match legacy_compose_imap_staging_context(state, original_action, payload, session).await {
             Ok(context) => context,
             Err(response) => return response,
@@ -17712,7 +17762,7 @@ where
         let raw_key_str = attachment.as_str().unwrap_or_default().to_string();
         let scope = scope.clone();
         let config = config.clone();
-        let password = password.clone();
+        let credentials = credentials.clone();
         let fetcher = &fetcher;
 
         in_flight.push(Box::pin(async move {
@@ -17720,7 +17770,7 @@ where
                 &raw_key_str,
                 &scope,
                 &config,
-                &password,
+                &credentials,
                 fetcher,
                 fetch_deadline,
             )
@@ -17748,12 +17798,12 @@ async fn upload_single_attachment<F, Fut>(
     raw_key_str: &str,
     scope: &LegacyComposeStagingScope,
     config: &ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
     fetcher: &F,
     fetch_deadline: Duration,
 ) -> Value
 where
-    F: Fn(ImapConnectionConfig, String, String, u32, String) -> Fut + Send + Sync,
+    F: Fn(ImapConnectionConfig, ImapCredentials, String, u32, String) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<u8>>>> + Send,
 {
     let raw_key_str = raw_key_str.to_string();
@@ -17843,13 +17893,7 @@ where
     };
     let data = match tokio::time::timeout(
         fetch_deadline,
-        fetcher(
-            config.clone(),
-            password.to_string(),
-            folder,
-            uid,
-            mime_index,
-        ),
+        fetcher(config.clone(), credentials.clone(), folder, uid, mime_index),
     )
     .await
     {
@@ -17964,8 +18008,8 @@ async fn native_legacy_message(
         session,
         headers,
         MESSAGE_BODY_FETCH_DEADLINE,
-        |config, password, folder, uid| async move {
-            fetch_message_body_preview(config, &password, &folder, uid).await
+        |config, credentials, folder, uid| async move {
+            fetch_message_body_preview_with_credentials(config, &credentials, &folder, uid).await
         },
     )
     .await
@@ -17981,7 +18025,7 @@ async fn native_legacy_message_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, u32) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, u32) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Option<Vec<BodyPreviewPart>>>>,
 {
     let (config, password) =
@@ -18011,7 +18055,7 @@ where
         let folder_hash = legacy_message_list_cache_key(&message_request.folder, &client_hash);
 
         // Fetch all threads
-        let all_threads = match login(config.clone(), &password).await {
+        let all_threads = match login_with_credentials(config.clone(), &password).await {
             Ok(mut session) => {
                 fetch_legacy_message_threads_cached(
                     &mut session,
@@ -18035,7 +18079,7 @@ where
             Vec::new()
         } else if !thread_uids.is_empty() {
             // Fetch unseen UIDs for thread_unseen
-            match login(config.clone(), &password).await {
+            match login_with_credentials(config.clone(), &password).await {
                 Ok(mut session) => {
                     let _ =
                         timeout_imap("examine mailbox", session.examine(&message_request.folder))
@@ -18291,7 +18335,7 @@ async fn native_legacy_message_list(
         session,
         headers,
         MESSAGE_LIST_DEADLINE,
-        move |config, password, request, account_email, unchanged_folder_etag| {
+        move |config, credentials, request, account_email, unchanged_folder_etag| {
             let uid_cache = redis_pool.map(|pool| {
                 Arc::new(RedisLegacyMessageListUidCache::new(
                     pool,
@@ -18300,9 +18344,9 @@ async fn native_legacy_message_list(
                 )) as Arc<dyn fm_imap::LegacyMessageListUidCache>
             });
             async move {
-                fetch_legacy_message_list_with_uid_cache_if_changed(
+                fetch_legacy_message_list_with_uid_cache_if_changed_with_credentials(
                     config,
-                    &password,
+                    &credentials,
                     request,
                     uid_cache,
                     unchanged_folder_etag,
@@ -18326,7 +18370,7 @@ async fn native_legacy_message_list_with_fetcher<F, Fut>(
 where
     F: FnOnce(
         ImapConnectionConfig,
-        String,
+        ImapCredentials,
         LegacyMessageListRequest,
         String,
         Option<String>,
@@ -18358,7 +18402,7 @@ where
             )
         }
     };
-    let (config, password, account_email) =
+    let (config, credentials, account_email) =
         match imap_action_connection_with_email_for_selected_or_payload(
             state,
             original_action,
@@ -18452,7 +18496,7 @@ where
         fetch_deadline,
         fetcher(
             config,
-            password,
+            credentials,
             request.clone(),
             cache_account_email,
             unchanged_folder_etag,
@@ -18857,8 +18901,9 @@ async fn native_legacy_folders(
         original_action,
         payload,
         session,
-        |config, password, discover_subscriptions| async move {
-            fetch_legacy_folders(config, &password, discover_subscriptions).await
+        |config, credentials, discover_subscriptions| async move {
+            fetch_legacy_folders_with_credentials(config, &credentials, discover_subscriptions)
+                .await
         },
     )
     .await
@@ -18872,7 +18917,7 @@ async fn native_legacy_folders_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, bool) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, bool) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<LegacyFolderCollection>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
@@ -18963,10 +19008,10 @@ async fn native_legacy_folder_information(
         payload,
         session,
         FOLDER_INFORMATION_DEADLINE,
-        |config, password, folder, prev_uid_next, flag_uids| async move {
-            fetch_legacy_folder_information(
+        |config, credentials, folder, prev_uid_next, flag_uids| async move {
+            fetch_legacy_folder_information_with_credentials(
                 config,
-                &password,
+                &credentials,
                 &folder,
                 prev_uid_next,
                 flag_uids,
@@ -18987,7 +19032,7 @@ async fn native_legacy_folder_information_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, Option<u32>, Option<Vec<u32>>) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, Option<u32>, Option<Vec<u32>>) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<LegacyFolderInformation>>,
 {
     let (config, password) =
@@ -19034,10 +19079,10 @@ async fn native_legacy_folder_information_multiply(
         payload,
         session,
         FOLDER_INFORMATION_DEADLINE,
-        |config, password, folder| async move {
-            fetch_legacy_folder_information(
+        |config, credentials, folder| async move {
+            fetch_legacy_folder_information_with_credentials(
                 config,
-                &password,
+                &credentials,
                 &folder,
                 None,
                 None,
@@ -19058,7 +19103,7 @@ async fn native_legacy_folder_information_multiply_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: Fn(ImapConnectionConfig, String, String) -> Fut + Clone,
+    F: Fn(ImapConnectionConfig, ImapCredentials, String) -> Fut + Clone,
     Fut: std::future::Future<Output = fm_core::Result<LegacyFolderInformation>>,
 {
     let (config, password) =
@@ -19110,8 +19155,8 @@ async fn native_legacy_folder_create(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, parent, subscribe| async move {
-            create_mailbox(config, &password, &folder, &parent, subscribe).await
+        |config, credentials, folder, parent, subscribe| async move {
+            create_mailbox_with_credentials(config, &credentials, &folder, &parent, subscribe).await
         },
     )
     .await
@@ -19126,7 +19171,7 @@ async fn native_legacy_folder_create_with_creator<F, Fut>(
     creator: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String, bool) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, String, bool) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Option<LegacyFolder>>>,
 {
     let (config, password) =
@@ -19180,8 +19225,9 @@ async fn native_legacy_folder_subscribe(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, subscribe| async move {
-            set_mailbox_subscription(config, &password, &folder, subscribe).await
+        |config, credentials, folder, subscribe| async move {
+            set_mailbox_subscription_with_credentials(config, &credentials, &folder, subscribe)
+                .await
         },
     )
     .await
@@ -19196,7 +19242,7 @@ async fn native_legacy_folder_subscribe_with_subscriber<F, Fut>(
     subscriber: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, bool) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, bool) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password) =
@@ -19232,8 +19278,16 @@ async fn native_legacy_folder_rename(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, old_name, new_name, subscribe, metadata| async move {
-            rename_mailbox(config, &password, &old_name, &new_name, subscribe, metadata).await
+        |config, credentials, old_name, new_name, subscribe, metadata| async move {
+            rename_mailbox_with_credentials(
+                config,
+                &credentials,
+                &old_name,
+                &new_name,
+                subscribe,
+                metadata,
+            )
+            .await
         },
     )
     .await
@@ -19248,7 +19302,14 @@ async fn native_legacy_folder_rename_with_renamer<F, Fut>(
     renamer: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String, bool, Option<MailboxMetadata>) -> Fut,
+    F: FnOnce(
+        ImapConnectionConfig,
+        ImapCredentials,
+        String,
+        String,
+        bool,
+        Option<MailboxMetadata>,
+    ) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<String>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
@@ -19354,8 +19415,8 @@ async fn native_legacy_folder_set_metadata(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, metadata| async move {
-            set_mailbox_metadata(config, &password, &folder, metadata).await
+        |config, credentials, folder, metadata| async move {
+            set_mailbox_metadata_with_credentials(config, &credentials, &folder, metadata).await
         },
     )
     .await
@@ -19370,7 +19431,7 @@ async fn native_legacy_folder_set_metadata_with_setter<F, Fut>(
     setter: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, MailboxMetadata) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, MailboxMetadata) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password) =
@@ -19418,8 +19479,8 @@ async fn native_legacy_folder_acl(
         original_action,
         payload,
         session,
-        |config, password, folder| async move {
-            fetch_mailbox_acl(config, &password, &folder).await
+        |config, credentials, folder| async move {
+            fetch_mailbox_acl_with_credentials(config, &credentials, &folder).await
         },
     )
     .await
@@ -19433,7 +19494,7 @@ async fn native_legacy_folder_acl_with_fetcher<F, Fut>(
     fetcher: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<Vec<MailboxAclEntry>>>,
 {
     let (config, password) =
@@ -19473,8 +19534,9 @@ async fn native_legacy_folder_set_acl(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, identifier, rights| async move {
-            set_mailbox_acl(config, &password, &folder, &identifier, &rights).await
+        |config, credentials, folder, identifier, rights| async move {
+            set_mailbox_acl_with_credentials(config, &credentials, &folder, &identifier, &rights)
+                .await
         },
     )
     .await
@@ -19489,7 +19551,7 @@ async fn native_legacy_folder_set_acl_with_setter<F, Fut>(
     setter: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, String, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password) =
@@ -19526,8 +19588,8 @@ async fn native_legacy_folder_delete_acl(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, identifier| async move {
-            delete_mailbox_acl(config, &password, &folder, &identifier).await
+        |config, credentials, folder, identifier| async move {
+            delete_mailbox_acl_with_credentials(config, &credentials, &folder, &identifier).await
         },
     )
     .await
@@ -19542,7 +19604,7 @@ async fn native_legacy_folder_delete_acl_with_deleter<F, Fut>(
     deleter: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password) =
@@ -19586,8 +19648,15 @@ async fn native_legacy_folder_settings(
         original_action,
         payload,
         session,
-        |config, password, folder, subscribe, metadata| async move {
-            update_mailbox_settings(config, &password, &folder, subscribe, metadata).await
+        |config, credentials, folder, subscribe, metadata| async move {
+            update_mailbox_settings_with_credentials(
+                config,
+                &credentials,
+                &folder,
+                subscribe,
+                metadata,
+            )
+            .await
         },
     )
     .await
@@ -19601,7 +19670,7 @@ async fn native_legacy_folder_settings_with_updater<F, Fut>(
     updater: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, bool, Option<MailboxMetadata>) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, bool, Option<MailboxMetadata>) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (user, credential_key) = match imap_action_auth(state, original_action, session).await {
@@ -19748,7 +19817,9 @@ async fn native_legacy_folder_clear(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder| async move { clear_mailbox(config, &password, &folder).await },
+        |config, credentials, folder| async move {
+            clear_mailbox_with_credentials(config, &credentials, &folder).await
+        },
     )
     .await
 }
@@ -19762,7 +19833,7 @@ async fn native_legacy_folder_clear_with_clearer<F, Fut>(
     clearer: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password) =
@@ -19794,7 +19865,9 @@ async fn native_legacy_folder_delete(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder| async move { delete_mailbox(config, &password, &folder).await },
+        |config, credentials, folder| async move {
+            delete_mailbox_with_credentials(config, &credentials, &folder).await
+        },
     )
     .await
 }
@@ -19808,7 +19881,7 @@ async fn native_legacy_folder_delete_with_deleter<F, Fut>(
     deleter: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password) =
@@ -19888,8 +19961,9 @@ async fn native_legacy_message_store_flag(
         session,
         flag,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, uid_set, flag, set| async move {
-            store_message_flag(config, &password, &folder, &uid_set, flag, set).await
+        |config, credentials, folder, uid_set, flag, set| async move {
+            store_message_flag_with_credentials(config, &credentials, &folder, &uid_set, flag, set)
+                .await
         },
     )
     .await
@@ -19905,7 +19979,7 @@ async fn native_legacy_message_store_flag_with_storer<F, Fut>(
     storer: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String, ImapMessageFlag, bool) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, String, ImapMessageFlag, bool) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password, folder, uid_set) =
@@ -19937,8 +20011,16 @@ async fn native_legacy_message_store_keyword(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, uid_set, keyword, set| async move {
-            store_message_keyword(config, &password, &folder, &uid_set, &keyword, set).await
+        |config, credentials, folder, uid_set, keyword, set| async move {
+            store_message_keyword_with_credentials(
+                config,
+                &credentials,
+                &folder,
+                &uid_set,
+                &keyword,
+                set,
+            )
+            .await
         },
     )
     .await
@@ -19953,7 +20035,7 @@ async fn native_legacy_message_store_keyword_with_storer<F, Fut>(
     storer: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String, String, bool) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, String, String, bool) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password, folder, uid_set) =
@@ -19986,8 +20068,15 @@ async fn native_legacy_message_set_seen_to_all(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, thread_uids, set| async move {
-            store_seen_to_all(config, &password, &folder, thread_uids.as_deref(), set).await
+        |config, credentials, folder, thread_uids, set| async move {
+            store_seen_to_all_with_credentials(
+                config,
+                &credentials,
+                &folder,
+                thread_uids.as_deref(),
+                set,
+            )
+            .await
         },
     )
     .await
@@ -20002,7 +20091,7 @@ async fn native_legacy_message_set_seen_to_all_with_storer<F, Fut>(
     storer: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, Option<String>, bool) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, Option<String>, bool) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password) =
@@ -20041,8 +20130,9 @@ async fn native_legacy_message_copy(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, from_folder, to_folder, uid_set| async move {
-            copy_messages(config, &password, &from_folder, &to_folder, &uid_set).await
+        |config, credentials, from_folder, to_folder, uid_set| async move {
+            copy_messages_with_credentials(config, &credentials, &from_folder, &to_folder, &uid_set)
+                .await
         },
     )
     .await
@@ -20057,7 +20147,7 @@ async fn native_legacy_message_copy_with_copier<F, Fut>(
     copier: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, String, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password, from_folder, uid_set) =
@@ -20100,10 +20190,10 @@ async fn native_legacy_message_move(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, from_folder, to_folder, uid_set, options| async move {
-            move_messages(
+        |config, credentials, from_folder, to_folder, uid_set, options| async move {
+            move_messages_with_credentials(
                 config,
-                &password,
+                &credentials,
                 &from_folder,
                 &to_folder,
                 &uid_set,
@@ -20124,7 +20214,14 @@ async fn native_legacy_message_move_with_mover<F, Fut>(
     mover: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String, String, ImapMoveOptions) -> Fut,
+    F: FnOnce(
+        ImapConnectionConfig,
+        ImapCredentials,
+        String,
+        String,
+        String,
+        ImapMoveOptions,
+    ) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password, from_folder, uid_set) =
@@ -20175,8 +20272,8 @@ async fn native_legacy_message_delete(
         payload,
         session,
         MESSAGE_MUTATION_DEADLINE,
-        |config, password, folder, uid_set| async move {
-            delete_messages(config, &password, &folder, &uid_set).await
+        |config, credentials, folder, uid_set| async move {
+            delete_messages_with_credentials(config, &credentials, &folder, &uid_set).await
         },
     )
     .await
@@ -20191,7 +20288,7 @@ async fn native_legacy_message_delete_with_deleter<F, Fut>(
     deleter: F,
 ) -> Response
 where
-    F: FnOnce(ImapConnectionConfig, String, String, String) -> Fut,
+    F: FnOnce(ImapConnectionConfig, ImapCredentials, String, String) -> Fut,
     Fut: std::future::Future<Output = fm_core::Result<()>>,
 {
     let (config, password, folder, uid_set) =
@@ -20215,7 +20312,7 @@ async fn legacy_message_mutation_context(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
-) -> Result<(ImapConnectionConfig, String, String, String), Response> {
+) -> Result<(ImapConnectionConfig, ImapCredentials, String, String), Response> {
     legacy_message_mutation_context_with_folder_key(
         state,
         original_action,
@@ -20232,7 +20329,7 @@ async fn legacy_message_mutation_context_with_folder_key(
     payload: &Value,
     session: &fm_session::Session,
     folder_key: &str,
-) -> Result<(ImapConnectionConfig, String, String, String), Response> {
+) -> Result<(ImapConnectionConfig, ImapCredentials, String, String), Response> {
     let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
     let folder = match required_payload_string(payload, folder_key, "folder required") {
         Ok(folder) => folder,
@@ -20336,7 +20433,7 @@ async fn legacy_imap_connection_context(
     original_action: &str,
     payload: &Value,
     session: &fm_session::Session,
-) -> Result<(ImapConnectionConfig, String), Response> {
+) -> Result<(ImapConnectionConfig, ImapCredentials), Response> {
     let (user, credential_key) = imap_action_auth(state, original_action, session).await?;
     imap_action_connection_for_selected_or_payload(
         state,
@@ -20864,7 +20961,7 @@ async fn legacy_message_pgp_auto_verify(
     state: &AppState,
     user_id: i64,
     config: ImapConnectionConfig,
-    password: &str,
+    credentials: &ImapCredentials,
     folder: &str,
     uid: u32,
     pgp_signed: &fm_imap::LegacyPgpSigned,
@@ -20872,7 +20969,7 @@ async fn legacy_message_pgp_auto_verify(
     let sig_part_id = pgp_signed.sig_part_id.as_deref().unwrap_or_default();
     let (text, signature) = fetch_pgp_verify_inputs(
         config,
-        password,
+        credentials,
         folder,
         uid,
         &pgp_signed.part_id,
@@ -21648,7 +21745,7 @@ async fn imap_action_connection_for_user(
     payload: &Value,
     user_id: i64,
     credential_key: &[u8],
-) -> Result<(ImapConnectionConfig, String), Response> {
+) -> Result<(ImapConnectionConfig, ImapCredentials), Response> {
     let Some(pool) = state.db_pool() else {
         return Err(json_result_error(
             original_action,
@@ -21668,16 +21765,16 @@ async fn imap_action_connection_for_user(
             Ok(None) => return Err(json_result_error(original_action, "Account not found")),
             Err(err) => return Err(json_result_error(original_action, &err.public_message())),
         };
-    let config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
-    };
-    let password = match account_password(&account, credential_key) {
-        Ok(password) => password,
-        Err(_) => return Err(json_result_error(original_action, "Missing IMAP password")),
-    };
+    let (config, credentials) = imap_action_connection_for_account(
+        state,
+        &account,
+        credential_key,
+        &ProductionOAuthTokenRefresher,
+    )
+    .await
+    .map_err(|message| json_result_error(original_action, &message))?;
 
-    Ok((config, password))
+    Ok((config, credentials))
 }
 
 async fn imap_action_connection_for_selected_or_payload(
@@ -21687,8 +21784,8 @@ async fn imap_action_connection_for_selected_or_payload(
     session: &fm_session::Session,
     user_id: i64,
     credential_key: &[u8],
-) -> Result<(ImapConnectionConfig, String), Response> {
-    let (config, password, _) = imap_action_connection_with_email_for_selected_or_payload(
+) -> Result<(ImapConnectionConfig, ImapCredentials), Response> {
+    let (config, credentials, _) = imap_action_connection_with_email_for_selected_or_payload(
         state,
         original_action,
         payload,
@@ -21697,9 +21794,38 @@ async fn imap_action_connection_for_selected_or_payload(
         credential_key,
     )
     .await?;
-    Ok((config, password))
+    Ok((config, credentials))
 }
 
+/// Resolves the IMAP endpoint **and** the credential kind for an already
+/// selected account. Provider OAuth accounts (gmail/o365) are first class
+/// here: they resolve to well-known IMAP hosts and authenticate with a freshly
+/// refreshed XOAUTH2 access token, because refusing them as "not an IMAP
+/// account" breaks every action for users whose primary account is
+/// provider-hosted. Password accounts keep the exact previous behavior.
+async fn imap_action_connection_for_account(
+    state: &AppState,
+    account: &MailAccountConnectionSecret,
+    credential_key: &[u8],
+    token_refresher: &dyn OAuthAccessTokenRefresher,
+) -> Result<(ImapConnectionConfig, ImapCredentials), String> {
+    let config = match account.account_type.as_str() {
+        "gmail" | "o365" => {
+            let Some(pool) = state.db_pool() else {
+                return Err("Frickmail database is not configured".to_string());
+            };
+            oauth_imap_connection_config(pool, account).await?
+        }
+        _ => imap_config_from_account_secret(account).map_err(|err| err.public_message())?,
+    };
+    let credentials =
+        resolve_account_imap_credentials(account, credential_key, token_refresher).await?;
+
+    Ok((config, credentials))
+}
+
+/// Resolves the IMAP endpoint **and** the credential kind for the account a
+/// legacy action operates on.
 async fn imap_action_connection_with_email_for_selected_or_payload(
     state: &AppState,
     original_action: &str,
@@ -21707,7 +21833,7 @@ async fn imap_action_connection_with_email_for_selected_or_payload(
     session: &fm_session::Session,
     user_id: i64,
     credential_key: &[u8],
-) -> Result<(ImapConnectionConfig, String, String), Response> {
+) -> Result<(ImapConnectionConfig, ImapCredentials, String), Response> {
     let Some(pool) = state.db_pool() else {
         return Err(json_result_error(
             original_action,
@@ -21724,16 +21850,16 @@ async fn imap_action_connection_with_email_for_selected_or_payload(
             Ok(None) => return Err(json_result_error(original_action, "Account not found")),
             Err(err) => return Err(json_result_error(original_action, &err.public_message())),
         };
-    let config = match imap_config_from_account_secret(&account) {
-        Ok(config) => config,
-        Err(err) => return Err(json_result_error(original_action, &err.public_message())),
-    };
-    let password = match account_password(&account, credential_key) {
-        Ok(password) => password,
-        Err(_) => return Err(json_result_error(original_action, "Missing IMAP password")),
-    };
+    let (config, credentials) = imap_action_connection_for_account(
+        state,
+        &account,
+        credential_key,
+        &ProductionOAuthTokenRefresher,
+    )
+    .await
+    .map_err(|message| json_result_error(original_action, &message))?;
 
-    Ok((config, password, account.email))
+    Ok((config, credentials, account.email))
 }
 
 async fn native_frickmail_list_oidc_links(
@@ -24487,12 +24613,13 @@ mod tests {
     use data_encoding::BASE32_NOPAD;
     use fm_core::{FrickmailConfig, FrickmailError, SelectedMailAccountSession, UserSession};
     use fm_imap::{
-        BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapMessageFlag, ImapMoveLearning,
-        ImapMoveOptions, LegacyAttachmentSummary, LegacyFolder, LegacyFolderCollection,
-        LegacyFolderInformation, LegacyMessageFlags, LegacyMessageList, LegacyMessageListRequest,
-        LegacyMessageSummary, LegacyNamespaces, LegacyNewMessage, MailboxAclEntry, MailboxMetadata,
-        MailboxStatus, RawFolderFetchLimits, RuleAction, RuleConditionField, RuleConditionOp,
-        RuleConditionsLogic, RuleExecutionPlan, RuleExecutionReport, RuleExecutionResult,
+        BodyPartKind, BodyPreviewPart, ImapConnectionConfig, ImapCredentials, ImapMessageFlag,
+        ImapMoveLearning, ImapMoveOptions, LegacyAttachmentSummary, LegacyFolder,
+        LegacyFolderCollection, LegacyFolderInformation, LegacyMessageFlags, LegacyMessageList,
+        LegacyMessageListRequest, LegacyMessageSummary, LegacyNamespaces, LegacyNewMessage,
+        MailboxAclEntry, MailboxMetadata, MailboxStatus, RawFolderFetchLimits, RuleAction,
+        RuleConditionField, RuleConditionOp, RuleConditionsLogic, RuleExecutionPlan,
+        RuleExecutionReport, RuleExecutionResult,
     };
     use fm_session::{
         MemoryStore, Session, CREDENTIAL_KEY_SESSION_KEY, SELECTED_ACCOUNT_SESSION_KEY,
@@ -24524,8 +24651,25 @@ mod tests {
 
     type ExportMessageCapture = Arc<Mutex<Option<(String, String, String, u32)>>>;
     type AppendMessageCapture = Arc<Mutex<Option<(String, String, String, Vec<u8>)>>>;
-    type RuleExecutionCapture =
-        Arc<Mutex<Option<(ImapConnectionConfig, String, Vec<RuleExecutionPlan>)>>>;
+    type RuleExecutionCapture = Arc<
+        Mutex<
+            Option<(
+                ImapConnectionConfig,
+                ImapCredentials,
+                Vec<RuleExecutionPlan>,
+            )>,
+        >,
+    >;
+
+    /// Reads the secret material out of a credential so assertions can pin the
+    /// exact value a fetcher was handed. Legacy fetchers now receive either a
+    /// stored password or a refreshed XOAUTH2 access token.
+    fn credential_material(credentials: &ImapCredentials) -> &str {
+        match credentials {
+            ImapCredentials::Password(password) => password.as_str(),
+            ImapCredentials::OAuthToken(token) => token.as_str(),
+        }
+    }
 
     // Autocrypt 1.1 Ed25519/Cv25519 example transferable public key from the
     // specification's example header.
@@ -30251,7 +30395,13 @@ mod tests {
         .await;
         let body = read_json(response).await;
         assert_eq!(body["Result"]["ok"], false);
-        assert_eq!(body["Result"]["error"], "Not an IMAP account");
+        // A provider OAuth account is a valid IMAP account: it resolves to its
+        // provider endpoint and only fails when the stored refresh token cannot
+        // be turned into a usable access token.
+        assert_eq!(
+            body["Result"]["error"],
+            "Missing OAuth refresh token — re-authorize this account."
+        );
 
         set_mail_account_email_and_type(&pool, 1320, "work@example.com", "imap").await;
         let response = super::native_frickmail_get_message_body(
@@ -30277,10 +30427,10 @@ mod tests {
             &json!({"account_id": 1325, "uid": 41, "folder": "Sent Items"}),
             &session,
             Duration::from_secs(1),
-            |config, password, folder, uid| async move {
+            |config, credentials, folder, uid| async move {
                 assert_eq!(config.host, "imap.example.com");
                 assert_eq!(config.port, 993);
-                assert_eq!(password, "imap-secret");
+                assert_eq!(credential_material(&credentials), "imap-secret");
                 assert_eq!(folder, "Sent Items");
                 assert_eq!(uid, 41);
                 Ok(Some(vec![
@@ -30365,9 +30515,9 @@ mod tests {
             &json!({"uid": 77}),
             &session,
             Duration::from_secs(1),
-            |config, password, folder, uid| async move {
+            |config, credentials, folder, uid| async move {
                 assert_eq!(config.login, "selected@example.com");
-                assert_eq!(password, "selected-secret");
+                assert_eq!(credential_material(&credentials), "selected-secret");
                 assert_eq!(folder, "INBOX");
                 assert_eq!(uid, 77);
                 Ok(Some(vec![BodyPreviewPart {
@@ -34627,12 +34777,12 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             &HeaderMap::new(),
             Duration::from_secs(1),
-            move |config, password, request, cache_account_email, unchanged_folder_etag| {
+            move |config, credentials, request, cache_account_email, unchanged_folder_etag| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
                     *captured.lock().unwrap() = Some((
                         config,
-                        password,
+                        credentials,
                         request.clone(),
                         cache_account_email,
                         unchanged_folder_etag,
@@ -34669,7 +34819,7 @@ Subject: Empty body metadata\r\n\r\n"
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(request.mailbox, "INBOX");
         assert_eq!(request.offset, 10);
         assert_eq!(request.limit, 50);
@@ -35493,10 +35643,10 @@ Subject: Empty body metadata\r\n\r\n"
             "Folders",
             &json!({}),
             &session,
-            move |config, password, discover_subscriptions| {
+            move |config, credentials, discover_subscriptions| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, discover_subscriptions));
+                    *captured.lock().unwrap() = Some((config, credentials, discover_subscriptions));
                     Ok(LegacyFolderCollection {
                         folders: vec![LegacyFolder {
                             name: "Archive".to_string(),
@@ -35530,7 +35680,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["Result"]["namespaces"], Value::Null);
         let (config, password, discover_subscriptions) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert!(discover_subscriptions);
     }
 
@@ -35866,11 +36016,11 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, prev_uid_next, flag_uids| {
+            move |config, credentials, folder, prev_uid_next, flag_uids| {
                 let captured = Arc::clone(&captured_for_fetch);
                 async move {
                     *captured.lock().unwrap() =
-                        Some((config, password, folder, prev_uid_next, flag_uids));
+                        Some((config, credentials, folder, prev_uid_next, flag_uids));
                     Ok(LegacyFolderInformation {
                         id: None,
                         name: "INBOX".to_string(),
@@ -35917,7 +36067,7 @@ Subject: Empty body metadata\r\n\r\n"
 
         let (_config, password, folder, prev_uid_next, flag_uids) =
             captured.lock().unwrap().clone().unwrap();
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "INBOX");
         assert_eq!(prev_uid_next, Some(50));
         assert_eq!(flag_uids, Some(vec![41, 42]));
@@ -35943,10 +36093,11 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"folder": "Child", "parent": "Parent", "subscribe": "1"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, parent, subscribe| {
+            move |config, credentials, folder, parent, subscribe| {
                 let captured = Arc::clone(&captured_for_create);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder, parent, subscribe));
+                    *captured.lock().unwrap() =
+                        Some((config, credentials, folder, parent, subscribe));
                     Ok(Some(LegacyFolder {
                         name: "Child".to_string(),
                         full_name: "Parent/Child".to_string(),
@@ -35975,7 +36126,7 @@ Subject: Empty body metadata\r\n\r\n"
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Child");
         assert_eq!(parent, "Parent");
         assert!(subscribe);
@@ -36021,11 +36172,11 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             Duration::from_secs(1),
-            move |config, password, old_name, new_name, subscribe, metadata| {
+            move |config, credentials, old_name, new_name, subscribe, metadata| {
                 let captured = Arc::clone(&captured_for_rename);
                 async move {
                     *captured.lock().unwrap() =
-                        Some((config, password, old_name, new_name, subscribe, metadata));
+                        Some((config, credentials, old_name, new_name, subscribe, metadata));
                     Ok("/".to_string())
                 }
             },
@@ -36038,7 +36189,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, old_name, new_name, subscribe, metadata) =
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(old_name, "Projects");
         assert_eq!(new_name, "Work");
         assert!(subscribe);
@@ -36114,10 +36265,10 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, metadata| {
+            move |config, credentials, folder, metadata| {
                 let captured = Arc::clone(&captured_for_setter);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder, metadata));
+                    *captured.lock().unwrap() = Some((config, credentials, folder, metadata));
                     Ok(())
                 }
             },
@@ -36129,7 +36280,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["Result"], true);
         let (config, password, folder, metadata) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Calendar");
         assert_eq!(
             metadata,
@@ -36201,11 +36352,11 @@ Subject: Empty body metadata\r\n\r\n"
                 }
             }),
             &session,
-            move |config, password, folder, subscribe, metadata| {
+            move |config, credentials, folder, subscribe, metadata| {
                 let captured = Arc::clone(&captured_for_updater);
                 async move {
                     *captured.lock().unwrap() =
-                        Some((config, password, folder, subscribe, metadata));
+                        Some((config, credentials, folder, subscribe, metadata));
                     Ok(())
                 }
             },
@@ -36218,7 +36369,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, folder, subscribe, metadata) =
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Calendar");
         assert!(!subscribe);
         assert_eq!(
@@ -36253,10 +36404,10 @@ Subject: Empty body metadata\r\n\r\n"
             "FolderACL",
             &json!({"folder": "Shared"}),
             &session,
-            move |config, password, folder| {
+            move |config, credentials, folder| {
                 let captured = Arc::clone(&captured_for_fetcher);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder));
+                    *captured.lock().unwrap() = Some((config, credentials, folder));
                     Ok(vec![
                         MailboxAclEntry {
                             identifier: "alice@example.com".to_string(),
@@ -36291,7 +36442,7 @@ Subject: Empty body metadata\r\n\r\n"
 
         let (config, password, folder) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Shared");
     }
 
@@ -36319,11 +36470,11 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, identifier, rights| {
+            move |config, credentials, folder, identifier, rights| {
                 let captured = Arc::clone(&captured_for_setter);
                 async move {
                     *captured.lock().unwrap() =
-                        Some((config, password, folder, identifier, rights));
+                        Some((config, credentials, folder, identifier, rights));
                     Ok(())
                 }
             },
@@ -36334,7 +36485,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, folder, identifier, rights) =
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Shared");
         assert_eq!(identifier, "bob@example.com");
         assert!(rights.is_empty());
@@ -36360,10 +36511,10 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"folder": "Shared", "identifier": "bob@example.com"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, identifier| {
+            move |config, credentials, folder, identifier| {
                 let captured = Arc::clone(&captured_for_deleter);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder, identifier));
+                    *captured.lock().unwrap() = Some((config, credentials, folder, identifier));
                     Ok(())
                 }
             },
@@ -36373,7 +36524,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(read_json(response).await["Result"], true);
         let (config, password, folder, identifier) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Shared");
         assert_eq!(identifier, "bob@example.com");
     }
@@ -36509,10 +36660,10 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"folder": "Archive", "subscribe": "1"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, subscribe| {
+            move |config, credentials, folder, subscribe| {
                 let captured = Arc::clone(&captured_for_subscribe);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder, subscribe));
+                    *captured.lock().unwrap() = Some((config, credentials, folder, subscribe));
                     Ok(())
                 }
             },
@@ -36525,7 +36676,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, folder, subscribe) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Archive");
         assert!(subscribe);
     }
@@ -36543,10 +36694,10 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"account_id": 1823, "folder": "Archive", "subscribe": "0"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, subscribe| {
+            move |config, credentials, folder, subscribe| {
                 let captured = Arc::clone(&captured_for_subscribe);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder, subscribe));
+                    *captured.lock().unwrap() = Some((config, credentials, folder, subscribe));
                     Ok(())
                 }
             },
@@ -36557,7 +36708,7 @@ Subject: Empty body metadata\r\n\r\n"
         assert_eq!(body["Action"], "FolderSubscribe");
         assert_eq!(body["Result"], true);
         let (_config, password, folder, subscribe) = captured.lock().unwrap().clone().unwrap();
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Archive");
         assert!(!subscribe);
     }
@@ -36582,10 +36733,10 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"folder": "Archive"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder| {
+            move |config, credentials, folder| {
                 let captured = Arc::clone(&captured_for_clear);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder));
+                    *captured.lock().unwrap() = Some((config, credentials, folder));
                     Ok(())
                 }
             },
@@ -36598,7 +36749,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, folder) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Archive");
     }
 
@@ -36622,10 +36773,10 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"folder": "Archive"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder| {
+            move |config, credentials, folder| {
                 let captured = Arc::clone(&captured_for_delete);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder));
+                    *captured.lock().unwrap() = Some((config, credentials, folder));
                     Ok(())
                 }
             },
@@ -36638,7 +36789,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, folder) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "Archive");
     }
 
@@ -36688,11 +36839,11 @@ Subject: Empty body metadata\r\n\r\n"
             &session,
             ImapMessageFlag::Seen,
             Duration::from_secs(1),
-            move |config, password, folder, uid_set, flag, set| {
+            move |config, credentials, folder, uid_set, flag, set| {
                 let captured = Arc::clone(&captured_for_store);
                 async move {
                     *captured.lock().unwrap() =
-                        Some((config, password, folder, uid_set, flag, set));
+                        Some((config, credentials, folder, uid_set, flag, set));
                     Ok(())
                 }
             },
@@ -36706,7 +36857,7 @@ Subject: Empty body metadata\r\n\r\n"
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "INBOX");
         assert_eq!(uid_set, "41,42");
         assert_eq!(flag, ImapMessageFlag::Seen);
@@ -36733,11 +36884,11 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"folder": "INBOX", "uids": "41:42", "keyword": "$label1", "setAction": "0"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, uid_set, keyword, set| {
+            move |config, credentials, folder, uid_set, keyword, set| {
                 let captured = Arc::clone(&captured_for_store);
                 async move {
                     *captured.lock().unwrap() =
-                        Some((config, password, folder, uid_set, keyword, set));
+                        Some((config, credentials, folder, uid_set, keyword, set));
                     Ok(())
                 }
             },
@@ -36751,7 +36902,7 @@ Subject: Empty body metadata\r\n\r\n"
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "INBOX");
         assert_eq!(uid_set, "41:42");
         assert_eq!(keyword, "$label1");
@@ -36778,10 +36929,11 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"folder": "INBOX", "threadUids": "41,42", "setAction": "1"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, thread_uids, set| {
+            move |config, credentials, folder, thread_uids, set| {
                 let captured = Arc::clone(&captured_for_store);
                 async move {
-                    *captured.lock().unwrap() = Some((config, password, folder, thread_uids, set));
+                    *captured.lock().unwrap() =
+                        Some((config, credentials, folder, thread_uids, set));
                     Ok(())
                 }
             },
@@ -36795,7 +36947,7 @@ Subject: Empty body metadata\r\n\r\n"
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
         assert_eq!(config.port, 993);
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(folder, "INBOX");
         assert_eq!(thread_uids.as_deref(), Some("41,42"));
         assert!(set);
@@ -36821,11 +36973,11 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"fromFolder": "INBOX", "toFolder": "Archive", "uids": "45"}),
             &session,
             Duration::from_secs(1),
-            move |config, password, from_folder, to_folder, uid_set| {
+            move |config, credentials, from_folder, to_folder, uid_set| {
                 let captured = Arc::clone(&captured_for_copy);
                 async move {
                     *captured.lock().unwrap() =
-                        Some((config, password, from_folder, to_folder, uid_set));
+                        Some((config, credentials, from_folder, to_folder, uid_set));
                     Ok(())
                 }
             },
@@ -36839,7 +36991,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, from_folder, to_folder, uid_set) =
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(from_folder, "INBOX");
         assert_eq!(to_folder, "Archive");
         assert_eq!(uid_set, "45");
@@ -36871,11 +37023,17 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             Duration::from_secs(1),
-            move |config, password, from_folder, to_folder, uid_set, options| {
+            move |config, credentials, from_folder, to_folder, uid_set, options| {
                 let captured = Arc::clone(&captured_for_move);
                 async move {
-                    *captured.lock().unwrap() =
-                        Some((config, password, from_folder, to_folder, uid_set, options));
+                    *captured.lock().unwrap() = Some((
+                        config,
+                        credentials,
+                        from_folder,
+                        to_folder,
+                        uid_set,
+                        options,
+                    ));
                     Ok(())
                 }
             },
@@ -36889,7 +37047,7 @@ Subject: Empty body metadata\r\n\r\n"
         let (config, password, from_folder, to_folder, uid_set, options) =
             captured.lock().unwrap().clone().unwrap();
         assert_eq!(config.host, "imap.example.com");
-        assert_eq!(password, "imap-secret");
+        assert_eq!(credential_material(&password), "imap-secret");
         assert_eq!(from_folder, "INBOX");
         assert_eq!(to_folder, "Archive");
         assert_eq!(uid_set, "44");
@@ -37015,11 +37173,15 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, uid| {
+            move |config, credentials, folder, uid| {
                 let captured_for_fetch = Arc::clone(&captured_for_fetch);
                 async move {
-                    *captured_for_fetch.lock().unwrap() =
-                        Some((config.login, password, folder, uid));
+                    *captured_for_fetch.lock().unwrap() = Some((
+                        config.login,
+                        credential_material(&credentials).to_string(),
+                        folder,
+                        uid,
+                    ));
                     Ok(Some(
                         b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\n\r\nExported body".to_vec(),
                     ))
@@ -37066,10 +37228,14 @@ Subject: Empty body metadata\r\n\r\n"
                 max_messages: 10,
                 max_bytes: 1024,
             },
-            move |config, password, folder| {
+            move |config, credentials, folder| {
                 let captured_for_fetch = Arc::clone(&captured_for_fetch);
                 async move {
-                    *captured_for_fetch.lock().unwrap() = Some((config.login, password, folder));
+                    *captured_for_fetch.lock().unwrap() = Some((
+                        config.login,
+                        credential_material(&credentials).to_string(),
+                        folder,
+                    ));
                     Ok(vec![
                         b"Date: Mon, 1 Jan 2026 00:00:00 +0000\r\nFrom escaped\r\nBody".to_vec(),
                         b"From sender@example.com\r\n\r\nBody".to_vec(),
@@ -37149,11 +37315,15 @@ Subject: Empty body metadata\r\n\r\n"
             }),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, raw| {
+            move |config, credentials, folder, raw| {
                 let captured_for_append = Arc::clone(&captured_for_append);
                 async move {
-                    *captured_for_append.lock().unwrap() =
-                        Some((config.login, password, folder, raw));
+                    *captured_for_append.lock().unwrap() = Some((
+                        config.login,
+                        credential_material(&credentials).to_string(),
+                        folder,
+                        raw,
+                    ));
                     Ok(())
                 }
             },
@@ -37356,11 +37526,15 @@ Subject: Empty body metadata\r\n\r\n"
             &folder_append_multipart_body("Uploads", raw),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder, raw| {
+            move |config, credentials, folder, raw| {
                 let captured_for_append = Arc::clone(&captured_for_append);
                 async move {
-                    *captured_for_append.lock().unwrap() =
-                        Some((config.login, password, folder, raw));
+                    *captured_for_append.lock().unwrap() = Some((
+                        config.login,
+                        credential_material(&credentials).to_string(),
+                        folder,
+                        raw,
+                    ));
                     Ok(())
                 }
             },
@@ -37525,10 +37699,10 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"last_uids": {"1335": 12, "1336": 99}}),
             &session,
             Duration::from_secs(1),
-            move |config, password, folder| {
+            move |config, credentials, folder| {
                 let calls_for_fetch = Arc::clone(&calls_for_fetch);
                 async move {
-                    assert_eq!(password, "imap-secret");
+                    assert_eq!(credential_material(&credentials), "imap-secret");
                     assert_eq!(folder, "INBOX");
                     calls_for_fetch.lock().unwrap().push(config.login);
                     Ok(MailboxStatus {
@@ -37569,10 +37743,10 @@ Subject: Empty body metadata\r\n\r\n"
                 poll_deadline: Duration::from_millis(100),
                 poll_interval: Duration::from_millis(1),
             },
-            move |config, password, folder| {
+            move |config, credentials, folder| {
                 let calls_for_fetch = Arc::clone(&calls_for_fetch);
                 async move {
-                    assert_eq!(password, "imap-secret");
+                    assert_eq!(credential_material(&credentials), "imap-secret");
                     assert_eq!(folder, "INBOX");
                     assert_eq!(config.login, "work@example.com");
                     *calls_for_fetch.lock().unwrap() += 1;
@@ -37992,12 +38166,12 @@ Subject: Empty body metadata\r\n\r\n"
             &json!({"account_id": 1330}),
             &session,
             Duration::from_secs(1),
-            move |config, password, rules| {
+            move |config, credentials, rules| {
                 let captured_for_executor = Arc::clone(&captured_for_executor);
                 async move {
                     let first_rule = rules[0].rule_id;
                     let second_rule = rules[1].rule_id;
-                    *captured_for_executor.lock().unwrap() = Some((config, password, rules));
+                    *captured_for_executor.lock().unwrap() = Some((config, credentials, rules));
                     Ok(RuleExecutionReport {
                         applied: vec![RuleExecutionResult {
                             rule_id: first_rule,
@@ -38021,7 +38195,7 @@ Subject: Empty body metadata\r\n\r\n"
         let captured = captured.lock().unwrap().take().unwrap();
         assert_eq!(captured.0.host, "imap.example.com");
         assert_eq!(captured.0.login, "primary@example.com");
-        assert_eq!(captured.1, "imap-secret");
+        assert_eq!(credential_material(&captured.1), "imap-secret");
         assert_eq!(captured.2.len(), 2);
         assert_eq!(captured.2[0].rule_id, 1430);
         assert_eq!(captured.2[0].conditions_logic, RuleConditionsLogic::All);
@@ -38067,7 +38241,9 @@ Subject: Empty body metadata\r\n\r\n"
         .await;
         let body = read_json(response).await;
         assert_eq!(body["Result"]["ok"], false);
-        assert_eq!(body["Result"]["error"], "Missing IMAP password");
+        // Same wording the other actions use for an account without a stored
+        // password.
+        assert_eq!(body["Result"]["error"], "No credentials stored");
 
         set_mail_account_email_and_type(&pool, 1331, "graph@example.com", "o365").await;
         let response = super::native_frickmail_apply_rules_with_executor(
@@ -39749,6 +39925,69 @@ Subject: Empty body metadata\r\n\r\n"
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn imap_action_connection_for_account_serves_provider_oauth_accounts() {
+        // Every legacy IMAP action resolves its endpoint and credentials here.
+        // Provider OAuth accounts must resolve to the provider IMAP endpoint
+        // with a refreshed XOAUTH2 token: treating them as "not an IMAP
+        // account" broke folder lists, message lists and reads for every user
+        // whose primary account is provider-hosted.
+        let key = [77_u8; fm_user::CREDENTIAL_KEY_BYTES];
+        let pool = user_db_pool().await;
+        create_mail_account_tables(&pool).await;
+        let state = AppState::with_db_pool(test_config(None), Some(pool));
+
+        let mut account = oauth_imap_test_account("gmail", None, None);
+        account.encrypted_oauth_refresh_token =
+            Some(fm_user::encrypt_account_secret("refresh-token", &key).unwrap());
+
+        let (config, credentials) = super::imap_action_connection_for_account(
+            &state,
+            &account,
+            &key,
+            &StubOAuthTokenRefresher {
+                token: Some("fresh-token".to_string()),
+            },
+        )
+        .await
+        .expect("provider account resolves");
+        assert_eq!(config.host, "imap.gmail.com");
+        assert_eq!(config.port, 993);
+        assert_eq!(config.login, "oauth-user@example.com");
+        assert_eq!(
+            credentials,
+            ImapCredentials::OAuthToken("fresh-token".to_string())
+        );
+
+        // Password accounts keep the exact previous behavior: stored host plus
+        // the stored password.
+        let imap_account = fm_user::MailAccountConnectionSecret {
+            id: 7_732,
+            email: "work@example.com".to_string(),
+            account_type: "imap".to_string(),
+            imap_host: Some("imap.example.com".to_string()),
+            imap_port: Some(993),
+            imap_secure: Some("SSL".to_string()),
+            login: Some("work@example.com".to_string()),
+            encrypted_password: Some(fm_user::encrypt_account_secret("imap-secret", &key).unwrap()),
+            encrypted_oauth_refresh_token: None,
+            oauth_tenant: None,
+        };
+        let (config, credentials) = super::imap_action_connection_for_account(
+            &state,
+            &imap_account,
+            &key,
+            &StubOAuthTokenRefresher { token: None },
+        )
+        .await
+        .expect("password account resolves");
+        assert_eq!(config.host, "imap.example.com");
+        assert_eq!(
+            credentials,
+            ImapCredentials::Password("imap-secret".to_string())
+        );
     }
 
     #[tokio::test]
