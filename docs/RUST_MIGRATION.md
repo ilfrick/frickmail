@@ -5,6 +5,71 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-28 17:20:00 UTC
+
+Completed-and-pushed since the 15:45 snapshot:
+
+- The two UI shell fixes (`1136e2222` boot CSS + plugin templates,
+  `f4092d050` Dockerfile template copy) and their docs snapshot (`dde24aa45`)
+  were pushed to `master` + `rust-full-migration` on `origin` + `gitea`; all
+  four tips resolved to `dde24aa45c5b0...` via live `ls-remote`. `naming` gate
+  **success**; `rust-ci` run `36445187820` **success**. Operator confirmed the
+  reading-pane scroll fix.
+
+Current slice — **the whole app now runs the Phase 9 v1 UI** (code commits
+`7067ca9b6` + `effb9ba41`; deployed; docs pending in this commit). Operator
+decision (explicit): standalone Calendar and Contacts were the goal, and the
+v1 app already has native screens for both, so switch the main UI instead of
+extending the legacy shell.
+
+- `frickmail-ui/build.mjs` writes the v1 entry (`frickmail-ui/v1/index.html`)
+  to `index.html`, which `root_get` serves at `/`, with
+  `<base href="/static/v1/">` so the app's relative ES-module and stylesheet
+  paths resolve under the static mount. The legacy shell is still generated as
+  `legacy.html` for reference.
+- `fix(static)`: `/static/v1/*` now answers `Cache-Control: no-cache` (nested
+  `ServeDir` + `SetResponseHeaderLayer`, tower-http `set-header` feature), so
+  the stable-named v1 modules are revalidated and a future deploy is never
+  served stale. Pinned by `static_v1_assets_force_browser_revalidation`.
+- Why Contacts "did nothing": the Rust `AppData` hardcoded
+  `contactsAllowed:false` and `Capa.Contacts:false`, and the legacy Contacts
+  popup would also need the un-migrated legacy `Contacts` action. Why Calendar
+  still looked like settings: in the legacy shell it only existed as a settings
+  tab. Both are resolved by the v1 switch — the v1 app has standalone Calendar
+  (`loadCalendars`/`loadEvents`) and Contacts (`loadContacts`) screens over the
+  native `/api/frickmail/v1`.
+- Authentication: users sign in with their Frickmail username/password (the
+  Rust server only serves Frickmail mode; Google-as-identity login was never
+  migrated). The v1 login bootstraps the CSRF token from `GET /session`, POSTs
+  `/api/frickmail/v1/login`, and the OAuth provider buttons come from
+  `GET /oauth/providers` (`/?StartLoginGMail`, `/?StartLoginO365` part hooks,
+  still handled by `root_get` before the index is served).
+
+Verification: `cargo test --workspace` — fm-http 588 passed / 0 failed (incl.
+the new revalidation test), all other suites green; `cargo fmt --check` and
+`cargo clippy --workspace --all-targets -D warnings` clean; v1 host tests
+(`node --test frickmail-ui/v1/js/*.test.mjs`) green; naming gate green. Canary
+and live both serve `/` as the v1 app (`<base href="/static/v1/">`), with
+`/static/v1/js/api.js`, `/static/v1/css/app.css`, all 18 entry modules,
+`/static/legacy.html`, `/health` and `/api/frickmail/v1/session` returning 200;
+`/api/frickmail/v1/login` reaches credential validation
+(`invalid_credentials`); `/static/v1/*` returns `cache-control: no-cache`.
+Production image `frickmail-rust:effb9ba412e6`
+(`sha256:a75b41c34cad974960704cc784fe28b3bb6a34954e960bde586a48fce4db27f9`),
+cut over with the same hardened flags/networks/env; Redis session store
+connected, container healthy, zero restarts. Rollback: re-run the previous
+image (`frickmail-rust:7067ca9b643b` was the legacy-shell build; the
+long-lived `frickmail-rust:rollback` also remains).
+
+Remaining confirmation: operator in-browser login + daily-use check on the v1
+UI (Calendar and Contacts especially). Known v1-vs-legacy gaps to track:
+themes/background, some plugin surfaces, and Google *sign-in* (as opposed to
+account linking while authenticated) which the Rust backend does not implement.
+Remaining major gates unchanged: v1 message-read path password-only, OAuth
+sends live verification, PG backup/restore and schema-migration cutover gates.
+
+---
+
 ## Progress Snapshot — 2026-09-28 15:45:00 UTC
 
 Completed-and-pushed since the 14:30 snapshot:

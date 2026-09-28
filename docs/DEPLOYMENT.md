@@ -10,12 +10,18 @@ Frickmail now has two production image definitions:
   an HTTP health check and graceful shutdown support.
 
 The Rust image is packaged for production and can connect to the existing
-PostgreSQL and Redis services without mounting PHP application data. It is not
-yet a functional replacement for the complete browser application: `/` still
-serves the Rust migration shell, some legacy actions remain unmigrated, and
-sessions are currently in memory. Use the Rust Compose service as a canary until
-the readiness gate below passes. Promoting `master` does not by itself authorize
-switching production traffic from the compatibility container.
+PostgreSQL and Redis services without mounting PHP application data. `/` now
+serves the Phase 9 v1 web UI (`frickmail-ui/v1`, native screens over
+`/api/frickmail/v1`); the previous legacy shell is still built and shipped as
+`/static/legacy.html` for reference. Some legacy actions remain unmigrated.
+Promoting `master` does not by itself authorize switching production traffic
+from the compatibility container.
+
+Rolling back the UI is rolling back the container image: the legacy shell only
+boots from `/` (it routes AppData relative to `location.pathname`), so it has
+no standalone URL. Re-run the previous image, e.g.
+`frickmail-rust:7067ca9b643b` (the last legacy-shell build) or the long-lived
+`frickmail-rust:rollback` tag.
 
 ## Prerequisites
 
