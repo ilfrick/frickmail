@@ -5,6 +5,57 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-28 15:45:00 UTC
+
+Completed-and-pushed since the 14:30 snapshot:
+
+- The provider-OAuth IMAP fix (`c02c2dd77`) and its docs snapshot
+  (`79613a067`) were pushed to `master` and `rust-full-migration` on `origin`
+  and `gitea`; all four tips resolved to `79613a067c8c...` by live
+  `ls-remote`. `rust-ci` run `36437231621` completed **success** and the
+  `naming` gate passed. Live webmail confirmed working by the operator
+  ("I can enter my mailbox and read email").
+
+Current slice — two UI regressions fixed in the generated shell (code commits
+`1136e2222` + `f4092d050`; deployed; docs pending in this commit):
+
+- **Reading pane scrolled the whole view.** The legacy template inlines
+  `boot.min.css` in `<style id="app-boot-css">` before the app stylesheet;
+  the generated shell never did, so `body#rl-app{height:100vh;height:100dvh}`
+  — the viewport contract that makes `#rl-content` a fixed-height flex
+  container and `#V-MailMessageView`/`#messageItem` the scroll owners — was
+  missing. Reading a long message scrolled the document, moving the top bar.
+  `frickmail-ui/build.mjs` now inlines `boot.min.css` first, restoring the
+  height chain and the base margin/box-sizing reset.
+- **Calendar nav icon opened an empty Settings pane.** The assembled plugin
+  bundle registers the Calendar and Contacts Sync settings view models by
+  template id (`rl.addSettingsViewModel`), which Knockout resolves against
+  `<template id="...">` in the page — unlike PHP's `addTemplate`, nothing
+  serves them at runtime. Only `frickmail-user` templates were inlined, so
+  `#/settings/calendar` selected the Calendar tab but rendered nothing. The
+  build now also inlines `CalendarSettingsTab.html` and
+  `ContactsSyncSettingsTab.html`, and the ui-builder Dockerfile copies those
+  `templates/` directories (its absence broke the image build with `ENOENT`).
+
+Verification: local `node frickmail-ui/build.mjs` output contains the
+`app-boot-css` style with `body#rl-app{height:100vh;height:100dvh;width:100vw}`
+plus both plugin templates; naming gate green. A canary container built from
+the fix served `/` (200) with `app-boot-css`, the body-height rule, the
+Calendar/Contacts Sync templates and the core `Login` template all present.
+Production image `frickmail-rust:f4092d050593`
+(`sha256:249e666d71d04072d42830316b7b17acd0cbb245f88c1ab09ffa92976717c4e1`),
+cut over with the same hardened flags/networks/env; `/health` 200, external
+`https://webmail.housefz.com/` 200, Redis session store connected, container
+healthy with zero restarts. Previous container removed after the new image was
+healthy; `frickmail-rust:rollback` retained.
+
+Remaining confirmation: operator in-browser re-test (scroll the reading pane;
+open Calendar). Remaining major gates unchanged: v1 message-read path still
+password-only, OAuth sends live verification, PG backup/restore and
+schema-migration cutover gates, and the deferred operator decisions.
+
+---
+
 ## Progress Snapshot — 2026-09-28 14:30:00 UTC
 
 Completed-and-pushed since the preceding snapshot:
