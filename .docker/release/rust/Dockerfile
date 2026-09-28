@@ -39,7 +39,9 @@ COPY plugins/frickmail-user ./plugins/frickmail-user
 COPY plugins/frickmail-theme ./plugins/frickmail-theme
 COPY plugins/login-oidc/LoginOIDC.js ./plugins/login-oidc/LoginOIDC.js
 COPY plugins/calendar/js ./plugins/calendar/js
+COPY plugins/calendar/templates ./plugins/calendar/templates
 COPY plugins/contacts-sync/js ./plugins/contacts-sync/js
+COPY plugins/contacts-sync/templates ./plugins/contacts-sync/templates
 COPY snappymail/v/0.0.0/static ./snappymail/v/0.0.0/static
 COPY snappymail/v/0.0.0/themes ./snappymail/v/0.0.0/themes
 COPY snappymail/v/0.0.0/app/localization ./snappymail/v/0.0.0/app/localization
