@@ -71,21 +71,31 @@ for (const entry of templateEntries) {
   templates += `<template id="${id}">${safeSource}</template>`;
 }
 
-for (const file of [
-  'FrickmailMailAccountsSettings.html',
-  'FrickmailTwoFactorSettingsTab.html',
-  'FrickmailUserPrefsTab.html',
-  'FrickmailIdentitySettings.html',
-  'FrickmailRulesSettings.html',
-  'FrickmailSmimeSettings.html',
-  'FrickmailImportExportTab.html',
-]) {
-  const source = await readFile(
-    path.join(root, 'plugins/frickmail-user/templates', file),
-    'utf8',
-  );
-  const safeSource = source.replace(/<(\/?)script/gi, '<$1x-script');
-  templates += `<template id="${path.basename(file, '.html')}">${safeSource}</template>`;
+// Plugin settings templates must ship with the bundle: the assembled plugin
+// JS registers settings view models by template id (`rl.addSettingsViewModel`)
+// and Knockout resolves the name against `<template id="...">` in the page.
+// Unlike PHP's `addTemplate`, nothing serves these at runtime here, so a
+// missing entry renders an empty tab (e.g. clicking the Calendar icon opened
+// Settings with no calendar).
+const pluginTemplateDirs = {
+  'plugins/frickmail-user/templates': [
+    'FrickmailMailAccountsSettings.html',
+    'FrickmailTwoFactorSettingsTab.html',
+    'FrickmailUserPrefsTab.html',
+    'FrickmailIdentitySettings.html',
+    'FrickmailRulesSettings.html',
+    'FrickmailSmimeSettings.html',
+    'FrickmailImportExportTab.html',
+  ],
+  'plugins/calendar/templates': ['CalendarSettingsTab.html'],
+  'plugins/contacts-sync/templates': ['ContactsSyncSettingsTab.html'],
+};
+for (const [directory, files] of Object.entries(pluginTemplateDirs)) {
+  for (const file of files) {
+    const source = await readFile(path.join(root, directory, file), 'utf8');
+    const safeSource = source.replace(/<(\/?)script/gi, '<$1x-script');
+    templates += `<template id="${path.basename(file, '.html')}">${safeSource}</template>`;
+  }
 }
 
 const themeFiles = [
@@ -138,9 +148,20 @@ const bootScript = await readFile(
   path.join(root, 'snappymail/v/0.0.0/static/js/min/boot.min.js'),
   'utf8',
 );
+// The legacy template inlines the boot CSS in `<style id="app-boot-css">`
+// before the app stylesheet. It carries the viewport contract (`body#rl-app`
+// is `100vh`/`100dvh`, so `#rl-content`/`#rl-right`/`#V-MailMessageView` own
+// their scrolling) plus the base margin/box-sizing reset. Without it the
+// document itself scrolls — the whole main view, top bar included, moves when
+// reading a long message.
+const bootCss = await readFile(
+  path.join(root, 'snappymail/v/0.0.0/static/css/boot.min.css'),
+  'utf8',
+);
 const indexHtml = `<!doctype html>
 <html lang="en" class="rl-started-trigger">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Frickmail</title>
+<style id="app-boot-css">${bootCss}</style>
 <link rel="manifest" href="/static/manifest.json"><link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/css/app.min.css"><link rel="stylesheet" href="/static/frickmail-theme.css">
 <style id="app-theme-style" data-name="Default"></style></head>
