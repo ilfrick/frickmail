@@ -56,10 +56,14 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 ARG FRICKMAIL_UID=10001
 ARG FRICKMAIL_GID=10001
 
+ARG FRICKMAIL_BUILD_ID=dev
+
 LABEL org.opencontainers.image.title="Frickmail Rust server" \
       org.opencontainers.image.description="Production runtime image for the Frickmail Rust migration server" \
       org.opencontainers.image.source="https://github.com/ilfrick/frickmail" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.revision="$FRICKMAIL_BUILD_ID" \
+      org.opencontainers.image.version="$FRICKMAIL_BUILD_ID"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

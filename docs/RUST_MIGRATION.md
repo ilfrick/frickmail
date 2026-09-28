@@ -5,6 +5,69 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-28 14:30:00 UTC
+
+Completed-and-pushed since the preceding snapshot:
+
+- `1424d9cae` (folders error-envelope surfacing + server `tracing::warn!`)
+  was pushed to `master` and `rust-full-migration` on `origin` and `gitea`
+  (both remotes resolved to `1424d9caef46...` via live `ls-remote`). That
+  client-side change made the previously swallowed Folders failure visible.
+
+Current slice — provider OAuth accounts served by every legacy IMAP action
+(code commit `c02c2dd77`; deployed; NOT yet pushed):
+
+- **Root cause of the live "Folders error" popup.** Every user's primary mail
+  account is a provider OAuth account (gmail/o365), but the shared legacy IMAP
+  connection helper rejected any account whose type was not plain `imap` with
+  `Not an IMAP account`. Consequently folder lists, message lists, reads,
+  attachment export, moves/deletes and server-side rules failed for the entire
+  user base; the failure cascaded into the follow-up `Logout error: Request is
+  aborted` popup.
+- **fm-imap**: introduced `ImapCredentials` (`Password` | `OAuthToken`, redacted
+  `Debug`) with an XOAUTH2 SASL client response builder; added 26
+  `*_with_credentials` cores and kept the pre-existing password-only entry
+  points as thin wrappers over them (minimal churn). `login_with_read_guard`
+  now dispatches LOGIN vs SASL XOAUTH2.
+- **fm-http**: a single account-scoped resolver
+  (`imap_action_connection_for_account`) now resolves both the endpoint and the
+  credential kind for the account an action operates on; the selected-account,
+  per-user, attachment-export and compose-staging paths all route through it.
+  The resolver takes an injectable `OAuthAccessTokenRefresher`, matching the
+  existing compose pattern. Missing-password errors now keep the credential
+  layer's own wording (`No credentials stored`) instead of per-action
+  substitutes.
+- **api_v1.rs**: the v1 PGP auto-verify call site wraps the still-password-only
+  v1 message path explicitly (documented follow-up gap).
+- **Regression coverage**: `imap_action_connection_for_account_serves_provider_oauth_accounts`
+  pins that a gmail account resolves to `imap.gmail.com` with an XOAUTH2 token
+  and that password accounts keep the exact previous behavior; the account
+  validation test now pins that provider accounts are accepted (failing only
+  with the actionable `Missing OAuth refresh token — re-authorize this
+  account.`).
+
+Verification: `cargo test --workspace` — fm-http 587 passed / 0 failed, fm-user
+64, fm-imap and all other suites green; `cargo fmt --all --check` clean;
+`cargo clippy --workspace --all-targets -- -D warnings` clean; naming gate
+clean (no new legacy product names). Production image
+`frickmail-rust:c02c2dd77db8` (`sha256:112cd4fdd0972da59b208aa97fac48f1d08a8461856f2d1d3ca40825238509a8`,
+now carrying `org.opencontainers.image.revision`), cut over on
+`127.0.0.1:8888` with the same read-only/hardened flags, network set and env;
+`/health` 200, external `https://webmail.housefz.com/` 200, container healthy
+with zero restarts. The Dockerfile now labels the image with its build
+revision/version for auditability. The previous container (`frickmail-rust-prev`,
+image `1424d9caef46`) was kept through the cutover and removed once the new
+image was healthy; `frickmail-rust:rollback` remains the last-resort rollback.
+
+Remaining confirmation: the operator's in-browser re-test on the live site
+(browser automation is unavailable to the agent). Remaining major gates toward
+the final Rust-only goal are unchanged: v1 message-read path still
+password-only, OAuth sends live verification, PG backup/restore and
+schema-migration cutover gates, and the deferred operator decisions
+(KolabFolder, Nextcloud import, external password drivers).
+
+---
+
 ## Progress Snapshot — 2026-09-27 17:30:00 UTC
 
 Cache-hardening follow-up (`b5aa494e4923`, image
