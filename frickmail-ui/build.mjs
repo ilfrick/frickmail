@@ -190,4 +190,18 @@ await writeFile(
 );
 await writeFile(appPath, `${await readFile(appPath, 'utf8')}\n${plugins}`);
 
-await writeFile(path.join(outputRoot, 'index.html'), indexHtml);
+await writeFile(path.join(outputRoot, 'legacy.html'), indexHtml);
+
+// The Phase 9 v1 app is the main UI: its screens are Rust-native and it talks
+// to `/api/frickmail/v1` directly, so `root_get` serving `index.html` now
+// boots the new UI at `/`. The app's entry module and stylesheet are relative
+// (`./js/…`, `./css/app.css`) and live under the static mount, so a `<base>`
+// resolves them against `/static/v1/`. The legacy shell above is kept in the
+// image for reference; rollback is done by re-running the previous image
+// (the legacy shell only boots from `/`, so it has no standalone URL).
+const v1Entry = await readFile(path.join(root, 'frickmail-ui/v1/index.html'), 'utf8');
+if (!v1Entry.includes('<head>')) {
+  throw new Error('v1 entry is missing <head>');
+}
+const v1IndexHtml = v1Entry.replace('<head>', '<head>\n<base href="/static/v1/">');
+await writeFile(path.join(outputRoot, 'index.html'), v1IndexHtml);
