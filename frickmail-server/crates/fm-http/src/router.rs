@@ -108,7 +108,10 @@ use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
-use tower_http::{compression::CompressionLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    compression::CompressionLayer, services::ServeDir, set_header::SetResponseHeaderLayer,
+    trace::TraceLayer,
+};
 use tracing::warn;
 
 use crate::{uid_cache::RedisLegacyMessageListUidCache, AppState};
@@ -419,6 +422,21 @@ pub fn build_router_with_session(
         .route("/LoginO365", get(o365_path_callback))
         .route("/StartLoginO365", get(o365_path_start_login))
         .nest("/api/frickmail/v1", api_v1::routes())
+        // The v1 app is the main UI and its ES modules keep stable filenames,
+        // so force revalidation: a future deploy must not be served stale from
+        // the browser cache (the legacy bundles were build-versioned instead).
+        .nest_service(
+            "/static/v1",
+            ServiceBuilder::new()
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    CACHE_CONTROL,
+                    HeaderValue::from_static("no-cache"),
+                ))
+                .service(
+                    ServeDir::new(std::path::Path::new(&static_root).join("v1"))
+                        .append_index_html_on_directories(true),
+                ),
+        )
         .nest_service(
             "/static",
             ServeDir::new(static_root).append_index_html_on_directories(true),
@@ -24844,6 +24862,32 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("Frickmail Rust migration server"));
+    }
+
+    /// The v1 app's ES modules keep stable filenames, so `/static/v1/*` must
+    /// force revalidation: a future deploy must not be served stale.
+    #[tokio::test(flavor = "current_thread")]
+    async fn static_v1_assets_force_browser_revalidation() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/static/v1/js/api.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The test static root has no v1 files, so ServeDir answers 404; the
+        // header layer must still stamp `no-cache` on the response.
+        assert_eq!(
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache")
+        );
     }
 
     #[tokio::test]
