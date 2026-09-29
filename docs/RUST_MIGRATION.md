@@ -5,6 +5,48 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-29 07:15:00 UTC
+
+Completed-and-pushed since the 21:00 snapshot:
+
+- The v1 OAuth-account mail fix (`8894df626`) and its docs snapshot
+  (`60273327e`) were pushed to `master` + `rust-full-migration` on `origin` +
+  `gitea`; all four tips resolved to `60273327e911a...` via live `ls-remote`.
+  `naming` **success**; `rust-ci` run `36483016744` **success**. Operator
+  confirmed sign-in and mailbox access work.
+
+Current slice — v1 app gets a full-window layout (code commit `0c211f3e7`;
+deployed; docs pending in this commit):
+
+- Operator report: the v1 UI worked but was "all crowded in the center
+  section". Cause: the Phase 9 stylesheet was a starting point — `body` set
+  `display:grid; place-items:center` and `#app` was a 26rem card, so every
+  authenticated screen rendered squeezed into that card.
+- Fix: `enterApp`/`signOut` toggle `body.fm-app`. Signed out keeps the
+  centered login card; signed in the app fills the window — sticky top nav,
+  folders sidebar beside the message list (`:has(> [data-fm="folders"])`
+  grid, both panes scroll independently), a scrolling reading pane, and a
+  styled Calendar (month grid table, event chips, pager, calendar picker,
+  event editor). Checkboxes no longer inherit the full-width input rule and
+  app submit buttons are no longer full width.
+
+Verification: layout inspected by headless-Chrome screenshots of the mailbox,
+reading pane, calendar and login states (checked into no repository, rendered
+ad hoc). `node --test frickmail-ui/v1/js/*.test.mjs` 213 passed / 0 failed;
+naming gate green; CSS brace-balanced. Production image
+`frickmail-rust:0c211f3e762a`
+(`sha256:64ac537b21836a7f90af38018035f9875cd9170a0f8f40e7216339387e1119e2`),
+cut over with the same hardened flags/networks/env; `/` serves the new
+stylesheet (26 `body.fm-app` rules), `/health` 200, external site 200, Redis
+sessions connected, healthy. Rollback: `frickmail-rust:8894df6263c5` or
+earlier.
+
+Remaining confirmation: operator in-browser check of the new layout across
+mailbox, reading pane, Calendar and Contacts. Remaining major gates
+unchanged.
+
+---
+
 ## Progress Snapshot — 2026-09-28 21:00:00 UTC
 
 Completed-and-pushed since the 17:20 snapshot:
