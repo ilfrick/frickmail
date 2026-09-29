@@ -33,8 +33,11 @@ deployed; docs pending in this commit):
 Verification: layout inspected by headless-Chrome screenshots of the mailbox,
 reading pane, calendar and login states (checked into no repository, rendered
 ad hoc). `node --test frickmail-ui/v1/js/*.test.mjs` 213 passed / 0 failed;
-naming gate green; CSS brace-balanced. Production image
-`frickmail-rust:0c211f3e762a`
+naming gate green; CSS brace-balanced. `rust-ci` produced **no run** for this
+push: its `paths` filter covers `frickmail-server/**` and the Rust Docker
+files only, and this slice touches `frickmail-ui/**` and docs exclusively —
+the expected no-run, not a claimed success. `naming` ran and passed.
+Production image `frickmail-rust:0c211f3e762a`
 (`sha256:64ac537b21836a7f90af38018035f9875cd9170a0f8f40e7216339387e1119e2`),
 cut over with the same hardened flags/networks/env; `/` serves the new
 stylesheet (26 `body.fm-app` rules), `/health` 200, external site 200, Redis
