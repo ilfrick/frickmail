@@ -10,10 +10,12 @@
 	color-scheme: dark;
 	--fm-bg: #1b1e24;
 	--fm-surface: #23272f;
+	--fm-panel: #1f232a;
 	--fm-text: #e8eaf0;
 	--fm-muted: #9aa1b2;
 	--fm-accent: #4a90e2;
 	--fm-danger: #e06c75;
+	--fm-border: #343b48;
 	--fm-radius: 10px;
 	--fm-font: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
@@ -25,14 +27,18 @@
 body {
 	margin: 0;
 	min-height: 100vh;
-	display: grid;
-	place-items: center;
 	background: var(--fm-bg);
 	color: var(--fm-text);
 	font-family: var(--fm-font);
 }
 
-#app {
+/* Signed-out: a single centered authentication card. */
+body:not(.fm-app) {
+	display: grid;
+	place-items: center;
+}
+
+body:not(.fm-app) #app {
 	width: min(26rem, calc(100vw - 2rem));
 	background: var(--fm-surface);
 	border-radius: var(--fm-radius);
@@ -54,6 +60,22 @@ body {
 #app input {
 	width: 100%;
 	padding: 0.55rem 0.65rem;
+	border: 1px solid #3a4150;
+	border-radius: 6px;
+	background: #14171d;
+	color: inherit;
+	font: inherit;
+}
+
+#app input[type="checkbox"],
+#app input[type="radio"] {
+	width: auto;
+	min-width: 0;
+}
+
+#app select {
+	max-width: 100%;
+	padding: 0.35rem 0.5rem;
 	border: 1px solid #3a4150;
 	border-radius: 6px;
 	background: #14171d;
@@ -304,4 +326,281 @@ body {
 #app [data-fm="counts"] {
 	margin-left: 0.4rem;
 	opacity: 0.75;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Authenticated app shell — full window, Thunderbird-like panes.
+
+   The signed-out login card above stays centered; once authenticated
+   (`body.fm-app`) the app fills the viewport: a sticky top navigation bar,
+   a folders sidebar beside the message list, and a scrolling reading pane.
+   ═══════════════════════════════════════════════════════════════ */
+
+body.fm-app {
+	height: 100vh;
+	overflow: hidden;
+}
+
+body.fm-app #app {
+	height: 100vh;
+	width: 100%;
+	padding: 0;
+	background: var(--fm-bg);
+	border-radius: 0;
+	display: flex;
+	flex-direction: column;
+	overflow-y: auto;
+}
+
+/* Top navigation bar: sticky, wraps, never scrolls away. */
+body.fm-app #app > [data-fm="nav"] {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.15rem;
+	margin: 0;
+	padding: 0.45rem 0.75rem;
+	background: var(--fm-panel);
+	border-bottom: 1px solid var(--fm-border);
+}
+
+body.fm-app #app > [data-fm="nav"] button {
+	padding: 0.4rem 0.7rem;
+	border-radius: 7px;
+}
+
+body.fm-app #app > [data-fm="nav"] button[aria-current="page"] {
+	background: rgba(74, 144, 226, 0.18);
+	border-color: transparent;
+	color: var(--fm-text);
+}
+
+/* Generic screen content. */
+body.fm-app #app > :not([data-fm="nav"]) {
+	padding: 0 1.25rem;
+}
+
+body.fm-app #app > [data-fm="title"] {
+	margin: 1rem 0 0.5rem;
+}
+
+/* ── Mailbox: folders sidebar + message list, both scroll independently ── */
+body.fm-app #app:has(> [data-fm="folders"]) {
+	display: grid;
+	grid-template-columns: minmax(190px, 230px) 1fr;
+	grid-template-rows: auto 1fr;
+	overflow: hidden;
+}
+
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="title"] {
+	display: none;
+}
+
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="nav"] {
+	grid-column: 1 / -1;
+}
+
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] {
+	grid-column: 1;
+	grid-row: 2;
+	display: block;
+	overflow-y: auto;
+	margin: 0;
+	padding: 0.6rem 0.5rem;
+	background: var(--fm-panel);
+	border-right: 1px solid var(--fm-border);
+}
+
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] [data-fm="folder"] {
+	display: block;
+	border: 1px solid transparent;
+	border-radius: 7px;
+	padding: 0.45rem 0.6rem;
+	margin-bottom: 0.15rem;
+}
+
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] [data-fm="folder"]:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] [data-fm="folder"][data-current] {
+	background: rgba(74, 144, 226, 0.18);
+	border-color: transparent;
+	color: var(--fm-text);
+}
+
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="list"],
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="empty"] {
+	grid-column: 2;
+	grid-row: 2;
+	overflow-y: auto;
+	margin: 0;
+	padding: 0;
+}
+
+body.fm-app #app > [data-fm="empty"] {
+	padding: 1.5rem 1.25rem;
+	color: var(--fm-muted);
+}
+
+/* Message list rows: roomier, with hover and current-row feedback. */
+body.fm-app #app > [data-fm="list"] [data-fm="message"] {
+	padding: 0.6rem 1.25rem;
+	border-bottom: 1px solid var(--fm-border);
+}
+
+body.fm-app #app > [data-fm="list"] [data-fm="message"]:hover {
+	background: rgba(255, 255, 255, 0.04);
+}
+
+/* ── Reading pane: scrolls with the window, nav stays reachable ── */
+body.fm-app #app > [data-fm="back"] {
+	align-self: flex-start;
+	margin: 0.75rem 0 0;
+}
+
+body.fm-app #app > [data-fm="headers"] {
+	margin-top: 0.75rem;
+}
+
+/* ── Calendar: pager, calendar picker, month grid, agenda, event editor ── */
+body.fm-app #app > [data-fm="pager"] {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	margin: 0.75rem 0;
+}
+
+body.fm-app #app > [data-fm="pager"] [data-fm="month"] {
+	font-weight: 600;
+	font-size: 1.05rem;
+	min-width: 11rem;
+}
+
+#app [data-fm="calendars"] {
+	list-style: none;
+	margin: 0.5rem 0 0.75rem;
+	padding: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem 1rem;
+}
+
+#app [data-fm="calendars"] label {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+	font-size: 0.85rem;
+	color: var(--fm-muted);
+}
+
+#app [data-fm="calendars"] input {
+	width: auto;
+}
+
+#app [data-fm="grid"] {
+	width: 100%;
+	border-collapse: collapse;
+	table-layout: fixed;
+}
+
+#app [data-fm="grid"] th {
+	padding: 0.4rem 0.3rem;
+	color: var(--fm-muted);
+	font-size: 0.72rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	border-bottom: 1px solid var(--fm-border);
+}
+
+#app [data-fm="grid"] td[data-fm="day"] {
+	height: 5.6rem;
+	vertical-align: top;
+	border: 1px solid var(--fm-border);
+	border-top: none;
+	padding: 0.25rem 0.3rem;
+	overflow: hidden;
+}
+
+#app [data-fm="grid"] td[data-outside] {
+	opacity: 0.45;
+}
+
+#app [data-fm="day-number"] {
+	display: block;
+	margin-bottom: 0.15rem;
+	font-size: 0.75rem;
+	color: var(--fm-muted);
+}
+
+#app button[data-fm="event"] {
+	display: block;
+	width: 100%;
+	margin-bottom: 0.15rem;
+	padding: 0.05rem 0.3rem;
+	border: 0;
+	border-left: 3px solid var(--fm-accent);
+	border-radius: 3px;
+	background: rgba(74, 144, 226, 0.25);
+	color: var(--fm-text);
+	font: inherit;
+	font-size: 0.72rem;
+	text-align: left;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+#app [data-fm="events"] {
+	list-style: none;
+	margin: 0.75rem 0 0;
+	padding: 0;
+}
+
+#app [data-fm="event-row"] {
+	padding: 0.35rem 0;
+	border-bottom: 1px solid var(--fm-border);
+}
+
+#app [data-fm="event-start"] {
+	margin-right: 0.5rem;
+	color: var(--fm-muted);
+	font-size: 0.82rem;
+}
+
+#app [data-fm="editor"] {
+	margin-top: 1rem;
+	padding: 1rem;
+	background: var(--fm-surface);
+	border: 1px solid var(--fm-border);
+	border-radius: 8px;
+}
+
+#app [data-fm="editor"] label {
+	display: block;
+	margin: 0.5rem 0;
+}
+
+#app [data-fm="editor"] input[type="text"],
+#app [data-fm="editor"] input:not([type]),
+#app [data-fm="editor"] select {
+	max-width: 24rem;
+}
+
+/* In the app, submit buttons size to their content (the full-width submit is
+   the signed-out login card only). */
+body.fm-app #app button[type="submit"] {
+	width: auto;
+	padding: 0.55rem 1.1rem;
+}
+
+/* The plain-text `<pre>` and the HTML iframe fill the pane; horizontal
+   spacing comes from the shared screen padding above. */
+body.fm-app #app > pre {
+	flex: 0 0 auto;
 }

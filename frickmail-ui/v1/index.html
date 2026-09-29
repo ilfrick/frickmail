@@ -197,6 +197,7 @@ function wireNav() {
 }
 
 async function signOut() {
+	document.body.classList.remove('fm-app');
 	try {
 		await api.logout();
 	} catch (error) {
@@ -968,6 +969,7 @@ async function showMessage(folder, uid, options) {
 /// primary, else oldest — mirroring legacy login selection) so
 /// account-dependent views work, then opens the inbox.
 async function enterApp() {
+	document.body.classList.add('fm-app');
 	try {
 		const session = await api.bootstrap();
 		if (!session.selected_account_id) {
@@ -1101,6 +1103,7 @@ try {
 	if (session && session.authenticated) {
 		await enterApp();
 	} else {
+		document.body.classList.remove('fm-app');
 		renderLogin(root, api, enterApp);
 		await showOAuthProviders();
 	}
