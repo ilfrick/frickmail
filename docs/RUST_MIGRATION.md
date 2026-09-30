@@ -78,6 +78,12 @@ Verification:
   `/static/v1/js/actions.js` 200, `/health` 200, external site 200, DB
   verified, Redis sessions connected, healthy, **0 restarts**. Rollback:
   `frickmail-rust:0c211f3e762a` or earlier.
+- CI on `34c396362`: `naming` run `36680173810` **success**; `rust-ci` run
+  `36680173666` **success** (it does run this time — the code commit touches
+  `frickmail-server/**`, which the `rust-ci` path filter covers). All four
+  remote tips (`origin`/`gitea` × `master`/`rust-full-migration`) verified
+  identical at `34c39636246797c19e1b856dcd5289f8494adc87` by live
+  `ls-remote`.
 
 Remaining in the parity program, in the recommended order: bulk selection and
 bulk actions, attachment download + compose file picker, drafts and PGP/S-MIME
