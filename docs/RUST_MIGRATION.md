@@ -5,6 +5,91 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-30 06:47:00 UTC
+
+Slice 1 of the v1 UI feature-parity program: **message and folder actions**.
+The v1 app could read mail and nothing else — every mutation still lived
+behind the legacy dispatcher, which is no longer routed (`legacy.html` is a
+404), so the UI the operator is actually served could not move, copy, delete,
+star, mark read/unread, mark a folder read, or empty the trash.
+
+Code commit `d84b12b5b8a4` (deployed; docs in this commit):
+
+- **Server** (`fm-http/src/router/api_v1.rs`): six new v1 routes —
+  `POST /messages/flags`, `/messages/move`, `/messages/copy`,
+  `/messages/delete`, `/messages/seen-all`, `/folders/clear` — each a thin
+  v1-contract handler over the *already-native* action pipelines
+  (`MessageSetSeen`/`Flagged`/`Deleted`/`Keyword`, `MessageMove`,
+  `MessageCopy`, `MessageDelete`, `MessageSetSeenToAll`, `FolderClear`).
+  No IMAP logic is duplicated; OAuth-account resolution, the mutation
+  deadline, and MOVE's `markAsRead` companion option all come from the native
+  handlers. The v1 contract is owned here rather than inherited from the
+  legacy HTTP-200 envelope:
+  - `uids` is a list of **integers**, so a caller cannot smuggle IMAP
+    sequence-set syntax (`1:*`, `1,3:5`) into a STORE/COPY/MOVE; the server
+    joins the digits itself. One request is bounded to 500 UIDs.
+  - A keyword flag is restricted to a plain IMAP atom (alphanumerics, `_`,
+    `-`, `.`, `/`, `$`) and **keeps its case and `$` sigil**, so
+    `$Forwarded` is stored as `$Forwarded`. System flags match
+    case-insensitively. (The first implementation lowercased everything and
+    rejected `$` outright — the new tests caught it.)
+  - Both legacy failure shapes (`Result:false` + `message`, and
+    `Result:{ok:false,error}`) fold into v1 errors: field-validation
+    messages stay 400, genuine IMAP failures become a generic 502 with the
+    detail in the log, and a non-200 legacy status never surfaces as success.
+  - An explicit `account_id` is ownership-checked up front and reported as the
+    404 `account_not_found` that every other account-scoped v1 route returns,
+    instead of the generic upstream failure the legacy path gives.
+- **Client** (`frickmail-ui/v1/js/actions.js`, new, wired in `index.html`): a
+  reading-pane toolbar (Reply, Reply all, Forward, Star/Unstar, Mark unread,
+  Move, Copy, Archive, Spam, Delete) and a folder toolbar (Mark all read, Empty
+  folder for the trash only, Refresh). Destinations are a plain `<select>` of
+  the account's other folders; Archive/Spam/Empty appear only when a matching
+  folder exists, so no button can promise an action the account does not
+  support. Reply/Reply-all/Forward build compose seeds with prefix-safe
+  subjects and a quoted plain-text body. All server strings escaped; a failed
+  action reports the server's own message in the toolbar.
+- **Layout**: the mailbox grid gains a third row so the folder toolbar spans
+  both panes without overlapping the sidebar. The toolbars are sticky *below*
+  the sticky nav, whose height the shell measures into `--fm-sticky-top` and
+  re-publishes on every render and on resize — the first attempt used
+  `top: 0` and the toolbar slid underneath the nav when the nav wrapped.
+
+Verification:
+
+- `cargo fmt --all -- --check` clean; `cargo clippy --workspace --all-targets
+  -D warnings` clean; `cargo test --workspace` **0 failures** (fm-http lib 595
+  passed, 105 in `api_v1` including 5 new tests: UID bounding/injection,
+  keyword validation, legacy-envelope normalization, and route-level
+  token+validation+reach-the-IMAP-path assertions).
+- `node --test frickmail-ui/v1/js/*.test.mjs` **238 passed / 0 failed** (25
+  new in `actions.test.mjs`).
+- 25 headless-Chrome layout assertions pass (mailbox panes, toolbar span, no
+  overlap, no horizontal overflow, sticky toolbar under the nav at 1440px and
+  at a wrapped 700px nav, login card still a centered card). The page model no
+  longer accepts images in this session, so layout is verified by headless
+  Chrome reporting real geometry rather than by screenshot inspection.
+- Canary: `frickmail-rust:d84b12b5b8a4` on `127.0.0.1:8902`, DB verified, all
+  six new routes answering 403 `invalid_token` unauthenticated.
+- Production: image `frickmail-rust:d84b12b5b8a4`
+  (`sha256:d882484b5df0e54c02d705afd71d03fe1413be7894ad7775a0818bcd276ab7bc`),
+  `org.opencontainers.image.revision=d84b12b5b8a4`, cut over with the same
+  hardened flags/networks/env; `/` 200 serving the new stylesheet,
+  `/static/v1/js/actions.js` 200, `/health` 200, external site 200, DB
+  verified, Redis sessions connected, healthy, **0 restarts**. Rollback:
+  `frickmail-rust:0c211f3e762a` or earlier.
+
+Remaining in the parity program, in the recommended order: bulk selection and
+bulk actions, attachment download + compose file picker, drafts and PGP/S-MIME
+compose, new-mail polling, dropping the legacy bundle from the image and
+wiring v1 to the Frickmail theme model, then the stale
+`Still Missing Before The Final Rust-Only Goal` section (it still claims PHP
+is in the image and that Rust is canary-only) and `docs/DEPLOYMENT.md` gates
+1–4. Operator decisions still needed on `KolabFolder`,
+`NextcloudSaveMsg`/`NextcloudAttachFile` and `ChangePassword`.
+
+---
+
 ## Progress Snapshot — 2026-09-29 07:15:00 UTC
 
 Completed-and-pushed since the 21:00 snapshot:
