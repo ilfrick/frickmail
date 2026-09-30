@@ -1117,7 +1117,6 @@ async function showMessage(folder, uid, options) {
 			// decide whether remote images load now or wait for a click.
 			const html = rewriteCidSources(selected.body, message.attachments, context);
 			const prepared = readerDocument(html, { allowRemote });
-			viewer = '<iframe data-fm="body" sandbox="" title="Message body"></iframe>';
 			if (prepared.blocked > 0) {
 				imageBar = '<div data-fm="image-bar">'
 					+ '<span>Remote images are blocked to protect your privacy.</span>'
@@ -1163,7 +1162,7 @@ async function showMessage(folder, uid, options) {
 				showMessage(folder, uid, { back, accountId: settings.accountId });
 			});
 		}
-		wireMessageActions(folder, uid, message, folders, back);
+		wireMessageActions(folder, uid, message, folders, back, settings.accountId);
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the message.</p>';
 	}
@@ -1172,7 +1171,7 @@ async function showMessage(folder, uid, options) {
 /// Wires the reading-pane toolbar. `reload` re-opens the same message after
 /// an in-place flag change; `back` returns to the list after the message
 /// leaves the current folder.
-function wireMessageActions(folder, uid, message, folders, back) {
+function wireMessageActions(folder, uid, message, folders, back, accountId) {
 	const uids = [Number(uid)];
 	const target = () => {
 		const select = root.querySelector('[data-fm="target"]');
@@ -1194,7 +1193,7 @@ function wireMessageActions(folder, uid, message, folders, back) {
 						flag: 'flagged',
 						set: !starred
 					});
-					await showMessage(folder, uid, { back });
+					await showMessage(folder, uid, { back, accountId });
 					return;
 				}
 				if (action === 'unread') {
@@ -1217,7 +1216,7 @@ function wireMessageActions(folder, uid, message, folders, back) {
 					if (action === 'move') {
 						await back();
 					} else {
-						await showMessage(folder, uid, { back });
+						await showMessage(folder, uid, { back, accountId });
 					}
 					return;
 				}
