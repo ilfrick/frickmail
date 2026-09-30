@@ -60,6 +60,9 @@ Verification:
   attachment route 401 unauthenticated, `/health` 200, external site 200, DB
   verified, Redis sessions connected, healthy, **0 restarts**. Rollback:
   `frickmail-rust:d84b12b5b8a4` or earlier.
+- CI on `b2fe256e4`: `naming` run `36774165077` **success**; `rust-ci` run
+  `36774165076` **success** (it runs: the slice touches `frickmail-server/**`).
+  All four remote tips verified identical at `c7ce49cf3` by live `ls-remote`.
 
 **Not in this slice, and honestly stated rather than padded:** the empty
 **Identities** panel (the v1 list does not synthesize the account's default
