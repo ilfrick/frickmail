@@ -5,6 +5,71 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-09-30 20:40:00 UTC
+
+Slice 2: **v1 UI overhaul** (operator feedback round). Code commits
+`db8884d24783` + `b2fe256e4043`.
+
+The operator's report and what it turned out to be:
+
+| Report | Root cause | Fix |
+| --- | --- | --- |
+| "all grey, not the colourful interface from before" | `app.css` carried its own flat grey palette and ignored the Frickmail theme values | Adopted the theme palette (indigo base; blue/teal/green/amber accents), light + dark under `html[data-fm-theme]`, Appearance section in Settings, remembered locally |
+| opened mail "in a very narrow panel at the centre" | measured: the pane **is** full width (1920px at a 1920 viewport) — the narrowness is the sender's centred fixed-width HTML plus a white frame with no reader stylesheet | body goes through `readerDocument` (light canvas, wrapping, responsive `img`/`table`); pane stays full width |
+| "some images are not visualized inline" | `fm-mime`'s sanitizer used `ammonia::Builder::default()`, whose URL allow-list **drops unknown schemes** — `src="cid:…"` was stripped before the client saw it (`cid` is not in ammonia's default set; verified against the vendored crate) | `cid` added to the allow-list; client rewrites it to the inline endpoint. Remote images are held back behind a Thunderbird-style "Show images" bar |
+| "compose window is weird" | generic stacked settings form | rebuilt as a mail window: title bar + Cc/Bcc reveal, labelled header rows, large body, footer action bar |
+| "S/MIME is a button in the top panel" | it was a top-bar item | Settings hub with a section menu (General, Appearance, Accounts, Identities, S/MIME, OpenPGP, Security, Rules); top bar is brand + mail/calendar/contacts/tasks + Compose + Settings |
+| PGP keys visible nowhere | there are **no v1 key-management routes**; the native keyring exists server-side | OpenPGP section shows an honest placeholder; real key management is the next slice |
+
+Also new: **attachment download**. There was no way to download a message
+part at all (`AttachmentsActions` only served compose staging). New route
+`GET /messages/{uid}/attachments/{mime_index}` streams one part via
+`fetch_mime_part_bounded_with_credentials`. It is deliberately conservative:
+only an allow-list of inert raster image types is ever emitted as `image/*`
+for inline rendering; everything else is `application/octet-stream` with an
+`attachment` disposition and `X-Content-Type-Options: nosniff`, because a
+sender controls the name and MIME hint and serving HTML/SVG from this origin
+would be script execution. Names are stripped of separators/quotes/control
+characters and bounded; `Content-Disposition` carries an RFC 5987
+`filename*`.
+
+New `frickmail-ui/v1/js/reader.js` (pure, 11 tests): cid normalization/lookup,
+cid→inline rewrite, remote-image counting/blocking, and the reader document
+wrapper.
+
+Verification:
+
+- `node --test frickmail-ui/v1/js/*.test.mjs` **260 passed / 0 failed**
+  (reader 11 new; message and compose updated for the new markup).
+- **24 headless-Chrome layout assertions pass**: reader pane full width and
+  toolbar pinned under the nav, cid rewritten, remote src withheld, attachment
+  cards + download links, image guard bar, compose window geometry and the
+  Cc/Bcc toggle, Settings two-column layout, dark vs light colours differ,
+  login card still centred.
+- `cargo fmt` clean; `clippy --workspace --all-targets -D warnings` clean;
+  `cargo test --workspace` **0 failures** (fm-http lib 599, 109 in `api_v1`
+  incl. the new attachment-route and filename/type tests; fm-mime 18 with the
+  new cid-sanitizer test).
+- naming gate green.
+- Canary `frickmail-rust:b2fe256e4043` on `127.0.0.1:8902`: DB verified, new
+  UI assets 200, attachment route 401 unauthenticated.
+- Production: image `frickmail-rust:b2fe256e4043`
+  (`sha256:043973c7726221b3dddae20cb8ba6515ed9dc9f84034d6e1049695a6caab156e`),
+  `org.opencontainers.image.revision=b2fe256e4043`, cut over with the same
+  hardened flags/networks/env; `/` 200, `/static/v1/js/reader.js` 200, the
+  attachment route 401 unauthenticated, `/health` 200, external site 200, DB
+  verified, Redis sessions connected, healthy, **0 restarts**. Rollback:
+  `frickmail-rust:d84b12b5b8a4` or earlier.
+
+**Not in this slice, and honestly stated rather than padded:** the empty
+**Identities** panel (the v1 list does not synthesize the account's default
+sender identity the way the legacy screen did) and real **OpenPGP** key
+management. Both are server-side work; they lead the next slice. The operator
+is the in-browser verifier — layout is checked by headless Chrome geometry
+because this session's page model no longer accepts images.
+
+---
+
 ## Progress Snapshot — 2026-09-30 06:47:00 UTC
 
 Slice 1 of the v1 UI feature-parity program: **message and folder actions**.
