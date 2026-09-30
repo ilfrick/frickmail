@@ -15,6 +15,22 @@ describe('renderComposeForm', () => {
 		assert.ok(html.includes('>x&amp;y</textarea>'));
 	});
 
+	it('renders a window chrome with header rows and a footer', () => {
+		const html = renderComposeForm();
+		assert.ok(html.includes('data-fm="compose-head"'));
+		assert.ok(html.includes('data-fm="compose-fields"'));
+		assert.ok(html.includes('data-fm="compose-foot"'));
+		assert.ok(html.includes('data-fm="compose-body"'));
+		assert.ok(html.includes('data-fm="send"'));
+		// Cc/Bcc start hidden behind the toggle.
+		assert.ok(html.includes('data-fm-row="cc" hidden'));
+	});
+
+	it('reveals Cc/Bcc for a reply-all', () => {
+		const html = renderComposeForm({ to: 'x', cc: 'c@x' }, [], { replyAll: true });
+		assert.ok(!html.includes('data-fm-row="cc" hidden'));
+	});
+
 	it('renders empty forms without seeds', () => {
 		const html = renderComposeForm();
 		assert.ok(html.includes('data-fm="compose"'));
@@ -39,15 +55,19 @@ describe('renderComposeForm', () => {
 
 describe('collectComposePayload', () => {
 	function fakeRoot(values) {
+		const table = {
+			'[data-fm="to"]': values.to,
+			'[data-fm="subject"]': values.subject,
+			'[data-fm="compose-body"]': values.text
+		};
+		if (values.cc !== undefined) {
+			table['[data-fm="cc"]'] = values.cc;
+		}
+		if (values.bcc !== undefined) {
+			table['[data-fm="bcc"]'] = values.bcc;
+		}
 		return {
-			querySelector: (selector) => {
-				const table = {
-					'[data-fm="to"]': values.to,
-					'[data-fm="subject"]': values.subject,
-					'[data-fm="body"]': values.text
-				};
-				return selector in table ? { value: table[selector] } : null;
-			}
+			querySelector: (selector) => (selector in table ? { value: table[selector] } : null)
 		};
 	}
 
@@ -64,7 +84,7 @@ describe('collectComposePayload', () => {
 				const table = {
 					'[data-fm="to"]': 'a@example.com',
 					'[data-fm="subject"]': '',
-					'[data-fm="body"]': '',
+					'[data-fm="compose-body"]': '',
 					'[data-fm="identity"]': '3'
 				};
 				return selector in table ? { value: table[selector] } : null;
@@ -80,6 +100,19 @@ describe('collectComposePayload', () => {
 			subject: '',
 			text: ''
 		});
+	});
+
+	it('includes non-empty Cc/Bcc and omits blank ones', () => {
+		const withCc = collectComposePayload(
+			fakeRoot({ to: 'a', subject: 's', text: 't', cc: 'c@x', bcc: 'b@x' })
+		);
+		assert.equal(withCc.cc, 'c@x');
+		assert.equal(withCc.bcc, 'b@x');
+		const blank = collectComposePayload(
+			fakeRoot({ to: 'a', subject: 's', text: 't', cc: '  ', bcc: '' })
+		);
+		assert.ok(!('cc' in blank));
+		assert.ok(!('bcc' in blank));
 	});
 });
 

@@ -77,6 +77,10 @@ pub fn routes() -> Router<AppState> {
         .route("/contacts/{id}", delete(delete_contact))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
+        .route(
+            "/messages/{uid}/attachments/{mime_index}",
+            get(message_attachment),
+        )
         .route("/messages/flags", post(message_set_flags))
         .route("/messages/move", post(message_move))
         .route("/messages/copy", post(message_copy))
@@ -3516,10 +3520,303 @@ where
     }
 }
 
+/// One stored attachment, streamed straight from IMAP.
+///
+/// `GET /messages/{uid}/attachments/{mime_index}?folder=…&account_id=…&name=…&type=…&inline=1`
+///
+/// This is what the reader uses for both the download buttons and the inline
+/// (`cid:`) images. The contract is deliberately conservative: only a small
+/// allow-list of inert raster image types is ever emitted as `image/*` for
+/// inline rendering; every other part is served as an `application/octet-stream`
+/// download. A sender controls the file name and MIME hint, so trusting either
+/// to set `Content-Type` would let them serve active content (HTML, SVG) from
+/// this origin, which is a script-execution vector — the allow-list plus
+/// `X-Content-Type-Options: nosniff` removes that. Responses are `no-store`
+/// because they are private mail.
+async fn message_attachment(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    path: Result<axum::extract::Path<(u32, String)>, axum::extract::rejection::PathRejection>,
+    query: Result<axum::extract::Query<AttachmentQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let stored = match session
+        .get::<UserSession>(fm_session::USER_SESSION_KEY)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(_) => {
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_error",
+                "Frickmail session read failed",
+            )
+        }
+    };
+    let Some(user) = stored else {
+        return v1_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "No authenticated Frickmail session",
+        );
+    };
+    let Some(pool) = state.db_pool() else {
+        return v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        );
+    };
+    let Ok(axum::extract::Path((uid, mime_index))) = path else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid attachment path",
+        );
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid attachment query",
+        );
+    };
+    if uid == 0 || params.folder.trim().is_empty() || mime_index.trim().is_empty() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "A folder, a MIME index and a nonzero uid are required",
+        );
+    }
+    let account_id = match params.account_id.filter(|id| *id > 0) {
+        Some(account_id) => account_id,
+        None => match session
+            .get::<fm_core::SelectedMailAccountSession>(fm_session::SELECTED_ACCOUNT_SESSION_KEY)
+            .await
+        {
+            Ok(Some(selected)) if selected.account_id > 0 => selected.account_id,
+            Ok(_) => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "account_required",
+                    "An account_id query parameter or selected account is required",
+                )
+            }
+            Err(_) => {
+                return v1_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_error",
+                    "Frickmail session read failed",
+                )
+            }
+        },
+    };
+    let credential_key = match v1_session_credential_key(&session).await {
+        Ok(credential_key) => credential_key,
+        Err(response) => return response,
+    };
+    let account = match fm_user::SqlxUserRepository::get_mail_account_connection_secret(
+        pool,
+        user.user_id,
+        account_id,
+    )
+    .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "account_not_found",
+                "Mail account not found",
+            )
+        }
+        Err(err) => {
+            tracing::warn!(
+                "v1 attachment account lookup failed: {}",
+                err.public_message()
+            );
+            return v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail account lookup failed",
+            );
+        }
+    };
+    let (imap_config, credentials) = match v1_imap_connection(
+        &state,
+        &account,
+        &credential_key,
+        &super::ProductionOAuthTokenRefresher,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
+
+    let fetch = fm_imap::fetch_mime_part_bounded_with_credentials(
+        imap_config,
+        &credentials,
+        &params.folder,
+        uid,
+        &mime_index,
+        ATTACHMENT_DOWNLOAD_MAX_BYTES,
+    );
+    let part = match tokio::time::timeout(super::MESSAGE_BODY_FETCH_DEADLINE, fetch).await {
+        Ok(Ok(Some(part))) => part,
+        Ok(Ok(None)) => {
+            return v1_error(
+                StatusCode::NOT_FOUND,
+                "attachment_not_found",
+                "Attachment not found",
+            )
+        }
+        Ok(Err(err)) => {
+            tracing::warn!("v1 attachment fetch failed: {}", err.public_message());
+            return v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail server attachment fetch failed",
+            );
+        }
+        Err(_) => {
+            return v1_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "Mail server attachment fetch timed out",
+            )
+        }
+    };
+
+    let file_name = attachment_download_filename(params.name.as_deref());
+    let inline = params.inline.as_deref().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    });
+    let content_type = if inline {
+        attachment_inline_content_type(params.mime_type.as_deref())
+    } else {
+        None
+    };
+    let (content_type, disposition) = match content_type {
+        Some(content_type) => (
+            content_type,
+            format!(
+                "inline; filename=\"{file_name}\"; filename*=UTF-8''{}",
+                rfc5987_encode(&file_name)
+            ),
+        ),
+        None => (
+            "application/octet-stream",
+            format!(
+                "attachment; filename=\"{file_name}\"; filename*=UTF-8''{}",
+                rfc5987_encode(&file_name)
+            ),
+        ),
+    };
+
+    let mut response = Response::new(axum::body::Body::from(part));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(content_type),
+    );
+    if let Ok(value) = axum::http::HeaderValue::from_str(&disposition) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::CONTENT_DISPOSITION, value);
+    }
+    response.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, no-store"),
+    );
+    response
+}
+
+/// Query for the attachment-content route. `name` and `type` come from the
+/// message payload the server itself produced, but are still treated as
+/// untrusted: `type` only selects from the inline allow-list, and `name` only
+/// becomes a sanitized `Content-Disposition` suggestion.
+#[derive(Debug, Deserialize, Default)]
+struct AttachmentQuery {
+    #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    mime_type: Option<String>,
+    #[serde(default)]
+    inline: Option<String>,
+}
+
+/// Raster image types that are safe to render inline in an `<img>` element.
+/// SVG is intentionally excluded (it can carry script) and so is every
+/// non-image type; those download instead.
+fn attachment_inline_content_type(requested: Option<&str>) -> Option<&'static str> {
+    match requested?.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("image/png"),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/bmp" => Some("image/bmp"),
+        "image/avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
+/// Turns a caller-provided display name into a safe `Content-Disposition`
+/// filename: no path separators, no quotes, no control characters, bounded
+/// length, and never empty.
+fn attachment_download_filename(name: Option<&str>) -> String {
+    let cleaned: String = name
+        .unwrap_or_default()
+        .chars()
+        .filter(|ch| !ch.is_control() && !matches!(ch, '"' | '\\' | '/' | '\r' | '\n'))
+        .take(200)
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "attachment".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// RFC 5987 percent-encoding for the `filename*` parameter, so non-ASCII
+/// names survive without breaking the header.
+fn rfc5987_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let allowed = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            );
+        if allowed {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 /// Upper bound on the UIDs one action may touch, so a single request can
 /// never turn into an unbounded IMAP command. The UI works in page-sized
 /// batches well under this.
 const MESSAGE_ACTION_MAX_UIDS: usize = 500;
+
+/// Upper bound on one streamed attachment. Larger than the compose limit
+/// because reading (and saving) a big attachment someone sent you is normal,
+/// but it is still bounded so one request cannot exhaust memory.
+const ATTACHMENT_DOWNLOAD_MAX_BYTES: usize = 25 * 1024 * 1024;
 
 /// Shared body of every message-mutation route: which mailbox, which
 /// messages, and which account. `uids` is deliberately a list of integers —
@@ -8612,6 +8909,161 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn attachment_download_filename_is_safe() {
+        // Path separators, quotes and control characters never reach the
+        // header; directory traversal in a sender-chosen name is defused.
+        assert_eq!(
+            super::attachment_download_filename(Some("../../etc/passwd")),
+            "etcpasswd"
+        );
+        assert_eq!(
+            super::attachment_download_filename(Some("re\"port\r\n.pdf")),
+            "report.pdf"
+        );
+        assert_eq!(
+            super::attachment_download_filename(Some("  ..hidden..  ")),
+            "hidden"
+        );
+        // Empty and missing names fall back to a fixed label.
+        assert_eq!(super::attachment_download_filename(None), "attachment");
+        assert_eq!(
+            super::attachment_download_filename(Some("  ")),
+            "attachment"
+        );
+        // Length is bounded.
+        let long = "a".repeat(500);
+        assert_eq!(
+            super::attachment_download_filename(Some(long.as_str())).len(),
+            200
+        );
+    }
+
+    #[test]
+    fn attachment_inline_type_is_allowlisted() {
+        // Only inert raster images are ever emitted inline.
+        for (requested, expected) in [
+            ("image/png", Some("image/png")),
+            ("IMAGE/JPEG", Some("image/jpeg")),
+            ("image/jpg", Some("image/jpeg")),
+            ("image/gif", Some("image/gif")),
+            ("image/webp", Some("image/webp")),
+        ] {
+            assert_eq!(
+                super::attachment_inline_content_type(Some(requested)),
+                expected,
+                "{requested}"
+            );
+        }
+        // SVG can carry script, and active/non-image types must download.
+        for refused in [
+            "image/svg+xml",
+            "text/html",
+            "application/pdf",
+            "application/xhtml+xml",
+            "text/javascript",
+            "",
+        ] {
+            assert_eq!(
+                super::attachment_inline_content_type(Some(refused)),
+                None,
+                "{refused} must not be inline"
+            );
+        }
+        assert_eq!(super::attachment_inline_content_type(None), None);
+    }
+
+    #[test]
+    fn rfc5987_encode_keeps_attr_chars_and_escapes_the_rest() {
+        assert_eq!(super::rfc5987_encode("report.pdf"), "report.pdf");
+        assert_eq!(
+            super::rfc5987_encode("relazione 2026.pdf"),
+            "relazione%202026.pdf"
+        );
+        assert_eq!(super::rfc5987_encode("café.pdf"), "caf%C3%A9.pdf");
+    }
+
+    /// The route exists, refuses anonymous callers, validates before touching
+    /// IMAP, and 404s an account the caller does not own.
+    #[tokio::test]
+    async fn v1_message_attachment_route_validates_and_reaches_imap() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1301, "v1attach", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 1300, 1301, &blob).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1attach", "correct-horse").await;
+        let _ = token;
+
+        let uri = "/api/frickmail/v1/messages/5/attachments/2?folder=INBOX&account_id=1300";
+
+        // Anonymous: 401 before any IMAP work.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Missing folder: 400.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/messages/5/attachments/2?account_id=1300")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Unknown account: 404, like every other account-scoped v1 route.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(
+                        "/api/frickmail/v1/messages/5/attachments/2?folder=INBOX&account_id=999999",
+                    )
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "account_not_found");
+
+        // Valid request reaches the IMAP path against an unroutable host.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     struct RecordingSmtpSender {

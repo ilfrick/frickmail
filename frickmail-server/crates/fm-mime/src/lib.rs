@@ -888,8 +888,20 @@ fn format_addr(addr: &mail_parser::Addr<'_>) -> String {
     }
 }
 
+/// Sanitizes a received message's HTML body for display.
+///
+/// `ammonia`'s default URL allow-list drops every scheme it does not know,
+/// which silently removed `src="cid:…"` from inline images and left them
+/// broken (or missing entirely) in the reader. `cid` is added back so the
+/// reference survives sanitization; it is a dead scheme over HTTP, so the
+/// browser will never fetch it, and the client rewrites it to the inline
+/// attachment endpoint. Nothing else about the policy changes — in
+/// particular `javascript:`, `data:` and unknown schemes stay stripped.
 fn sanitize_html(html: &str) -> String {
-    ammonia::Builder::default().clean(html).to_string()
+    ammonia::Builder::default()
+        .add_url_schemes(&["cid"])
+        .clean(html)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -985,6 +997,31 @@ UERGREFUQQ==
         assert_eq!(attachment.c_id, "part@example.com");
         assert_eq!(attachment.content_location, "cid:report");
         assert!(attachment.is_inline);
+    }
+
+    /// Inline images reference their part with `src="cid:…"`. `ammonia` drops
+    /// unknown URL schemes, which used to strip the reference and leave the
+    /// image missing; `cid` is now preserved. Everything dangerous stays
+    /// stripped.
+    #[test]
+    fn sanitizer_preserves_cid_sources_and_strips_dangerous_schemes() {
+        let raw = br#"Subject: With inline image
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<p><img src="cid:part1.abc@example" alt="inline"></p>
+<p><a href="javascript:alert(1)">click</a></p>
+<p><img src="javascript:alert(2)" alt="bad"></p>
+"#;
+
+        let body = parse_body(raw).unwrap();
+
+        assert!(
+            body.html.contains("cid:part1.abc@example"),
+            "cid source was stripped: {}",
+            body.html
+        );
+        assert!(!body.html.contains("javascript:"), "{}", body.html);
     }
 
     #[test]

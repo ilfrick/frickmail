@@ -1,23 +1,62 @@
 /* Frickmail v1 shell styles (Phase 9).
  *
- * Self-contained starting point: CSS variables with dark defaults, a
- * centered authentication card, and form primitives. Later slices adopt the
- * shared Frickmail theme tokens once the legacy pipeline no longer owns
- * them.
+ * Colour comes from the Frickmail theme token values: a saturated indigo/
+ * violet base with blue, teal, green and amber accents, plus a light variant,
+ * rather than the flat grey starting point. The palette is declared here so
+ * the app is self-contained; the token names mirror `frickmail-theme.css`
+ * (`--fm-bg-base`, `--fm-accent`, …) so adopting the shared plugin
+ * stylesheet later is an alias change, not a rewrite.
  */
 
-:root {
+:root,
+html[data-fm-theme="dark"] {
 	color-scheme: dark;
-	--fm-bg: #1b1e24;
-	--fm-surface: #23272f;
-	--fm-panel: #1f232a;
-	--fm-text: #e8eaf0;
-	--fm-muted: #9aa1b2;
-	--fm-accent: #4a90e2;
-	--fm-danger: #e06c75;
-	--fm-border: #343b48;
+	--fm-bg: #13131f;
+	--fm-surface: #1e1f33;
+	--fm-panel: #1a1a2e;
+	--fm-elevated: #252641;
+	--fm-hover: #2a2d45;
+	--fm-selected: #2d3461;
+	--fm-text: #e2e4f0;
+	--fm-muted: #9fa3bf;
+	--fm-faint: #6b6f8a;
+	--fm-accent: #7aa2f7;
+	--fm-accent-strong: #9ab5f9;
+	--fm-accent-soft: rgba(122, 162, 247, 0.18);
+	--fm-teal: #14b8a6;
+	--fm-green: #9ece6a;
+	--fm-yellow: #e0af68;
+	--fm-danger: #f7768e;
+	--fm-border: rgba(255, 255, 255, 0.09);
+	--fm-border-strong: rgba(255, 255, 255, 0.18);
 	--fm-radius: 10px;
 	--fm-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+	--fm-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+html[data-fm-theme="light"] {
+	color-scheme: light;
+	--fm-bg: #f4f5fb;
+	--fm-surface: #ffffff;
+	--fm-panel: #eceefa;
+	--fm-elevated: #ffffff;
+	--fm-hover: #e4e7f7;
+	--fm-selected: #d9e2ff;
+	--fm-text: #1a1c2b;
+	--fm-muted: #555a75;
+	--fm-faint: #83879f;
+	--fm-accent: #3b6fd4;
+	--fm-accent-strong: #2f5cb0;
+	--fm-accent-soft: rgba(59, 111, 212, 0.14);
+	--fm-teal: #0d9488;
+	--fm-green: #3f8f2a;
+	--fm-yellow: #a97a1f;
+	--fm-danger: #c5344e;
+	--fm-border: rgba(0, 0, 0, 0.12);
+	--fm-border-strong: rgba(0, 0, 0, 0.22);
+	--fm-radius: 10px;
+	--fm-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+	--fm-shadow: 0 4px 16px rgba(40, 44, 80, 0.16);
 }
 
 * {
@@ -60,9 +99,9 @@ body:not(.fm-app) #app {
 #app input {
 	width: 100%;
 	padding: 0.55rem 0.65rem;
-	border: 1px solid #3a4150;
+	border: 1px solid var(--fm-border-strong);
 	border-radius: 6px;
-	background: #14171d;
+	background: var(--fm-bg);
 	color: inherit;
 	font: inherit;
 }
@@ -76,9 +115,9 @@ body:not(.fm-app) #app {
 #app select {
 	max-width: 100%;
 	padding: 0.35rem 0.5rem;
-	border: 1px solid #3a4150;
+	border: 1px solid var(--fm-border-strong);
 	border-radius: 6px;
-	background: #14171d;
+	background: var(--fm-bg);
 	color: inherit;
 	font: inherit;
 }
@@ -118,7 +157,7 @@ body:not(.fm-app) #app {
 	gap: 0.75rem;
 	align-items: baseline;
 	padding: 0.55rem 0.25rem;
-	border-bottom: 1px solid #343b48;
+	border-bottom: 1px solid var(--fm-border);
 	cursor: pointer;
 }
 
@@ -164,7 +203,7 @@ body:not(.fm-app) #app {
 #app [data-fm="body"] {
 	width: 100%;
 	min-height: 20rem;
-	border: 1px solid #343b48;
+	border: 1px solid var(--fm-border);
 	border-radius: 6px;
 	background: #fff;
 }
@@ -184,14 +223,14 @@ body:not(.fm-app) #app {
 	display: flex;
 	gap: 0.75rem;
 	padding: 0.4rem 0;
-	border-top: 1px solid #343b48;
+	border-top: 1px solid var(--fm-border);
 	font-size: 0.85rem;
 }
 
 #app button[data-fm="back"] {
 	margin-bottom: 1rem;
 	background: none;
-	border: 1px solid #3a4150;
+	border: 1px solid var(--fm-border-strong);
 	border-radius: 6px;
 	color: inherit;
 	font: inherit;
@@ -217,7 +256,7 @@ body:not(.fm-app) #app {
 
 #app [data-fm="nav"] button[aria-current="page"] {
 	color: var(--fm-text);
-	border-color: #3a4150;
+	border-color: var(--fm-border-strong);
 }
 
 #app [data-fm="row"] {
@@ -248,7 +287,7 @@ body:not(.fm-app) #app {
 	gap: 0.5rem;
 	align-items: baseline;
 	padding: 0.4rem 0;
-	border-bottom: 1px solid #343b48;
+	border-bottom: 1px solid var(--fm-border);
 }
 
 #app [data-fm="filter-label"] {
@@ -267,7 +306,7 @@ body:not(.fm-app) #app {
 	gap: 0.75rem;
 	align-items: baseline;
 	padding: 0.4rem 0;
-	border-bottom: 1px solid #343b48;
+	border-bottom: 1px solid var(--fm-border);
 }
 
 #app [data-fm="contact"] [data-fm="uid"] {
@@ -286,15 +325,15 @@ body:not(.fm-app) #app {
 	gap: 0.5rem;
 	align-items: baseline;
 	padding: 0.4rem 0;
-	border-bottom: 1px solid #343b48;
+	border-bottom: 1px solid var(--fm-border);
 }
 
 #app textarea {
 	width: 100%;
 	padding: 0.55rem 0.65rem;
-	border: 1px solid #3a4150;
+	border: 1px solid var(--fm-border-strong);
 	border-radius: 6px;
-	background: #14171d;
+	background: var(--fm-bg);
 	color: inherit;
 	font: inherit;
 	resize: vertical;
@@ -310,7 +349,7 @@ body:not(.fm-app) #app {
 }
 
 #app [data-fm="folder"] {
-	border: 1px solid #343b48;
+	border: 1px solid var(--fm-border);
 	border-radius: 6px;
 	padding: 0.35rem 0.6rem;
 	font-size: 0.85rem;
@@ -373,7 +412,7 @@ body.fm-app #app > [data-fm="nav"] button {
 }
 
 body.fm-app #app > [data-fm="nav"] button[aria-current="page"] {
-	background: rgba(74, 144, 226, 0.18);
+	background: var(--fm-accent-soft);
 	border-color: transparent;
 	color: var(--fm-text);
 }
@@ -430,11 +469,11 @@ body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] [data-fm="fold
 }
 
 body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] [data-fm="folder"]:hover {
-	background: rgba(255, 255, 255, 0.05);
+	background: var(--fm-hover);
 }
 
 body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] [data-fm="folder"][data-current] {
-	background: rgba(74, 144, 226, 0.18);
+	background: var(--fm-accent-soft);
 	border-color: transparent;
 	color: var(--fm-text);
 }
@@ -460,7 +499,7 @@ body.fm-app #app > [data-fm="list"] [data-fm="message"] {
 }
 
 body.fm-app #app > [data-fm="list"] [data-fm="message"]:hover {
-	background: rgba(255, 255, 255, 0.04);
+	background: var(--fm-hover);
 }
 
 /* ── Action toolbars: folder-level above the list, message-level in the
@@ -640,7 +679,7 @@ body.fm-app #app > [data-fm="pager"] [data-fm="month"] {
 	border: 0;
 	border-left: 3px solid var(--fm-accent);
 	border-radius: 3px;
-	background: rgba(74, 144, 226, 0.25);
+	background: var(--fm-accent-soft);
 	color: var(--fm-text);
 	font: inherit;
 	font-size: 0.72rem;
@@ -698,4 +737,407 @@ body.fm-app #app button[type="submit"] {
    spacing comes from the shared screen padding above. */
 body.fm-app #app > pre {
 	flex: 0 0 auto;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Overhaul: real mail-client chrome.
+
+   Thunderbird-inspired: a compact top bar instead of a row of equal
+   buttons, a full-height reading pane, a compose window with proper header
+   rows, and a Settings hub that gathers S/MIME, PGP, identities and accounts
+   where users expect them.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Top bar ── */
+body.fm-app #app > [data-fm="nav"] {
+	align-items: center;
+	gap: 0.1rem;
+}
+
+#app [data-fm="nav-brand"] {
+	display: flex;
+	align-items: center;
+	gap: 0.45rem;
+	margin-right: 0.75rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	color: var(--fm-text);
+}
+
+#app [data-fm="nav-brand"] [data-fm="brand-mark"] {
+	display: inline-grid;
+	place-items: center;
+	width: 1.5rem;
+	height: 1.5rem;
+	border-radius: 7px;
+	background: linear-gradient(135deg, var(--fm-accent), var(--fm-teal));
+	color: #fff;
+	font-size: 0.95rem;
+	font-weight: 800;
+}
+
+#app [data-fm="nav-spacer"] {
+	flex: 1 1 auto;
+}
+
+/* Compose is the one prominent action in the bar. */
+body.fm-app #app > [data-fm="nav"] button[data-fm="nav-compose"] {
+	margin-left: 0.35rem;
+	border-color: transparent;
+	background: var(--fm-accent);
+	color: #fff;
+	font-weight: 600;
+}
+
+body.fm-app #app > [data-fm="nav"] button[data-fm="nav-compose"]:hover {
+	background: var(--fm-accent-strong);
+}
+
+/* ── Reading pane ── */
+body.fm-app #app > [data-fm="message-bar"] {
+	padding: 0.55rem 1.25rem;
+	border-bottom: 1px solid var(--fm-border);
+}
+
+#app [data-fm="headers"] {
+	padding-bottom: 0.6rem;
+	border-bottom: 1px solid var(--fm-border);
+}
+
+#app [data-fm="headers"] h2[data-fm="subject"] {
+	font-size: 1.2rem;
+	line-height: 1.3;
+}
+
+#app [data-fm="headers"] [data-fm="from"] {
+	color: var(--fm-text);
+}
+
+/* Sender avatar chip, Thunderbird-style. */
+#app [data-fm="headers"] [data-fm="sender-chip"] {
+	display: inline-grid;
+	place-items: center;
+	width: 2.25rem;
+	height: 2.25rem;
+	margin-right: 0.6rem;
+	border-radius: 50%;
+	background: var(--fm-accent-soft);
+	color: var(--fm-accent);
+	font-weight: 700;
+	vertical-align: middle;
+}
+
+/* The message body. `background: #fff` is intentional: HTML mail is authored
+   for a light canvas, and every mainstream client keeps it white even in a
+   dark chrome. */
+#app [data-fm="body"] {
+	flex: 0 0 auto;
+	width: 100%;
+	height: max(26rem, 68vh);
+	border: 1px solid var(--fm-border);
+	border-radius: 8px;
+	background: #fff;
+}
+
+#app [data-fm="body-plain"] {
+	flex: 0 0 auto;
+	margin: 0.75rem 0 0;
+	padding: 1rem 1.1rem;
+	border: 1px solid var(--fm-border);
+	border-radius: 8px;
+	background: var(--fm-surface);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.9rem;
+	line-height: 1.5;
+}
+
+/* Remote-image guard bar, shown until the user chooses to load them. */
+#app [data-fm="image-bar"] {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	margin: 0.6rem 0 0;
+	padding: 0.5rem 0.75rem;
+	border: 1px solid var(--fm-border-strong);
+	border-radius: 8px;
+	background: var(--fm-elevated);
+	color: var(--fm-muted);
+	font-size: 0.85rem;
+}
+
+#app [data-fm="image-bar"] button {
+	margin-left: auto;
+	padding: 0.3rem 0.7rem;
+	border: 1px solid transparent;
+	border-radius: 7px;
+	background: var(--fm-accent);
+	color: #fff;
+	font: inherit;
+	font-size: 0.82rem;
+	cursor: pointer;
+}
+
+/* ── Attachments: cards with a real download affordance ── */
+#app [data-fm="attachments"] {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin: 0.9rem 0 0;
+}
+
+#app [data-fm="attachment"] {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	padding: 0.5rem 0.75rem;
+	border: 1px solid var(--fm-border);
+	border-radius: 8px;
+	background: var(--fm-surface);
+}
+
+#app [data-fm="attachment"] [data-fm="attachment-icon"] {
+	display: inline-grid;
+	place-items: center;
+	width: 2rem;
+	height: 2rem;
+	border-radius: 6px;
+	background: var(--fm-accent-soft);
+	color: var(--fm-accent);
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+}
+
+#app [data-fm="attachment"] [data-fm="attachment-meta"] {
+	display: flex;
+	flex-direction: column;
+	line-height: 1.25;
+}
+
+#app [data-fm="attachment"] [data-fm="name"] {
+	color: var(--fm-text);
+	font-size: 0.88rem;
+}
+
+#app [data-fm="attachment"] [data-fm="size"] {
+	color: var(--fm-muted);
+	font-size: 0.75rem;
+}
+
+#app [data-fm="attachment"] a[data-fm="download"] {
+	margin-left: 0.25rem;
+	padding: 0.3rem 0.6rem;
+	border-radius: 7px;
+	background: var(--fm-accent-soft);
+	color: var(--fm-accent);
+	font-size: 0.8rem;
+	font-weight: 600;
+	text-decoration: none;
+}
+
+#app [data-fm="attachment"] a[data-fm="download"]:hover {
+	background: var(--fm-accent);
+	color: #fff;
+}
+
+/* ── Compose window ── */
+#app [data-fm="compose"] {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
+	margin-top: 0.75rem;
+	border: 1px solid var(--fm-border);
+	border-radius: var(--fm-radius);
+	background: var(--fm-surface);
+	overflow: hidden;
+}
+
+#app [data-fm="compose-head"] {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.6rem 0.9rem;
+	border-bottom: 1px solid var(--fm-border);
+	background: var(--fm-panel);
+}
+
+#app [data-fm="compose-head"] [data-fm="compose-title"] {
+	font-weight: 600;
+}
+
+#app [data-fm="compose-fields"] {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	align-items: center;
+	gap: 0;
+	border-bottom: 1px solid var(--fm-border);
+}
+
+#app [data-fm="compose-fields"] label {
+	display: contents;
+}
+
+#app [data-fm="compose-fields"] label[hidden] {
+	display: none;
+}
+
+#app [data-fm="compose-fields"] [data-fm="field-label"] {
+	padding: 0.5rem 0.4rem 0.5rem 0.9rem;
+	color: var(--fm-muted);
+	font-size: 0.85rem;
+}
+
+#app [data-fm="compose-fields"] input {
+	width: 100%;
+	margin: 0;
+	padding: 0.5rem 0.6rem;
+	border: 0;
+	border-bottom: 1px solid var(--fm-border);
+	border-radius: 0;
+	background: transparent;
+	color: var(--fm-text);
+	font: inherit;
+}
+
+#app [data-fm="compose-fields"] input:focus {
+	outline: none;
+	background: var(--fm-hover);
+}
+
+#app [data-fm="compose"] textarea[data-fm="compose-body"] {
+	flex: 1 1 auto;
+	min-height: 16rem;
+	margin: 0;
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	font-family: inherit;
+	font-size: 0.95rem;
+	line-height: 1.5;
+	resize: none;
+}
+
+#app [data-fm="compose-foot"] {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.6rem 0.9rem;
+	border-top: 1px solid var(--fm-border);
+	background: var(--fm-panel);
+}
+
+#app [data-fm="compose-foot"] [data-fm="spacer"] {
+	flex: 1 1 auto;
+}
+
+#app button[data-fm="send"] {
+	padding: 0.5rem 1.2rem;
+	border: 0;
+	border-radius: 7px;
+	background: var(--fm-accent);
+	color: #fff;
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+#app button[data-fm="send"]:hover {
+	background: var(--fm-accent-strong);
+}
+
+#app button[data-fm="compose-toggle"] {
+	padding: 0.3rem 0.6rem;
+	border: 1px solid var(--fm-border);
+	border-radius: 7px;
+	background: transparent;
+	color: var(--fm-muted);
+	font: inherit;
+	font-size: 0.8rem;
+	cursor: pointer;
+}
+
+/* ── Settings hub ── */
+body.fm-app #app > [data-fm="settings-layout"] {
+	display: grid;
+	grid-template-columns: minmax(180px, 220px) 1fr;
+	gap: 0;
+	flex: 1 1 auto;
+	min-height: 0;
+	padding: 0;
+}
+
+#app [data-fm="settings-menu"] {
+	margin: 0;
+	padding: 0.75rem 0.5rem;
+	background: var(--fm-panel);
+	border-right: 1px solid var(--fm-border);
+	overflow-y: auto;
+}
+
+#app [data-fm="settings-menu"] button {
+	display: block;
+	width: 100%;
+	margin-bottom: 0.15rem;
+	padding: 0.5rem 0.7rem;
+	border: 1px solid transparent;
+	border-radius: 7px;
+	background: transparent;
+	color: var(--fm-muted);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+#app [data-fm="settings-menu"] button:hover {
+	background: var(--fm-hover);
+	color: var(--fm-text);
+}
+
+#app [data-fm="settings-menu"] button[aria-current="page"] {
+	background: var(--fm-accent-soft);
+	color: var(--fm-text);
+}
+
+#app [data-fm="settings-panel"] {
+	padding: 1rem 1.25rem;
+	overflow-y: auto;
+}
+
+/* ── Colour accents ── */
+#app [data-fm="message"][data-unseen] [data-fm="from"] {
+	color: var(--fm-accent);
+	font-weight: 700;
+}
+
+#app [data-fm="message"][data-unseen] {
+	box-shadow: inset 3px 0 0 var(--fm-accent);
+}
+
+#app [data-fm="folder"][data-current] {
+	background: var(--fm-accent-soft);
+}
+
+/* Theme toggle buttons in Settings. */
+#app [data-fm="theme-choices"] {
+	display: flex;
+	gap: 0.5rem;
+	margin: 0.5rem 0 1rem;
+}
+
+#app [data-fm="theme-choices"] button {
+	padding: 0.4rem 0.9rem;
+	border: 1px solid var(--fm-border-strong);
+	border-radius: 7px;
+	background: var(--fm-surface);
+	color: var(--fm-text);
+	font: inherit;
+	cursor: pointer;
+}
+
+#app [data-fm="theme-choices"] button[aria-pressed="true"] {
+	border-color: var(--fm-accent);
+	background: var(--fm-accent-soft);
+	color: var(--fm-accent);
+	font-weight: 600;
 }

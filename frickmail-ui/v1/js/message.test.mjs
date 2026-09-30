@@ -5,8 +5,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	attachmentBadge,
 	formatAddress,
 	formatAddresses,
+	formatFileSize,
 	loadMessage,
 	renderAttachments,
 	renderMessageHeader,
@@ -55,12 +57,41 @@ describe('renderAttachments', () => {
 		assert.equal(renderAttachments({ attachments: null }), '');
 	});
 
-	it('escapes file names and keeps indexes', () => {
-		const html = renderAttachments({
-			attachments: [{ fileName: 'a"b.pdf', mimeIndex: '2', estimatedSize: 9 }]
-		});
+	it('escapes file names and links each part to the download endpoint', () => {
+		const html = renderAttachments(
+			{ attachments: [{ fileName: 'a"b.pdf', mimeIndex: '2', estimatedSize: 2048 }] },
+			{ folder: 'INBOX', uid: 7, accountId: 3 }
+		);
 		assert.ok(html.includes('a&quot;b.pdf'));
-		assert.ok(html.includes('data-index="2"'));
+		assert.ok(html.includes('data-fm="download"'));
+		assert.ok(html.includes('href="/api/frickmail/v1/messages/7/attachments/2?'));
+		assert.ok(html.includes('folder=INBOX'));
+		assert.ok(html.includes('account_id=3'));
+		assert.ok(html.includes('2.0 KB'));
+		assert.ok(!html.includes('a"b.pdf'));
+	});
+
+	it('shows an extension badge', () => {
+		const html = renderAttachments(
+			{ attachments: [{ fileName: 'report.PDF', mimeIndex: '2' }] },
+			{ folder: 'INBOX', uid: 1 }
+		);
+		assert.ok(html.includes('data-fm="attachment-icon">PDF<'));
+	});
+});
+
+describe('formatFileSize / attachmentBadge', () => {
+	it('formats byte counts', () => {
+		assert.equal(formatFileSize(0), '');
+		assert.equal(formatFileSize(512), '512 B');
+		assert.equal(formatFileSize(2048), '2.0 KB');
+		assert.equal(formatFileSize(5 * 1024 * 1024), '5.0 MB');
+	});
+
+	it('derives a bounded, escaped badge', () => {
+		assert.equal(attachmentBadge('a.tar.gz'), 'GZ');
+		assert.equal(attachmentBadge('noext'), 'FILE');
+		assert.equal(attachmentBadge('<img>.png'), 'PNG');
 	});
 });
 

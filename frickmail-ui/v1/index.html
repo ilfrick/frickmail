@@ -33,8 +33,9 @@ import {
 	renderContactForm,
 	renderContacts
 } from './js/contacts.js';
-import { collectComposePayload, loadIdentities as loadComposeIdentities, renderComposeForm, sendMessage } from './js/compose.js';
+import { collectComposePayload, loadIdentities as loadComposeIdentities, renderComposeForm, sendMessage, wireComposeToggle } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
+import { readerDocument, rewriteCidSources } from './js/reader.js';
 import {
 	actionErrorMessage,
 	buildActionSeed,
@@ -125,31 +126,18 @@ const api = new ApiClient('');
 const root = document.getElementById('app');
 
 function nav(active) {
-	const inbox = active === 'inbox' ? ' aria-current="page"' : '';
-	const accounts = active === 'accounts' ? ' aria-current="page"' : '';
-	const settings = active === 'settings' ? ' aria-current="page"' : '';
-	const tasks = active === 'tasks' ? ' aria-current="page"' : '';
-	const search = active === 'search' ? ' aria-current="page"' : '';
-	const unified = active === 'unified' ? ' aria-current="page"' : '';
-	const smime = active === 'smime' ? ' aria-current="page"' : '';
-	const rules = active === 'rules' ? ' aria-current="page"' : '';
-	const calendar = active === 'calendar' ? ' aria-current="page"' : '';
-	const contacts = active === 'contacts' ? ' aria-current="page"' : '';
-	const identities = active === 'identities' ? ' aria-current="page"' : '';
-	const compose = active === 'compose' ? ' aria-current="page"' : '';
+	const current = (name) => (active === name ? ' aria-current="page"' : '');
 	return '<nav data-fm="nav">'
-		+ '<button type="button" data-fm="nav-inbox"' + inbox + '>Inbox</button>'
-		+ '<button type="button" data-fm="nav-accounts"' + accounts + '>Accounts</button>'
-		+ '<button type="button" data-fm="nav-tasks"' + tasks + '>Tasks</button>'
-		+ '<button type="button" data-fm="nav-search"' + search + '>Search</button>'
-		+ '<button type="button" data-fm="nav-unified"' + unified + '>Unified</button>'
-		+ '<button type="button" data-fm="nav-smime"' + smime + '>S/MIME</button>'
-		+ '<button type="button" data-fm="nav-rules"' + rules + '>Rules</button>'
-		+ '<button type="button" data-fm="nav-contacts"' + contacts + '>Contacts</button>'
-		+ '<button type="button" data-fm="nav-identities"' + identities + '>Identities</button>'
-		+ '<button type="button" data-fm="nav-calendar"' + calendar + '>Calendar</button>'
-		+ '<button type="button" data-fm="nav-settings"' + settings + '>Settings</button>'
-		+ '<button type="button" data-fm="nav-compose"' + compose + '>Compose</button>'
+		+ '<span data-fm="nav-brand"><span data-fm="brand-mark">F</span>Frickmail</span>'
+		+ '<button type="button" data-fm="nav-inbox"' + current('inbox') + '>Inbox</button>'
+		+ '<button type="button" data-fm="nav-unified"' + current('unified') + '>Unified</button>'
+		+ '<button type="button" data-fm="nav-search"' + current('search') + '>Search</button>'
+		+ '<button type="button" data-fm="nav-calendar"' + current('calendar') + '>Calendar</button>'
+		+ '<button type="button" data-fm="nav-contacts"' + current('contacts') + '>Contacts</button>'
+		+ '<button type="button" data-fm="nav-tasks"' + current('tasks') + '>Tasks</button>'
+		+ '<span data-fm="nav-spacer"></span>'
+		+ '<button type="button" data-fm="nav-compose"' + current('compose') + '>Compose</button>'
+		+ '<button type="button" data-fm="nav-settings"' + current('settings') + '>Settings</button>'
 		+ '<button type="button" data-fm="nav-logout">Sign out</button>'
 		+ '</nav>';
 }
@@ -199,7 +187,7 @@ function wireNav() {
 		calendarButton.addEventListener('click', () => showCalendar());
 	}
 	if (settingsButton) {
-		settingsButton.addEventListener('click', showSettings);
+		settingsButton.addEventListener('click', () => showSettings('general'));
 	}
 	if (composeButton) {
 		composeButton.addEventListener('click', () => showCompose());
@@ -373,29 +361,9 @@ async function showUnifiedInbox() {
 	}
 }
 
+/// Opens the S/MIME section of the Settings hub.
 async function showSmime() {
-	try {
-		const data = await loadSmimeCerts(api);
-		root.innerHTML = nav('smime')
-			+ '<h1 data-fm="title">S/MIME certificates</h1>'
-			+ renderSmimeCerts(data)
-			+ renderSmimeImportForms()
-			+ '<p data-fm="status"></p>';
-		wireNav();
-		const certForm = root.querySelector('[data-fm="import-cert"]');
-		if (certForm) {
-			certForm.addEventListener('submit', onSmimeCertSubmit);
-		}
-		const p12Form = root.querySelector('[data-fm="import-p12"]');
-		if (p12Form) {
-			p12Form.addEventListener('submit', onSmimeP12Submit);
-		}
-		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
-			button.addEventListener('click', () => onSmimeDelete(button.getAttribute('data-id')));
-		}
-	} catch (error) {
-		root.innerHTML = '<p>Cannot load S/MIME certificates.</p>';
-	}
+	return showSettings('smime');
 }
 
 function smimeStatus(text) {
@@ -653,35 +621,9 @@ async function onEventDelete() {
 
 let rulesAccountId = 0;
 
+/// Opens the Rules section of the Settings hub.
 async function showRules() {
-	try {
-		const session = await api.bootstrap();
-		rulesAccountId = session && session.selected_account_id
-			? session.selected_account_id
-			: 0;
-		const data = await loadRules(
-			api,
-			rulesAccountId ? { accountId: rulesAccountId } : undefined
-		);
-		root.innerHTML = nav('rules')
-			+ '<h1 data-fm="title">Rules</h1>'
-			+ renderRuleForm()
-			+ renderRules(data)
-			+ '<p data-fm="status"></p>';
-		wireNav();
-		const form = root.querySelector('[data-fm="add"]');
-		if (form) {
-			form.addEventListener('submit', onRuleAdd);
-		}
-		for (const button of root.querySelectorAll('[data-fm="toggle"]')) {
-			button.addEventListener('click', () => onRuleToggle(button.getAttribute('data-id')));
-		}
-		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
-			button.addEventListener('click', () => onRuleDelete(button.getAttribute('data-id')));
-		}
-	} catch (error) {
-		root.innerHTML = '<p>Cannot load rules.</p>';
-	}
+	return showSettings('rules');
 }
 
 function rulesStatus(text) {
@@ -729,32 +671,9 @@ async function onRuleDelete(id) {
 
 let identitiesAccountId = 0;
 
+/// Opens the Identities section of the Settings hub.
 async function showIdentities() {
-	try {
-		const session = await api.bootstrap();
-		identitiesAccountId = session && session.selected_account_id
-			? session.selected_account_id
-			: 0;
-		const data = await loadIdentities(api, identitiesAccountId);
-		root.innerHTML = nav('identities')
-			+ '<h1 data-fm="title">Sender identities</h1>'
-			+ renderIdentityForm()
-			+ renderIdentities(data)
-			+ '<p data-fm="status"></p>';
-		wireNav();
-		const form = root.querySelector('[data-fm="add"]');
-		if (form) {
-			form.addEventListener('submit', onIdentityAdd);
-		}
-		for (const button of root.querySelectorAll('[data-fm="default"]')) {
-			button.addEventListener('click', () => onIdentityDefault(button.getAttribute('data-id')));
-		}
-		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
-			button.addEventListener('click', () => onIdentityDelete(button.getAttribute('data-id')));
-		}
-	} catch (error) {
-		root.innerHTML = '<p>Cannot load sender identities.</p>';
-	}
+	return showSettings('identities');
 }
 
 function identitiesStatus(text) {
@@ -801,30 +720,245 @@ async function onIdentityDelete(id) {
 	}
 }
 
-async function showSettings() {
+/// The Settings hub: a left menu of sections and a panel on the right, so
+/// S/MIME, OpenPGP, identities, accounts and filter rules live where users
+/// expect them instead of as separate top-level buttons.
+const SETTINGS_SECTIONS = [
+	['general', 'General'],
+	['appearance', 'Appearance'],
+	['accounts', 'Accounts'],
+	['identities', 'Identities'],
+	['smime', 'S/MIME'],
+	['pgp', 'OpenPGP'],
+	['security', 'Security'],
+	['rules', 'Rules']
+];
+
+/// Which account an account-editor panel is editing, if any. Reset by the hub
+/// after use so re-opening Accounts shows the add form.
+let settingsEditAccountId = null;
+
+function isSettingsSection(value) {
+	return SETTINGS_SECTIONS.some((entry) => entry[0] === value);
+}
+
+async function showSettings(section) {
+	const current = isSettingsSection(section) ? section : 'general';
+	const menu = SETTINGS_SECTIONS.map(
+		([id, label]) =>
+			'<button type="button" data-fm="settings-tab" data-section="' + id + '"'
+			+ (id === current ? ' aria-current="page"' : '')
+			+ '>'
+			+ label
+			+ '</button>'
+	).join('');
+	let panel;
 	try {
+		panel = await renderSettingsPanel(current);
+	} catch (error) {
+		panel = '<p>Cannot load this settings section.</p>';
+	}
+	root.innerHTML = nav('settings')
+		+ '<div data-fm="settings-layout">'
+		+ '<nav data-fm="settings-menu">' + menu + '</nav>'
+		+ '<div data-fm="settings-panel">' + panel + '</div>'
+		+ '</div>';
+	wireNav();
+	for (const button of root.querySelectorAll('[data-fm="settings-tab"]')) {
+		button.addEventListener('click', () => showSettings(button.getAttribute('data-section')));
+	}
+	await wireSettingsPanel(current);
+}
+
+/// Builds one settings panel. Kept as a table of small builders so adding a
+/// section is one entry in `SETTINGS_SECTIONS` plus one branch here.
+async function renderSettingsPanel(section) {
+	if (section === 'appearance') {
+		return '<h2 data-fm="subtitle">Appearance</h2>'
+			+ '<p>Choose the interface theme.</p>'
+			+ '<div data-fm="theme-choices">'
+			+ '<button type="button" data-theme="dark"'
+			+ (currentTheme() === 'dark' ? ' aria-pressed="true"' : '')
+			+ '>Dark</button>'
+			+ '<button type="button" data-theme="light"'
+			+ (currentTheme() === 'light' ? ' aria-pressed="true"' : '')
+			+ '>Light</button>'
+			+ '</div>';
+	}
+	if (section === 'general') {
 		const data = await loadPreferences(api);
-		let totp = '';
+		return '<h2 data-fm="subtitle">Preferences</h2>'
+			+ renderPreferencesForm(data.preferences)
+			+ '<p data-fm="status"></p>';
+	}
+	if (section === 'accounts') {
+		const data = await loadAccounts(api);
+		const accounts = data && Array.isArray(data.accounts) ? data.accounts : [];
+		const editing = settingsEditAccountId
+			? accounts.find((account) => String(account.id) === String(settingsEditAccountId)) || null
+			: null;
+		return '<h2 data-fm="subtitle">Mail accounts</h2>'
+			+ renderAccounts(data)
+			+ '<h2 data-fm="subtitle">' + (editing ? 'Edit account' : 'Add account') + '</h2>'
+			+ renderAccountEditor(editing)
+			+ '<p data-fm="status"></p>';
+	}
+	if (section === 'identities') {
+		const session = await api.bootstrap();
+		identitiesAccountId = session && session.selected_account_id
+			? session.selected_account_id
+			: 0;
+		const data = await loadIdentities(api, identitiesAccountId);
+		return '<h2 data-fm="subtitle">Sender identities</h2>'
+			+ renderIdentityForm()
+			+ renderIdentities(data)
+			+ '<p data-fm="status"></p>';
+	}
+	if (section === 'smime') {
+		const data = await loadSmimeCerts(api);
+		return '<h2 data-fm="subtitle">S/MIME certificates</h2>'
+			+ renderSmimeCerts(data)
+			+ renderSmimeImportForms()
+			+ '<p data-fm="status"></p>';
+	}
+	if (section === 'pgp') {
+		// Honest placeholder: the native keyring exists server-side (key
+		// generation, import and signing are native), but the v1 API has no
+		// key-management routes yet, so there is nothing to show.
+		return '<h2 data-fm="subtitle">OpenPGP</h2>'
+			+ '<p data-fm="empty">OpenPGP keys are held in the account keyring on the '
+			+ 'server. Key management — generate, import, list and revoke — is not '
+			+ 'exposed in this interface yet.</p>';
+	}
+	if (section === 'security') {
+		let totp = '<p data-fm="empty">Two-factor status unavailable.</p>';
 		try {
 			const status = await loadTotpStatus(api);
-			totp = '<h2 data-fm="subtitle">Two-factor authentication</h2>'
-				+ '<div data-fm="totp-wrap">'
-				+ renderTotpStatus(status && status.enabled)
-				+ '</div>';
+			totp = renderTotpStatus(status && status.enabled);
 		} catch (error) {
 			void error;
 		}
-		root.innerHTML = nav('settings')
-			+ '<h1 data-fm="title">Settings</h1>'
-			+ renderPreferencesForm(data.preferences)
-			+ totp
-			+ renderPasswordForm();
-		wireNav();
+		return '<h2 data-fm="subtitle">Two-factor authentication</h2>'
+			+ '<div data-fm="totp-wrap">' + totp + '</div>'
+			+ '<h2 data-fm="subtitle">Password</h2>'
+			+ renderPasswordForm()
+			+ '<p data-fm="status"></p>';
+	}
+	if (section === 'rules') {
+		const session = await api.bootstrap();
+		rulesAccountId = session && session.selected_account_id
+			? session.selected_account_id
+			: 0;
+		const data = await loadRules(
+			api,
+			rulesAccountId ? { accountId: rulesAccountId } : undefined
+		);
+		return '<h2 data-fm="subtitle">Filter rules</h2>'
+			+ renderRuleForm()
+			+ renderRules(data)
+			+ '<p data-fm="status"></p>';
+	}
+	return '';
+}
+
+/// Wires the interactive parts of the currently shown panel.
+async function wireSettingsPanel(section) {
+	if (section === 'appearance') {
+		for (const button of root.querySelectorAll('[data-fm="theme-choices"] button')) {
+			button.addEventListener('click', () => {
+				applyTheme(button.getAttribute('data-theme'));
+				for (const other of root.querySelectorAll('[data-fm="theme-choices"] button')) {
+					other.setAttribute(
+						'aria-pressed',
+						other.getAttribute('data-theme') === currentTheme() ? 'true' : 'false'
+					);
+				}
+			});
+		}
+		return;
+	}
+	if (section === 'general') {
 		wireSettingsForm();
+		return;
+	}
+	if (section === 'accounts') {
+		wireAccounts();
+		return;
+	}
+	if (section === 'identities') {
+		const form = root.querySelector('[data-fm="add"]');
+		if (form) {
+			form.addEventListener('submit', onIdentityAdd);
+		}
+		for (const button of root.querySelectorAll('[data-fm="default"]')) {
+			button.addEventListener('click', () => onIdentityDefault(button.getAttribute('data-id')));
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onIdentityDelete(button.getAttribute('data-id')));
+		}
+		return;
+	}
+	if (section === 'smime') {
+		const certForm = root.querySelector('[data-fm="import-cert"]');
+		if (certForm) {
+			certForm.addEventListener('submit', onSmimeCertSubmit);
+		}
+		const p12Form = root.querySelector('[data-fm="import-p12"]');
+		if (p12Form) {
+			p12Form.addEventListener('submit', onSmimeP12Submit);
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onSmimeDelete(button.getAttribute('data-id')));
+		}
+		return;
+	}
+	if (section === 'security') {
 		wireTotp();
 		wirePasswordForm();
+		return;
+	}
+	if (section === 'rules') {
+		const form = root.querySelector('[data-fm="add"]');
+		if (form) {
+			form.addEventListener('submit', onRuleAdd);
+		}
+		for (const button of root.querySelectorAll('[data-fm="toggle"]')) {
+			button.addEventListener('click', () => onRuleToggle(button.getAttribute('data-id')));
+		}
+		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
+			button.addEventListener('click', () => onRuleDelete(button.getAttribute('data-id')));
+		}
+	}
+}
+
+/// Current theme: the `data-fm-theme` attribute on `<html>`, defaulting to
+/// dark. Pure read.
+function currentTheme() {
+	return document.documentElement.getAttribute('data-fm-theme') === 'light' ? 'light' : 'dark';
+}
+
+/// Applies a theme by attribute and remembers it locally. The legacy theme
+/// model stores this server-side; adopting that (and the Frickmail theme
+/// switcher) is a follow-up, so this is deliberately a local preference.
+function applyTheme(name) {
+	const theme = name === 'light' ? 'light' : 'dark';
+	document.documentElement.setAttribute('data-fm-theme', theme);
+	try {
+		window.localStorage.setItem('fm-theme', theme);
 	} catch (error) {
-		root.innerHTML = '<p>Cannot load settings.</p>';
+		void error;
+	}
+}
+
+/// Restores the remembered theme at boot. Called once from the shell.
+function restoreTheme() {
+	try {
+		const stored = window.localStorage.getItem('fm-theme');
+		if (stored === 'light' || stored === 'dark') {
+			document.documentElement.setAttribute('data-fm-theme', stored);
+		}
+	} catch (error) {
+		void error;
 	}
 }
 
@@ -864,7 +998,7 @@ async function onTotpConfirm(event) {
 	event.preventDefault();
 	try {
 		await confirmTotp(api, collectTotpCode(root));
-		await showSettings();
+		await showSettings('security');
 	} catch (error) {
 		showSettingsStatus(error && error.message ? error.message : 'Confirmation failed.');
 	}
@@ -874,7 +1008,7 @@ async function onTotpDisable(event) {
 	event.preventDefault();
 	try {
 		await disableTotp(api, collectTotpCode(root));
-		await showSettings();
+		await showSettings('security');
 	} catch (error) {
 		showSettingsStatus(error && error.message ? error.message : 'Disable failed.');
 	}
@@ -909,12 +1043,8 @@ function wireSettingsForm() {
 async function onSettingsSubmit(event) {
 	event.preventDefault();
 	try {
-		const saved = await savePreferences(api, collectPreferencesPatch(root));
-		root.innerHTML = nav('settings')
-			+ '<h1 data-fm="title">Settings</h1>'
-			+ renderPreferencesForm(saved.preferences);
-		wireNav();
-		wireSettingsForm();
+		await savePreferences(api, collectPreferencesPatch(root));
+		await showSettings('general');
 		showSettingsStatus('Saved.');
 	} catch (error) {
 		showSettingsStatus(error && error.message ? error.message : 'Save failed.');
@@ -929,6 +1059,7 @@ function showSettingsStatus(text) {
 }
 
 async function showCompose(seed) {
+	const values = seed && typeof seed === 'object' ? seed : {};
 	let identities = [];
 	try {
 		const session = await api.bootstrap();
@@ -941,13 +1072,13 @@ async function showCompose(seed) {
 		void error;
 	}
 	root.innerHTML = nav('compose')
-		+ '<h1 data-fm="title">Compose</h1>'
-		+ renderComposeForm(seed, identities);
+		+ renderComposeForm(values, identities, { replyAll: !!values.cc });
 	wireNav();
 	const form = root.querySelector('[data-fm="compose"]');
 	if (form) {
 		form.addEventListener('submit', onComposeSubmit);
 	}
+	wireComposeToggle(root);
 }
 
 async function onComposeSubmit(event) {
@@ -963,6 +1094,10 @@ async function onComposeSubmit(event) {
 	}
 }
 
+/// Remembers, per message, whether the reader chose to load remote images, so
+/// the toggle survives the re-render a flag change triggers.
+const remoteImageChoice = new Map();
+
 async function showMessage(folder, uid, options) {
 	const settings = options || {};
 	const back = typeof settings.back === 'function'
@@ -971,14 +1106,37 @@ async function showMessage(folder, uid, options) {
 	try {
 		const message = await loadMessage(api, folder, uid, { accountId: settings.accountId });
 		const selected = selectMessageBody(message);
+		const messageKey = folder + ':' + uid;
+		const allowRemote = remoteImageChoice.get(messageKey) === true;
+		const context = { folder, uid: Number(uid), accountId: settings.accountId };
+
 		let viewer = '';
+		let imageBar = '';
 		if (selected.kind === 'html') {
+			// Rewrite inline (`cid:`) images to the attachment endpoint, then
+			// decide whether remote images load now or wait for a click.
+			const html = rewriteCidSources(selected.body, message.attachments, context);
+			const prepared = readerDocument(html, { allowRemote });
 			viewer = '<iframe data-fm="body" sandbox="" title="Message body"></iframe>';
+			if (prepared.blocked > 0) {
+				imageBar = '<div data-fm="image-bar">'
+					+ '<span>Remote images are blocked to protect your privacy.</span>'
+					+ '<button type="button" data-fm="show-images">Show images</button>'
+					+ '</div>';
+			}
+			const frame = document.createElement('iframe');
+			frame.setAttribute('data-fm', 'body');
+			frame.setAttribute('sandbox', '');
+			frame.setAttribute('title', 'Message body');
+			frame.srcdoc = prepared.document;
+			viewer = frame.outerHTML;
 		} else {
 			const pre = document.createElement('pre');
+			pre.setAttribute('data-fm', 'body-plain');
 			pre.textContent = selected.body;
 			viewer = pre.outerHTML;
 		}
+
 		let folders = { folders: [] };
 		try {
 			folders = await loadFolders(api);
@@ -993,14 +1151,18 @@ async function showMessage(folder, uid, options) {
 			+ '</div>'
 			+ renderMessageToolbar({ folder, folders, message })
 			+ renderMessageHeader(message)
+			+ imageBar
 			+ viewer
-			+ renderAttachments(message);
+			+ renderAttachments(message, context);
 		wireNav();
-		const frame = root.querySelector('[data-fm="body"]');
-		if (frame && selected.kind === 'html') {
-			frame.srcdoc = selected.body;
-		}
 		root.querySelector('[data-fm="back"]').addEventListener('click', () => back());
+		const showImages = root.querySelector('[data-fm="show-images"]');
+		if (showImages) {
+			showImages.addEventListener('click', () => {
+				remoteImageChoice.set(messageKey, true);
+				showMessage(folder, uid, { back, accountId: settings.accountId });
+			});
+		}
 		wireMessageActions(folder, uid, message, folders, back);
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the message.</p>';
@@ -1108,24 +1270,12 @@ async function enterApp() {
 	await showMailbox('INBOX');
 }
 
+/// Opens the Accounts section of the Settings hub, optionally pre-selecting
+/// an account to edit. Kept as the single entry point so every account action
+/// returns to the hub instead of a standalone screen.
 async function showAccounts(editingId) {
-	try {
-		const data = await loadAccounts(api);
-		const accounts = data && Array.isArray(data.accounts) ? data.accounts : [];
-		const editing = editingId
-			? accounts.find((account) => String(account.id) === String(editingId)) || null
-			: null;
-		root.innerHTML = nav('accounts')
-			+ '<h1 data-fm="title">Mail accounts</h1>'
-			+ renderAccounts(data)
-			+ '<h2 data-fm="subtitle">' + (editing ? 'Edit account' : 'Add account') + '</h2>'
-			+ renderAccountEditor(editing)
-			+ '<p data-fm="status"></p>';
-		wireNav();
-		wireAccounts();
-	} catch (error) {
-		root.innerHTML = '<p>Cannot load mail accounts.</p>';
-	}
+	settingsEditAccountId = editingId === undefined ? null : editingId || null;
+	return showSettings('accounts');
 }
 
 function wireAccounts() {
@@ -1260,6 +1410,8 @@ function wireFolderActions(folder) {
 		});
 	}
 }
+
+restoreTheme();
 
 try {
 	const session = await api.bootstrap();

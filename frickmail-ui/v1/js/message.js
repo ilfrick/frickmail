@@ -7,6 +7,33 @@
 // below, never via innerHTML. All pure helpers are unit-tested.
 
 import { escapeHtml, formatTimestamp } from './mailbox.js';
+import { attachmentUrl } from './reader.js';
+
+/// Formats a byte count for an attachment chip. Pure.
+export function formatFileSize(bytes) {
+	const size = Number(bytes);
+	if (!Number.isFinite(size) || size <= 0) {
+		return '';
+	}
+	if (size < 1024) {
+		return size + ' B';
+	}
+	if (size < 1024 * 1024) {
+		return (size / 1024).toFixed(size < 10 * 1024 ? 1 : 0) + ' KB';
+	}
+	return (size / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+/// A short badge for an attachment card: the file extension when there is
+/// one, else a generic label. Pure.
+export function attachmentBadge(name) {
+	const text = String(name || '');
+	const dot = text.lastIndexOf('.');
+	if (dot > 0 && dot < text.length - 1) {
+		return escapeHtml(text.slice(dot + 1).slice(0, 4).toUpperCase());
+	}
+	return 'FILE';
+}
 
 /// Formats one address entry of an email collection. Pure.
 export function formatAddress(entry) {
@@ -32,41 +59,67 @@ export function formatAddresses(collection) {
 		.join(', ');
 }
 
+/// First letter (or initials) of an address for the sender chip. Pure.
+export function senderInitials(message) {
+	const first = message && Array.isArray(message.from) ? message.from[0] : null;
+	const name = first && typeof first === 'object'
+		? (first.name || first.email || '')
+		: '';
+	const text = String(name).replace(/[^A-Za-z0-9 ]/g, ' ').trim();
+	if (!text) {
+		return '?';
+	}
+	const words = text.split(/\s+/).filter(Boolean);
+	if (words.length === 1) {
+		return words[0].slice(0, 2).toUpperCase();
+	}
+	return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+}
+
 /// Renders the message header block. Pure.
 export function renderMessageHeader(message) {
 	const subject = escapeHtml(message && message.subject ? message.subject : '(no subject)');
 	const from = escapeHtml(formatAddresses(message && message.from));
 	const to = escapeHtml(formatAddresses(message && message.to));
 	const date = escapeHtml(formatTimestamp(message && (message.dateTimestamp || message.date_timestamp)));
+	const initials = escapeHtml(senderInitials(message));
 	return (
 		'<header data-fm="headers">'
 		+ '<h2 data-fm="subject">' + subject + '</h2>'
-		+ '<div data-fm="from">From: ' + from + '</div>'
+		+ '<div data-fm="from"><span data-fm="sender-chip">' + initials + '</span>From: ' + from + '</div>'
 		+ '<div data-fm="to">To: ' + to + '</div>'
 		+ '<div data-fm="date">' + date + '</div>'
 		+ '</header>'
 	);
 }
 
-/// Renders the attachment list. Pure; download URLs stay server-relative.
-export function renderAttachments(message) {
+/// Renders the attachment list as cards with a real download link. Pure; the
+/// URL is built from the v1 attachment endpoint using the message context, and
+/// the name is escaped before it reaches the markup.
+export function renderAttachments(message, context) {
 	const attachments = message && Array.isArray(message.attachments) ? message.attachments : [];
-	if (!attachments.length) {
-		return '';
-	}
+	const settings = context || {};
 	const items = attachments
 		.filter((item) => item && typeof item === 'object')
 		.map((item) => {
-			const name = escapeHtml(item.fileName || item.file_name || 'attachment');
-			const size = Number(item.estimatedSize || item.estimated_size) || 0;
-			const index = escapeHtml(item.mimeIndex || item.mime_index || '');
+			const rawName = item.fileName || item.file_name || 'attachment';
+			const name = escapeHtml(rawName);
+			const size = formatFileSize(item.estimatedSize || item.estimated_size);
+			const href = escapeHtml(attachmentUrl(item, settings, { inline: false }));
 			return (
-				'<li data-fm="attachment" data-index="' + index + '">'
+				'<li data-fm="attachment">'
+				+ '<span data-fm="attachment-icon">' + attachmentBadge(rawName) + '</span>'
+				+ '<span data-fm="attachment-meta">'
 				+ '<span data-fm="name">' + name + '</span>'
-				+ '<span data-fm="size">' + size + '</span>'
+				+ (size ? '<span data-fm="size">' + escapeHtml(size) + '</span>' : '')
+				+ '</span>'
+				+ '<a data-fm="download" href="' + href + '" download>Download</a>'
 				+ '</li>'
 			);
 		});
+	if (!items.length) {
+		return '';
+	}
 	return '<ul data-fm="attachments">' + items.join('') + '</ul>';
 }
 
