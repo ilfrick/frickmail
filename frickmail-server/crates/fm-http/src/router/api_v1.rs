@@ -77,6 +77,12 @@ pub fn routes() -> Router<AppState> {
         .route("/contacts/{id}", delete(delete_contact))
         .route("/messages", get(messages))
         .route("/messages/{uid}", get(message))
+        .route("/messages/flags", post(message_set_flags))
+        .route("/messages/move", post(message_move))
+        .route("/messages/copy", post(message_copy))
+        .route("/messages/delete", post(message_delete))
+        .route("/messages/seen-all", post(message_set_seen_all))
+        .route("/folders/clear", post(folder_clear))
         .route("/send", post(send))
         .route("/preferences", get(get_preferences).put(set_preferences))
         .route("/rules", get(rules).post(add_rule_v1))
@@ -3507,6 +3513,641 @@ where
             "unparseable_message",
             "Message body could not be parsed",
         ),
+    }
+}
+
+/// Upper bound on the UIDs one action may touch, so a single request can
+/// never turn into an unbounded IMAP command. The UI works in page-sized
+/// batches well under this.
+const MESSAGE_ACTION_MAX_UIDS: usize = 500;
+
+/// Shared body of every message-mutation route: which mailbox, which
+/// messages, and which account. `uids` is deliberately a list of integers —
+/// joining digits server-side removes any way for a caller to smuggle IMAP
+/// sequence-set syntax into a STORE/COPY/MOVE command.
+#[derive(Debug, Deserialize, Default)]
+struct MessageActionRequest {
+    #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
+    uids: Option<Vec<u64>>,
+    #[serde(default)]
+    account_id: Option<i64>,
+}
+
+/// `POST /messages/flags` body: which flag, and whether it is being added or
+/// removed.
+#[derive(Debug, Deserialize, Default)]
+struct MessageFlagRequest {
+    #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
+    uids: Option<Vec<u64>>,
+    /// `seen`, `flagged`, `deleted`, or a literal IMAP keyword (must not be
+    /// one of the system flags). Legacy `MessageSetSeen`/`MessageSetFlagged`/
+    /// `MessageSetDeleted`/`MessageSetKeyword` are one route here because the
+    /// server-side operation is identical.
+    #[serde(default)]
+    flag: Option<String>,
+    #[serde(default)]
+    set: Option<bool>,
+    #[serde(default)]
+    account_id: Option<i64>,
+}
+
+/// `POST /messages/move` and `/messages/copy` body: the destination mailbox
+/// plus the legacy `markAsRead` companion flag honored by MOVE.
+#[derive(Debug, Deserialize, Default)]
+struct MessageTransferRequest {
+    #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
+    uids: Option<Vec<u64>>,
+    #[serde(default)]
+    to_folder: Option<String>,
+    #[serde(default)]
+    mark_as_read: Option<bool>,
+    #[serde(default)]
+    account_id: Option<i64>,
+}
+
+/// `POST /messages/seen-all` and `POST /folders/clear` body: one mailbox.
+#[derive(Debug, Deserialize, Default)]
+struct FolderActionRequest {
+    #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
+    account_id: Option<i64>,
+}
+
+/// Renders a UID list as the comma-joined set the IMAP cores take, after
+/// bounding it. A UID of 0 is not addressable, so it is rejected rather than
+/// silently passed through to the server.
+fn message_uid_set(uids: &Option<Vec<u64>>) -> Result<String, Response> {
+    let uids = match uids {
+        Some(uids) if !uids.is_empty() => uids,
+        _ => {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "uids is required",
+            ))
+        }
+    };
+    if uids.len() > MESSAGE_ACTION_MAX_UIDS {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Too many uids in one request",
+        ));
+    }
+    if uids.contains(&0) {
+        return Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "uids must be positive integers",
+        ));
+    }
+    Ok(uids
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<String>>()
+        .join(","))
+}
+
+/// Required non-empty string field, or a 400 naming the field.
+fn required_action_field(value: &Option<String>, field: &str) -> Result<String, Response> {
+    match value
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|v| !v.is_empty())
+    {
+        Some(value) => Ok(value.to_string()),
+        None => Err(v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("{field} is required"),
+        )),
+    }
+}
+
+/// Translates a legacy envelope from a native action into the v1 contract.
+///
+/// The legacy dispatcher always answers HTTP 200 and signals failure inside
+/// `Result` — either `false` (with `message`, from `compat_error`) or
+/// `{"ok":false,"error":…}`. Both are folded into a v1 error here, with
+/// field-validation messages kept as 400 and genuine IMAP failures reported
+/// as a generic 502 (the real text goes to the log, matching the rest of the
+/// tree rather than reflecting server internals to the client).
+async fn legacy_message_action_result(response: Response) -> Result<Value, Response> {
+    if response.status() != StatusCode::OK {
+        return Err(v1_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "Mail server rejected the request",
+        ));
+    }
+    let body = match axum::body::to_bytes(response.into_body(), 64 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            return Err(v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail server rejected the request",
+            ))
+        }
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(body) => body,
+        Err(_) => {
+            return Err(v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail server rejected the request",
+            ))
+        }
+    };
+    let result = match body.get("Result") {
+        Some(result) => result,
+        None => {
+            return Err(v1_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                "Mail server rejected the request",
+            ))
+        }
+    };
+    match result {
+        // MOVE/COPY/DELETE echo `[folder, ""]` on success.
+        Value::Array(items) if items.first().and_then(Value::as_str).is_some() => {
+            let folder = items[0].as_str().unwrap_or_default().to_string();
+            Ok(json!({ "folder": folder }))
+        }
+        Value::Array(_) => Ok(json!({})),
+        Value::Bool(true) => Ok(json!({})),
+        Value::Bool(false) => Err(message_action_error(
+            body.get("message").and_then(Value::as_str),
+        )),
+        Value::Object(error) => {
+            let message = error
+                .get("error")
+                .and_then(Value::as_str)
+                .or_else(|| body.get("message").and_then(Value::as_str));
+            match error.get("ok") {
+                Some(Value::Bool(false)) | None if message.is_some() => {
+                    Err(message_action_error(message))
+                }
+                Some(Value::Bool(false)) | None => Err(message_action_error(None)),
+                _ => Ok(json!({})),
+            }
+        }
+        _ => Ok(json!({})),
+    }
+}
+
+/// Maps a legacy failure message onto a v1 error: the legacy dispatcher uses
+/// a fixed set of "… required" strings for missing fields, which are the
+/// caller's fault; everything else is an upstream failure.
+fn message_action_error(message: Option<&str>) -> Response {
+    let message = message.unwrap_or_default();
+    if message.ends_with(" required") {
+        return v1_error(StatusCode::BAD_REQUEST, "invalid_request", message);
+    }
+    tracing::warn!("v1 message action failed: {message}");
+    v1_error(
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        "Mail server rejected the request",
+    )
+}
+
+/// Common preamble for the mutation routes: CSRF token, pool, and body.
+macro_rules! v1_message_action_preamble {
+    ($state:expr, $session:expr, $headers:expr, $body:expr) => {{
+        if let Err(response) = v1_require_token($state, $session, $headers).await {
+            return response;
+        }
+        if $state.db_pool().is_none() {
+            return v1_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "database_unconfigured",
+                "Frickmail database is not configured",
+            );
+        }
+        let Ok(axum::extract::Json(request)) = $body else {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid message action body",
+            );
+        };
+        request
+    }};
+}
+
+/// Builds the legacy-shaped payload the native action reads, carrying the
+/// caller's account override through the same `account_id` key the legacy
+/// dispatcher uses.
+fn message_action_payload(
+    folder_key: &str,
+    folder: &str,
+    uids: Option<&str>,
+    account_id: Option<i64>,
+    extra: &[(&str, Value)],
+) -> Value {
+    let mut payload = json!({
+        folder_key: folder,
+        "account_id": account_id.unwrap_or_default(),
+    });
+    if let Some(uids) = uids {
+        payload["uids"] = json!(uids);
+    }
+    for (key, value) in extra {
+        payload[*key] = value.clone();
+    }
+    payload
+}
+
+/// Confirms an explicit `account_id` belongs to the caller before the native
+/// action runs. The legacy pipeline would answer this as a generic upstream
+/// failure; v1 reports it as the 404 `account_not_found` that every other
+/// account-scoped route in this tree already returns.
+///
+/// This is an ownership check, so it runs before the body is validated: a
+/// caller who does not own the account should not get validation feedback
+/// about a request they are not allowed to make.
+async fn v1_check_action_account(
+    state: &AppState,
+    session: &fm_session::Session,
+    account_id: Option<i64>,
+) -> Result<(), Response> {
+    let Some(account_id) = account_id.filter(|id| *id > 0) else {
+        // No override: the native action resolves the selected account, and
+        // reports "no account selected" itself.
+        return Ok(());
+    };
+    let user_id = match v1_session_user_id(session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return Err(response),
+    };
+    let Some(pool) = state.db_pool() else {
+        return Err(v1_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unconfigured",
+            "Frickmail database is not configured",
+        ));
+    };
+    match fm_user::SqlxUserRepository::get_mail_account_connection_secret(pool, user_id, account_id)
+        .await
+    {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(v1_error(
+            StatusCode::NOT_FOUND,
+            "account_not_found",
+            "Mail account not found",
+        )),
+        Err(err) => {
+            tracing::warn!(
+                "v1 message action account lookup failed: {}",
+                err.public_message()
+            );
+            Err(v1_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Frickmail account lookup failed",
+            ))
+        }
+    }
+}
+
+/// Resolves a v1 `flag` string to the IMAP operation, keeping system flags
+/// and literal keywords apart. Returns `(flag, keyword)` mirroring the legacy
+/// `MessageSetSeen`/`MessageSetFlagged`/`MessageSetDeleted`/`MessageSetKeyword`
+/// split.
+fn resolve_action_flag(flag: &Option<String>) -> Result<(&'static str, Option<String>), Response> {
+    // System flags are matched case-insensitively, but a keyword is passed
+    // through unchanged: IMAP keywords such as `$Forwarded` and `$Junk` carry
+    // their `$` sigil and are case-sensitive on the server, so lowercasing
+    // here would store a different keyword than the client asked for.
+    let flag = match flag.as_ref().map(|value| value.trim()) {
+        Some(flag) if !flag.is_empty() => flag,
+        _ => {
+            return Err(v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "flag is required",
+            ))
+        }
+    };
+    match flag.to_ascii_lowercase().as_str() {
+        "seen" => Ok(("MessageSetSeen", None)),
+        "flagged" | "starred" => Ok(("MessageSetFlagged", None)),
+        "deleted" => Ok(("MessageSetDeleted", None)),
+        _ => {
+            // A keyword reaches the server as an IMAP atom, so reject
+            // anything that is not a plain token rather than letting the
+            // store path decide.
+            if flag.len() > 64
+                || !flag.chars().all(|ch| {
+                    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '$')
+                })
+            {
+                return Err(v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "flag keyword contains unsupported characters",
+                ));
+            }
+            Ok(("MessageSetKeyword", Some(flag.to_string())))
+        }
+    }
+}
+
+/// Stores or clears `\Seen`, `\Flagged`, `\Deleted` or an IMAP keyword on a
+/// set of messages, reusing the native `MessageSet*` pipeline. State-changing,
+/// so the connection token is required.
+async fn message_set_flags(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<MessageFlagRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request = v1_message_action_preamble!(&state, &session, &headers, body);
+    if let Err(response) = v1_check_action_account(&state, &session, request.account_id).await {
+        return response;
+    }
+    let folder = match required_action_field(&request.folder, "folder") {
+        Ok(folder) => folder,
+        Err(response) => return response,
+    };
+    let uids = match message_uid_set(&request.uids) {
+        Ok(uids) => uids,
+        Err(response) => return response,
+    };
+    let (action, keyword) = match resolve_action_flag(&request.flag) {
+        Ok(resolved) => resolved,
+        Err(response) => return response,
+    };
+    let updated = uids.split(',').count();
+    let payload = message_action_payload(
+        "folder",
+        &folder,
+        Some(&uids),
+        request.account_id,
+        &[
+            (
+                "setAction",
+                json!(if request.set.unwrap_or(true) { 1 } else { 0 }),
+            ),
+            ("keyword", json!(keyword.unwrap_or_default())),
+        ],
+    );
+    let response = match action {
+        "MessageSetSeen" => {
+            super::native_legacy_message_store_flag(
+                &state,
+                action,
+                &payload,
+                &session,
+                fm_imap::ImapMessageFlag::Seen,
+            )
+            .await
+        }
+        "MessageSetFlagged" => {
+            super::native_legacy_message_store_flag(
+                &state,
+                action,
+                &payload,
+                &session,
+                fm_imap::ImapMessageFlag::Flagged,
+            )
+            .await
+        }
+        "MessageSetDeleted" => {
+            super::native_legacy_message_store_flag(
+                &state,
+                action,
+                &payload,
+                &session,
+                fm_imap::ImapMessageFlag::Deleted,
+            )
+            .await
+        }
+        _ => super::native_legacy_message_store_keyword(&state, action, &payload, &session).await,
+    };
+    match legacy_message_action_result(response).await {
+        Ok(mut data) => {
+            data["updated"] = json!(updated);
+            (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+/// Moves messages to another mailbox, reusing the native `MessageMove`
+/// pipeline including its `markAsRead` companion option. State-changing.
+async fn message_move(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<
+        axum::extract::Json<MessageTransferRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let request = v1_message_action_preamble!(&state, &session, &headers, body);
+    if let Err(response) = v1_check_action_account(&state, &session, request.account_id).await {
+        return response;
+    }
+    let folder = match required_action_field(&request.folder, "folder") {
+        Ok(folder) => folder,
+        Err(response) => return response,
+    };
+    let to_folder = match required_action_field(&request.to_folder, "to_folder") {
+        Ok(to_folder) => to_folder,
+        Err(response) => return response,
+    };
+    let uids = match message_uid_set(&request.uids) {
+        Ok(uids) => uids,
+        Err(response) => return response,
+    };
+    let updated = uids.split(',').count();
+    let payload = message_action_payload(
+        "fromFolder",
+        &folder,
+        Some(&uids),
+        request.account_id,
+        &[
+            ("toFolder", json!(to_folder)),
+            (
+                "markAsRead",
+                json!(if request.mark_as_read.unwrap_or(false) {
+                    1
+                } else {
+                    0
+                }),
+            ),
+        ],
+    );
+    let response =
+        super::native_legacy_message_move(&state, "MessageMove", &payload, &session).await;
+    match legacy_message_action_result(response).await {
+        Ok(data) => {
+            let mut data = data;
+            data["updated"] = json!(updated);
+            (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+/// Copies messages to another mailbox, reusing the native `MessageCopy`
+/// pipeline. State-changing.
+async fn message_copy(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<
+        axum::extract::Json<MessageTransferRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let request = v1_message_action_preamble!(&state, &session, &headers, body);
+    if let Err(response) = v1_check_action_account(&state, &session, request.account_id).await {
+        return response;
+    }
+    let folder = match required_action_field(&request.folder, "folder") {
+        Ok(folder) => folder,
+        Err(response) => return response,
+    };
+    let to_folder = match required_action_field(&request.to_folder, "to_folder") {
+        Ok(to_folder) => to_folder,
+        Err(response) => return response,
+    };
+    let uids = match message_uid_set(&request.uids) {
+        Ok(uids) => uids,
+        Err(response) => return response,
+    };
+    let updated = uids.split(',').count();
+    let payload = message_action_payload(
+        "fromFolder",
+        &folder,
+        Some(&uids),
+        request.account_id,
+        &[("toFolder", json!(to_folder))],
+    );
+    let response =
+        super::native_legacy_message_copy(&state, "MessageCopy", &payload, &session).await;
+    match legacy_message_action_result(response).await {
+        Ok(data) => {
+            let mut data = data;
+            data["updated"] = json!(updated);
+            (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+/// Deletes messages (mark `\Deleted`, then expunge), reusing the native
+/// `MessageDelete` pipeline. State-changing.
+async fn message_delete(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<
+        axum::extract::Json<MessageActionRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let request = v1_message_action_preamble!(&state, &session, &headers, body);
+    if let Err(response) = v1_check_action_account(&state, &session, request.account_id).await {
+        return response;
+    }
+    let folder = match required_action_field(&request.folder, "folder") {
+        Ok(folder) => folder,
+        Err(response) => return response,
+    };
+    let uids = match message_uid_set(&request.uids) {
+        Ok(uids) => uids,
+        Err(response) => return response,
+    };
+    let updated = uids.split(',').count();
+    let payload = message_action_payload("folder", &folder, Some(&uids), request.account_id, &[]);
+    let response =
+        super::native_legacy_message_delete(&state, "MessageDelete", &payload, &session).await;
+    match legacy_message_action_result(response).await {
+        Ok(data) => {
+            let mut data = data;
+            data["updated"] = json!(updated);
+            (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+/// Marks every message in a mailbox as read (or unread), reusing the native
+/// `MessageSetSeenToAll` pipeline. State-changing.
+async fn message_set_seen_all(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<FolderActionRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request = v1_message_action_preamble!(&state, &session, &headers, body);
+    if let Err(response) = v1_check_action_account(&state, &session, request.account_id).await {
+        return response;
+    }
+    let folder = match required_action_field(&request.folder, "folder") {
+        Ok(folder) => folder,
+        Err(response) => return response,
+    };
+    let payload = message_action_payload(
+        "folder",
+        &folder,
+        None,
+        request.account_id,
+        &[("setAction", json!(1))],
+    );
+    let response = super::native_legacy_message_set_seen_to_all(
+        &state,
+        "MessageSetSeenToAll",
+        &payload,
+        &session,
+    )
+    .await;
+    match legacy_message_action_result(response).await {
+        Ok(mut data) => {
+            data["folder"] = json!(folder);
+            (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+/// Empties a mailbox, reusing the native `FolderClear` pipeline. State-changing.
+async fn folder_clear(
+    state: axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<FolderActionRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request = v1_message_action_preamble!(&state, &session, &headers, body);
+    if let Err(response) = v1_check_action_account(&state, &session, request.account_id).await {
+        return response;
+    }
+    let folder = match required_action_field(&request.folder, "folder") {
+        Ok(folder) => folder,
+        Err(response) => return response,
+    };
+    let payload = message_action_payload("folder", &folder, None, request.account_id, &[]);
+    let response =
+        super::native_legacy_folder_clear(&state, "FolderClear", &payload, &session).await;
+    match legacy_message_action_result(response).await {
+        Ok(mut data) => {
+            data["folder"] = json!(folder);
+            (StatusCode::OK, Json(ApiV1Envelope::ok(data))).into_response()
+        }
+        Err(response) => response,
     }
 }
 
@@ -7656,6 +8297,321 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn message_uid_set_binds_and_bounds_the_uid_list() {
+        assert_eq!(
+            super::message_uid_set(&Some(vec![7, 9, 12])).unwrap(),
+            "7,9,12"
+        );
+        // An empty list is a caller error, not an IMAP "match nothing".
+        let empty = super::message_uid_set(&Some(Vec::new())).unwrap_err();
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+        let missing = super::message_uid_set(&None).unwrap_err();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        // UID 0 is not addressable.
+        let zero = super::message_uid_set(&Some(vec![0])).unwrap_err();
+        assert_eq!(zero.status(), StatusCode::BAD_REQUEST);
+        // The bound keeps one request from becoming an unbounded STORE.
+        let huge = vec![1_u64; super::MESSAGE_ACTION_MAX_UIDS + 1];
+        let rejected = super::message_uid_set(&Some(huge)).unwrap_err();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Because UIDs are deserialized as integers, a caller cannot smuggle IMAP
+    /// sequence-set syntax (`1:*`, `1,3:5`) into a STORE/COPY/MOVE command.
+    #[test]
+    fn message_uid_set_rejects_non_numeric_uids_at_the_json_boundary() {
+        let parsed: Result<super::MessageActionRequest, _> =
+            serde_json::from_str(r#"{"folder":"INBOX","uids":[1,"1:*"]}"#);
+        assert!(parsed.is_err());
+        let ok: super::MessageActionRequest =
+            serde_json::from_str(r#"{"folder":"INBOX","uids":[1,2]}"#).unwrap();
+        assert_eq!(super::message_uid_set(&ok.uids).unwrap(), "1,2");
+    }
+
+    #[test]
+    fn resolve_action_flag_maps_system_flags_and_rejects_hostile_keywords() {
+        assert_eq!(
+            super::resolve_action_flag(&Some("seen".to_string())).unwrap(),
+            ("MessageSetSeen", None)
+        );
+        assert_eq!(
+            super::resolve_action_flag(&Some("Flagged".to_string())).unwrap(),
+            ("MessageSetFlagged", None)
+        );
+        assert_eq!(
+            super::resolve_action_flag(&Some("starred".to_string())).unwrap(),
+            ("MessageSetFlagged", None)
+        );
+        // Keywords keep their case and sigil: `$Forwarded` must not be stored
+        // as `$forwarded`.
+        assert_eq!(
+            super::resolve_action_flag(&Some("$Forwarded".to_string())).unwrap(),
+            ("MessageSetKeyword", Some("$Forwarded".to_string()))
+        );
+        assert_eq!(
+            super::resolve_action_flag(&Some("$Junk".to_string())).unwrap(),
+            ("MessageSetKeyword", Some("$Junk".to_string()))
+        );
+        // A keyword is an IMAP atom: spaces, quotes and parens are rejected
+        // before the store path sees them.
+        for hostile in ["a b", "a\"b", "a(b", "\\Seen", "x] STORE [", "a\nb", "a] ["] {
+            assert!(
+                super::resolve_action_flag(&Some(hostile.to_string())).is_err(),
+                "expected {hostile} to be rejected"
+            );
+        }
+        assert!(super::resolve_action_flag(&None).is_err());
+        assert!(super::resolve_action_flag(&Some("   ".to_string())).is_err());
+    }
+
+    /// The legacy dispatcher reports failure inside a 200 response, in two
+    /// different shapes. Both must become v1 errors, and only genuine
+    /// field-validation messages may keep their 400.
+    #[tokio::test]
+    async fn legacy_message_action_result_normalizes_legacy_envelopes() {
+        let ok_true = super::legacy_message_action_result(
+            (
+                StatusCode::OK,
+                Json(json!({ "Action": "MessageSetSeen", "Result": true })),
+            )
+                .into_response(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok_true, json!({}));
+
+        // MOVE/COPY/DELETE echo the source folder on success.
+        let ok_folder = super::legacy_message_action_result(
+            (StatusCode::OK, Json(json!({ "Result": ["INBOX", ""] }))).into_response(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok_folder, json!({ "folder": "INBOX" }));
+
+        // compat_error shape: Result false with a top-level message.
+        let upstream = super::legacy_message_action_result(
+            (
+                StatusCode::OK,
+                Json(json!({ "Result": false, "message": "Connection refused" })),
+            )
+                .into_response(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(upstream.status(), StatusCode::BAD_GATEWAY);
+
+        // json_result_error shape: Result object with ok:false and error.
+        let invalid = super::legacy_message_action_result(
+            (
+                StatusCode::OK,
+                Json(json!({ "Result": { "ok": false, "error": "uids required" } })),
+            )
+                .into_response(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        // A non-200 legacy status never reaches the client as success.
+        let bad_status = super::legacy_message_action_result(
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))).into_response(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bad_status.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// The message-action routes must exist, demand the connection token, and
+    /// validate the body before any IMAP connection is attempted. A fully
+    /// valid request against the unreachable test host still reaches the
+    /// native pipeline and surfaces as 502, which proves the route is wired
+    /// to the real store/move/delete path rather than short-circuiting.
+    #[tokio::test]
+    async fn v1_message_actions_require_token_and_validate_before_imap() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1201, "v1actions", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 1200, 1201, &blob).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1actions", "correct-horse").await;
+
+        let post = |app: Router, uri: &'static str, body: &'static str, tok: Option<String>| {
+            let cookie = cookie.clone();
+            async move {
+                let request = match tok {
+                    Some(tok) => Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("cookie", &cookie)
+                        .header("x-sm-token", tok)
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                    None => Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("cookie", &cookie)
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                };
+                app.clone().oneshot(request).await.unwrap()
+            }
+        };
+
+        // No token: rejected before anything else.
+        let response = post(
+            app.clone(),
+            "/api/frickmail/v1/messages/flags",
+            r#"{"folder":"INBOX","uids":[1],"flag":"seen"}"#,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_token");
+
+        // Missing folder.
+        let response = post(
+            app.clone(),
+            "/api/frickmail/v1/messages/flags",
+            r#"{"uids":[1],"flag":"seen"}"#,
+            Some(token.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["message"], "folder is required");
+
+        // Empty uid list.
+        let response = post(
+            app.clone(),
+            "/api/frickmail/v1/messages/move",
+            r#"{"folder":"INBOX","uids":[],"to_folder":"Sent"}"#,
+            Some(token.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Move without a destination.
+        let response = post(
+            app.clone(),
+            "/api/frickmail/v1/messages/move",
+            r#"{"folder":"INBOX","uids":[1]}"#,
+            Some(token.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["message"], "to_folder is required");
+
+        // Missing flag.
+        let response = post(
+            app.clone(),
+            "/api/frickmail/v1/messages/flags",
+            r#"{"folder":"INBOX","uids":[1]}"#,
+            Some(token.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["message"], "flag is required");
+
+        // A valid request reaches the native pipeline; the seeded account
+        // points at an unroutable host, so this is an upstream failure.
+        for (uri, body) in [
+            (
+                "/api/frickmail/v1/messages/flags",
+                r#"{"folder":"INBOX","uids":[3,4],"flag":"seen","account_id":1200}"#,
+            ),
+            (
+                "/api/frickmail/v1/messages/move",
+                r#"{"folder":"INBOX","uids":[3,4],"to_folder":"Sent","account_id":1200}"#,
+            ),
+            (
+                "/api/frickmail/v1/messages/delete",
+                r#"{"folder":"INBOX","uids":[3],"account_id":1200}"#,
+            ),
+            (
+                "/api/frickmail/v1/messages/seen-all",
+                r#"{"folder":"INBOX","account_id":1200}"#,
+            ),
+            (
+                "/api/frickmail/v1/folders/clear",
+                r#"{"folder":"Trash","account_id":1200}"#,
+            ),
+        ] {
+            let response = post(app.clone(), uri, body, Some(token.clone())).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_GATEWAY,
+                "{uri} should have reached the IMAP path"
+            );
+            let parsed = read_json(response).await;
+            assert_eq!(parsed["version"], "v1");
+            assert_eq!(parsed["error"]["code"], "upstream_error");
+        }
+    }
+
+    /// A keyword flag with an unknown account still reports the account
+    /// problem, not a validation error, and `MessageSetKeyword` must not be
+    /// reachable with a system flag value.
+    #[tokio::test]
+    async fn v1_message_flag_keyword_route_reaches_the_keyword_pipeline() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1211, "v1kw", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        let blob = fm_user::encrypt_account_secret("imap-secret", &credential_key).unwrap();
+        seed_imap_account_with_password(&pool, 1210, 1211, &blob).await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, "v1kw", "correct-horse").await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/messages/flags")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        r#"{"folder":"INBOX","uids":[1],"flag":"$Forwarded","set":true,"account_id":1210}"#
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        // An unknown account is a 404-shaped upstream failure, not a 400.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/frickmail/v1/messages/seen-all")
+                    .header("content-type", "application/json")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::from(
+                        r#"{"folder":"INBOX","account_id":999999}"#.to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     struct RecordingSmtpSender {

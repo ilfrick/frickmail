@@ -391,7 +391,7 @@ body.fm-app #app > [data-fm="title"] {
 body.fm-app #app:has(> [data-fm="folders"]) {
 	display: grid;
 	grid-template-columns: minmax(190px, 230px) 1fr;
-	grid-template-rows: auto 1fr;
+	grid-template-rows: auto auto 1fr;
 	overflow: hidden;
 }
 
@@ -401,11 +401,18 @@ body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="title"] {
 
 body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="nav"] {
 	grid-column: 1 / -1;
+	grid-row: 1;
+}
+
+/* The folder toolbar spans both panes, above the sidebar and the list. */
+body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folder-toolbar"] {
+	grid-column: 1 / -1;
+	grid-row: 2;
 }
 
 body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] {
 	grid-column: 1;
-	grid-row: 2;
+	grid-row: 3;
 	display: block;
 	overflow-y: auto;
 	margin: 0;
@@ -435,7 +442,7 @@ body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="folders"] [data-fm="fold
 body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="list"],
 body.fm-app #app:has(> [data-fm="folders"]) > [data-fm="empty"] {
 	grid-column: 2;
-	grid-row: 2;
+	grid-row: 3;
 	overflow-y: auto;
 	margin: 0;
 	padding: 0;
@@ -456,10 +463,98 @@ body.fm-app #app > [data-fm="list"] [data-fm="message"]:hover {
 	background: rgba(255, 255, 255, 0.04);
 }
 
+/* ── Action toolbars: folder-level above the list, message-level in the
+   reading pane. Both are sticky so the actions stay reachable in a long
+   message. ── */
+#app [data-fm="toolbar"],
+#app [data-fm="folder-toolbar"] {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.35rem;
+	margin: 0;
+	padding: 0.45rem 1.25rem;
+	background: var(--fm-panel);
+	border-bottom: 1px solid var(--fm-border);
+}
+
+body.fm-app #app > [data-fm="toolbar"],
+body.fm-app #app > [data-fm="folder-toolbar"] {
+	position: sticky;
+	/* The nav is sticky too, so the toolbar pins under it. `--fm-sticky-top`
+	   is the measured nav height, published by the shell on every render and
+	   on resize, because the nav wraps to a second row on narrow windows. */
+	top: var(--fm-sticky-top, 0px);
+	z-index: 4;
+	width: 100%;
+}
+
+#app [data-fm="spacer"] {
+	flex: 1 1 auto;
+	min-width: 0.5rem;
+}
+
+#app [data-fm="current-folder"] {
+	font-size: 0.95rem;
+}
+
+#app [data-fm="unread-count"] {
+	color: var(--fm-muted);
+	font-size: 0.8rem;
+}
+
+#app [data-fm="toolbar"] button,
+#app [data-fm="folder-toolbar"] button {
+	padding: 0.35rem 0.7rem;
+	border: 1px solid var(--fm-border);
+	border-radius: 7px;
+	background: var(--fm-surface);
+	color: var(--fm-text);
+	font: inherit;
+	font-size: 0.85rem;
+	cursor: pointer;
+}
+
+#app [data-fm="toolbar"] button:hover,
+#app [data-fm="folder-toolbar"] button:hover {
+	border-color: var(--fm-accent);
+}
+
+/* Delete is the one destructive action in the row. */
+#app [data-fm="toolbar"] button[data-action="delete"] {
+	color: var(--fm-danger);
+}
+
+#app [data-fm="toolbar"] select {
+	padding: 0.35rem 0.5rem;
+	border: 1px solid var(--fm-border);
+	border-radius: 7px;
+	background: var(--fm-surface);
+	color: var(--fm-text);
+	font: inherit;
+	font-size: 0.85rem;
+	max-width: 14rem;
+}
+
+#app [data-fm="toolbar"] [data-fm="status"],
+#app [data-fm="folder-toolbar"] [data-fm="status"] {
+	color: var(--fm-danger);
+	font-size: 0.82rem;
+}
+
 /* ── Reading pane: scrolls with the window, nav stays reachable ── */
-body.fm-app #app > [data-fm="back"] {
-	align-self: flex-start;
-	margin: 0.75rem 0 0;
+body.fm-app #app > [data-fm="message-bar"] {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	flex: 0 0 auto;
+	padding-top: 0.75rem;
+	color: var(--fm-muted);
+	font-size: 0.85rem;
+}
+
+body.fm-app #app > [data-fm="message-bar"] [data-fm="back"] {
+	align-self: center;
 }
 
 body.fm-app #app > [data-fm="headers"] {

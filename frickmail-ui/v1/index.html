@@ -13,7 +13,7 @@
 <script type="module">
 import { ApiClient } from './js/api.js';
 import { renderLogin } from './js/login.js';
-import { loadMailbox, renderMailbox } from './js/mailbox.js';
+import { escapeHtml, loadMailbox, renderMailbox } from './js/mailbox.js';
 import { loadFolders, renderFolderList } from './js/folders.js';
 import {
 	addRule,
@@ -35,6 +35,19 @@ import {
 } from './js/contacts.js';
 import { collectComposePayload, loadIdentities as loadComposeIdentities, renderComposeForm, sendMessage } from './js/compose.js';
 import { loadMessage, renderAttachments, renderMessageHeader, selectMessageBody } from './js/message.js';
+import {
+	actionErrorMessage,
+	buildActionSeed,
+	clearFolder,
+	copyMessages,
+	deleteMessages,
+	findSpecialFolder,
+	markFolderRead,
+	moveMessages,
+	renderFolderToolbar,
+	renderMessageToolbar,
+	setMessageFlag
+} from './js/actions.js';
 import {
 	addTask,
 	collectTaskPayload,
@@ -194,7 +207,24 @@ function wireNav() {
 	if (logoutButton) {
 		logoutButton.addEventListener('click', signOut);
 	}
+	syncStickyOffset();
 }
+
+/// Publishes the measured height of the top navigation as
+/// `--fm-sticky-top`, so the action toolbars below it stick *under* the nav
+/// instead of sliding underneath it. The nav wraps to a second row on narrow
+/// windows, so the offset is re-measured on every render and on resize rather
+/// than hard-coded in CSS.
+function syncStickyOffset() {
+	const nav = root.querySelector('[data-fm="nav"]');
+	if (!nav) {
+		root.style.setProperty('--fm-sticky-top', '0px');
+		return;
+	}
+	root.style.setProperty('--fm-sticky-top', nav.offsetHeight + 'px');
+}
+
+window.addEventListener('resize', syncStickyOffset);
 
 async function signOut() {
 	document.body.classList.remove('fm-app');
@@ -949,8 +979,19 @@ async function showMessage(folder, uid, options) {
 			pre.textContent = selected.body;
 			viewer = pre.outerHTML;
 		}
+		let folders = { folders: [] };
+		try {
+			folders = await loadFolders(api);
+		} catch (error) {
+			// The reading pane still works without a destination picker; the
+			// toolbar simply renders without Move/Copy/Archive/Spam.
+			void error;
+		}
 		root.innerHTML = nav('')
-			+ '<button type="button" data-fm="back">Back</button>'
+			+ '<div data-fm="message-bar"><button type="button" data-fm="back">Back</button>'
+			+ escapeHtml(folder)
+			+ '</div>'
+			+ renderMessageToolbar({ folder, folders, message })
 			+ renderMessageHeader(message)
 			+ viewer
 			+ renderAttachments(message);
@@ -960,8 +1001,86 @@ async function showMessage(folder, uid, options) {
 			frame.srcdoc = selected.body;
 		}
 		root.querySelector('[data-fm="back"]').addEventListener('click', () => back());
+		wireMessageActions(folder, uid, message, folders, back);
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the message.</p>';
+	}
+}
+
+/// Wires the reading-pane toolbar. `reload` re-opens the same message after
+/// an in-place flag change; `back` returns to the list after the message
+/// leaves the current folder.
+function wireMessageActions(folder, uid, message, folders, back) {
+	const uids = [Number(uid)];
+	const target = () => {
+		const select = root.querySelector('[data-fm="target"]');
+		return select ? select.value : '';
+	};
+	for (const button of root.querySelectorAll('[data-fm="toolbar"] [data-fm="action"]')) {
+		button.addEventListener('click', async () => {
+			const action = button.getAttribute('data-action');
+			try {
+				if (action === 'reply' || action === 'reply-all' || action === 'forward') {
+					await showCompose(buildActionSeed(message, action));
+					return;
+				}
+				if (action === 'flag') {
+					const starred = (message.flags || []).indexOf('\\flagged') !== -1;
+					await setMessageFlag(api, {
+						folder,
+						uids,
+						flag: 'flagged',
+						set: !starred
+					});
+					await showMessage(folder, uid, { back });
+					return;
+				}
+				if (action === 'unread') {
+					await setMessageFlag(api, { folder, uids, flag: 'seen', set: false });
+					await back();
+					return;
+				}
+				if (action === 'move' || action === 'copy') {
+					const toFolder = target();
+					if (!toFolder) {
+						actionStatus('Pick a destination folder first.');
+						return;
+					}
+					const payload = { folder, uids, to_folder: toFolder };
+					if (action === 'move') {
+						await moveMessages(api, payload);
+					} else {
+						await copyMessages(api, payload);
+					}
+					if (action === 'move') {
+						await back();
+					} else {
+						await showMessage(folder, uid, { back });
+					}
+					return;
+				}
+				if (action === 'archive' || action === 'spam') {
+					const wanted = action === 'archive' ? ['archive', 'archives'] : ['junk', 'spam'];
+					const destination = findSpecialFolder(folders, wanted);
+					if (!destination) {
+						actionStatus('No matching folder on this account.');
+						return;
+					}
+					await moveMessages(api, { folder, uids, to_folder: destination });
+					await back();
+					return;
+				}
+				if (action === 'delete') {
+					if (!window.confirm('Delete this message?')) {
+						return;
+					}
+					await deleteMessages(api, { folder, uids });
+					await back();
+				}
+			} catch (error) {
+				actionStatus(actionErrorMessage(error, 'Action failed.'));
+			}
+		});
 	}
 }
 
@@ -1078,8 +1197,11 @@ async function showMailbox(folder) {
 	try {
 		const folders = await loadFolders(api);
 		const data = await loadMailbox(api, current, { limit: 25 });
+		const folderData = (folders.folders || []).find(
+			(item) => item && item.full_name === current
+		) || {};
 		root.innerHTML = nav('inbox')
-			+ '<h1 data-fm="title">Inbox</h1>'
+			+ renderFolderToolbar({ folder: current, folders, folderData })
 			+ renderFolderList(folders, current)
 			+ renderMailbox(data);
 		wireNav();
@@ -1093,8 +1215,49 @@ async function showMailbox(folder) {
 				showMessage(current, item.getAttribute('data-uid'));
 			});
 		}
+		wireFolderActions(current);
 	} catch (error) {
 		root.innerHTML = '<p>Cannot load the mailbox.</p>';
+	}
+}
+
+/// Reports the outcome of a folder-level action in the toolbar, so a failed
+/// mutation says why instead of silently reloading the list.
+function actionStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+/// Wires the folder toolbar: mark-all-read, empty trash, refresh. Every
+/// action reloads the folder on success so the counts and the list agree with
+/// the server.
+function wireFolderActions(folder) {
+	for (const button of root.querySelectorAll('[data-fm="folder-toolbar"] [data-fm="action"]')) {
+		button.addEventListener('click', async () => {
+			const action = button.getAttribute('data-action');
+			try {
+				if (action === 'refresh') {
+					await showMailbox(folder);
+					return;
+				}
+				if (action === 'seen-all') {
+					await markFolderRead(api, { folder });
+					await showMailbox(folder);
+					return;
+				}
+				if (action === 'empty') {
+					if (!window.confirm('Permanently delete every message in ' + folder + '?')) {
+						return;
+					}
+					await clearFolder(api, { folder });
+					await showMailbox(folder);
+				}
+			} catch (error) {
+				actionStatus(actionErrorMessage(error, 'Action failed.'));
+			}
+		});
 	}
 }
 
