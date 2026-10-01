@@ -5,6 +5,108 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Progress Snapshot — 2026-10-01 09:52:30 UTC
+
+Slice 3: **native OpenPGP key management + crypto compose**. Code commit
+`94de9dafbf63` (the docs commit that carries this snapshot follows it).
+
+The previous slice left OpenPGP as an honest placeholder because the v1 API had
+no key-management routes. This slice adds them natively over the GnuPG
+primitives that were already native (`run_gnupg`, `parse_gnupg_keys`,
+`delete_gnupg_key`) instead of adapting the legacy `Response` envelopes:
+
+| v1 route | Legacy action it replaces |
+| --- | --- |
+| `GET /pgp/keys` | `GnupgGetKeys` |
+| `POST /pgp/keys/generate` | `GnupgGenerateKey` |
+| `POST /pgp/keys/import` | `GnupgImportKey` |
+| `POST /pgp/keys/export` | `GnupgExportKey` |
+| `DELETE /pgp/keys?key_id=&secret=` | `GnupgDeleteKey` |
+
+Contract notes:
+
+- One row per **keyring** (public and secret), sharing a primary fingerprint, so
+  a client can tell which private keys it holds. Public rows carry
+  `can_verify: true`; secret rows `can_decrypt: true` and `can_encrypt: false`,
+  mirroring `GnupgGetKeys`. A uid with no angle brackets is reported as a bare
+  address in `email`. Key material never appears in the listing.
+- `POST /pgp/keys/import` takes an opt-in `backup` flag (default `false`) that
+  delegates to the shared `backup_pgp_key_material`, the same routine legacy
+  import uses; secret blocks are encrypted at rest with the session credential
+  key.
+- GnuPG failures are 502 `pgp_unavailable` (the raw message is logged, never
+  returned); deleting an absent key is 404 `key_not_found`.
+- `POST /send` gains `sign_fingerprint`, `sign_passphrase` and
+  `encrypt_fingerprints`. Fingerprints are validated up front (400
+  `invalid_request`) instead of the legacy PHP-truthy silent skip; a blank or
+  absent fingerprint means "do not sign". The SMTP endpoint still comes from the
+  stored account, never the request.
+
+Two pre-existing GnuPG bugs surfaced by the new routes and fixed:
+
+- `parse_gnupg_keys` skipped `fpr` records (11 colon fields, not the 12 the
+  length guard required), so **every fingerprint was empty** — which broke
+  fingerprint-keyed lookups and `delete_gnupg_key` as well.
+- `run_gnupg` only tolerated a non-zero exit status when the command was the
+  *first* argv element. Every listing form leads with `--with-colons`, so
+  listing an absent key returned `Err` and surfaced as a 502 instead of the
+  caller's "not found" mapping.
+
+Client: new `frickmail-ui/v1/js/pgp.js` (pure, **51 tests**) — a merged key list
+with generate/import/export forms, a delete that removes both keyring halves,
+and a **collapsed** OpenPGP compose bar whose summary doubles as the
+sign/encrypt state readout. The Settings hub gains a real OpenPGP panel. Compose
+splices the crypto bar above its footer; `collectPgpComposeOptions` merges
+`sign_fingerprint`/`sign_passphrase`/`encrypt_fingerprints` onto the send
+payload without coupling compose to the keyring module.
+
+Three layout defects the headless-Chrome geometry checks caught and fixed:
+
+- the crypto bar added ~125px to every compose window → collapsed `<details>`
+  costing one summary line;
+- the bar overflowed the compose window (flex `min-width: auto`) → `min-width: 0`
+  plus capped selects;
+- the Settings hub squeezed its panel to 140px on narrow screens → the section
+  menu collapses to a horizontal scroller under a media query.
+
+Verification:
+
+- `node --test frickmail-ui/v1/js/*.test.mjs` **313 passed / 0 failed** (pgp 51
+  new); eslint clean.
+- **43 headless-Chrome layout assertions pass** at both a 1200px and a 380px
+  viewport: settings key rows stack and fit, the compose bar is collapsed by
+  default, expands within bounds, and its summary/selects never overflow the
+  form, and the narrow settings menu no longer starves the panel.
+- `cargo fmt --check` clean; `clippy --workspace --all-targets -D warnings`
+  clean; `cargo test --workspace` **0 failures** (fm-http lib 605, `api_v1` 114
+  of which 5 are new PGP tests; fm-mime 18).
+- naming gate green.
+- Canary `frickmail-rust:94de9dafbf63` on `127.0.0.1:8902`: DB verified, `/` 200,
+  `/static/v1/js/pgp.js` 200, `GET /pgp/keys` 401 and `POST /pgp/keys/generate`
+  403 unauthenticated, healthy, 0 restarts.
+- Production: image `frickmail-rust:94de9dafbf63`
+  (`sha256:dba2f4ecb270c901b144f852ab8633f13fdc2138a500ce2627f9e7a4f0ba4f51`),
+  `org.opencontainers.image.revision=94de9dafbf63`, cut over with the same
+  hardened flags/networks/env; `/` 200, `/static/v1/js/pgp.js` 200 (sha256 equal
+  to the repo source), PGP routes 401/403 unauthenticated, `/health` 200,
+  external site 200, DB verified, healthy, **0 restarts**. The first boot logs
+  the usual Redis name-resolution fallback before the network is attached; after
+  `docker network connect` + restart no such warning is logged. Rollback:
+  `frickmail-rust:b2fe256e4043` or earlier.
+- CI on `94de9dafbf63`, both branches: `rust-ci` run `36843250948` (master) and
+  `36843246535` (rust-full-migration) **success**; `naming` run `36843251025`
+  and `36843246495` **success**. All four remote tips verified identical at
+  `94de9dafbf63` by live `ls-remote`. This docs commit touches only `docs/`,
+  which is in neither workflow's path filter, so **no CI run is expected** for
+  it rather than a claimed green.
+
+**Deferred, stated rather than padded:** HKP/keyserver search, client-side
+(Mailvelope) PGP payloads, and S/MIME in compose stay on the legacy dispatcher.
+The empty **Identities** panel (no synthetic default identity) leads the next
+slice. The operator remains the in-browser verifier.
+
+---
+
 ## Progress Snapshot — 2026-09-30 20:40:00 UTC
 
 Slice 2: **v1 UI overhaul** (operator feedback round). Code commits
@@ -4004,35 +4106,38 @@ must never enter the repository or any shared artifact.
 
 ### Still Missing Before The Final Rust-Only Goal
 
-The Rust service is usable as a guarded canary for the native routes, but is not
-yet a safe drop-in replacement for the PHP production container. The major
-remaining gates are:
+Corrected 2026-10-01. The production image is **already Rust-only**: the
+runtime stage is `debian:bookworm-slim` plus `/usr/local/bin/frickmail-server`
+and the static bundle, with no PHP, PHP-FPM, nginx or supervisor present
+(verified in the running image: all four binaries absent, zero matching
+packages). It serves the v1 UI at `/`, and that is the live webmail. What
+remains are *readiness* gates, not "is Rust in production":
 
-1. Complete server-side OpenPGP/GnuPG keyring signing/encryption. Client-
-   provided OpenPGP MIME, selected-account S/MIME signing/encryption, and
-   bounded direct client-supplied S/MIME certificate/private-key signing are
-   native.
+1. OpenPGP key management, signing and encryption are now native (v1
+   `/pgp/keys`; `POST /send` `sign_fingerprint`/`encrypt_fingerprints`). Still
+   on the legacy dispatcher by choice: HKP/keyserver search, client-side
+   (Mailvelope) PGP payloads, and S/MIME in compose. Client-provided OpenPGP
+   MIME, selected-account S/MIME signing/encryption, and bounded direct
+   client-supplied S/MIME certificate/private-key signing are native.
 2. Finish exact legacy action and response parity, then migrate every request
-   still dependent on the PHP compatibility bridge.
-3. Complete the Rust-only connection-token/CSRF/session contract and port or
-   retire outstanding plugin, admin, domain, and settings hooks.
-4. Replace the Knockout/SnappyMail frontend and bundle path with the Frickmail
-   UI and complete the Frickmail-only theme transition.
-5. Validate schema upgrades, deployment rollback, restarts, multi-instance
-   sessions, observability, and the full real-service acceptance matrix before
-   removing PHP-FPM, nginx, supervisor, MailSo, and SnappyMail/RainLoop.
+   still dependent on the compatibility dispatcher.
+3. Multi-instance session continuity, schema-upgrade/rollback evidence, and a
+   PostgreSQL backup/restore exercise — the outstanding items in
+   `docs/DEPLOYMENT.md` gates 2 and 3.
+4. The v1 Frickmail UI (vanilla ES modules) is the production UI. The legacy
+   Knockout bundle is still assembled into the image for reference and
+   rollback familiarity, but `/` no longer boots it.
+5. Work the real-service acceptance matrix in `docs/DEPLOYMENT.md` gate 4
+   (attachments, drafts, notifications, PGP/S/MIME compose) before declaring
+   the migration done.
 
 The production Rust Dockerfile, Compose service, deployment guide, healthcheck,
-and canary workflow already exist. Operators should continue to use the canary
-procedure in `docs/DEPLOYMENT.md`; promoting the Rust service as the sole
-production container remains intentionally blocked by the gates above. This
-snapshot is a high-level summary; `docs/DEPLOYMENT.md` is the authoritative,
-exhaustive readiness and cutover checklist.
+and canary workflow already exist; `docs/DEPLOYMENT.md` remains the
+authoritative, exhaustive readiness and cutover checklist.
 
-The PHP backend and legacy JavaScript application are temporary compatibility
-layers only. They must shrink continuously until no production request depends
-on PHP, nginx, PHP-FPM, supervisor, Knockout screens, legacy bundle generation,
-or SnappyMail/RainLoop runtime paths.
+The legacy JavaScript application is a temporary compatibility layer only. It
+must shrink continuously until no production request depends on Knockout
+screens, legacy bundle generation, or SnappyMail/RainLoop runtime paths.
 
 ## Migration Definition Of Done
 
