@@ -1141,3 +1141,166 @@ body.fm-app #app > [data-fm="settings-layout"] {
 	color: var(--fm-accent);
 	font-weight: 600;
 }
+
+/* ── OpenPGP ── */
+/* Key list in Settings: identity and fingerprint stack on the left, the
+   per-row actions stay on the right, so the panel reads at a glance the way a
+   key manager does. */
+#app [data-fm="pgp-keys"] {
+	list-style: none;
+	margin: 0 0 1.5rem;
+	padding: 0;
+}
+
+#app [data-fm="pgp-key"] {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 0.2rem 0.75rem;
+	padding: 0.65rem 0.25rem;
+	border-bottom: 1px solid var(--fm-border);
+}
+
+#app [data-fm="pgp-key"] [data-fm="uid"] {
+	flex: 1 1 100%;
+	font-weight: 600;
+	color: var(--fm-text);
+}
+
+#app [data-fm="pgp-key"] [data-fm="fingerprint"] {
+	flex: 1 1 100%;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.78rem;
+	color: var(--fm-muted);
+	word-break: break-all;
+}
+
+#app [data-fm="pgp-key"] [data-fm="created"],
+#app [data-fm="pgp-key"] [data-fm="expires"] {
+	color: var(--fm-muted);
+	font-size: 0.8rem;
+}
+
+#app [data-fm="pgp-key"] [data-fm="state"] {
+	flex: 1 1 100%;
+	color: var(--fm-accent);
+	font-size: 0.78rem;
+}
+
+#app [data-fm="pgp-key"] button {
+	width: auto;
+	padding: 0.3rem 0.75rem;
+	border: 1px solid var(--fm-border-strong);
+	border-radius: 6px;
+	background: var(--fm-surface);
+	color: var(--fm-text);
+	font: inherit;
+	font-size: 0.8rem;
+	cursor: pointer;
+}
+
+#app [data-fm="pgp-key"] button:hover {
+	border-color: var(--fm-accent);
+}
+
+/* Deleting a key is irreversible, so it is the one destructive row action. */
+#app [data-fm="pgp-key"] [data-fm="pgp-delete"] {
+	color: var(--fm-danger);
+}
+
+#app [data-fm="pgp-generate"],
+#app [data-fm="pgp-import"],
+#app [data-fm="pgp-export-form"] {
+	max-width: 34rem;
+	margin-bottom: 1.75rem;
+}
+
+#app [data-fm="pgp-export-form"] [data-fm="export-output"] {
+	margin-top: 0.6rem;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.75rem;
+}
+
+/* Compose OpenPGP bar: sits between the body and the footer, the way a
+   mail client's encrypt/sign toggle does. Collapsed by default so the compose
+   window only grows by its one summary line. */
+#app [data-fm="pgp-compose"] {
+	margin: 0;
+	border: 0;
+	border-top: 1px solid var(--fm-border);
+	background: var(--fm-panel);
+	/* A flex item defaults to `min-width: auto`, which lets the recipient
+	   select push the bar wider than the compose window. */
+	min-width: 0;
+}
+
+#app [data-fm="pgp-compose"] > summary {
+	padding: 0.45rem 0.9rem;
+	color: var(--fm-muted);
+	font-size: 0.8rem;
+	cursor: pointer;
+	user-select: none;
+}
+
+#app [data-fm="pgp-compose"][open] > summary {
+	color: var(--fm-text);
+}
+
+#app [data-fm="pgp-compose"] [data-fm="pgp-state"] {
+	color: var(--fm-accent);
+}
+
+#app [data-fm="pgp-compose"] [data-fm="pgp-compose-body"] {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.35rem 1.1rem;
+	padding: 0.25rem 0.9rem 0.6rem;
+}
+
+#app [data-fm="pgp-compose"] label {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	min-width: 0;
+	margin: 0;
+	font-size: 0.8rem;
+}
+
+#app [data-fm="pgp-compose"] input[type="password"] {
+	width: 12rem;
+	max-width: 100%;
+}
+
+#app [data-fm="pgp-compose"] select {
+	max-width: 100%;
+}
+
+#app [data-fm="pgp-compose"] select[multiple] {
+	min-width: 12rem;
+	max-height: 7rem;
+	overflow-y: auto;
+}
+
+/* Narrow window: the section menu becomes a horizontal scroller, otherwise its
+   180px floor leaves the settings panel almost no room to show anything. */
+@media (max-width: 40rem) {
+	body.fm-app #app > [data-fm="settings-layout"] {
+		grid-template-columns: 1fr;
+		grid-template-rows: auto minmax(0, 1fr);
+	}
+
+	#app [data-fm="settings-menu"] {
+		display: flex;
+		gap: 0.25rem;
+		overflow-x: auto;
+		border-right: 0;
+		border-bottom: 1px solid var(--fm-border);
+	}
+
+	#app [data-fm="settings-menu"] button {
+		width: auto;
+		margin-bottom: 0;
+		white-space: nowrap;
+	}
+}

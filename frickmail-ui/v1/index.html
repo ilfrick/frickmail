@@ -92,6 +92,21 @@ import {
 	renderSmimeImportForms
 } from './js/smime.js';
 import {
+	collectExportPayload,
+	collectGeneratePayload,
+	collectImportPayload,
+	collectPgpComposeOptions,
+	exportPgpKey,
+	generatePgpKey,
+	importPgpKey,
+	loadPgpKeys,
+	renderPgpComposeOptions,
+	renderPgpForms,
+	renderPgpKeys,
+	removePgpKey,
+	wirePgpComposeToggle
+} from './js/pgp.js';
+import {
 	loadUnifiedInbox,
 	renderSearchForm,
 	renderSearchResults,
@@ -399,6 +414,97 @@ async function onSmimeDelete(id) {
 		await showSmime();
 	} catch (error) {
 		smimeStatus(error && error.message ? error.message : 'Delete failed.');
+	}
+}
+
+/// Opens the OpenPGP section of the Settings hub.
+async function showPgp() {
+	return showSettings('pgp');
+}
+
+function pgpStatus(text) {
+	const status = root.querySelector('[data-fm="status"]');
+	if (status) {
+		status.textContent = text;
+	}
+}
+
+async function onPgpGenerateSubmit(event) {
+	event.preventDefault();
+	try {
+		await generatePgpKey(api, collectGeneratePayload(root));
+		await showPgp();
+	} catch (error) {
+		pgpStatus(error && error.message ? error.message : 'Generation failed.');
+	}
+}
+
+async function onPgpImportSubmit(event) {
+	event.preventDefault();
+	try {
+		await importPgpKey(api, collectImportPayload(root));
+		await showPgp();
+	} catch (error) {
+		pgpStatus(error && error.message ? error.message : 'Import failed.');
+	}
+}
+
+async function onPgpExportSubmit(event) {
+	event.preventDefault();
+	const payload = collectExportPayload(root);
+	try {
+		const data = await exportPgpKey(api, payload);
+		const output = root.querySelector('[data-fm="export-output"]');
+		if (output) {
+			output.value = (data && data.key) || '';
+		}
+		pgpStatus('Exported. Copy the armor below and store it somewhere safe.');
+	} catch (error) {
+		pgpStatus(error && error.message ? error.message : 'Export failed.');
+	}
+}
+
+/// Fills the export form from a key row, so a user can export straight from
+/// the list. Ticks the private-key box when the secret half is held.
+function onPgpExportPick(button) {
+	const form = root.querySelector('[data-fm="pgp-export-form"]');
+	if (!form) {
+		return;
+	}
+	const keyId = form.querySelector('[data-fm="export-key-id"]');
+	const secret = form.querySelector('[data-fm="export-secret"]');
+	if (keyId) {
+		keyId.value = button.getAttribute('data-fingerprint') || '';
+	}
+	if (secret) {
+		secret.checked = button.getAttribute('data-secret') === '1';
+	}
+	const passphrase = form.querySelector('[data-fm="export-passphrase"]');
+	if (passphrase) {
+		passphrase.focus();
+	}
+}
+
+async function onPgpDelete(button) {
+	const keyId = button.getAttribute('data-fingerprint') || '';
+	const row = button.closest ? button.closest('[data-fm="pgp-key"]') : null;
+	const secret = !!(row && row.getAttribute('data-secret') === '1');
+	// Removal is irreversible and takes out the secret half as well, so ask
+	// before touching the keyring.
+	const question = secret
+		? 'Delete this key and its private half? This cannot be undone.'
+		: 'Delete this public key? This cannot be undone.';
+	if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+		&& !window.confirm(question)) {
+		return;
+	}
+	try {
+		// A secret key keeps its public half in the keyring, so both halves have
+		// to go for the key to disappear from the list.
+		await removePgpKey(api, { fingerprint: keyId, secret });
+		await showPgp();
+	} catch (error) {
+		pgpStatus(error && error.message ? error.message : 'Delete failed.');
 	}
 }
 
@@ -822,13 +928,11 @@ async function renderSettingsPanel(section) {
 			+ '<p data-fm="status"></p>';
 	}
 	if (section === 'pgp') {
-		// Honest placeholder: the native keyring exists server-side (key
-		// generation, import and signing are native), but the v1 API has no
-		// key-management routes yet, so there is nothing to show.
-		return '<h2 data-fm="subtitle">OpenPGP</h2>'
-			+ '<p data-fm="empty">OpenPGP keys are held in the account keyring on the '
-			+ 'server. Key management — generate, import, list and revoke — is not '
-			+ 'exposed in this interface yet.</p>';
+		const data = await loadPgpKeys(api);
+		return '<h2 data-fm="subtitle">OpenPGP keys</h2>'
+			+ renderPgpKeys(data)
+			+ renderPgpForms()
+			+ '<p data-fm="status"></p>';
 	}
 	if (section === 'security') {
 		let totp = '<p data-fm="empty">Two-factor status unavailable.</p>';
@@ -909,6 +1013,27 @@ async function wireSettingsPanel(section) {
 		}
 		for (const button of root.querySelectorAll('[data-fm="delete"]')) {
 			button.addEventListener('click', () => onSmimeDelete(button.getAttribute('data-id')));
+		}
+		return;
+	}
+	if (section === 'pgp') {
+		const generateForm = root.querySelector('[data-fm="pgp-generate"]');
+		if (generateForm) {
+			generateForm.addEventListener('submit', onPgpGenerateSubmit);
+		}
+		const importForm = root.querySelector('[data-fm="pgp-import"]');
+		if (importForm) {
+			importForm.addEventListener('submit', onPgpImportSubmit);
+		}
+		const exportForm = root.querySelector('[data-fm="pgp-export-form"]');
+		if (exportForm) {
+			exportForm.addEventListener('submit', onPgpExportSubmit);
+		}
+		for (const button of root.querySelectorAll('[data-fm="pgp-export"]')) {
+			button.addEventListener('click', () => onPgpExportPick(button));
+		}
+		for (const button of root.querySelectorAll('[data-fm="pgp-delete"]')) {
+			button.addEventListener('click', () => onPgpDelete(button));
 		}
 		return;
 	}
@@ -1071,20 +1196,36 @@ async function showCompose(seed) {
 	} catch (error) {
 		void error;
 	}
+	// The OpenPGP controls only appear when the keyring actually has something
+	// to offer, and a keyring that cannot be read must not block composing.
+	let crypto = '';
+	try {
+		crypto = renderPgpComposeOptions(await loadPgpKeys(api));
+	} catch (error) {
+		void error;
+	}
 	root.innerHTML = nav('compose')
-		+ renderComposeForm(values, identities, { replyAll: !!values.cc });
+		+ renderComposeForm(values, identities, { replyAll: !!values.cc, crypto: crypto });
 	wireNav();
 	const form = root.querySelector('[data-fm="compose"]');
 	if (form) {
 		form.addEventListener('submit', onComposeSubmit);
 	}
 	wireComposeToggle(root);
+	wirePgpComposeToggle(root);
 }
 
 async function onComposeSubmit(event) {
 	event.preventDefault();
 	try {
-		await sendMessage(api, collectComposePayload(root));
+		// OpenPGP options are merged onto the send payload here rather than
+		// inside `collectComposePayload`, so compose stays independent of the
+		// keyring module.
+		const payload = Object.assign(
+			collectComposePayload(root),
+			collectPgpComposeOptions(root)
+		);
+		await sendMessage(api, payload);
 		await showMailbox('INBOX');
 	} catch (error) {
 		const status = root.querySelector('[data-fm="status"]');

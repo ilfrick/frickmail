@@ -51,6 +51,19 @@ describe('renderComposeForm', () => {
 		assert.ok(!renderComposeForm().includes('data-fm="identity"'));
 		assert.ok(!renderComposeForm(null, []).includes('data-fm="identity"'));
 	});
+
+	it('splices supplied crypto markup above the footer, inside the form', () => {
+		const html = renderComposeForm(null, [], { crypto: '<fieldset data-fm="pgp-compose"></fieldset>' });
+		assert.ok(html.includes('data-fm="pgp-compose"'));
+		assert.ok(html.indexOf('data-fm="pgp-compose"') < html.indexOf('data-fm="compose-foot"'));
+		assert.ok(html.indexOf('data-fm="pgp-compose"') < html.indexOf('</form>'));
+	});
+
+	it('ignores a missing or non-string crypto option', () => {
+		assert.ok(!renderComposeForm(null, [], { crypto: 42 }).includes('pgp-compose'));
+		assert.ok(!renderComposeForm(null, [], { crypto: '' }).includes('pgp-compose'));
+		assert.ok(!renderComposeForm(null, [], {}).includes('pgp-compose'));
+	});
 });
 
 describe('collectComposePayload', () => {

@@ -11,7 +11,8 @@ import { escapeHtml } from './mailbox.js';
 /// Renders the compose window, optionally seeded for replies/forwards.
 /// `identities` feeds the sender select; without any, the account default
 /// sends. `options.replyAll` reveals Cc/Bcc immediately (a reply-all usually
-/// already has a Cc). Pure.
+/// already has a Cc); `options.crypto` is pre-rendered OpenPGP markup spliced
+/// in above the footer. Pure.
 export function renderComposeForm(seed, identities, options) {
 	const values = seed && typeof seed === 'object' ? seed : {};
 	const settings = options || {};
@@ -28,11 +29,12 @@ export function renderComposeForm(seed, identities, options) {
 		+ '<span data-fm="field-label">' + label + '</span>'
 		+ field
 		+ '</label>';
+	const title = typeof values.title === 'string' && values.title ? values.title : 'New message';
 	const reveal = settings.replyAll || text('cc') !== '' || text('bcc') !== '' ? '' : ' hidden';
 	return (
 		'<form data-fm="compose">'
 		+ '<div data-fm="compose-head">'
-		+ '<span data-fm="compose-title">' + escapeHtml(typeof values.title === 'string' && values.title ? values.title : 'New message') + '</span>'
+		+ '<span data-fm="compose-title">' + escapeHtml(title) + '</span>'
 		+ '<span data-fm="spacer"></span>'
 		+ '<button type="button" data-fm="compose-toggle">Cc / Bcc</button>'
 		+ '</div>'
@@ -46,6 +48,7 @@ export function renderComposeForm(seed, identities, options) {
 		+ row('Subject', '<input type="text" data-fm="subject" value="' + text('subject') + '" />')
 		+ '</div>'
 		+ '<textarea data-fm="compose-body" rows="14" placeholder="Write your message…">' + text('body') + '</textarea>'
+		+ (typeof settings.crypto === 'string' ? settings.crypto : '')
 		+ '<div data-fm="compose-foot">'
 		+ '<button type="submit" data-fm="send">Send</button>'
 		+ '<span data-fm="spacer"></span>'

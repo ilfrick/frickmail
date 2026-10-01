@@ -111,6 +111,10 @@ pub fn routes() -> Router<AppState> {
                 .delete(smime_delete_cert),
         )
         .route("/smime/p12", post(smime_import_p12))
+        .route("/pgp/keys", get(pgp_keys).delete(pgp_delete_key))
+        .route("/pgp/keys/generate", post(pgp_generate_key))
+        .route("/pgp/keys/import", post(pgp_import_key))
+        .route("/pgp/keys/export", post(pgp_export_key))
         .route("/calendars", get(calendars))
         .route(
             "/calendars/events",
@@ -1224,10 +1228,11 @@ where
     }
 }
 /// reusing the exact compose/delivery pipeline as legacy `SendMessage`
-/// (validation, MIME build, SMTP delivery, Sent filing). Attachments,
-/// client PGP/SMIME payloads, and signing options stay on the legacy
-/// dispatcher for now: v1 `SendRequest` carries only addressing plus
-/// text/HTML bodies. State-changing, so the connection token is required.
+/// (validation, MIME build, SMTP delivery, Sent filing). Attachments and
+/// client-built PGP/S-MIME payloads stay on the legacy dispatcher for now:
+/// v1 `SendRequest` carries addressing plus text/HTML bodies and server-side
+/// OpenPGP signing/encryption. State-changing, so the connection token is
+/// required.
 async fn send(
     state: axum::extract::State<AppState>,
     session: fm_session::Session,
@@ -1268,6 +1273,18 @@ struct SendRequest {
     html: Option<String>,
     #[serde(default = "default_send_save_to_sent")]
     save_to_sent: bool,
+    /// Server-side OpenPGP signing key: a key id or fingerprint from
+    /// `GET /pgp/keys`. Omitted means "do not sign" — unlike the legacy
+    /// dispatcher, v1 never guesses from a PHP-truthy placeholder, so an
+    /// unparseable value is a 400 rather than a silent skip.
+    #[serde(default)]
+    sign_fingerprint: Option<String>,
+    /// Passphrase protecting the signing key, when it has one.
+    #[serde(default)]
+    sign_passphrase: Option<String>,
+    /// Recipient key ids/fingerprints to encrypt to.
+    #[serde(default)]
+    encrypt_fingerprints: Option<Vec<String>>,
 }
 
 fn default_send_save_to_sent() -> bool {
@@ -1438,6 +1455,67 @@ async fn send_with_sender_and_appender(
     }
     if request.save_to_sent {
         payload["saveFolder"] = json!(sent_folder.as_deref().unwrap_or("Sent"));
+    }
+    // Server-side OpenPGP signing/encryption. Fingerprints are validated here
+    // so a typo is a v1 400 with a readable message, not a generic legacy
+    // upstream failure. The passphrase is handed to the native pipeline, which
+    // passes it to GnuPG through a 0600 file and never through argv.
+    if let Some(fingerprint) = request
+        .sign_fingerprint
+        .as_deref()
+        .map(str::trim)
+        .filter(|fingerprint| !fingerprint.is_empty())
+    {
+        let normalized = match super::validate_gnupg_compose_fingerprint(fingerprint) {
+            Ok(normalized) => normalized,
+            Err(_) => {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "OpenPGP signing fingerprint is invalid",
+                )
+            }
+        };
+        payload["signFingerprint"] = json!(normalized);
+        if let Some(passphrase) = request
+            .sign_passphrase
+            .filter(|passphrase| !passphrase.is_empty())
+        {
+            if passphrase.len() > super::GNUPG_PASSPHRASE_LIMIT_BYTES {
+                return v1_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "OpenPGP passphrase exceeds the safety limit",
+                );
+            }
+            payload["signPassphrase"] = json!(passphrase);
+        }
+    }
+    if let Some(fingerprints) = request
+        .encrypt_fingerprints
+        .filter(|fingerprints| !fingerprints.is_empty())
+    {
+        if fingerprints.len() > super::GNUPG_ENCRYPT_RECIPIENT_LIMIT {
+            return v1_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "OpenPGP encryption recipient limit exceeded",
+            );
+        }
+        let mut normalized = Vec::with_capacity(fingerprints.len());
+        for fingerprint in fingerprints {
+            match super::validate_gnupg_compose_fingerprint(fingerprint.trim()) {
+                Ok(value) => normalized.push(value),
+                Err(_) => {
+                    return v1_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request",
+                        "OpenPGP encryption fingerprint is invalid",
+                    )
+                }
+            }
+        }
+        payload["encryptFingerprints"] = json!(normalized);
     }
     let response = super::native_send_message_inner_with_sender_and_sent_appender(
         state,
@@ -2379,6 +2457,461 @@ async fn smime_delete_cert(
             "S/MIME certificate not found",
         ),
         Err(err) => smime_error(&err.public_message(), "certificate delete"),
+    }
+}
+
+/// Maps a GnuPG failure onto the v1 contract. GnuPG is a local process, not a
+/// remote upstream, so a failed spawn/exit is a server fault (502) rather than
+/// a client one; the raw message can name server paths and is logged, never
+/// returned. Callers turn expected rejections (bad key id, bad material) into
+/// 400s before ever reaching GnuPG.
+fn pgp_error(message: &str, action: &'static str) -> Response {
+    tracing::warn!("v1 {action} failed: {message}");
+    v1_error(
+        StatusCode::BAD_GATEWAY,
+        "pgp_unavailable",
+        "OpenPGP operation failed",
+    )
+}
+
+/// Normalizes one parsed GnuPG key for the v1 contract: the primary key is
+/// `subkeys[0]` (that is how `parse_gnupg_keys` records it), and remaining
+/// subkeys are reported separately because only the primary key carries the
+/// user IDs. Pure.
+fn pgp_key_view(key: &super::LegacyGnupgKey) -> Value {
+    let primary = key.subkeys.first();
+    let subkey = |value: fn(&super::LegacyGnupgSubkey) -> Value| -> Vec<Value> {
+        key.subkeys.iter().skip(1).map(value).collect()
+    };
+    json!({
+        "fingerprint": primary.map(|subkey| subkey.fingerprint.clone()).unwrap_or_default(),
+        "key_id": primary.map(|subkey| subkey.keyid.clone()).unwrap_or_default(),
+        "secret": key.is_secret,
+        "expired": key.expired,
+        "revoked": key.revoked,
+        "created": primary.map(|subkey| subkey.timestamp).unwrap_or_default(),
+        "expires": primary.map(|subkey| subkey.expires).unwrap_or_default(),
+        "length": primary.map(|subkey| subkey.length).unwrap_or_default(),
+        "algorithm": primary.map(|subkey| subkey.algorithm).unwrap_or_default(),
+        "can_sign": key.can_sign,
+        "can_encrypt": key.can_encrypt,
+        "can_verify": key.can_verify,
+        "can_decrypt": key.can_decrypt,
+        "uids": key
+            .uids
+            .iter()
+            .map(|uid| {
+                // A uid with no angle brackets is a bare address, which the
+                // shared legacy parser reports as the display name. Recover the
+                // address here so the v1 shape always has a usable `email`
+                // without changing the legacy envelope.
+                let email = if uid.email.is_empty() && uid.uid.parse::<lettre::Address>().is_ok()
+                {
+                    uid.uid.clone()
+                } else {
+                    uid.email.clone()
+                };
+                json!({
+                    "name": uid.name,
+                    "email": email,
+                    "uid": uid.uid,
+                    "revoked": uid.revoked,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "subkeys": subkey(|subkey| json!({
+            "fingerprint": subkey.fingerprint,
+            "key_id": subkey.keyid,
+            "secret": subkey.is_secret,
+            "created": subkey.timestamp,
+            "expires": subkey.expires,
+            "length": subkey.length,
+            "algorithm": subkey.algorithm,
+            "can_sign": subkey.can_sign,
+            "can_encrypt": subkey.can_encrypt,
+            "expired": subkey.expired,
+            "revoked": subkey.revoked,
+        })),
+    })
+}
+
+/// Lists the caller's OpenPGP keyring: every public key plus every secret key
+/// the server holds for them. Key material never leaves the server here, only
+/// the metadata GnuPG reports in `--with-colons` form. Read-only.
+async fn pgp_keys(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+) -> Response {
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let (public, private) = tokio::join!(
+        super::run_gnupg(&state, user_id, super::PGP_LIST_KEYS_ARGS, None, None),
+        super::run_gnupg(
+            &state,
+            user_id,
+            super::PGP_LIST_SECRET_KEYS_ARGS,
+            None,
+            None
+        ),
+    );
+    let public = match public {
+        Ok(public) => public,
+        Err(message) => return pgp_error(&message, "key listing"),
+    };
+    let private = match private {
+        Ok(private) => private,
+        Err(message) => return pgp_error(&message, "key listing"),
+    };
+    // Capability bookkeeping mirrors legacy `GnupgGetKeys`: a public key can
+    // always verify, and a secret key can decrypt but is not offered as an
+    // encryption target for the caller's own mail.
+    let mut keys: Vec<Value> = super::parse_gnupg_keys(&public.output, false)
+        .into_iter()
+        .map(|mut key| {
+            key.can_verify = true;
+            pgp_key_view(&key)
+        })
+        .collect();
+    for mut secret in super::parse_gnupg_keys(&private.output, true) {
+        secret.can_decrypt = true;
+        secret.can_encrypt = false;
+        keys.push(pgp_key_view(&secret));
+    }
+    (
+        StatusCode::OK,
+        Json(ApiV1Envelope::ok(json!({ "keys": keys }))),
+    )
+        .into_response()
+}
+
+/// Request body for `POST /api/frickmail/v1/pgp/keys/generate`: the user ID to
+/// certify on the new key. Key generation is state-changing, so the
+/// connection token is required.
+#[derive(Debug, Deserialize, Default)]
+struct PgpGenerateRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    passphrase: Option<String>,
+}
+
+/// Generates a new OpenPGP key pair in the caller's keyring, mirroring legacy
+/// `GnupgGenerateKey`: a valid identity email is mandatory, the display name
+/// is bounded and control-character free, and the passphrase is optional (an
+/// empty one leaves the key unprotected, exactly like PHP's `--passphrase ''`).
+async fn pgp_generate_key(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<PgpGenerateRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid OpenPGP request",
+        );
+    };
+    let name = request.name.unwrap_or_default().trim().to_string();
+    let Some(email) = request
+        .email
+        .map(|email| email.trim().to_string())
+        .filter(|email| email.parse::<lettre::Address>().is_ok())
+    else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "A valid OpenPGP identity email is required",
+        );
+    };
+    if name.len() > 128 || name.chars().any(char::is_control) {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "OpenPGP identity name is invalid",
+        );
+    }
+    let passphrase = request.passphrase.unwrap_or_default();
+    if passphrase.len() > super::GNUPG_PASSPHRASE_LIMIT_BYTES {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "OpenPGP passphrase exceeds the safety limit",
+        );
+    }
+    let uid = if name.is_empty() {
+        email
+    } else {
+        format!("{name} <{email}>")
+    };
+    // An empty passphrase keeps the historical `--passphrase ""` form so the
+    // key is generated unprotected. A non-empty passphrase is delivered via a
+    // 0600 file inside `run_gnupg` so it never appears in argv.
+    let generated = if passphrase.is_empty() {
+        super::run_gnupg(
+            &state,
+            user_id,
+            &[
+                "--yes",
+                "--passphrase",
+                "",
+                "--quick-generate-key",
+                &uid,
+                "default",
+                "default",
+            ],
+            None,
+            None,
+        )
+        .await
+    } else {
+        super::run_gnupg(
+            &state,
+            user_id,
+            &["--yes", "--quick-generate-key", &uid, "default", "default"],
+            None,
+            Some((String::new(), passphrase)),
+        )
+        .await
+    };
+    match generated {
+        Ok(result) => {
+            let fingerprint = result
+                .status
+                .iter()
+                .find_map(|line| line.strip_prefix("KEY_CREATED "))
+                .and_then(|value| value.split(' ').next_back())
+                .unwrap_or_default()
+                .to_string();
+            (
+                StatusCode::OK,
+                Json(ApiV1Envelope::ok(json!({ "fingerprint": fingerprint }))),
+            )
+                .into_response()
+        }
+        Err(message) => pgp_error(&message, "key generation"),
+    }
+}
+
+/// Request body for `POST /api/frickmail/v1/pgp/keys/import`: one ASCII-armored
+/// key block. `backup` additionally stores a copy under the account's `PGP`
+/// settings (secret blocks encrypted at rest with the session credential key),
+/// mirroring legacy `PgpImportKey`.
+#[derive(Debug, Deserialize, Default)]
+struct PgpImportRequest {
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    backup: Option<bool>,
+}
+
+/// Imports one armored key into the caller's keyring.
+async fn pgp_import_key(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<PgpImportRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid OpenPGP request",
+        );
+    };
+    let key = request.key.unwrap_or_default().trim().to_string();
+    if key.is_empty() {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "An armored OpenPGP key is required",
+        );
+    }
+    if let Err(message) =
+        super::validate_gnupg_material(&key, super::PGP_KEY_MATERIAL_LIMIT_BYTES, true)
+            .and_then(|_| super::validate_armored_pgp_material(&key))
+    {
+        return v1_error(StatusCode::BAD_REQUEST, "invalid_request", message);
+    }
+
+    let mut stored = false;
+    if request.backup.unwrap_or(false) {
+        let credential_key = match v1_session_credential_key(&session).await {
+            Ok(credential_key) => credential_key,
+            Err(response) => return response,
+        };
+        stored = super::backup_pgp_key_material(&state, user_id, &key, &credential_key).await;
+    }
+
+    match super::run_gnupg(&state, user_id, &["--import"], Some(key.into_bytes()), None).await {
+        Ok(result) => {
+            let imported = result
+                .status
+                .iter()
+                .any(|line| line.starts_with("IMPORT_OK "));
+            (
+                StatusCode::OK,
+                Json(ApiV1Envelope::ok(json!({
+                    "imported": imported,
+                    "backup": stored,
+                }))),
+            )
+                .into_response()
+        }
+        Err(message) => pgp_error(&message, "key import"),
+    }
+}
+
+/// Request body for `POST /api/frickmail/v1/pgp/keys/export`: which key to
+/// export and, for a secret key, the passphrase that protects it.
+#[derive(Debug, Deserialize, Default)]
+struct PgpExportRequest {
+    #[serde(default)]
+    key_id: Option<String>,
+    #[serde(default)]
+    secret: Option<bool>,
+    #[serde(default)]
+    passphrase: Option<String>,
+}
+
+/// Exports one key as ASCII armor. GnuPG requires the passphrase for a
+/// protected secret key, exactly like legacy `GnupgExportKey`.
+async fn pgp_export_key(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    body: Result<axum::extract::Json<PgpExportRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Ok(axum::extract::Json(request)) = body else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid OpenPGP request",
+        );
+    };
+    let Some(key_id) = request
+        .key_id
+        .map(|key_id| key_id.trim().to_string())
+        .filter(|key_id| !key_id.is_empty())
+    else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "An OpenPGP key id is required",
+        );
+    };
+    let secret = request.secret.unwrap_or(false);
+    let passphrase = request.passphrase.unwrap_or_default();
+    if passphrase.len() > super::GNUPG_PASSPHRASE_LIMIT_BYTES {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "OpenPGP passphrase exceeds the safety limit",
+        );
+    }
+    let mut args = vec!["--armor"];
+    let mut export_passphrase: Option<(String, String)> = None;
+    if secret {
+        if !passphrase.is_empty() {
+            export_passphrase = Some((key_id.clone(), passphrase));
+        }
+        args.push("--export-secret-keys");
+    } else {
+        args.push("--export");
+    }
+    args.push(key_id.as_str());
+    match super::run_gnupg(&state, user_id, &args, None, export_passphrase).await {
+        Ok(result) => {
+            let key = String::from_utf8_lossy(&result.output).to_string();
+            (
+                StatusCode::OK,
+                Json(ApiV1Envelope::ok(json!({ "key": key }))),
+            )
+                .into_response()
+        }
+        Err(message) => pgp_error(&message, "key export"),
+    }
+}
+
+/// Deletes one key from the caller's keyring. GnuPG keeps secret and public
+/// halves separately, so `secret` picks which one is removed, mirroring legacy
+/// `GnupgDeleteKey`.
+async fn pgp_delete_key(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    session: fm_session::Session,
+    headers: axum::http::HeaderMap,
+    query: Result<
+        axum::extract::Query<std::collections::HashMap<String, String>>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    if let Err(response) = v1_require_token(&state, &session, &headers).await {
+        return response;
+    }
+    let user_id = match v1_session_user_id(&session).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Ok(axum::extract::Query(params)) = query else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid OpenPGP delete query",
+        );
+    };
+    let Some(key_id) = params
+        .get("key_id")
+        .map(|key_id| key_id.trim().to_string())
+        .filter(|key_id| !key_id.is_empty())
+    else {
+        return v1_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "An OpenPGP key id is required",
+        );
+    };
+    let secret = params
+        .get("secret")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let payload = json!({ "keyId": key_id });
+    match super::delete_gnupg_key(&state, user_id, &payload, secret).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiV1Envelope::ok(json!({ "ok": true }))),
+        )
+            .into_response(),
+        Err(message) if message.ends_with(" key not found") => v1_error(
+            StatusCode::NOT_FOUND,
+            "key_not_found",
+            "OpenPGP key not found",
+        ),
+        Err(message) => pgp_error(&message, "key delete"),
     }
 }
 
@@ -9156,6 +9689,9 @@ mod tests {
                 text: Some("Body text".to_string()),
                 html: None,
                 save_to_sent: true,
+                sign_fingerprint: None,
+                sign_passphrase: None,
+                encrypt_fingerprints: None,
             })),
             &headers,
             None,
@@ -9203,6 +9739,9 @@ mod tests {
                 text: Some("Body text".to_string()),
                 html: None,
                 save_to_sent: false,
+                sign_fingerprint: None,
+                sign_passphrase: None,
+                encrypt_fingerprints: None,
             })),
             &headers,
             None,
@@ -9298,6 +9837,9 @@ mod tests {
                 text: Some("Body text".to_string()),
                 html: None,
                 save_to_sent: false,
+                sign_fingerprint: None,
+                sign_passphrase: None,
+                encrypt_fingerprints: None,
             })),
             &headers,
             None,
@@ -9409,6 +9951,494 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A user id unique to this process. The GnuPG home is derived from it and
+    /// lives on disk, so a fixed id would let a test inherit keys an earlier
+    /// run left behind. The 9e12 base keeps it clear of the fixed ids the other
+    /// suites use; the 8-wide slot per sequence value keeps sibling tests apart.
+    fn unique_pgp_user_id() -> i64 {
+        static SEQUENCE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        9_000_000_000_000 + (nanos % 1_000_000) * 1_000 + sequence
+    }
+
+    /// Authenticated state for the OpenPGP routes, on a keyring of its own.
+    ///
+    /// The keyring lives on disk under the shared `tmp_dir`, so it is wiped
+    /// before use. The unique user id already keeps sibling tests apart, but a
+    /// previous run that happened to draw the same id would otherwise leave
+    /// keys behind for this one to trip over.
+    async fn pgp_test_state(username: &str) -> (Router, String, String) {
+        let user_id = unique_pgp_user_id();
+        let home = std::path::Path::new(&test_api_config().tmp_dir)
+            .join("gnupg")
+            .join(format!("user-{user_id:x}"));
+        let _ = std::fs::remove_dir_all(&home);
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, user_id, username, "correct-horse", None).await;
+        seed_mail_account(&pool, user_id, user_id, "Primary").await;
+        let app = login_app(pool);
+        let (cookie, token) = bootstrap_csrf(app.clone()).await;
+        let cookie = login_as(app.clone(), &cookie, &token, username, "correct-horse").await;
+        (app, cookie, token)
+    }
+
+    #[tokio::test]
+    async fn v1_pgp_rejects_anonymous_callers() {
+        let app = login_app(login_db_pool().await);
+
+        // Reads hit the session gate; writes hit the connection-token gate
+        // first, exactly like v1 send and the S/MIME routes.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/pgp/keys")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for request in [
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/pgp/keys/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/pgp/keys/import")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/frickmail/v1/pgp/keys/export")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/frickmail/v1/pgp/keys?key_id=ABCDEF0123456789")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_pgp_validates_input_before_touching_gnupg() {
+        let (app, cookie, token) = pgp_test_state("v1pgpbad").await;
+        let post = |uri: &str, body: serde_json::Value| {
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("cookie", &cookie)
+                .header("x-sm-token", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Generation needs a parseable identity email and a control-free name.
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"email": "   "}),
+            serde_json::json!({"email": "not-an-address"}),
+            serde_json::json!({"email": "a@example.com", "name": "bad\u{7}name"}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post("/api/frickmail/v1/pgp/keys/generate", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+
+        // Import wants exactly one ASCII-armored block.
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"key": "   "}),
+            serde_json::json!({"key": "not armored at all"}),
+            serde_json::json!({
+                "key": "-----BEGIN PGP PUBLIC KEY BLOCK-----\n!!!\n-----END PGP PUBLIC KEY BLOCK-----"
+            }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post("/api/frickmail/v1/pgp/keys/import", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+
+        // Export needs a key id too, and an unprotected-secret export with a
+        // passphrase is fine but a blank key id is not.
+        for body in [
+            serde_json::json!({"secret": true}),
+            serde_json::json!({"key_id": "  ", "secret": true}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post("/api/frickmail/v1/pgp/keys/export", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/frickmail/v1/pgp/keys")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Full keyring round trip against real GnuPG: generate, list, export the
+    /// secret key, delete both halves, and confirm the keyring is empty again.
+    /// Also pins that the listing never carries key material.
+    #[tokio::test]
+    async fn v1_pgp_generates_lists_exports_and_deletes_a_key() {
+        let (app, cookie, token) = pgp_test_state("v1pgp").await;
+        let post = |uri: &str, body: serde_json::Value| {
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("cookie", &cookie)
+                .header("x-sm-token", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/pgp/keys/generate",
+                serde_json::json!({
+                    "name": "V1 PGP",
+                    "email": "v1pgp@example.com",
+                    "passphrase": ""
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let fingerprint = body["data"]["fingerprint"].as_str().unwrap().to_string();
+        assert_eq!(fingerprint.len(), 40, "{fingerprint}");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/pgp/keys")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let keys = body["data"]["keys"].as_array().unwrap();
+        // GnuPG reports the key in both the public and the secret keyring, so
+        // v1 emits one row per keyring sharing a primary fingerprint.
+        let primary: Vec<&serde_json::Value> = keys
+            .iter()
+            .filter(|key| key["fingerprint"] == fingerprint.as_str())
+            .collect();
+        assert_eq!(primary.len(), 2, "{body}");
+        let public = primary
+            .iter()
+            .find(|key| key["secret"] == false)
+            .expect("public view");
+        let secret = primary
+            .iter()
+            .find(|key| key["secret"] == true)
+            .expect("secret view");
+        assert_eq!(public["can_verify"], true);
+        assert_eq!(secret["can_decrypt"], true);
+        assert_eq!(public["can_sign"], true);
+        assert_eq!(public["revoked"], false);
+        assert_eq!(public["expired"], false);
+        assert_eq!(public["uids"][0]["email"], "v1pgp@example.com");
+        assert_eq!(public["uids"][0]["name"], "V1 PGP");
+        assert!(public["created"].as_u64().unwrap() > 0);
+        assert!(public["length"].as_u64().unwrap() > 0);
+        // Metadata only: no armor may appear in the listing.
+        assert!(!body.to_string().contains("BEGIN PGP"));
+
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/pgp/keys/export",
+                serde_json::json!({"key_id": fingerprint, "secret": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let exported = body["data"]["key"].as_str().unwrap();
+        assert!(
+            exported.contains("-----BEGIN PGP PRIVATE KEY BLOCK-----"),
+            "{exported}"
+        );
+
+        // Deleting an unknown key is a 404, not a silent success.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/frickmail/v1/pgp/keys?key_id=ABCDEF0123456789")
+                    .header("cookie", &cookie)
+                    .header("x-sm-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "key_not_found");
+
+        for secret in ["1", "0"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::DELETE)
+                        .uri(format!(
+                            "/api/frickmail/v1/pgp/keys?key_id={fingerprint}&secret={secret}"
+                        ))
+                        .header("cookie", &cookie)
+                        .header("x-sm-token", &token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = read_json(response).await;
+            assert_eq!(body["data"]["ok"], true);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/pgp/keys")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(
+            body["data"]["keys"].as_array().unwrap().is_empty(),
+            "{body}"
+        );
+    }
+
+    /// Import is the recovery path for a keyring the server no longer holds,
+    /// so exported armor must round trip back in.
+    #[tokio::test]
+    async fn v1_pgp_import_round_trips_an_exported_key() {
+        let (app, cookie, token) = pgp_test_state("v1pgpimport").await;
+        let post = |uri: &str, body: serde_json::Value| {
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("cookie", &cookie)
+                .header("x-sm-token", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/pgp/keys/generate",
+                serde_json::json!({"email": "roundtrip@example.com"}),
+            ))
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        let fingerprint = body["data"]["fingerprint"].as_str().unwrap().to_string();
+
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/pgp/keys/export",
+                serde_json::json!({"key_id": fingerprint}),
+            ))
+            .await
+            .unwrap();
+        let body = read_json(response).await;
+        let armored = body["data"]["key"].as_str().unwrap().to_string();
+        assert!(armored.contains("-----BEGIN PGP PUBLIC KEY BLOCK-----"));
+
+        // Drop the key from the keyring, then bring the same armor back.
+        for secret in ["1", "0"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::DELETE)
+                        .uri(format!(
+                            "/api/frickmail/v1/pgp/keys?key_id={fingerprint}&secret={secret}"
+                        ))
+                        .header("cookie", &cookie)
+                        .header("x-sm-token", &token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/api/frickmail/v1/pgp/keys/import",
+                serde_json::json!({"key": armored, "backup": false}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["imported"], true, "{body}");
+        // Backup is opt-in; without it nothing is written to account settings.
+        assert_eq!(body["data"]["backup"], false, "{body}");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/frickmail/v1/pgp/keys")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let keys = body["data"]["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 1, "{body}");
+        assert_eq!(keys[0]["fingerprint"], fingerprint.as_str());
+        assert_eq!(keys[0]["secret"], false);
+        assert_eq!(keys[0]["uids"][0]["email"], "roundtrip@example.com");
+    }
+
+    async fn send_with_pgp_options(
+        state: &AppState,
+        session: &fm_session::Session,
+        headers: &axum::http::HeaderMap,
+        sign_fingerprint: Option<&str>,
+        encrypt: Option<Vec<&str>>,
+    ) -> Response {
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(None));
+        super::send_with_sender_and_appender(
+            state,
+            session,
+            Ok(axum::extract::Json(super::SendRequest {
+                account_id: Some(1201),
+                identity_id: None,
+                to: "recipient@example.net".to_string(),
+                cc: None,
+                bcc: None,
+                subject: Some("PGP parity".to_string()),
+                text: Some("Body text".to_string()),
+                html: None,
+                save_to_sent: true,
+                sign_fingerprint: sign_fingerprint.map(str::to_string),
+                sign_passphrase: None,
+                encrypt_fingerprints: encrypt
+                    .map(|values| values.into_iter().map(str::to_string).collect()),
+            })),
+            headers,
+            None,
+            &RecordingSmtpSender { message: sent },
+            &RecordingSentAppender { message: stored },
+            &super::super::ProductionOAuthTokenRefresher,
+        )
+        .await
+        .into_response()
+    }
+
+    #[tokio::test]
+    async fn v1_send_rejects_invalid_pgp_fingerprints() {
+        let (state, session, token) = send_test_state().await;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-sm-token", token.parse().unwrap());
+
+        // v1 never silently skips signing on a PHP-truthy placeholder: an
+        // unparseable fingerprint is a 400, not an unsigned send. An absent
+        // fingerprint (blank string) means "do not sign" and sends normally.
+        for fingerprint in ["0", "nope", "ZZZZ"] {
+            let response =
+                send_with_pgp_options(&state, &session, &headers, Some(fingerprint), None).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{fingerprint}");
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+        let response = send_with_pgp_options(&state, &session, &headers, Some(""), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = send_with_pgp_options(
+            &state,
+            &session,
+            &headers,
+            None,
+            Some(vec!["not-a-fingerprint"]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+        let response = send_with_pgp_options(
+            &state,
+            &session,
+            &headers,
+            None,
+            Some(vec![
+                "ABCDEF01";
+                super::super::GNUPG_ENCRYPT_RECIPIENT_LIMIT + 1
+            ]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
     }
 
     async fn contacts_test_state() -> (Router, String) {

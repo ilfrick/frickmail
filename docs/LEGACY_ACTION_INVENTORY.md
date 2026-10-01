@@ -303,6 +303,57 @@ Exit criteria (matches Phase 10): no production code path loads a legacy
 theme package, and Frickmail theme settings are the only user/admin theming
 surface.
 
+## Native OpenPGP Key Management (v1)
+
+Added 2026-10-01. The legacy `GnupgGetKeys` / `GnupgGenerateKey` /
+`GnupgImportKey` / `GnupgDeleteKey` primitives were already native, but they
+were only reachable through the legacy `Response` envelope. This slice exposes
+them as first-class v1 routes so the v1 UI can do real key management instead
+of showing a placeholder.
+
+| v1 route | Legacy action it replaces |
+| --- | --- |
+| `GET /pgp/keys` | `GnupgGetKeys` (list) |
+| `POST /pgp/keys/generate` | `GnupgGenerateKey` |
+| `POST /pgp/keys/import` | `GnupgImportKey` |
+| `POST /pgp/keys/export` | `GnupgGetKeys` (export) / `GnupgExportKey` |
+| `DELETE /pgp/keys?key_id=&secret=` | `GnupgDeleteKey` |
+
+Contract notes:
+
+- Implemented natively in `api_v1.rs` over the existing `run_gnupg` /
+  `parse_gnupg_keys` / `delete_gnupg_key` primitives; the legacy `Response`
+  envelopes are not adapted. Legacy behaviour is unchanged.
+- One row per **keyring**: GnuPG reports the same key once from
+  `--list-keys` and once from `--list-secret-keys`, and the two share a
+  primary fingerprint. Rows are not merged server-side, so a client can tell
+  which half it holds. Public rows carry `can_verify: true`; secret rows carry
+  `can_decrypt: true` and `can_encrypt: false`, mirroring `GnupgGetKeys`.
+- `POST /pgp/keys/import` takes an opt-in `backup` flag (default `false`) that
+  delegates to the shared `backup_pgp_key_material` in `router.rs`, the same
+  routine legacy `native_pgp_import_key` uses; secret blocks are encrypted at
+  rest with the session credential key.
+- GnuPG failures map to 502 `pgp_unavailable`; the raw process message is
+  logged, never returned. A delete of an absent key is 404 `key_not_found`.
+- `POST /send` accepts `sign_fingerprint`, `sign_passphrase` and
+  `encrypt_fingerprints`. Fingerprints are validated up front (400
+  `invalid_request`) instead of the legacy PHP-truthy silent skip; an absent or
+  blank fingerprint means "do not sign".
+
+Two pre-existing bugs in the shared GnuPG layer were found and fixed here,
+since the v1 routes made them visible:
+
+- `parse_gnupg_keys` skipped `fpr` records. A `fpr` colon line has 11 fields,
+  not the 12 the length guard required, so every fingerprint came back empty —
+  which broke fingerprint-keyed lookups and therefore key deletion as well.
+- `run_gnupg` only treated a non-zero exit status as expected when the command
+  was the *first* argv element. Every listing form leads with
+  `--with-colons`, so listing an absent key returned `Err` and surfaced as a
+  502 instead of the caller's own "not found" mapping.
+
+Still on the legacy dispatcher (deliberate deferrals): HKP/keyserver search,
+client-side (Mailvelope) PGP payloads, and S/MIME in compose.
+
 ## Remaining Native Migration Targets
 
 The next Rust implementation targets from this inventory are:

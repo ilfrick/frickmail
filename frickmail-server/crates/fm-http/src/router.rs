@@ -237,6 +237,21 @@ const GNUPG_DEADLINE: Duration = Duration::from_secs(15);
 const GNUPG_KEY_MATERIAL_LIMIT_BYTES: usize = 512 * 1024;
 const GNUPG_PASSPHRASE_LIMIT_BYTES: usize = 1024;
 const GNUPG_ENCRYPT_RECIPIENT_LIMIT: usize = 32;
+/// Machine-readable public keyring listing, shared by the legacy
+/// `GnupgGetKeys` action and the v1 `/pgp/keys` route.
+const PGP_LIST_KEYS_ARGS: &[&str] = &[
+    "--with-colons",
+    "--with-fingerprint",
+    "--fixed-list-mode",
+    "--list-keys",
+];
+/// Machine-readable secret keyring listing, likewise shared.
+const PGP_LIST_SECRET_KEYS_ARGS: &[&str] = &[
+    "--with-colons",
+    "--with-fingerprint",
+    "--fixed-list-mode",
+    "--list-secret-keys",
+];
 const SMIME_CERT_IMPORT_MAX_BASE64_BYTES: usize = fm_user::SMIME_CERT_PEM_MAX_BYTES.div_ceil(3) * 4;
 const SMIME_P12_IMPORT_MAX_BASE64_BYTES: usize = fm_user::SMIME_P12_MAX_BYTES.div_ceil(3) * 4;
 const SMIME_VERIFY_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -6293,12 +6308,16 @@ async fn run_gnupg(
         let _ = std::fs::remove_file(path);
     }
     let output = output.map_err(|err| format!("GnuPG operation failed: {err}"))?;
-    if !output.status.success()
-        && !matches!(
-            args.first(),
-            Some(&"--list-keys") | Some(&"--list-secret-keys") | Some(&"--verify")
-        )
-    {
+    // Listing and verification operations are expected to exit non-zero (an
+    // absent key, an unreadable keyring, a bad signature): their callers read
+    // the result themselves, so the status alone is not a failure. The command
+    // can appear anywhere in argv — the listing forms lead with
+    // `--with-colons` — so the whole argument list is scanned, not just its
+    // head.
+    let reports_status_in_output = args
+        .iter()
+        .any(|arg| matches!(*arg, "--list-keys" | "--list-secret-keys" | "--verify"));
+    if !output.status.success() && !reports_status_in_output {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Status lines (`[GNUPG:] ...`) are protocol chatter, not the error.
         // Prefer the first human-readable line so failures name the cause
@@ -6455,6 +6474,19 @@ fn parse_gnupg_keys(output: &[u8], secret: bool) -> Vec<LegacyGnupgKey> {
 
     for line in String::from_utf8_lossy(output).lines() {
         let fields: Vec<&str> = line.split(':').collect();
+        // `fpr` records carry only the fingerprint (11 colon-separated fields
+        // on GnuPG 2.x), not the 12-field capability layout every key record
+        // uses, so they have to be handled before the shared length guard.
+        // Skipping them silently leaves every fingerprint empty, which in turn
+        // makes fingerprint-keyed lookups (and so key deletion) fail.
+        if fields.first() == Some(&"fpr") {
+            if fields.len() >= 10 {
+                if let Some(subkey) = pending_subkey.as_mut() {
+                    subkey.fingerprint = fields[9].to_string();
+                }
+            }
+            continue;
+        }
         if fields.len() < 12 {
             continue;
         }
@@ -6516,12 +6548,6 @@ fn parse_gnupg_keys(output: &[u8], secret: bool) -> Vec<LegacyGnupgKey> {
                     algorithm: fields[3].parse().unwrap_or_default(),
                 });
             }
-            "fpr" => {
-                let fingerprint = fields.get(9).copied().unwrap_or_default();
-                if let Some(subkey) = pending_subkey.as_mut() {
-                    subkey.fingerprint = fingerprint.to_string();
-                }
-            }
             "uid" => {
                 if let Some(key) = current.as_mut() {
                     let raw_uid = fields.get(9).copied().unwrap_or_default();
@@ -6581,23 +6607,9 @@ async fn legacy_gnupg_keys_response(
     original_action: &str,
     user_id: i64,
 ) -> Response {
-    let list_public_args = [
-        "--with-colons",
-        "--with-fingerprint",
-        "--with-fingerprint",
-        "--fixed-list-mode",
-        "--list-keys",
-    ];
-    let list_private_args = [
-        "--with-colons",
-        "--with-fingerprint",
-        "--with-fingerprint",
-        "--fixed-list-mode",
-        "--list-secret-keys",
-    ];
     let (public, private) = tokio::join!(
-        run_gnupg(state, user_id, &list_public_args, None, None),
-        run_gnupg(state, user_id, &list_private_args, None, None),
+        run_gnupg(state, user_id, PGP_LIST_KEYS_ARGS, None, None),
+        run_gnupg(state, user_id, PGP_LIST_SECRET_KEYS_ARGS, None, None),
     );
     match (public, private) {
         (Ok(public), Ok(private)) => {
@@ -6822,27 +6834,7 @@ async fn native_pgp_import_key(
             Ok(credential_key) => credential_key,
             Err(response) => return response,
         };
-        let stored = if key.contains("PGP PRIVATE KEY") {
-            if let Ok(blob) = fm_user::encrypt_account_secret(key, &credential_key) {
-                store_primary_account_pgp_key(
-                    state,
-                    user.user_id,
-                    &format!("{:x}", Sha1::digest(key.as_bytes())),
-                    Value::String(format!("encrypted:{}", STANDARD.encode(blob))),
-                )
-                .await
-            } else {
-                false
-            }
-        } else {
-            store_primary_account_pgp_key(
-                state,
-                user.user_id,
-                &format!("{}_public", hex::encode(Sha1::digest(key.as_bytes()))),
-                Value::String(key.to_string()),
-            )
-            .await
-        };
+        let stored = backup_pgp_key_material(state, user.user_id, key, &credential_key).await;
         result.insert("backup".to_string(), Value::Bool(stored));
     }
     if payload_bool(payload, "gnuPG") {
@@ -7239,6 +7231,40 @@ async fn native_pgp_store_key(
         return json_result_error(action, "Unsupported OpenPGP key type");
     };
     json_value_envelope(StatusCode::OK, action, json!({"Result": stored}))
+}
+
+/// Stores one imported armored key under the primary account's `PGP` settings
+/// so it survives loss of the per-user GnuPG home. Secret blocks are encrypted
+/// at rest with the session credential key. Shared by legacy `PgpImportKey`
+/// and the v1 `/pgp/keys/import` route; reports whether it was stored.
+pub(crate) async fn backup_pgp_key_material(
+    state: &AppState,
+    user_id: i64,
+    key: &str,
+    credential_key: &[u8],
+) -> bool {
+    if key.contains("PGP PRIVATE KEY") {
+        match fm_user::encrypt_account_secret(key, credential_key) {
+            Ok(blob) => {
+                store_primary_account_pgp_key(
+                    state,
+                    user_id,
+                    &format!("{:x}", Sha1::digest(key.as_bytes())),
+                    Value::String(format!("encrypted:{}", STANDARD.encode(blob))),
+                )
+                .await
+            }
+            Err(_) => false,
+        }
+    } else {
+        store_primary_account_pgp_key(
+            state,
+            user_id,
+            &format!("{}_public", hex::encode(Sha1::digest(key.as_bytes()))),
+            Value::String(key.to_string()),
+        )
+        .await
+    }
 }
 
 async fn store_primary_account_pgp_key(
@@ -42114,6 +42140,44 @@ Subject: Empty body metadata\r\n\r\n"
             super::extract_legacy_email_address("not-an-email").await,
             None
         );
+    }
+
+    /// Real GnuPG 2.x `--with-colons --with-fingerprint` output. `fpr` records
+    /// have 11 fields (not the 12 key records carry), which is exactly the case
+    /// that used to be dropped by the shared length guard — leaving every
+    /// fingerprint empty and breaking fingerprint-keyed deletes.
+    #[test]
+    fn parse_gnupg_keys_reads_fingerprints_from_fpr_records() {
+        let listing = concat!(
+            "tru:o:1:1790838633:1885446633:3:1:5\n",
+            "pub:u:255:22:D873670D8740B474:1790838633:1885446633::u:::scESC:::::ed25519:::0:\n",
+            "fpr:::::::::379FB40C06CC299F7128B5A1D873670D8740B474:\n",
+            "uid:u::::1790838633::7C748C246DF0FAEA915D2124A47E75E209F6C22C::Debug <debug@example.com>::::::::::0:\n",
+            "sub:u:255:18:A65E24C333E4994C:1790838633::::::e:::::cv25519::\n",
+            "fpr:::::::::D138948ADE01FE3C80249E8CA65E24C333E4994C:\n",
+        );
+        let keys = super::parse_gnupg_keys(listing.as_bytes(), false);
+        assert_eq!(keys.len(), 1);
+        let key = &keys[0];
+        assert!(key.can_sign);
+        assert_eq!(key.uids.len(), 1);
+        assert_eq!(key.uids[0].name, "Debug");
+        assert_eq!(key.uids[0].email, "debug@example.com");
+        // The primary key is recorded first, then the encryption subkey.
+        assert_eq!(key.subkeys.len(), 2);
+        assert_eq!(
+            key.subkeys[0].fingerprint,
+            "379FB40C06CC299F7128B5A1D873670D8740B474"
+        );
+        assert_eq!(key.subkeys[0].keyid, "D873670D8740B474");
+        assert_eq!(key.subkeys[0].length, 255);
+        assert!(key.subkeys[0].can_sign);
+        assert_eq!(
+            key.subkeys[1].fingerprint,
+            "D138948ADE01FE3C80249E8CA65E24C333E4994C"
+        );
+        assert!(key.subkeys[1].can_encrypt);
+        assert!(!key.subkeys[1].can_sign);
     }
 
     #[tokio::test]
