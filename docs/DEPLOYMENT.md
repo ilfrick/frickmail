@@ -216,6 +216,47 @@ exercise Redis and external mail/OAuth connectivity. Do not cut over if it
 restarts, is OOM-killed, cannot connect to PostgreSQL, or reports configuration
 errors.
 
+### Verify the durability invariants after every deploy
+
+Deploy through `docker-compose.rust-production.yml`, not a hand-written
+`docker run`. A manual run silently drops hardening the Compose file declares,
+and the symptom shows up hours later: the container is stopped cleanly (SIGTERM,
+exit 0) and simply never comes back. Check these on **every** deploy, whichever
+path produced it:
+
+```bash
+docker inspect frickmail-rust --format '
+restart={{.HostConfig.RestartPolicy.Name}}
+init={{.HostConfig.Init}}
+stopTimeout={{.Config.StopTimeout}}
+readonly={{.HostConfig.ReadonlyRootfs}}
+user={{.Config.User}}'
+docker inspect frickmail-rust \
+  --format '{{range .Mounts}}{{println .Type .Destination}}{{end}}'
+```
+
+| Invariant | Required | Consequence if missing |
+| --- | --- | --- |
+| `restart` | `unless-stopped` | a stopped container stays down, including across a host reboot |
+| `init` | `true` | no zombie reaping, and SIGTERM is not forwarded, so a graceful stop never really exits |
+| `stopTimeout` | `30` | in-flight IMAP/SMTP work is killed instead of drained |
+| `readonly` | `true` | — |
+| tmpfs mounts | `/tmp`, `/tmp/frickmail/attachment-exports`, `/tmp/frickmail/compose-attachments` | the last two carry their own quotas (96 MiB, 72 MiB); without them attachment exports and compose staging land on the 64 MiB `/tmp` and can exhaust it |
+| `user` | `10001:10001` | — |
+
+Prove the restart policy works by crashing the server process, **not** by
+stopping the container: `docker stop` and `docker kill` both count as *manual*
+stops, which `unless-stopped` deliberately ignores, so they demonstrate nothing.
+
+```bash
+docker exec frickmail-rust sh -c 'kill -9 $(for f in /proc/[0-9]*/comm; do p=${f#/proc/}; p=${p%/comm}; [ "$(cat "$f")" = frickmail-serve ] && echo "$p"; done | head -1)'
+# RestartCount must climb by one and /health must recover without intervention.
+docker inspect frickmail-rust --format 'restarts={{.RestartCount}} status={{.State.Status}}'
+```
+
+The runtime image ships no `pkill`, and `/proc/*/comm` truncates the process
+name to 15 characters, hence matching `frickmail-serve`.
+
 ## Rust replacement readiness gate
 
 Before replacing the compatibility container, all of the following must be

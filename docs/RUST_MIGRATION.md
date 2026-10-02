@@ -5,6 +5,42 @@ It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
 
+## Availability Incident — 2026-10-02 17:05 UTC
+
+The webmail was down for roughly 12 hours (server stopped 05:15:58 UTC, host
+reboot 07:17 UTC, service restored 17:05 UTC). No crash, no data loss, no code
+defect: the container had been created by a hand-written `docker run` instead of
+`docker-compose.rust-production.yml`, so it carried `RestartPolicy=no`. The server
+handled SIGTERM through its normal `shutdown_signal()` path and exited **0**, and
+with no restart policy nothing brought it back — neither the stop itself nor the
+reboot two hours later.
+
+The same deviation had also dropped two of the three tmpfs mounts Compose
+declares. `/tmp/frickmail/attachment-exports` (96 MiB) and
+`/tmp/frickmail/compose-attachments` (72 MiB) were absent, so attachment exports
+and compose staging had been competing for the single 64 MiB `/tmp`.
+
+Restored with the Compose-declared hardening: `restart=unless-stopped`, `init`,
+`stopTimeout=30`, and all three tmpfs mounts. Confirmed by crashing the server
+process from inside the container: `RestartCount` 0 → 1 and `/health` recovered
+with no intervention. Note that `docker kill` and `docker stop` are *not* valid
+tests of an `unless-stopped` policy — Docker classifies both as manual stops,
+which the policy is defined to ignore, so a policy that looks broken under those
+commands may be working correctly.
+
+`docs/DEPLOYMENT.md` now carries a post-deploy durability-invariant table and the
+crash test. Two items remain open for the operator:
+
+- The live container is hand-created, not Compose-managed, so the next documented
+  `docker compose -f docker-compose.rust-production.yml up -d` meets a
+  `container_name` conflict. Migrating it needs `FRICKMAIL_RUST_PORT=8888` in
+  `.env`, which is absent today; Compose would otherwise bind its `18088` default
+  and leave the reverse proxy with nothing listening on `8888`.
+- `.env` is mode `664` (world-readable) and holds live Gmail, Microsoft and SMTP
+  secrets.
+
+---
+
 ## Progress Snapshot — 2026-10-01 09:52:30 UTC
 
 Slice 3: **native OpenPGP key management + crypto compose**. Code commit
