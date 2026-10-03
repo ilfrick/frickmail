@@ -241,7 +241,8 @@ docker inspect frickmail-rust \
 | `init` | `true` | no zombie reaping, and SIGTERM is not forwarded, so a graceful stop never really exits |
 | `stopTimeout` | `30` | in-flight IMAP/SMTP work is killed instead of drained |
 | `readonly` | `true` | — |
-| tmpfs mounts | `/tmp`, `/tmp/frickmail/attachment-exports`, `/tmp/frickmail/compose-attachments` | the last two carry their own quotas (96 MiB, 72 MiB); without them attachment exports and compose staging land on the 64 MiB `/tmp` and can exhaust it |
+| tmpfs mounts | `/tmp`, `/tmp/frickmail`, `/tmp/frickmail/attachment-exports`, `/tmp/frickmail/compose-attachments` | the last two carry their own quotas (96 MiB, 72 MiB); without them attachment exports and compose staging land on the 64 MiB `/tmp` and can exhaust it |
+| tmpfs ownership | `uid=10001,gid=10001,mode=0700` on `/tmp/frickmail` and both children | see below — this one silently breaks every GnuPG operation |
 | `user` | `10001:10001` | — |
 
 Prove the restart policy works by crashing the server process, **not** by
@@ -256,6 +257,32 @@ docker inspect frickmail-rust --format 'restarts={{.RestartCount}} status={{.Sta
 
 The runtime image ships no `pkill`, and `/proc/*/comm` truncates the process
 name to 15 characters, hence matching `frickmail-serve`.
+
+### `/tmp/frickmail` must be a mount owned by the application user
+
+`tmp_dir` defaults to `/tmp/frickmail`, and the server creates its own
+subdirectories there (`gnupg/user-<hex>` for keyrings, attachment scratch space).
+The daemon only creates a directory implicitly when it has to mount something
+*inside* it — and it does so **root-owned, mode 0755**. With `--cap-drop ALL` the
+process has no `CAP_DAC_OVERRIDE`, so a merely-parent directory is unwritable and
+every GnuPG call fails:
+
+```
+WARN fm_http::router::api_v1: v1 key listing failed:
+     GnuPG home unavailable: Permission denied (os error 13)
+```
+
+which surfaces in the UI as Settings → OpenPGP reporting that the section cannot
+be loaded. Mount `/tmp/frickmail` itself with `uid=10001,gid=10001,mode=0700` so
+the application owns its working directory. Confirm after any deploy:
+
+```bash
+docker exec frickmail-rust ls -ldn /tmp/frickmail          # must be 10001 10001
+docker exec frickmail-rust mkdir -p /tmp/frickmail/gnupg/probe   # must succeed
+docker exec frickmail-rust gpg --homedir /tmp/frickmail/gnupg/probe \
+  --with-colons --list-keys; echo "exit=$?"                 # must be 0
+docker exec frickmail-rust rm -rf /tmp/frickmail/gnupg/probe
+```
 
 ## Rust replacement readiness gate
 

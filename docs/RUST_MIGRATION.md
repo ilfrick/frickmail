@@ -61,6 +61,27 @@ Redis is connected (no in-memory session fallback warning);
 three tmpfs quotas present, running as `10001:10001`; and the crash test
 auto-recovered with `RestartCount` 0 → 1.
 
+### Regression found and fixed during the migration: OpenPGP was unusable
+
+The migration's first cutover broke Settings → OpenPGP with "Cannot load this
+settings section." The Compose service mounts two quota tmpfs directories *inside*
+`/tmp/frickmail`, and mounting inside a directory makes the daemon create that
+directory implicitly — **root-owned, mode 0755**. The server runs as `10001` with
+`--cap-drop ALL`, so it has no `CAP_DAC_OVERRIDE` and could not create
+`/tmp/frickmail/gnupg`:
+
+```
+WARN fm_http::router::api_v1: v1 key listing failed:
+     GnuPG home unavailable: Permission denied (os error 13)
+```
+
+The earlier hand-written cutover mounted only `/tmp`, so the application created
+`/tmp/frickmail` itself and owned it — which is why this only surfaced now. Fixed
+by mounting `/tmp/frickmail` itself with `uid=10001,gid=10001,mode=0700`, which
+also gives the working area its own quota instead of sharing `/tmp`'s. Verified in
+the container as `10001`: keyring directory creation, key generation, and both
+`--list-keys` and `--list-secret-keys` all succeed.
+
 ### Open: OpenPGP keyrings do not survive a restart
 
 Found while migrating. `tmp_dir` defaults to `/tmp/frickmail`, which is a tmpfs

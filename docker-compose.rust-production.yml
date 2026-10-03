@@ -79,6 +79,13 @@ services:
       # retained archives and one serialized build uses <=20 MiB of private
       # sources plus <=10 MiB of output.
       - /tmp:rw,noexec,nosuid,nodev,size=64m
+      # The application's working directory must be a mount in its own right,
+      # owned by the non-root user. If it is only the parent of the two mounts
+      # below, the daemon creates it root-owned 0755 and the process cannot
+      # create subdirectories inside it — which broke every GnuPG operation
+      # with "GnuPG home unavailable: Permission denied (os error 13)".
+      # This quota matches the 64 MiB the working area effectively had in /tmp.
+      - /tmp/frickmail:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
       - /tmp/frickmail/attachment-exports:rw,noexec,nosuid,nodev,size=96m,uid=10001,gid=10001,mode=0700
       # Staging needs 60 MiB committed data plus one serialized 10 MiB atomic
       # partial and filesystem overhead.
