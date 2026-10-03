@@ -153,6 +153,18 @@ docker compose -f docker-compose.rust.yml run --rm rust-dev \
   cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+The `build` step is not optional. `docker compose run` reuses an existing image, so
+without it the checks silently run against whatever toolchain the image was last
+built with.
+
+`.docker/dev/rust/Dockerfile` and `.docker/release/rust/Dockerfile` pin the **same**
+digest, so CI lints with the compiler that builds the shipped binary. Both must be
+moved together, deliberately:
+
+```bash
+docker compose -f docker-compose.rust.yml run --rm rust-dev rustc --version
+```
+
 ## Build the production Rust image
 
 Build an immutable, revision-tagged image and retain `latest` as the local

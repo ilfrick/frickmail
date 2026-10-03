@@ -82,6 +82,41 @@ also gives the working area its own quota instead of sharing `/tmp`'s. Verified 
 the container as `10001`: keyring directory creation, key generation, and both
 `--list-keys` and `--list-secret-keys` all succeed.
 
+### CI went red on a commit that changed no Rust code
+
+Commit `ccf665977` (OpenPGP tmpfs ownership) failed `rust-ci` at "Lint workspace"
+while `git diff 94de9dafbf63 ccf665977 -- '*.rs' '*.toml'` is empty. The cause
+was the dev image, which used the floating tag `rust:1-slim-bookworm`. That tag
+had moved to **1.99.0** (the local toolchain was 1.95.0, the release image pinned
+1.97.1), and the newer clippy raises `double_must_use` on the `#[must_use]` that
+`#[async_trait]`'s expansion puts on every desugared method returning
+`Pin<Box<dyn Future>>` — a type that is already `#[must_use]`. Six such errors
+appeared in `fm-imap` alone; the rest of the workspace would have followed.
+
+Two things worth recording:
+
+- **The shipped artifact was never affected.** The release Dockerfile pins
+  `rust:1.97.1-slim-bookworm@sha256:96c0af8…`, so the running container was built
+  by a pinned compiler. Only the lint gate went red.
+- **The lint gate was not reproducible.** It could fail on any commit, including
+  one that only touched YAML and docs, purely because upstream moved. Because lint
+  precedes the production-image steps, it also silently skipped
+  "Build Rust production image" and "Smoke test Rust production image".
+
+Fixed by pinning `.docker/dev/rust/Dockerfile` to the same
+`rust:1.97.1-slim-bookworm@sha256:96c0af8…` reference the release image uses, so
+CI lints with the compiler that produces the shipped binary. Re-run the dev image
+rebuild before trusting a local lint result: `docker compose run` reuses an
+existing image and will silently keep testing the old toolchain.
+
+```bash
+docker compose -f docker-compose.rust.yml build rust-dev   # CI step 3
+docker compose -f docker-compose.rust.yml run --rm rust-dev rustc --version
+```
+
+Upgrade the toolchain deliberately by bumping **both** Dockerfiles in one commit,
+never by letting a floating tag move underneath CI.
+
 ### Open: OpenPGP keyrings do not survive a restart
 
 Found while migrating. `tmp_dir` defaults to `/tmp/frickmail`, which is a tmpfs
