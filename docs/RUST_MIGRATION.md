@@ -29,15 +29,59 @@ which the policy is defined to ignore, so a policy that looks broken under those
 commands may be working correctly.
 
 `docs/DEPLOYMENT.md` now carries a post-deploy durability-invariant table and the
-crash test. Two items remain open for the operator:
+crash test. Both follow-ups are closed by the migration below: the container is
+Compose-managed, and `.env` was tightened from mode `664` to `600` (it holds live
+Gmail, Microsoft and SMTP secrets).
 
-- The live container is hand-created, not Compose-managed, so the next documented
-  `docker compose -f docker-compose.rust-production.yml up -d` meets a
-  `container_name` conflict. Migrating it needs `FRICKMAIL_RUST_PORT=8888` in
-  `.env`, which is absent today; Compose would otherwise bind its `18088` default
-  and leave the reverse proxy with nothing listening on `8888`.
-- `.env` is mode `664` (world-readable) and holds live Gmail, Microsoft and SMTP
-  secrets.
+## Compose-Managed Production — 2026-10-03
+
+The production container is now owned by `docker-compose.rust-production.yml`
+(`com.docker.compose.project=frickmail-rust`), so `up -d`, `ps`, `logs` and
+`down` behave as documented and the durability hardening can no longer be
+silently dropped by a hand-written cutover.
+
+The migration was lossless. `.env` was reconstructed from the live container's
+environment by parsing the Compose file's own `KEY: ${VAR}` mapping, then checked
+by rendering `docker compose config` and diffing it against the live container:
+**no variable lost, no value changed.** The only additions are
+`FRICKMAIL__MAIL__ADD_X_ORIGINATING_IP`, `..._FROM_ADDRESS_ACCOUNT_SMTP`,
+`..._FROM_ADDRESS_PATTERNS` and `..._FROM_ADDRESS_THROW_NOTFOUND`, which Compose
+now sets explicitly; each already equals what `fm-core`'s `Config::default()`
+produces (`config.rs:497-499` and `196-198`), so behaviour is unchanged.
+`.env.example` now leads with the cutover-critical keys — it previously
+advertised `FRICKMAIL_DB_PASSWORD`, which Compose ignores in favour of
+`POSTGRES_PASSWORD`, and omitted `FRICKMAIL_RUST_PORT`, whose `18088` default is
+exactly the trap that would have left the reverse proxy with nothing on `8888`.
+
+Verified after the switch: a Compose canary on `8902` was healthy before
+production was touched; `docker compose ps` reports healthy; `/health`, `/` and
+`/static/v1/js/pgp.js` return 200 and `GET /pgp/keys` returns 401 unauthenticated;
+Redis is connected (no in-memory session fallback warning);
+`restart=unless-stopped`, `init=true`, `stopTimeout=30`, read-only root, all
+three tmpfs quotas present, running as `10001:10001`; and the crash test
+auto-recovered with `RestartCount` 0 → 1.
+
+### Open: OpenPGP keyrings do not survive a restart
+
+Found while migrating. `tmp_dir` defaults to `/tmp/frickmail`, which is a tmpfs
+inside the read-only container, and `gnupg_homedir` derives the keyring from
+`tmp_dir/gnupg/user-<hex>`. Every container restart, recreate or reboot therefore
+begins with an empty keyring — the crash test above wiped it. `backup_pgp_key_material`
+does write key material into the database, encrypted with the credential key, but
+nothing reads it back: the only two call sites in `router.rs` are the two write
+sites, and there is no restore path. The backup therefore cannot rescue a wiped
+keyring today.
+
+Consequence: an OpenPGP key generated through Settings works until the next
+deploy and is gone afterwards. Fixing it needs a persistent volume for the GnuPG
+home plus a restore path; that is the next slice.
+
+### Open: `FRICKMAIL_RUST_BASE_URL` still points at the canary
+
+The live value is `http://localhost:18088` and was carried over unchanged so the
+migration altered no behaviour. It should be the real production origin; it feeds
+generated links and OIDC redirects. Deliberately not changed as part of a
+deployment migration — the operator owns that decision.
 
 ---
 

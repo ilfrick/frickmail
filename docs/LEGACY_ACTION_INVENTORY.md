@@ -351,6 +351,16 @@ since the v1 routes made them visible:
   `--with-colons`, so listing an absent key returned `Err` and surfaced as a
   502 instead of the caller's own "not found" mapping.
 
+Known limitation, found 2026-10-03 while migrating production to the Compose
+deployment: **the keyring does not survive a container restart.**
+`gnupg_homedir` derives the keyring from `tmp_dir/gnupg/user-<hex>`, and
+`tmp_dir` defaults to `/tmp/frickmail`, which is a tmpfs inside the read-only
+container. Every restart, recreate or host reboot starts from an empty keyring.
+`backup_pgp_key_material` does persist key material to the database (encrypted
+with the credential key), but no code path reads it back, so it cannot currently
+restore a wiped keyring. Fixing this needs a persistent volume for the GnuPG home
+plus a restore path.
+
 Still on the legacy dispatcher (deliberate deferrals): HKP/keyserver search,
 client-side (Mailvelope) PGP payloads, and S/MIME in compose.
 
