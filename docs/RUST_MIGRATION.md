@@ -141,6 +141,59 @@ deployment migration — the operator owns that decision.
 
 ---
 
+## Progress Snapshot — 2026-10-03 14:47:45 UTC
+
+Two defects closed, both found by the operator rather than by a gate. Code
+commits `ccf665977` (OpenPGP working directory) + `3f0aab6eb` (dev toolchain
+pin); the deployed image is unchanged at `frickmail-rust:94de9dafbf63`
+(`sha256:dba2f4ecb270…`), since neither commit altered Rust or UI code.
+
+| Symptom | Root cause | Fix |
+| --- | --- | --- |
+| Settings → OpenPGP reported "Cannot load this settings section." | `/tmp/frickmail` was implicitly created **root-owned 0755** as the parent of the two nested quota mounts, so uid 10001 under `--cap-drop ALL` could not create `/tmp/frickmail/gnupg` | mount `/tmp/frickmail` itself with `uid=10001,gid=10001,mode=0700`, which also gives the working area its own quota |
+| `rust-ci` red at "Lint workspace" on a commit with **no** Rust changes | the dev image floated on `rust:1-slim-bookworm`, which had moved to 1.99.0; the newer clippy raises `double_must_use` on `#[async_trait]`'s generated `#[must_use]` | pin the dev image to the same `rust:1.97.1-slim-bookworm@sha256:96c0af8…` digest the release image already used |
+
+The second one is the more instructive failure. The lint gate was not
+reproducible: it went red without a code change, and because lint precedes the
+production-image steps it had also silently skipped "Build Rust production image"
+and "Smoke test Rust production image" — meaning the OpenPGP fix deployed below
+was never CI-validated on the first attempt. CI now lints with the same compiler
+that builds the shipped binary, and the toolchain can only move by editing both
+Dockerfiles together.
+
+Two verification traps worth carrying forward:
+
+- `docker compose run` **reuses an existing image**. The first local clippy run
+  after the pin still reported `rustc 1.99.0` because the rebuild was skipped, so
+  the fix has to be re-validated after `docker compose build rust-dev`. Any
+  result from `run` without a preceding `build` describes the old toolchain.
+- The `fm-db` schema-compatibility tests read `FM_TEST_MYSQL_URL` /
+  `FM_TEST_POSTGRES_URL`, which are always set, so they **fail rather than skip**
+  when the `mysql`/`postgres` services are down — surfacing as
+  `Name or service not known`. CI starts them in step 7; a local run must do the
+  same or those 6 failures are expected, not regressions.
+
+Gates on the pinned toolchain: `cargo fmt --check` clean; `cargo clippy
+--workspace --all-targets -- -D warnings` clean; `cargo test --workspace`
+**940 passed, 0 failed** with `mysql`/`postgres` up; naming gate green locally
+(58 tracked hits, 11 allowlist entries, none stale).
+
+CI for `3f0aab6eb`: `rust-ci` `37129505196` and `37129506359` both **success**.
+`naming` produced **0 runs** — expected, since `.docker/dev/rust/Dockerfile`,
+`docs/DEPLOYMENT.md` and `docs/RUST_MIGRATION.md` are all outside that workflow's
+path filter; the gate was run locally instead and passed.
+
+Deployment state: production healthy, external 200, zero GnuPG permission errors
+since the fix, durability crash test still auto-recovers (`restarts=1`). Canary,
+handoff container and temporary files removed; no stray networks.
+
+Two items remain open and neither is a code defect: the OpenPGP keyring is still
+wiped on every container recreate (needs a persistent volume plus a restore path
+for the write-only `backup_pgp_key_material`), and `FRICKMAIL_RUST_BASE_URL` is
+still the stale canary value `http://localhost:18088`.
+
+---
+
 ## Progress Snapshot — 2026-10-01 09:52:30 UTC
 
 Slice 3: **native OpenPGP key management + crypto compose**. Code commit
