@@ -132,12 +132,111 @@ Consequence: an OpenPGP key generated through Settings works until the next
 deploy and is gone afterwards. Fixing it needs a persistent volume for the GnuPG
 home plus a restore path; that is the next slice.
 
-### Open: `FRICKMAIL_RUST_BASE_URL` still points at the canary
+### Resolved: `FRICKMAIL_RUST_BASE_URL` set to the production origin
 
-The live value is `http://localhost:18088` and was carried over unchanged so the
-migration altered no behaviour. It should be the real production origin; it feeds
-generated links and OIDC redirects. Deliberately not changed as part of a
-deployment migration — the operator owns that decision.
+Was `http://localhost:18088`; now `https://webmail.housefz.com`. See the
+2026-10-04 snapshot for the reasoning and the verification.
+
+The reasoning is worth keeping, because the intuition behind leaving it alone was
+wrong in an instructive way. The operator reverse-proxies with Apache, and Apache
+does present the public identity correctly — `ProxyPreserveHost On` means
+`Host: webmail.housefz.com` really does reach the process. But **nothing in the
+Rust code reads it**: a search for `x-forwarded-host`, `x-forwarded-proto`,
+`forwarded` and `host_header` across every crate returns zero hits. There is no
+header-derived origin logic at all, so `base_url` is config-only and
+authoritative. A proxy cannot correct a value the application never asks it for.
+
+What the value actually feeds is narrow, and all of it leaves the server:
+
+| Consumer | Reachability |
+| --- | --- |
+| `fm-user::build_password_reset_url` → `{base}/?reset_token=…` in reset emails | legacy dispatcher only; not referenced anywhere in the v1 UI |
+| OIDC / Gmail / O365 `redirect_uri` (`fm-oidc:385`, `:798`, `:857`, `o365_redirect_uri:779`) | dormant — `OIDC__ISSUER`, `__CLIENT_ID` and `__CLIENT_SECRET` are all empty |
+| `router.rs:906` | dead — `let _ = base;` discards it |
+
+OIDC *discovery* was checked specifically because it takes a `base_url` parameter
+and would have been the serious case. It does not: it is called with
+`config.oidc.issuer` (`fm-oidc:488,494`), so it was never affected.
+
+So the old value was harmless only because every consumer was dormant — not
+because the proxy compensated. That distinction matters: enabling OIDC against
+the stale value fails immediately, since the provider receives
+`http://localhost:18088/...` as the `redirect_uri` and either rejects it as an
+unregistered URI or sends the user's browser to their own machine on a port where
+nothing listens. The value was stale twice over, in fact — production publishes
+`127.0.0.1:8888`, and nothing anywhere listens on `18088`.
+
+### Open: the Compose default for `FRICKMAIL_RUST_BASE_URL` is still the trap
+
+`docker-compose.rust-production.yml:20` and `docker-compose.rust.yml:14` both
+default `FRICKMAIL__BASE_URL` to `http://localhost:18088`. Anyone who follows
+`DEPLOYMENT.md` gets the correct value from `.env`, but anyone who does not
+silently inherits the stale one and will not find out until OIDC is enabled.
+`DEPLOYMENT.md:329` already shows the fail-loud form used for the cutover:
+
+```bash
+FRICKMAIL__BASE_URL: "${FRICKMAIL_RUST_BASE_URL:?set this to the real externally reachable production origin}"
+```
+
+Not changed here because making it required would break `docker compose config`
+and `up` for any deployment that relies on the default. Worth deciding
+deliberately rather than leaving a known-bad default in place.
+
+---
+
+## Progress Snapshot — 2026-10-04 16:55:00 UTC
+
+`FRICKMAIL_RUST_BASE_URL` set to `https://webmail.housefz.com` (docs commit
+follows). No code change and no image rebuild: the value is read from the
+environment, so this was a one-line `.env` edit plus a container recreate.
+Deployed image is still `frickmail-rust:94de9dafbf63`.
+
+The full reasoning is in "Resolved: `FRICKMAIL_RUST_BASE_URL` set to the
+production origin" above. In short: the operator's reasoning for leaving it
+(`Apache` reverse-proxies it) was wrong — the code never reads `Host` or any
+`X-Forwarded-*` header — but the conclusion was right, because all three
+consumers were dormant. Changing it now removes the trap before OIDC is enabled,
+at zero behavioural risk today.
+
+Correct value derived from the actual vhost
+(`/etc/apache2/sites-enabled/webmail.conf`), not assumed:
+
+- `ProxyPass / http://localhost:8888/` — both sides end in `/`, so paths pass
+  through unchanged and there is **no prefix to declare**. A path component would
+  be actively wrong, since consumers append root-relative paths.
+- `ProxyPass /about !`, `/privacy !`, `/terms !` serve `/var/www/legal/` from
+  Apache. The Rust app registers **no** routes at those paths, so nothing is
+  shadowed in either direction — checked, because a collision would have been a
+  real argument *for* a prefix.
+- Asset URLs are root-relative (`/static/v1/…`, `"webPath": "/static/"`), never
+  built from `base_url`, so the value cannot leak an absolute internal URL into
+  any rendered page.
+- `ProxyPassReverse /` is set, so `Location` headers *are* rewritten to the public
+  host. Ordinary HTTP redirects were genuinely covered by the proxy all along;
+  the values Apache cannot touch are the ones emitted into email bodies and sent
+  to third parties.
+- `https://` is required — the vhost 301s to HTTPS and providers require an
+  https `redirect_uri`. Trailing slash is irrelevant; every consumer does
+  `base_url.trim_end_matches('/')`.
+
+Verification after the recreate: container env reports
+`https://webmail.housefz.com`; `/health`, `/` and `/static/v1/js/pgp.js` return
+200; external 200; `/api/frickmail/v1/pgp/keys` and `/api/frickmail/v1/folders`
+return 401 unauthenticated; durability invariants all hold (`healthy`,
+`restart=unless-stopped`, `init=true`, `stopTimeout=30`, read-only root,
+`frickmail:frickmail`); `/tmp/frickmail` is still `10001:10001`, so the OpenPGP
+ownership fix survived the recreate; no Redis in-memory fallback warning; and the
+crash test auto-recovered with `RestartCount` 0 → 1.
+
+A correction to the previous snapshot while recording this: it cited
+`GET /pgp/keys` returning 401 as an unauthenticated-access probe. That path was
+wrong — v1 routes are mounted at `/api/frickmail/v1` (`router.rs:439`), so the
+bare path was always a 404. The correct probe returns 401 and was re-checked.
+
+One item remains genuinely open and unchanged: the OpenPGP keyring is still wiped
+on every container recreate, which needs a persistent volume for the GnuPG home
+plus a restore path for the write-only `backup_pgp_key_material`. The Compose
+default for `FRICKMAIL_RUST_BASE_URL` is a second, smaller open item.
 
 ---
 
