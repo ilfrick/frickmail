@@ -20,6 +20,7 @@ services:
       # Integration test database URLs
       FM_TEST_MYSQL_URL: "mysql://root:password@mysql:3306/frickmail_test"
       FM_TEST_POSTGRES_URL: "postgres://postgres:password@postgres:5432/frickmail_test"
+      FM_TEST_SQLITE_URL: "sqlite:///tmp/frickmail-test.sqlite?mode=rwc"
     volumes:
       - .:/workspace
     command: ["cargo", "check", "--workspace"]
