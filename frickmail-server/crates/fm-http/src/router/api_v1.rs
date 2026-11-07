@@ -8361,6 +8361,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v1_message_reads_provider_oauth_account() {
+        let pool = login_db_pool().await;
+        seed_login_user(&pool, 1111, "v1gmailmsg", "correct-horse", None).await;
+        let credential_key =
+            fm_user::derive_credential_key("correct-horse", &[9_u8; fm_user::KDF_SALT_BYTES])
+                .unwrap();
+        seed_gmail_oauth_account(&pool, 1110, 1111, "v1gmailmsg@gmail.com", &credential_key).await;
+        let state = AppState::with_db_pool(test_api_config(), Some(pool));
+        let session = authed_v1_session(1111, "v1gmailmsg").await;
+
+        let response = super::message_with_fetcher(
+            &state,
+            &session,
+            Ok(axum::extract::Path(55)),
+            Ok(axum::extract::Query(super::MessageQuery {
+                folder: "INBOX".to_string(),
+                account_id: Some(1110),
+            })),
+            std::time::Duration::from_secs(5),
+            &StubV1OAuthTokenRefresher {
+                token: Some("fresh-token"),
+            },
+            |config, credentials, folder, uid| async move {
+                assert_eq!(config.host, "imap.gmail.com");
+                assert_eq!(config.port, 993);
+                assert_eq!(
+                    credentials,
+                    fm_imap::ImapCredentials::OAuthToken("fresh-token".to_string())
+                );
+                assert_eq!(folder, "INBOX");
+                assert_eq!(uid, 55);
+                Ok(Some(test_message_parts()))
+            },
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["data"]["subject"], "Single message");
+        assert_eq!(body["data"]["uid"], 55);
+    }
+
+    #[tokio::test]
     async fn v1_message_maps_absent_and_unparseable_messages() {
         let (state, session, _) = message_test_state().await;
         let query = || {

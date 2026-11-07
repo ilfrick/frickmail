@@ -1,6 +1,32 @@
 # Frickmail Full Rust Migration Plan
 
 This is the active plan for rewriting the entire Frickmail codebase in Rust.
+
+## Progress Snapshot — 2026-11-07
+
+Completed and published since the prior snapshot:
+
+- `87d1e8bd6` enables SQLite alongside MySQL/PostgreSQL in the Docker
+  integration-test environment. Schema, address-book, and admin-table suites
+  now exercise all three backends; both GitHub CI workflows passed, and the
+  same SHA is on `master` and `rust-full-migration` at both remotes.
+
+Current verification follow-up (test-only; no runtime behavior changed):
+
+- Added `v1_message_reads_provider_oauth_account`, which pins the v1 message
+  handler's Gmail IMAP endpoint and refreshed XOAUTH2 credential dispatch.
+  Independent review approved the test; its deliberate scope is handler-level,
+  not routed HTTP or OAuth-refresh request coverage.
+- Docker `cargo fmt --all -- --check`, `cargo test --workspace` (606 passed,
+  1 ignored Redis-only test), and strict Clippy pass. The release image was
+  smoke-tested in the preceding SQLite-test slice; it was not rebuilt for this
+  test-only change.
+
+Next gates are live OAuth send verification (requires operator accounts and
+client IDs), PostgreSQL backup/restore and schema-cutover validation, remaining
+operator decisions for legacy plugin integrations, and the in-browser release
+checks. Production cutover remains blocked by `docs/DEPLOYMENT.md` readiness
+criteria.
 It covers the Frickmail user features, the legacy SnappyMail/RainLoop runtime,
 the legacy PHP plugin host, the webmail core, the admin/settings surface, the
 frontend, theming, integrations, packaging, and the final production container.
