@@ -12,6 +12,8 @@ class KolabPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	public function Init() : void
 	{
+		// Kolab integration retired by explicit Frickmail migration decision (2026-11-21).
+		return;
 //		\RainLoop\Api::Config()->Set('contacts', 'enable', true);
 		if (\RainLoop\Api::Config()->Get('contacts', 'enable', false)) {
 			$this->UseLangs(true);

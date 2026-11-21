@@ -197,12 +197,12 @@ features unless noted elsewhere.
 |---|---|
 | Avatars | `Avatar` (native: file cache, bundled service icons on caller-asserted DKIM, opt-in SSRF-safe Gravatar/favicon; third-party favicon aggregators and BIMI DNS are follow-ups) |
 | Search filters | `SGetFilters`, `SAddEditFilter`, `SUpdateSearchQ`, `SDeleteFilter` (native settings CRUD under the legacy `Plugins["Search Filters"]` namespace; invalid add/edit and empty renamed queries are rejected as an intentional safety boundary, while login-time IMAP application remains pending) |
-| Kolab | `KolabFolder` — compat-known, deferred to an operator decision. The legacy handler depends on the Kolab PHP/library stack; no standalone Rust mapping exists on the mailbox path. Reassess at cutover (retire vs. live-integration port). |
+| Kolab | `KolabFolder` — explicitly retired by operator decision (2026-11-21); no Rust replacement or live-integration port will be provided. The legacy handler depends on the Kolab PHP/library stack. Residual cleanup: remove the legacy plugin/UI and Kolab-specific folder metadata handling when the legacy runtime is removed; preserve generic IMAP metadata support and historical migration notes until then. |
 | Backup | `JsonAdminBackupData`, `JsonAdminRestoreData` (native, operator-gated bounded legacy private-data archive/restore; requires `FRICKMAIL__ADMIN__TOKEN_HASH` and `FRICKMAIL__PRIVATE_DATA_DIR`, excludes cache and symlinks, and enforces entry/size/path/symlink limits) |
 | Contacts sync | `JsonContactsSync`, `JsonAddContact`, `JsonDeduplicateContacts` — all native. The new `fm-user` address-book module shares the legacy PHP `rainloop_ab_contacts` / `rainloop_ab_properties` schema (jCard blob under `prop_type = 251` plus flattened typed properties and lowercased search values), so the PHP compatibility runtime reads the same rows. `JsonContactsSync` proxies Gmail People API (pageSize 200, fixed personFields, page tokens) and Microsoft Graph contacts ($top=100 following `@odata.nextLink`, restricted to the Graph root for SSRF safety) with the selected Frickmail account's encrypted OAuth refresh token (`account_type` selects the provider instead of PHP's domain-list detection), refreshing with the Graph contacts scope, and upserting by `gmail:` / `o365:` provider UIDs with the PHP save-count semantics; provider error strings, jCard shapes (BDAY as `date`), and Result envelopes match the PHP plugin. `JsonAddContact` uses `manual:` plus 32 random hex characters; the "address book is not active" errors are intentionally absent because the native PAB storage is always available. |
 | Example plugin | `JsonGetExampleUserData`, `JsonSaveExampleUserData`, `JsonAdminGetData` — all native. Read/write the user settings `Plugins["example"]` object (defaults `''`, writes merge only the `example` sub-object so the Search Filters namespace survives); `JsonAdminGetData` requires the operator session flag like PHP's `IsAdminLoggined()` and returns the server version string. |
 | Change password | `ChangePassword` (partial-native: Frickmail login password with policy/HIBP/credential-reseal/session rotation is native; external LDAP/arbitrary-SQL/hosting-panel drivers need operator infrastructure and are an operator retire-vs-port decision) |
-| Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` — compat-known, deferred to an operator decision. The legacy handlers operate on Nextcloud's embedded `\OCP\Files` runtime and the plugin has no standalone endpoint/token configuration, so there is no native Rust mapping on a plain deployment. Reassess at cutover (retire vs. a standalone WebDAV-backed port). |
+| Nextcloud | `NextcloudSaveMsg`, `NextcloudAttachFile` — explicitly retired by operator decision (2026-11-21); no Rust replacement or standalone WebDAV port will be provided. The legacy handlers depend on Nextcloud's embedded `\OCP\Files` runtime. Residual cleanup: remove the legacy Nextcloud plugin/hooks and related UI integration when the legacy runtime is removed; retain unrelated generic WebDAV support and historical migration notes. |
 | Calendar | `JsonCalendarEvents`, `JsonCalendarList`, `JsonCalendarSave`, `JsonCalendarDelete` — native. Proxies Google Calendar / Microsoft Graph with the selected Frickmail account's encrypted OAuth refresh token (`account_type` selects the provider instead of PHP's domain-list detection; explicit `account_id` or the selected-account session replaces the PHP main-account lookup). Gmail refresh sends no scope; Graph refresh sends the `Calendars.ReadWrite offline_access` scope. Response envelopes, event shapes, composite-id rules, and provider error strings match the PHP plugin; the O365 event *update* intentionally addresses the raw Graph event id instead of the legacy composite `calendar:id` URL (which could never match), and client credentials come from `FRICKMAIL__OAUTH2__*` with the legacy `FRICKMAIL_GMAIL_*` / `FRICKMAIL_O365_*` fallback. |
 | Have I Been Pwned | `HibpCheck` (native) |
 | Two-factor-auth legacy plugin | `GetTwoFactorInfo`, `CreateTwoFactorSecret`, `ShowTwoFactorSecret`, `EnableTwoFactor`, `VerifyTwoFactorCode`, `ClearTwoFactorInfo` — all native. Ported onto the Frickmail TOTP store with PHP response shapes (`{User, IsSet, Enable, Tested}`, text `QRCode` for the monospace `<pre>`, empty `BackupCodes`); a secret only activates after a live code is verified in-session, and disable/clear without a valid code is refused (the modern `FrickmailDisableTotp` remains the code-gated removal path). Legacy PHP storage files are not read or written; the plugin's `force_two_factor_auth` setting and backup codes are boundaries. |
@@ -366,16 +366,21 @@ client-side (Mailvelope) PGP payloads, and S/MIME in compose.
 
 ## Remaining Native Migration Targets
 
-The next Rust implementation targets from this inventory are:
+The following explicit retirement decisions are recorded and are not Rust
+implementation targets:
 
-1. Operator decisions pending (no standalone local mapping exists, or live
-   integration endpoints are required to verify):
-   - `KolabFolder` and `NextcloudSaveMsg`/`NextcloudAttachFile` — the legacy
-     handlers depend on the embedded Kolab/Nextcloud PHP runtimes, which the
-     Rust-only deployment does not run; retire or provide a standalone
-     endpoint at cutover.
-   - OAuth (Gmail/O365) send/IMAP/SMTP live verification needs operator test
-     accounts plus OAuth client IDs; the native pipeline itself is complete.
+- Kolab (`KolabFolder`): retired; remove its legacy plugin/UI and Kolab-specific
+  folder metadata handling during legacy-runtime cleanup. Keep generic IMAP
+  metadata support and migration history until that cleanup is safe.
+- Nextcloud (`NextcloudSaveMsg`, `NextcloudAttachFile`): retired; remove the
+  legacy plugin/hooks and UI integration during legacy-runtime cleanup. Do not
+  add a WebDAV-backed replacement; generic WebDAV functionality is outside this
+  retirement decision.
+
+Remaining operator-dependent verification:
+
+1. OAuth (Gmail/O365) send/IMAP/SMTP live verification needs operator test
+   accounts plus OAuth client IDs; the native pipeline itself is complete.
 2. Complete `Message` parity: remaining message/header details and detailed
    message payloads. Absent `id`/`preview` now serialize as PHP-exact `""`
    and absent `headers` as an empty `MimeHeaderCollection` object (no longer

@@ -12,6 +12,9 @@ class NextcloudPlugin extends \RainLoop\Plugins\AbstractPlugin
 
 	public function Init() : void
 	{
+		// Nextcloud integration retired by explicit Frickmail migration decision (2026-11-21).
+		return;
+
 		if (static::IsIntegrated()) {
 			\SnappyMail\Log::debug('Nextcloud', 'integrated');
 			$this->UseLangs(true);
